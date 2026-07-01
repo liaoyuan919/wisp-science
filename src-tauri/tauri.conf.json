@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": { "script": "powershell -ExecutionPolicy Bypass -File sync-vendor.ps1; trunk serve --port 1420", "cwd": "../ui" },
-    "beforeBuildCommand": { "script": "powershell -ExecutionPolicy Bypass -File sync-vendor.ps1; trunk build --release", "cwd": "../ui" }
+    "beforeDevCommand": { "script": "powershell -ExecutionPolicy Bypass -File dev.ps1", "cwd": "../ui" },
+    "beforeBuildCommand": { "script": "powershell -ExecutionPolicy Bypass -File build.ps1", "cwd": "../ui" }
   },
   "app": {
     "windows": [

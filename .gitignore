@@ -9,6 +9,7 @@ python/.venv
 node_modules
 dist
 web-dist/
+ui/vendor/
 .wisp/
 ui-tests/test-results/
 wisp-cli*.exe
