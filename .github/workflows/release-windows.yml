@@ -25,10 +25,21 @@ jobs:
             ui -> target
           cache-on-failure: true
 
+      - name: Cache Trunk and Tauri CLI
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: tauri-tools-${{ runner.os }}-v1
+
       - name: Install Trunk and Tauri CLI
+        shell: pwsh
         run: |
-          cargo install trunk --locked
-          cargo install tauri-cli --version "^2" --locked
+          if (-not (Get-Command trunk -ErrorAction SilentlyContinue)) {
+            cargo install trunk --locked
+          }
+          if (-not (Get-Command cargo-tauri -ErrorAction SilentlyContinue)) {
+            cargo install tauri-cli --version "^2" --locked
+          }
 
       - uses: tauri-apps/tauri-action@v1
         env:
