@@ -719,7 +719,7 @@ fn App() -> impl IntoView {
 
     let save_settings = move |_| {
         if settings_busy.get() { return; }
-        let cfg = normalized_settings(settings.get());
+        let mut cfg = normalized_settings(settings.get());
         let key = api_key_input.get();
         let s = settings;
         let show = show_settings;
