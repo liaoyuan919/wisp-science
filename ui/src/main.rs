@@ -1831,12 +1831,14 @@ fn App() -> impl IntoView {
                             let loc = locale.get();
                             match open_file.get() {
                                 None => view! {
-                                    <div class="rp-empty">
+                                    <button type="button" class="rp-empty rp-empty-clickable"
+                                        title=t(loc, "right.browse_files")
+                                        on:click=open_files>
                                         <span class="rp-empty-icon"></span>
                                         <div class="rp-empty-title">{t(loc, "right.no_file.title")}</div>
                                         <p>{t(loc, "right.no_file.body")}</p>
-                                        <button class="side-btn" on:click=open_files>{t(loc, "right.browse_files")}</button>
-                                    </div>
+                                        <span class="rp-empty-action">{t(loc, "right.browse_files")}</span>
+                                    </button>
                                 }.into_view(),
                                 Some((path, kind)) => {
                                     let name = path.rsplit(['/', '\\']).next().unwrap_or(&path).to_string();

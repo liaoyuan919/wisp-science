@@ -293,9 +293,16 @@ button.stop:hover { background: hsl(0 70% 50% / 0.08); border-color: hsl(0 70% 5
 .rp-tab:hover:not(.active) { color: var(--text-muted); }
 .rp-doc { flex: 1 1 auto; min-height: 0; overflow: hidden; display: flex; flex-direction: column; background: var(--bg-elev); }
 .rp-empty { margin: auto; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 30px; color: var(--text-faint); }
+.rp-empty-clickable {
+  flex: 1; width: 100%; margin: 0; border: none; background: transparent; cursor: pointer;
+  justify-content: center; border-radius: 0; transition: background 0.15s;
+}
+.rp-empty-clickable:hover { background: var(--bg-sunken); }
+.rp-empty-clickable:focus-visible { outline: 2px solid var(--clay); outline-offset: -2px; }
 .rp-empty-icon { width: 40px; height: 40px; border-radius: 11px; border: 1.5px dashed var(--border-strong); background: var(--bg-sunken); }
 .rp-empty-title { font-size: 14px; font-weight: 600; color: var(--text-muted); }
 .rp-empty p { margin: 0; font-size: 12.5px; max-width: 260px; line-height: 1.5; }
+.rp-empty-action { margin-top: 4px; font-size: 13px; font-weight: 600; color: var(--clay-strong); text-decoration: underline; text-underline-offset: 2px; }
 .rp-empty .side-btn { margin-top: 4px; }
 
 .rp-artifacts-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
