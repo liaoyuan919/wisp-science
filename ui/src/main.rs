@@ -421,6 +421,98 @@ fn art_chip(idx: usize, a: &Artifact) -> String {
     )
 }
 
+fn normalize_path(path: &str) -> String {
+    path.trim()
+        .trim_start_matches("./")
+        .trim_start_matches(".\\")
+        .trim_start_matches('/')
+        .trim_start_matches('\\')
+        .to_string()
+}
+
+fn is_external_href(href: &str) -> bool {
+    let h = href.trim();
+    h.starts_with("http://")
+        || h.starts_with("https://")
+        || h.starts_with("mailto:")
+        || h.starts_with('#')
+        || h.starts_with("javascript:")
+}
+
+fn artifact_file_paths(a: &Artifact) -> Vec<String> {
+    match &a.data {
+        PreviewData::File { path, .. } => {
+            let mut out = vec![normalize_path(path)];
+            if let Some(name) = path.rsplit(['/', '\\']).next() {
+                let name = normalize_path(name);
+                if !out.contains(&name) {
+                    out.push(name);
+                }
+            }
+            out
+        }
+        _ => vec![normalize_path(&a.name)],
+    }
+}
+
+fn href_matches_artifact(href: &str, a: &Artifact) -> bool {
+    let h = normalize_path(href);
+    artifact_file_paths(a).iter().any(|p| *p == h)
+}
+
+fn artifact_index_for_href(arts: &[Artifact], href: &str) -> Option<usize> {
+    arts.iter()
+        .position(|a| href_matches_artifact(href, a))
+}
+
+fn extract_href_from_tag(tag: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let i = lower.find("href=")?;
+    let rest = &tag[i + 5..];
+    let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let rest = &rest[1..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_string())
+}
+
+fn replace_file_links(html: String, arts: &[Artifact]) -> String {
+    let mut out = String::new();
+    let mut rest = html.as_str();
+    while let Some(ai) = rest.find("<a ") {
+        out.push_str(&rest[..ai]);
+        rest = &rest[ai..];
+        let Some(gt) = rest.find('>') else {
+            out.push_str(rest);
+            break;
+        };
+        let tag = &rest[..=gt];
+        let after = &rest[gt + 1..];
+        let Some(end) = after.find("</a>") else {
+            out.push_str(rest);
+            break;
+        };
+        let inner = &after[..end];
+        rest = &after[end + 4..];
+
+        if let Some(href) = extract_href_from_tag(tag) {
+            if !is_external_href(&href) {
+                if let Some(idx) = artifact_index_for_href(arts, &href) {
+                    out.push_str(&art_chip(idx, &arts[idx]));
+                    continue;
+                }
+            }
+        }
+        out.push_str(tag);
+        out.push_str(inner);
+        out.push_str("</a>");
+    }
+    out.push_str(rest);
+    out
+}
+
 fn artifact_matches_token(token: &str, id: &str) -> bool {
     let t = token.trim();
     t == id
@@ -454,6 +546,7 @@ fn replace_artifact_tokens(mut html: String, arts: &[Artifact]) -> String {
 /// Post-process rendered Markdown: artifact chips, code wrappers, filename links.
 fn enrich_md_html(mut html: String, arts: &[Artifact]) -> String {
     html = replace_artifact_tokens(html, arts);
+    html = replace_file_links(html, arts);
     for (i, a) in arts.iter().enumerate() {
         let chip = art_chip(i, a);
         let marker = format!("{{{{artifact:{}}}}}", a.id);
@@ -482,15 +575,38 @@ fn tool_lang(name: &str) -> &'static str {
     }
 }
 
-fn handle_md_click(ev: &web_sys::MouseEvent, on_artifact: &Callback<usize>) {
+fn handle_md_click(
+    ev: &web_sys::MouseEvent,
+    arts: &[Artifact],
+    on_artifact: &Callback<usize>,
+    on_file: &Callback<(String, String)>,
+) {
     use wasm_bindgen::JsCast;
     let mut el = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok());
     while let Some(n) = el {
         if n.class_list().contains("art-ref") {
             if let Ok(idx) = n.get_attribute("data-art-idx").unwrap_or_default().parse::<usize>() {
+                ev.prevent_default();
+                ev.stop_propagation();
                 on_artifact.call(idx);
             }
             return;
+        }
+        if n.tag_name().eq_ignore_ascii_case("a") {
+            if let Some(href) = n.get_attribute("href") {
+                if !is_external_href(&href) {
+                    ev.prevent_default();
+                    ev.stop_propagation();
+                    let path = normalize_path(&href);
+                    if let Some(idx) = artifact_index_for_href(arts, &path) {
+                        on_artifact.call(idx);
+                    } else {
+                        let kind = file_kind(&path).unwrap_or("text").to_string();
+                        on_file.call((path, kind));
+                    }
+                    return;
+                }
+            }
         }
         el = n.parent_element();
     }
@@ -573,10 +689,18 @@ fn file_kind(path: &str) -> Option<&'static str> {
         "pdb" | "mol2" | "cif" => "structure",
         "sdf" | "mol" => "molecule",
         "smi" | "smiles" => "smiles",
-        "fasta" | "fa" => "msa",
+        // Alignment formats → interactive MSA viewer (web-dist Vae)
+        "aln" | "clustal" | "clustalw" | "sto" | "stockholm" | "stk" | "afa" | "mfa" => "msa",
+        // Plain FASTA → syntax-highlighted text (web-dist Hae → text preview)
+        "fasta" | "fa" | "fas" | "fna" | "faa" | "ffn" | "frn" => "fasta",
         "md" => "markdown",
+        "nwk" | "newick" | "treefile" | "tre" => "text",
         _ => return None,
     })
+}
+
+fn fasta_seq_count(text: &str) -> usize {
+    text.lines().filter(|l| l.trim_start().starts_with('>')).count()
 }
 
 fn push_file_artifact(out: &mut Vec<Artifact>, seen: &mut std::collections::HashSet<String>, path: &str) {
@@ -631,7 +755,7 @@ fn collect_artifacts(items: &[ChatItem], locale: Locale) -> Vec<Artifact> {
                                 out.push(Artifact { id, name: format!("data-{csv_n}.csv"), kind: "csv", data: PreviewData::Table(TableData { headers, rows }) });
                             } else if lang == "fasta" || lang == "fa" {
                                 let id = next_artifact_id(out.len());
-                                out.push(Artifact { id, name: format!("alignment-{csv_n}.fasta"), kind: "msa", data: PreviewData::Fasta(body.join("\n")) });
+                                out.push(Artifact { id, name: format!("alignment-{csv_n}.fasta"), kind: "fasta", data: PreviewData::Fasta(body.join("\n")) });
                             } else {
                                 code_n += 1;
                                 let id = next_artifact_id(out.len());
@@ -701,6 +825,38 @@ fn table_view(t: &TableData, locale: Locale) -> impl IntoView {
                 </tbody>
             </table>
         </div>
+    }
+}
+
+fn artifact_meta(a: &Artifact, locale: Locale) -> String {
+    match &a.data {
+        PreviewData::Table(t) => tf(locale, "artifact.meta.table", &[
+            ("rows", &t.rows.len().to_string()),
+            ("cols", &t.headers.len().to_string()),
+        ]),
+        PreviewData::Code { lang, body } => tf(locale, "artifact.meta.code", &[
+            ("lang", lang),
+            ("lines", &body.lines().count().to_string()),
+        ]),
+        PreviewData::File { path, kind } => {
+            if kind == "fasta" {
+                t(locale, "artifact.kind.fasta").into()
+            } else if kind == "msa" {
+                t(locale, "artifact.kind.msa").into()
+            } else if let Some(parent) = path.rsplit(['/', '\\']).nth(1) {
+                if parent.is_empty() {
+                    tf(locale, "artifact.meta.file", &[("kind", kind)])
+                } else {
+                    format!("{parent}/")
+                }
+            } else {
+                tf(locale, "artifact.meta.file", &[("kind", kind)])
+            }
+        }
+        PreviewData::Latex { .. } => t(locale, "artifact.latex").into(),
+        PreviewData::Fasta(s) => tf(locale, "artifact.meta.fasta", &[("seqs", &fasta_seq_count(s).max(1).to_string())]),
+        PreviewData::Smiles(s) => s.chars().take(28).collect(),
+        PreviewData::Text(s) | PreviewData::Markdown(s) => tf(locale, "artifact.meta.text", &[("chars", &s.len().to_string())]),
     }
 }
 
@@ -788,6 +944,8 @@ fn FilePreview(dom_id: String, path: String, kind: String) -> impl IntoView {
                 "image" => ("image", serde_json::json!({ "b64": fc.base64, "mime": fc.mime }).to_string()),
                 "structure" => ("structure", serde_json::json!({ "text": fc.text, "format": "pdb" }).to_string()),
                 "molecule" | "smiles" => ("molecule", serde_json::json!({ "text": fc.text, "smiles": fc.text }).to_string()),
+                "fasta" => ("fasta", serde_json::json!({ "text": fc.text }).to_string()),
+                "msa" => ("msa", serde_json::json!({ "text": fc.text }).to_string()),
                 _ => ("text", serde_json::json!({ "text": fc.text }).to_string()),
             };
             let _ = mount_preview(mount_kind, &dom_id, &payload).await;
@@ -809,8 +967,8 @@ fn artifact_preview(a: &Artifact, dom_id: String, locale: Locale) -> impl IntoVi
             view! { <HeavyPreview dom_id=dom_id kind="latex".to_string() payload=payload /> }.into_view()
         }
         PreviewData::Fasta(text) => {
-            let payload = serde_json::json!({ "text": text, "length": text.lines().count() }).to_string();
-            view! { <HeavyPreview dom_id=dom_id kind="msa".to_string() payload=payload /> }.into_view()
+            let payload = serde_json::json!({ "text": text }).to_string();
+            view! { <HeavyPreview dom_id=dom_id kind="fasta".to_string() payload=payload /> }.into_view()
         }
         PreviewData::Smiles(s) => {
             let payload = serde_json::json!({ "smiles": s }).to_string();
@@ -856,8 +1014,10 @@ fn AssistantMessage(
     text: String,
     artifacts: Vec<Artifact>,
     on_artifact: Callback<usize>,
+    on_file: Callback<(String, String)>,
 ) -> impl IntoView {
-    let html = create_memo(move |_| enrich_md_html(md_to_html(&text), &artifacts));
+    let arts_for_html = artifacts.clone();
+    let html = create_memo(move |_| enrich_md_html(md_to_html(&text), &arts_for_html));
     let hid = unique_dom_id("md");
     let hid_for_effect = hid.clone();
     create_effect(move |_| {
@@ -865,12 +1025,16 @@ fn AssistantMessage(
         schedule_highlight(hid_for_effect.clone());
     });
     let on_artifact = on_artifact.clone();
+    let on_file = on_file.clone();
+    let arts_for_click = artifacts.clone();
     let locale = use_locale();
     view! {
         <div class="role">{move || t(locale.get(), "chat.assistant")}</div>
         <div class="body md" id=hid.clone()
             inner_html=move || html.get()
-            on:click=move |ev: web_sys::MouseEvent| handle_md_click(&ev, &on_artifact)></div>
+            on:click=move |ev: web_sys::MouseEvent| {
+                handle_md_click(&ev, &arts_for_click, &on_artifact, &on_file)
+            }></div>
     }
 }
 
@@ -990,6 +1154,12 @@ fn App() -> impl IntoView {
                 sel_artifact.set(idx);
             }
         }
+    });
+
+    let on_file_link = Callback::new(move |(path, kind): (String, String)| {
+        show_right.set(true);
+        right_tab.set(RightTab::File);
+        open_file.set(Some((path, kind)));
     });
 
     spawn_local(async move {
@@ -1272,6 +1442,8 @@ fn App() -> impl IntoView {
         items.set(vec![]);
         active_session.set(None);
         sel_artifact.set(0);
+        open_file.set(None);
+        right_tab.set(RightTab::Artifacts);
         spawn_local(async move {
             let _ = invoke("new_session", JsValue::UNDEFINED).await;
             refresh_sessions(sessions);
@@ -1281,6 +1453,8 @@ fn App() -> impl IntoView {
     let load_session = Callback::new(move |id: String| {
         active_session.set(Some(id.clone()));
         sel_artifact.set(0);
+        open_file.set(None);
+        right_tab.set(RightTab::Artifacts);
         busy.set(true);
         spawn_local(async move {
             let v = invoke("load_session", to_value(&serde_json::json!({ "id": id })).unwrap()).await;
@@ -1310,6 +1484,10 @@ fn App() -> impl IntoView {
         let busy = busy;
         show.set(false);
         busy.set(true);
+        sel_artifact.set(0);
+        open_file.set(None);
+        right_tab.set(RightTab::Artifacts);
+        active_session.set(None);
         spawn_local(async move {
             // Fresh session so the demo doesn't mix into a real conversation.
             let _ = invoke("new_session", JsValue::UNDEFINED).await;
@@ -1547,9 +1725,10 @@ fn App() -> impl IntoView {
                     {move || {
                         let arts = artifacts.get();
                         let pick = on_artifact_select.clone();
+                        let open_link = on_file_link.clone();
                         items.get().into_iter().enumerate().map(|(i, item)| view! {
                             <div class=format!("{}", class_for(&item)) key=i>
-                                {render_item(&item, &arts, pick.clone())}
+                                {render_item(&item, &arts, pick.clone(), open_link.clone())}
                             </div>
                         }.into_view()).collect_view()
                     }}
@@ -1619,11 +1798,15 @@ fn App() -> impl IntoView {
                                 let tiles = arts.iter().enumerate().map(|(i, a)| {
                                     let name = a.name.clone();
                                     let kind = a.kind.to_string();
+                                    let meta = artifact_meta(a, loc);
                                     view! {
                                         <button class="rp-tile" class:active=move || sel_artifact.get() == i
                                             data-artifact-name=name.clone()
                                             on:click=move |_| sel_artifact.set(i)>
-                                            <span class="rp-tile-name">{name}</span>
+                                            <span class="rp-tile-text">
+                                                <span class="rp-tile-name">{name}</span>
+                                                <span class="rp-tile-meta">{meta}</span>
+                                            </span>
                                             <span class=format!("rp-badge {}", kind)>{kind.clone()}</span>
                                         </button>
                                     }.into_view()
@@ -1663,6 +1846,10 @@ fn App() -> impl IntoView {
                                             <div class="rp-view-head">
                                                 <span class=format!("rp-badge {}", kind)>{kind.clone()}</span>
                                                 <span class="rp-view-name">{name.clone()}</span>
+                                                <div class="spacer"></div>
+                                                <button class="icon-btn" type="button"
+                                                    title=move || t(locale.get(), "right.close_file")
+                                                    on:click=move |_| open_file.set(None)>"×"</button>
                                             </div>
                                             <p class="rp-path hint">{path.clone()}</p>
                                             {if kind == "csv" {
@@ -2000,12 +2187,17 @@ fn class_for(item: &ChatItem) -> &'static str {
     match item { ChatItem::User(_) => "msg user", ChatItem::Assistant(_) => "msg assistant", ChatItem::Reasoning(_) => "msg reasoning", ChatItem::Tool { .. } => "tool-wrap" }
 }
 
-fn render_item(item: &ChatItem, artifacts: &[Artifact], on_artifact: Callback<usize>) -> impl IntoView {
+fn render_item(
+    item: &ChatItem,
+    artifacts: &[Artifact],
+    on_artifact: Callback<usize>,
+    on_file: Callback<(String, String)>,
+) -> impl IntoView {
     let locale = use_locale();
     match item {
         ChatItem::User(s) => view! { <div class="role">{move || t(locale.get(), "chat.you")}</div><div class="body">{s.clone()}</div> }.into_view(),
         ChatItem::Assistant(s) => view! {
-            <AssistantMessage text=s.clone() artifacts=artifacts.to_vec() on_artifact=on_artifact />
+            <AssistantMessage text=s.clone() artifacts=artifacts.to_vec() on_artifact=on_artifact on_file=on_file />
         }.into_view(),
         ChatItem::Reasoning(s) => view! {
             <details class="rz">
