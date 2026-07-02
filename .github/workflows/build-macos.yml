@@ -1,10 +1,8 @@
 name: macOS Build
 
+# Manual diagnostic/packaging build (unsigned app + dmg). Not tied to push —
+# release packages only come from release-macos.yml on a version tag.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 jobs:

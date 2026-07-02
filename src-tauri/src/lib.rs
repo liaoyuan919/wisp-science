@@ -514,11 +514,13 @@ fn stop_agent(state: State<'_, AppState>) {
 #[tauri::command]
 async fn new_session(state: State<'_, AppState>) -> Result<(), String> {
     let mut guard = state.agent.lock().await;
+    // Reset even when the agent hasn't been created yet (lazy init in
+    // send_message), otherwise the next message lands in the old frame.
+    let mut sess = state.session.lock().await;
+    sess.frame_id = None;
+    sess.last_seq = 0;
     if let Some(agent) = guard.as_mut() {
         agent.ctx.clear();
-        let mut sess = state.session.lock().await;
-        sess.frame_id = None;
-        sess.last_seq = 0;
         let frame_id = ensure_frame(&state.store, &state.project_id, &mut sess).await.map_err(|e| format!("{e}"))?;
         agent.ctx.messages = state.store.load_messages(&frame_id).await.unwrap_or_default();
         sess.last_seq = agent.ctx.messages.len() as i64;

@@ -32,6 +32,20 @@ test("send streams a mocked assistant reply", async ({ page }) => {
   await expect(page.getByText("Hello from mock wisp-science.")).toBeVisible({ timeout: 10_000 });
 });
 
+test("uploaded file shows up in the artifacts panel after send", async ({ page }) => {
+  await page.goto("/");
+  await page.setInputFiles("#composer-file-input", {
+    name: "counts.csv",
+    mimeType: "text/csv",
+    buffer: Buffer.from("a,b\n1,2"),
+  });
+  await expect(page.locator(".composer-attachment.ready")).toHaveText("counts.csv");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText("Hello from mock wisp-science.")).toBeVisible({ timeout: 10_000 });
+  // The upload path lives in the user turn; the panel must pick it up from there.
+  await expect(page.locator('.rp-tile[data-artifact-name="counts.csv"]')).toBeVisible();
+});
+
 test("settings modal shows the saved provider", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Settings" }).click();

@@ -1,10 +1,8 @@
 name: Windows Build
 
+# Manual diagnostic/packaging build (msi/nsis). Not tied to push — release
+# packages only come from release-windows.yml on a version tag.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
