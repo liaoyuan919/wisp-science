@@ -830,6 +830,7 @@ fn file_kind(path: &str) -> Option<&'static str> {
         "fasta" | "fa" | "fas" | "fna" | "faa" | "ffn" | "frn" => "fasta",
         "md" => "markdown",
         "nwk" | "newick" | "treefile" | "tre" => "text",
+        "txt" | "log" | "json" => "text",
         _ => return None,
     })
 }
@@ -953,6 +954,12 @@ fn collect_artifacts(items: &[ChatItem], locale: Locale) -> Vec<Artifact> {
 
     for it in items {
         match it {
+            // Uploaded files live only in the user turn ("Uploaded files: a, b").
+            ChatItem::User(s) => {
+                for word in s.split(|c: char| c.is_whitespace() || c == ',' || c == '"' || c == '\'') {
+                    push_file_artifact(&mut out, &mut seen, word);
+                }
+            }
             ChatItem::Assistant(s) => collect_markdown_artifacts(&mut out, &mut seen, s, locale, &mut scan),
             ChatItem::Tool { name, input, output, .. } => {
                 if name == "attempt_completion" && !output.is_empty() {
@@ -1742,6 +1749,9 @@ fn App() -> impl IntoView {
 
     let new_session = move |_| {
         items.set(vec![]);
+        // ponytail: mid-upload switch can still re-add chips when the upload
+        // finishes; add a generation guard if that ever bites.
+        attachments.set(vec![]);
         active_session.set(None);
         sel_artifact.set(0);
         open_file.set(None);
@@ -1766,6 +1776,7 @@ fn App() -> impl IntoView {
         move |_| {
             if busy.get() { return; }
             show_capabilities.set(false);
+            attachments.set(vec![]);
             active_session.set(None);
             sel_artifact.set(0);
             open_file.set(None);
@@ -1790,6 +1801,7 @@ fn App() -> impl IntoView {
     };
 
     let load_session = Callback::new(move |id: String| {
+        attachments.set(vec![]);
         active_session.set(Some(id.clone()));
         sel_artifact.set(0);
         open_file.set(None);
@@ -1823,6 +1835,7 @@ fn App() -> impl IntoView {
         let busy = busy;
         show.set(false);
         busy.set(true);
+        attachments.set(vec![]);
         sel_artifact.set(0);
         open_file.set(None);
         right_tab.set(RightTab::Artifacts);
