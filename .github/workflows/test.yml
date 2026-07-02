@@ -1,0 +1,70 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            ui -> target
+          cache-on-failure: true
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+      - name: cargo check (wasm UI crate)
+        run: cargo check --target wasm32-unknown-unknown
+        working-directory: ui
+
+  ui-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ui -> target
+          cache-on-failure: true
+
+      - name: Cache Trunk
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: trunk-${{ runner.os }}-v1
+
+      - name: Install Trunk
+        run: command -v trunk >/dev/null 2>&1 || cargo install trunk --locked
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Playwright deps
+        working-directory: ui-tests
+        run: npm ci
+
+      - name: Install Chromium
+        working-directory: ui-tests
+        run: npx playwright install --with-deps chromium
+
+      - name: Playwright E2E
+        working-directory: ui-tests
+        run: npx playwright test
