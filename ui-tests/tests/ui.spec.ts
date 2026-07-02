@@ -40,7 +40,7 @@ test("settings normalizes a blank stored provider to openai", async ({ page }) =
   await page.getByRole("button", { name: "Settings" }).click();
   await expect(page.locator("select")).toHaveValue("openai");
   await page.getByRole("button", { name: "Valid" }).click();
-  await expect(page.locator(".settings-status")).toHaveText("Validated openai with deepseek-chat");
+  await expect(page.locator(".settings-status")).toHaveText("Validated openai with deepseek-v4-pro");
 });
 
 test("editing API URL keeps provider state and display aligned", async ({ page }) => {
@@ -49,14 +49,14 @@ test("editing API URL keeps provider state and display aligned", async ({ page }
   await page.getByLabel("API URL").fill("https://api.deepseek.com");
   await expect(page.locator("select")).toHaveValue("openai");
   await page.getByRole("button", { name: "Valid" }).click();
-  await expect(page.locator(".settings-status")).toHaveText("Validated openai with deepseek-chat");
+  await expect(page.locator(".settings-status")).toHaveText("Validated openai with deepseek-v4-pro");
 });
 
 test("settings can validate current API config", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Settings" }).click();
   await page.getByRole("button", { name: "Valid" }).click();
-  await expect(page.locator(".settings-status")).toHaveText("Validated openai with deepseek-chat");
+  await expect(page.locator(".settings-status")).toHaveText("Validated openai with deepseek-v4-pro");
 });
 
 test("settings validation rejects blank required fields", async ({ page }) => {
@@ -65,4 +65,15 @@ test("settings validation rejects blank required fields", async ({ page }) => {
   await page.getByLabel("API URL").fill("");
   await page.getByRole("button", { name: "Valid" }).click();
   await expect(page.locator(".settings-status")).toHaveText("Validation failed: API URL is required.");
+});
+
+test("provider switch fills current API defaults", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.locator("select").selectOption("openai_responses");
+  await expect(page.getByLabel("API URL")).toHaveValue("https://api.openai.com/v1");
+  await expect(page.getByLabel("Model")).toHaveValue("gpt-5.5");
+  await page.locator("select").selectOption("anthropic");
+  await expect(page.getByLabel("API URL")).toHaveValue("https://api.anthropic.com");
+  await expect(page.getByLabel("Model")).toHaveValue("claude-sonnet-5");
 });

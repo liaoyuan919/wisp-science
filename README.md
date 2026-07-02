@@ -57,8 +57,8 @@ wisp-science/
 
 ```powershell
 $env:WISP_API_KEY = "<your provider key>"
-$env:WISP_PROVIDER = "openai"          # or "anthropic"
-$env:WISP_MODEL     = "deepseek-chat"  # or "claude-3-5-sonnet-latest"
+$env:WISP_PROVIDER = "openai"           # openai=OpenAI-compatible Chat Completions; or openai_responses / anthropic
+$env:WISP_MODEL     = "deepseek-v4-pro" # openai_responses: gpt-5.5; anthropic: claude-sonnet-5
 cargo run -p wisp-cli
 ```
 
@@ -87,8 +87,8 @@ All optional; sensible defaults are bundled.
 | Variable             | Purpose                                                       |
 |----------------------|---------------------------------------------------------------|
 | `WISP_API_KEY`       | Provider API key (CLI). Desktop uses the keyring instead.     |
-| `WISP_PROVIDER`      | `openai` (default) or `anthropic`                             |
-| `WISP_API_URL`       | API root; defaults to DeepSeek / Anthropic                    |
+| `WISP_PROVIDER`      | `openai` (default), `openai_responses`, or `anthropic`        |
+| `WISP_API_URL`       | API root; defaults to DeepSeek / OpenAI / Anthropic           |
 | `WISP_MODEL`         | Model name                                                    |
 | `WISP_MAX_CONTEXT`   | Context budget (default 1,000,000)                            |
 | `WISP_MAX_ITER`      | Max agent iterations per turn (default 100)                   |

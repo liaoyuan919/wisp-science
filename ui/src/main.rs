@@ -7,8 +7,10 @@ use wasm_bindgen::JsCast;
 #[wasm_bindgen(module = "/src/api.js")]
 extern "C" {
     async fn invoke(cmd: &str, args: JsValue) -> JsValue;
-    #[wasm_bindgen(catch, js_name = invoke)]
+    #[wasm_bindgen(catch, js_name = invoke_strict)]
     async fn invoke_checked(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(catch, js_name = invoke_timeout)]
+    async fn invoke_timeout(cmd: &str, args: JsValue, timeout_ms: u32) -> Result<JsValue, JsValue>;
     async fn listen(event: &str, cb: &js_sys::Function) -> JsValue;
     async fn mount_preview(kind: &str, el_id: &str, payload: &str) -> JsValue;
 }
@@ -50,7 +52,7 @@ impl Default for Settings {
         Self {
             provider: "openai".into(),
             api_url: "https://api.deepseek.com".into(),
-            model: "deepseek-chat".into(),
+            model: "deepseek-v4-pro".into(),
             has_api_key: false,
         }
     }
@@ -62,11 +64,37 @@ fn js_error_text(err: JsValue) -> String {
         .unwrap_or_else(|| "Unknown error".into())
 }
 
+fn dom_value(ev: &web_sys::Event) -> String {
+    ev.target()
+        .and_then(|target| js_sys::Reflect::get(&target, &JsValue::from_str("value")).ok())
+        .and_then(|value| value.as_string())
+        .unwrap_or_default()
+}
+
 fn provider_value(provider: &str) -> &'static str {
     match provider.trim() {
         "anthropic" => "anthropic",
+        "openai_responses" | "openai-responses" | "responses" => "openai_responses",
         _ => "openai",
     }
+}
+
+fn provider_defaults(provider: &str) -> (&'static str, &'static str) {
+    match provider_value(provider) {
+        "anthropic" => ("https://api.anthropic.com", "claude-sonnet-5"),
+        "openai_responses" => ("https://api.openai.com/v1", "gpt-5.5"),
+        _ => ("https://api.deepseek.com", "deepseek-v4-pro"),
+    }
+}
+
+fn apply_provider_defaults(settings: RwSignal<Settings>, provider: String) {
+    settings.update(|s| {
+        let provider = provider_value(&provider);
+        let (api_url, model) = provider_defaults(provider);
+        s.provider = provider.into();
+        s.api_url = api_url.into();
+        s.model = model.into();
+    });
 }
 
 fn normalize_settings_mut(cfg: &mut Settings) {
@@ -605,7 +633,12 @@ fn App() -> impl IntoView {
                     _ => v.push(ChatItem::Assistant(delta)),
                 }
             }),
-            AgentEvent::Reasoning { delta, .. } => items_cb.update(|v| v.push(ChatItem::Reasoning(delta))),
+            AgentEvent::Reasoning { delta, .. } => items_cb.update(|v| {
+                match v.last_mut() {
+                    Some(ChatItem::Reasoning(s)) => s.push_str(&delta),
+                    _ => v.push(ChatItem::Reasoning(delta)),
+                }
+            }),
             AgentEvent::ToolCall { name, preview, .. } => items_cb.update(|v| v.push(ChatItem::Tool { name, ok: None, content: preview })),
             AgentEvent::ToolResult { name, ok, content, .. } => items_cb.update(|v| {
                 let idx = v.iter().rposition(|c| matches!(c, ChatItem::Tool { name: n, ok: None, .. } if n == &name));
@@ -714,7 +747,8 @@ fn App() -> impl IntoView {
                 busy.set(false);
                 return;
             }
-            if !key.is_empty() && !key.starts_with("(stored") {
+            let saved_new_key = !key.is_empty() && !key.starts_with("(stored");
+            if saved_new_key {
                 if let Err(err) = invoke_checked("set_api_key", to_value(&serde_json::json!({ "key": key })).unwrap()).await {
                     let text = format!("API key save failed: {}", js_error_text(err));
                     msg.set(Some((false, text.clone())));
@@ -726,6 +760,9 @@ fn App() -> impl IntoView {
             busy.set(false);
             show.set(false);
             status_msg.set("Settings saved".into());
+            if saved_new_key {
+                cfg.has_api_key = true;
+            }
             s.set(cfg);
         });
     };
@@ -747,9 +784,10 @@ fn App() -> impl IntoView {
         msg.set(Some((true, "Validating current settings...".into())));
         status_msg.set("Validating current settings...".into());
         spawn_local(async move {
-            let res = invoke_checked(
+            let res = invoke_timeout(
                 "validate_settings",
                 to_value(&serde_json::json!({ "settings": cfg, "key": key })).unwrap(),
+                35_000,
             ).await;
             match res {
                 Ok(v) => {
@@ -1130,9 +1168,11 @@ fn App() -> impl IntoView {
                 <div class="modal">
                     <h2>"Settings"</h2>
                     <label>"Provider"
-                        <select on:change=move|ev| settings.update(|s| s.provider = provider_value(&event_target_input(&ev).value()).into())
+                        <select on:input=move|ev| apply_provider_defaults(settings, dom_value(&ev))
+                            on:change=move|ev| apply_provider_defaults(settings, dom_value(&ev))
                             prop:value={move || provider_value(&settings.get().provider).to_string()}>
                             <option value="openai">"OpenAI-compatible"</option>
+                            <option value="openai_responses">"OpenAI (Responses API)"</option>
                             <option value="anthropic">"Anthropic"</option>
                         </select>
                     </label>

@@ -99,17 +99,29 @@ async fn register_mcp_tools(agent: &mut Agent, client: std::sync::Arc<wisp_mcp::
 }
 
 fn provider_config() -> Result<ProviderConfig> {
-    let kind = env("WISP_PROVIDER", "openai").to_ascii_lowercase();
+    let kind = match env("WISP_PROVIDER", "openai").to_ascii_lowercase().as_str() {
+        "anthropic" => "anthropic".to_string(),
+        "openai_responses" | "openai-responses" | "responses" => "openai_responses".to_string(),
+        _ => "openai".to_string(),
+    };
     let api_key = env("WISP_API_KEY", "");
-    let base_url = env("WISP_API_URL", if kind == "anthropic" { "https://api.anthropic.com" } else { "https://api.deepseek.com" });
-    let model = env("WISP_MODEL", if kind == "anthropic" { "claude-3-5-sonnet-latest" } else { "deepseek-chat" });
+    let base_url = env("WISP_API_URL", match kind.as_str() {
+        "anthropic" => "https://api.anthropic.com",
+        "openai_responses" => "https://api.openai.com/v1",
+        _ => "https://api.deepseek.com",
+    });
+    let model = env("WISP_MODEL", match kind.as_str() {
+        "anthropic" => "claude-sonnet-5",
+        "openai_responses" => "gpt-5.5",
+        _ => "deepseek-v4-pro",
+    });
     if api_key.is_empty() {
         anyhow::bail!("WISP_API_KEY is not set (required). Set it to your provider API key.");
     }
-    Ok(if kind == "anthropic" {
-        ProviderConfig::anthropic(base_url, api_key, model)
-    } else {
-        ProviderConfig::openai(base_url, api_key, model)
+    Ok(match kind.as_str() {
+        "anthropic" => ProviderConfig::anthropic(base_url, api_key, model),
+        "openai_responses" => ProviderConfig::openai_responses(base_url, api_key, model),
+        _ => ProviderConfig::openai(base_url, api_key, model),
     })
 }
 
@@ -149,7 +161,7 @@ async fn main() -> Result<()> {
         .ok()
         .or_else(|| wisp_python::bundled_worker_path().map(|p| p.to_string_lossy().to_string()))
         .unwrap_or_default();
-    let worker_path = std::path::PathBuf::from(&worker);
+    let worker_path = wisp_python::resolve_bundled_script(&worker);
     if worker_path.is_file() {
         if let Some(env) = &py_env {
             match wisp_python::KernelClient::spawn(&env.python(), &worker_path) {
@@ -169,10 +181,19 @@ async fn main() -> Result<()> {
     // MCP server: WISP_MCP_COMMAND overrides; otherwise WISP_MCP_PKG launches
     // the bundled bio-tools server (<pkg> e.g. mcp_pubmed) via the venv python.
     if let Ok(cmdline) = std::env::var("WISP_MCP_COMMAND") {
-        let parts: Vec<&str> = cmdline.split_whitespace().collect();
+        let parts: Vec<String> = cmdline
+            .split_whitespace()
+            .map(|s| {
+                if s.ends_with(".py") {
+                    wisp_python::resolve_bundled_script(s).to_string_lossy().to_string()
+                } else {
+                    s.to_string()
+                }
+            })
+            .collect();
         if parts.len() >= 2 {
-            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
-            wire_mcp(&mut agent, parts[0], &args).await;
+            let args: Vec<String> = parts[1..].to_vec();
+            wire_mcp(&mut agent, &parts[0], &args).await;
         }
     } else if let Ok(pkg) = std::env::var("WISP_MCP_PKG") {
         if let Some(env) = &py_env {

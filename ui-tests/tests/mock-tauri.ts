@@ -46,7 +46,7 @@ export function tauriMock(): void {
           case "list_sessions":
             return [];
           case "get_settings":
-            return { provider: "", api_url: "https://api.deepseek.com", model: "deepseek-chat", has_api_key: true };
+            return { provider: "", api_url: "https://api.deepseek.com", model: "deepseek-v4-pro", has_api_key: true };
           case "get_project_info":
             return project;
           case "get_onboarding_state":
@@ -69,7 +69,7 @@ export function tauriMock(): void {
           case "set_api_key":
             return null;
           case "validate_settings":
-            return "Validated openai with deepseek-chat";
+            return "Validated openai with deepseek-v4-pro";
           case "new_session":
           case "confirm_response":
           case "dismiss_onboarding":

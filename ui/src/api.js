@@ -1,11 +1,58 @@
 // Tauri v2 shim + scientific preview mounts (single file so Trunk ships one snippet).
 
+function tauriCore() {
+  return window.__TAURI__?.core;
+}
+
+function tauriEvent() {
+  return window.__TAURI__?.event;
+}
+
+function missingBridgeError(cmd) {
+  return new Error(`Tauri bridge is not available while calling ${cmd}. Open the app with 'cargo tauri dev', not the raw Trunk URL.`);
+}
+
 export async function invoke(cmd, args) {
-  return window.__TAURI__.core.invoke(cmd, args ?? {});
+  const core = tauriCore();
+  if (!core) {
+    console.error(missingBridgeError(cmd));
+    return null;
+  }
+  try {
+    return await core.invoke(cmd, args ?? {});
+  } catch (err) {
+    console.error(`Tauri command failed: ${cmd}`, err);
+    return null;
+  }
+}
+
+export async function invoke_strict(cmd, args) {
+  const core = tauriCore();
+  if (!core) {
+    throw missingBridgeError(cmd);
+  }
+  return core.invoke(cmd, args ?? {});
+}
+
+export async function invoke_timeout(cmd, args, timeoutMs) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([invoke_strict(cmd, args), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function listen(event, cb) {
-  return window.__TAURI__.event.listen(event, (e) => cb(e.payload));
+  const bus = tauriEvent();
+  if (!bus) {
+    console.error(new Error(`Tauri event bridge is not available while listening for ${event}.`));
+    return () => {};
+  }
+  return bus.listen(event, (e) => cb(e.payload));
 }
 
 const css = new Set();

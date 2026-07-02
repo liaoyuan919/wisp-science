@@ -13,6 +13,7 @@ pub mod anthropic;
 pub mod message;
 pub mod openai;
 pub mod provider;
+pub mod responses;
 pub mod routed;
 
 pub use message::{Completion, Content, FunctionCall, ImageUrl, Message, Part, Role, ToolCall, ToolSchema, Usage};

@@ -227,6 +227,7 @@ fn env_or(key: &str, default: &str) -> String {
 fn normalized_provider(provider: &str) -> String {
     match provider.trim() {
         "anthropic" => "anthropic".into(),
+        "openai_responses" | "openai-responses" | "responses" => "openai_responses".into(),
         _ => "openai".into(),
     }
 }
@@ -240,14 +241,26 @@ async fn load_settings(store: &Store) -> (String, String, String, String) {
         store.get_setting("provider").await.ok().flatten(),
         || env_or("WISP_PROVIDER", "openai"),
     ));
-    let api_url = non_empty_setting(store.get_setting("api_url").await.ok().flatten(), || {
-        env_or("WISP_API_URL", if provider == "anthropic" { "https://api.anthropic.com" } else { "https://api.deepseek.com" })
-    });
-    let model = non_empty_setting(store.get_setting("model").await.ok().flatten(), || {
-        env_or("WISP_MODEL", if provider == "anthropic" { "claude-3-5-sonnet-latest" } else { "deepseek-chat" })
-    });
+    let api_url = non_empty_setting(store.get_setting("api_url").await.ok().flatten(), || env_or("WISP_API_URL", default_api_url(&provider)));
+    let model = non_empty_setting(store.get_setting("model").await.ok().flatten(), || env_or("WISP_MODEL", default_model(&provider)));
     let api_key = wisp_store::secrets::Secret::get("api_key").ok().unwrap_or_else(|| env_or("WISP_API_KEY", ""));
     (provider, api_url, model, api_key)
+}
+
+fn default_api_url(provider: &str) -> &'static str {
+    match provider {
+        "anthropic" => "https://api.anthropic.com",
+        "openai_responses" => "https://api.openai.com/v1",
+        _ => "https://api.deepseek.com",
+    }
+}
+
+fn default_model(provider: &str) -> &'static str {
+    match provider {
+        "anthropic" => "claude-sonnet-5",
+        "openai_responses" => "gpt-5.5",
+        _ => "deepseek-v4-pro",
+    }
 }
 
 fn build_provider_config(provider: &str, api_url: &str, api_key: &str, model: &str) -> Result<ProviderConfig, String> {
@@ -266,6 +279,7 @@ fn build_provider_config(provider: &str, api_url: &str, api_key: &str, model: &s
     }
     Ok(match provider.as_str() {
         "anthropic" => ProviderConfig::anthropic(api_url, api_key, model),
+        "openai_responses" => ProviderConfig::openai_responses(api_url, api_key, model),
         "openai" => ProviderConfig::openai(api_url, api_key, model),
         _ => return Err(format!("Unsupported provider: {provider}")),
     })
@@ -300,7 +314,7 @@ async fn wire_python_and_mcp(agent: &mut wisp_core::Agent, root: &std::path::Pat
         .ok()
         .or_else(|| wisp_python::bundled_worker_path().map(|p| p.to_string_lossy().to_string()))
         .unwrap_or_default();
-    let worker_path = std::path::PathBuf::from(&worker);
+    let worker_path = wisp_python::resolve_bundled_script(&worker);
     if worker_path.is_file() {
         if let Some(env) = &py_env {
             if let Ok(client) = wisp_python::KernelClient::spawn(&env.python(), &worker_path) {
@@ -310,10 +324,19 @@ async fn wire_python_and_mcp(agent: &mut wisp_core::Agent, root: &std::path::Pat
     }
 
     if let Ok(cmdline) = std::env::var("WISP_MCP_COMMAND") {
-        let parts: Vec<&str> = cmdline.split_whitespace().collect();
+        let parts: Vec<String> = cmdline
+            .split_whitespace()
+            .map(|s| {
+                if s.ends_with(".py") {
+                    wisp_python::resolve_bundled_script(s).to_string_lossy().to_string()
+                } else {
+                    s.to_string()
+                }
+            })
+            .collect();
         if parts.len() >= 2 {
-            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
-            if let Ok(client) = wisp_mcp::McpClient::launch(parts[0], &args).await {
+            let args: Vec<String> = parts[1..].to_vec();
+            if let Ok(client) = wisp_mcp::McpClient::launch(&parts[0], &args).await {
                 register_mcp(agent, std::sync::Arc::new(client)).await;
             }
         }
@@ -537,13 +560,19 @@ async fn validate_settings(state: State<'_, AppState>, settings: Settings, key: 
         "validating settings"
     );
     let provider = wisp_llm::build(cfg);
-    tokio::time::timeout(
+    let result = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         provider.complete(&[Message::user("Reply with OK.")], &[]),
     )
     .await
-    .map_err(|_| "Validation timed out after 30s".to_string())?
-    .map_err(|e| format!("{e}"))?;
+    .map_err(|_| {
+        tracing::warn!(target: "wisp", "settings validation timed out");
+        "Validation timed out after 30s".to_string()
+    })?;
+    if let Err(e) = result {
+        tracing::warn!(target: "wisp", error = %e, "settings validation failed");
+        return Err(format!("{e}"));
+    }
 
     tracing::info!(target: "wisp", "settings validation succeeded");
     Ok(format!("Validated {} with {}", provider_name, settings.model))

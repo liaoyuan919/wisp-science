@@ -25,6 +25,8 @@ pub enum ProviderKind {
     /// OpenAI / DeepSeek / Qwen / MiniMax / local Ollama / LM Studio — any
     /// `/chat/completions` endpoint.
     OpenAiCompatible,
+    /// OpenAI's first-party `/v1/responses` endpoint.
+    OpenAiResponses,
     /// Anthropic Messages API (`/v1/messages`).
     Anthropic,
 }
@@ -45,6 +47,9 @@ pub struct ProviderConfig {
 impl ProviderConfig {
     pub fn openai(base_url: impl Into<String>, api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self { kind: ProviderKind::OpenAiCompatible, base_url: base_url.into(), api_key: api_key.into(), model: model.into(), anthropic_version: "2023-06-01".into(), max_tokens: 4096 }
+    }
+    pub fn openai_responses(base_url: impl Into<String>, api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        Self { kind: ProviderKind::OpenAiResponses, base_url: base_url.into(), api_key: api_key.into(), model: model.into(), anthropic_version: "2023-06-01".into(), max_tokens: 4096 }
     }
     pub fn anthropic(base_url: impl Into<String>, api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self { kind: ProviderKind::Anthropic, base_url: base_url.into(), api_key: api_key.into(), model: model.into(), anthropic_version: "2023-06-01".into(), max_tokens: 8192 }
@@ -89,6 +94,7 @@ pub trait Provider: Send + Sync {
 pub fn build(cfg: ProviderConfig) -> Box<dyn Provider> {
     match cfg.kind {
         ProviderKind::OpenAiCompatible => Box::new(crate::openai::OpenAiProvider::new(cfg)),
+        ProviderKind::OpenAiResponses => Box::new(crate::responses::OpenAiResponsesProvider::new(cfg)),
         ProviderKind::Anthropic => Box::new(crate::anthropic::AnthropicProvider::new(cfg)),
     }
 }
