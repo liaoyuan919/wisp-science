@@ -607,6 +607,8 @@ section { padding: 88px 0; }
   color: var(--text-faint);
 }
 
+.btn-label-short { display: none; }
+
 /* ---------- Responsive ---------- */
 @media (max-width: 960px) {
   .hero-mock { grid-template-columns: 1fr; }
@@ -617,10 +619,112 @@ section { padding: 88px 0; }
   .demo-grid { grid-template-columns: 1fr; }
   .stack-grid { grid-template-columns: repeat(2, 1fr); }
   .nav-links { display: none; }
+  .nav-cta .btn-secondary { display: none; }
 }
 
 @media (max-width: 560px) {
-  .container { width: calc(100% - 32px); }
-  section { padding: 64px 0; }
+  :root { --nav-h: 56px; }
+
+  .container {
+    width: calc(100% - 32px);
+    padding-inline: max(0px, env(safe-area-inset-left)) max(0px, env(safe-area-inset-right));
+  }
+
+  body { overflow-x: hidden; }
+
+  .site-nav .container { gap: 12px; }
+  .brand { min-width: 0; }
+  .brand-name { display: none; }
+  .nav-cta .btn {
+    min-height: 44px;
+    padding: 10px 16px;
+    font-size: 14px;
+  }
+  .btn-label-full { display: none; }
+  .btn-label-short { display: inline; }
+
+  .hero { padding: 36px 0 28px; }
+  .eyebrow { font-size: 12px; margin-bottom: 16px; }
+  .hero h1 {
+    font-size: clamp(1.75rem, 7.5vw, 2.25rem);
+    line-height: 1.12;
+  }
+  .hero .lead {
+    font-size: 1rem;
+    color: var(--text);
+    line-height: 1.65;
+    margin-bottom: 24px;
+  }
+  .hero-actions {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    margin-bottom: 32px;
+  }
+  .hero-actions .btn {
+    width: 100%;
+    min-height: 48px;
+    font-size: 15px;
+  }
+
+  .hero-visual {
+    aspect-ratio: auto;
+    min-height: 180px;
+    border-radius: var(--radius);
+  }
+  .mock-chat { padding: 16px; gap: 12px; }
+  .mock-bubble {
+    max-width: 92%;
+    padding: 10px 12px;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+
+  section { padding: 56px 0; }
+  .section-head { margin-bottom: 32px; }
+  .section-head h2 { font-size: clamp(1.5rem, 5vw, 1.85rem); }
+  .section-head p { font-size: 0.975rem; }
+
+  .feature-card { padding: 22px 18px; gap: 20px; }
+  .feature-card h3 { font-size: 1.25rem; }
+  .feature-visual { min-height: 140px; padding: 16px; }
+  .feature-visual pre { font-size: 11px; }
+  .feature-list-item { padding: 20px; }
+
+  .tab-bar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    margin-inline: -4px;
+    padding-inline: 4px 16px;
+    margin-bottom: 20px;
+  }
+  .tab-bar::-webkit-scrollbar { display: none; }
+  .tab-btn {
+    flex-shrink: 0;
+    white-space: nowrap;
+    font-size: 13px;
+    padding: 10px 14px;
+  }
+  .tab-panel { padding: 22px 18px; gap: 20px; }
+  .tab-panel h3 { font-size: 1.3rem; }
+
+  .demo-card { padding: 20px; }
   .stack-grid { grid-template-columns: 1fr; }
+
+  .faq-q {
+    padding: 16px;
+    font-size: 0.95rem;
+    gap: 12px;
+  }
+  .faq-a { padding: 0 16px 16px; font-size: 0.925rem; }
+
+  .site-footer { padding: 36px 0; }
+  .footer-inner {
+    flex-direction: column;
+    text-align: center;
+    gap: 16px;
+  }
+  .footer-links { justify-content: center; gap: 16px; }
 }
