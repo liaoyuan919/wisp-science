@@ -704,24 +704,6 @@ fn table_view(t: &TableData, locale: Locale) -> impl IntoView {
     }
 }
 
-fn artifact_meta(a: &Artifact, locale: Locale) -> String {
-    match &a.data {
-        PreviewData::Table(t) => tf(locale, "artifact.meta.table", &[
-            ("rows", &t.rows.len().to_string()),
-            ("cols", &t.headers.len().to_string()),
-        ]),
-        PreviewData::Code { lang, body } => tf(locale, "artifact.meta.code", &[
-            ("lang", lang),
-            ("lines", &body.lines().count().to_string()),
-        ]),
-        PreviewData::File { path, .. } => path.clone(),
-        PreviewData::Latex { .. } => t(locale, "artifact.latex").into(),
-        PreviewData::Fasta(s) => tf(locale, "artifact.meta.fasta", &[("lines", &s.lines().count().to_string())]),
-        PreviewData::Smiles(s) => s.chars().take(28).collect(),
-        PreviewData::Text(s) | PreviewData::Markdown(s) => tf(locale, "artifact.meta.text", &[("chars", &s.len().to_string())]),
-    }
-}
-
 #[component]
 fn HeavyPreview(dom_id: String, kind: String, payload: String) -> impl IntoView {
     let id_for_effect = dom_id.clone();
@@ -734,6 +716,43 @@ fn HeavyPreview(dom_id: String, kind: String, payload: String) -> impl IntoView 
         spawn_local(async move { let _ = mount_preview(&kind, &dom_id, &payload).await; });
     });
     view! { <div class="rp-heavy" id=dom_id></div> }
+}
+
+fn parse_csv_text(text: &str) -> Option<TableData> {
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() { return None; }
+    let headers = parse_csv_line(lines[0]);
+    let rows: Vec<Vec<String>> = lines[1..].iter().map(|l| parse_csv_line(l)).collect();
+    Some(TableData { headers, rows })
+}
+
+#[component]
+fn CsvFilePreview(path: String) -> impl IntoView {
+    let locale = use_locale();
+    let table = create_rw_signal::<Option<TableData>>(None);
+    let err = create_rw_signal::<Option<String>>(None);
+    create_effect(move |_| {
+        let path = path.clone();
+        let loc = locale.get();
+        spawn_local(async move {
+            table.set(None);
+            err.set(None);
+            let v = invoke("read_file", to_value(&serde_json::json!({ "path": path })).unwrap()).await;
+            let Ok(fc) = serde_wasm_bindgen::from_value::<FileContent>(v) else {
+                err.set(Some(tf(loc, "err.file_not_found", &[("path", &path)])));
+                return;
+            };
+            match fc.text.as_deref().and_then(parse_csv_text) {
+                Some(t) => table.set(Some(t)),
+                None => err.set(Some(tf(loc, "err.file_not_found", &[("path", &path)]))),
+            }
+        });
+    });
+    move || match (table.get(), err.get()) {
+        (Some(t), _) => table_view(&t, locale.get()).into_view(),
+        (_, Some(e)) => view! { <div class="rp-error">{e}</div> }.into_view(),
+        _ => view! { <div class="rp-heavy">{move || t(locale.get(), "loading")}</div> }.into_view(),
+    }
 }
 
 #[component]
@@ -797,9 +816,19 @@ fn artifact_preview(a: &Artifact, dom_id: String, locale: Locale) -> impl IntoVi
             let payload = serde_json::json!({ "smiles": s }).to_string();
             view! { <HeavyPreview dom_id=dom_id kind="molecule".to_string() payload=payload /> }.into_view()
         }
-        PreviewData::File { path, kind } => view! {
-            <FilePreview dom_id=dom_id path=path.clone() kind=kind.clone() />
-        }.into_view(),
+        PreviewData::File { path, kind } => {
+            if kind == "csv" {
+                view! {
+                    <p class="rp-path hint">{path.clone()}</p>
+                    <CsvFilePreview path=path.clone() />
+                }.into_view()
+            } else {
+                view! {
+                    <p class="rp-path hint">{path.clone()}</p>
+                    <FilePreview dom_id=dom_id path=path.clone() kind=kind.clone() />
+                }.into_view()
+            }
+        }
     }
 }
 
@@ -1588,27 +1617,29 @@ fn App() -> impl IntoView {
                             } else {
                                 let sel = sel_artifact.get().min(arts.len() - 1);
                                 let tiles = arts.iter().enumerate().map(|(i, a)| {
-                                    let meta = artifact_meta(a, loc);
                                     let name = a.name.clone();
+                                    let kind = a.kind.to_string();
                                     view! {
                                         <button class="rp-tile" class:active=move || sel_artifact.get() == i
                                             data-artifact-name=name.clone()
                                             on:click=move |_| sel_artifact.set(i)>
-                                            <span class="rp-tile-name">{a.name.clone()}</span>
-                                            <span class="rp-tile-meta">{meta}</span>
+                                            <span class="rp-tile-name">{name}</span>
+                                            <span class=format!("rp-badge {}", kind)>{kind.clone()}</span>
                                         </button>
                                     }.into_view()
                                 }).collect_view();
                                 let cur = arts[sel].clone();
                                 let dom_id = format!("rp-{sel}");
                                 view! {
-                                    <div class="rp-tiles">{tiles}</div>
-                                    <div class="rp-view">
-                                        <div class="rp-view-head">
-                                            <span class=format!("rp-badge {}", cur.kind)>{cur.kind}</span>
-                                            <span class="rp-view-name">{cur.name.clone()}</span>
+                                    <div class="rp-artifacts-body">
+                                        <div class="rp-tiles">{tiles}</div>
+                                        <div class="rp-view">
+                                            <div class="rp-view-head">
+                                                <span class=format!("rp-badge {}", cur.kind)>{cur.kind.to_string()}</span>
+                                                <span class="rp-view-name">{cur.name.clone()}</span>
+                                            </div>
+                                            {artifact_preview(&cur, dom_id, loc)}
                                         </div>
-                                        {artifact_preview(&cur, dom_id, loc)}
                                     </div>
                                 }.into_view()
                             }
@@ -1630,11 +1661,15 @@ fn App() -> impl IntoView {
                                     view! {
                                         <div class="rp-view">
                                             <div class="rp-view-head">
-                                                <span class="rp-badge">{kind.clone()}</span>
+                                                <span class=format!("rp-badge {}", kind)>{kind.clone()}</span>
                                                 <span class="rp-view-name">{name.clone()}</span>
                                             </div>
-                                            <div class="hint">{path.clone()}</div>
-                                            <FilePreview dom_id=dom_id path=path kind=kind />
+                                            <p class="rp-path hint">{path.clone()}</p>
+                                            {if kind == "csv" {
+                                                view! { <CsvFilePreview path=path.clone() /> }.into_view()
+                                            } else {
+                                                view! { <FilePreview dom_id=dom_id path=path kind=kind /> }.into_view()
+                                            }}
                                         </div>
                                     }.into_view()
                                 }
