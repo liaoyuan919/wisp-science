@@ -57,8 +57,8 @@ html, body {
 .proj { display: flex; align-items: center; gap: 9px; padding: 4px 6px 10px; }
 .proj .logo {
   width: 22px; height: 22px; border-radius: 7px; flex: 0 0 auto;
-  background: linear-gradient(145deg, var(--clay), var(--clay-strong));
-  box-shadow: inset 0 1px 0 hsl(0 0% 100% / 0.25), 0 1px 4px hsl(14.8 63% 40% / 0.5);
+  background: center / contain no-repeat url("logo.svg");
+  box-shadow: 0 1px 4px hsl(14.8 63% 40% / 0.45);
 }
 .proj .proj-name { font-weight: 650; font-size: 15px; letter-spacing: -0.01em; flex: 1; }
 
@@ -137,7 +137,7 @@ button.side-item { width: 100%; text-align: left; background: transparent; borde
 }
 
 .empty { margin: auto; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 40px 20px; color: var(--text-muted); }
-.empty-logo { width: 46px; height: 46px; border-radius: 13px; background: linear-gradient(145deg, var(--clay), var(--clay-strong)); box-shadow: inset 0 1px 0 hsl(0 0% 100% / 0.25), 0 6px 18px hsl(14.8 63% 40% / 0.4); }
+.empty-logo { width: 46px; height: 46px; border-radius: 13px; background: center / contain no-repeat url("logo.svg"); box-shadow: 0 6px 18px hsl(14.8 63% 40% / 0.35); }
 .empty h1 { margin: 4px 0 0; font-size: 22px; font-weight: 600; letter-spacing: -0.02em; color: var(--text); }
 .empty p { margin: 0; font-size: 14px; max-width: 420px; line-height: 1.5; }
 
@@ -148,7 +148,7 @@ button.side-item { width: 100%; text-align: left; background: transparent; borde
 .msg.user .body { background: var(--bg-elev); border: 1px solid var(--border); padding: 11px 15px; border-radius: 16px 16px 4px 16px; }
 .msg.user .role { text-align: right; }
 .msg.assistant .role { display: flex; align-items: center; gap: 7px; color: var(--text-muted); }
-.msg.assistant .role::before { content: ""; width: 15px; height: 15px; border-radius: 5px; background: linear-gradient(145deg, var(--clay), var(--clay-strong)); }
+.msg.assistant .role::before { content: ""; width: 15px; height: 15px; border-radius: 5px; background: center / contain no-repeat url("logo.svg"); }
 .msg.assistant .body { color: var(--text); }
 .msg.reasoning .body { color: var(--text-faint); font-style: italic; font-size: 13.5px; border-left: 2px solid var(--border-strong); padding-left: 12px; }
 
