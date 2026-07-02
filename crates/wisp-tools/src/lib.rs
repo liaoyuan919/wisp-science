@@ -10,6 +10,7 @@ pub mod edit;
 pub mod env;
 pub mod grep;
 pub mod image;
+pub mod process;
 pub mod read;
 pub mod safety;
 pub mod search;

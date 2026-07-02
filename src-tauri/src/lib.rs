@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
@@ -153,6 +154,12 @@ struct Settings {
     api_url: String,
     model: String,
     has_api_key: bool,
+    #[serde(default = "default_locale")]
+    locale: String,
+}
+
+fn default_locale() -> String {
+    "en".into()
 }
 
 #[derive(Serialize, Clone)]
@@ -182,6 +189,7 @@ struct AppState {
     session: tokio::sync::Mutex<SessionState>,
     confirm: Arc<StdMutex<Option<std::sync::mpsc::Sender<bool>>>>,
     bootstrap: StdMutex<BootstrapStatus>,
+    cancel: Arc<AtomicBool>,
 }
 
 /// `wisp_core::Output` backed by Tauri events. `confirm` blocks on a std
@@ -247,6 +255,15 @@ fn normalized_provider(provider: &str) -> String {
 
 fn non_empty_setting(value: Option<String>, fallback: impl FnOnce() -> String) -> String {
     value.filter(|v| !v.trim().is_empty()).unwrap_or_else(fallback)
+}
+
+async fn load_locale(store: &Store) -> String {
+    let raw = store.get_setting("locale").await.ok().flatten();
+    match raw.as_deref().map(str::trim) {
+        Some("zh") | Some("zh-CN") | Some("zh-TW") => "zh".into(),
+        Some(other) if !other.is_empty() => other.to_string(),
+        _ => "en".into(),
+    }
 }
 
 async fn load_settings(store: &Store) -> (String, String, String, String) {
@@ -433,8 +450,9 @@ async fn send_message(state: State<'_, AppState>, app: AppHandle, message: Strin
         *guard = Some(agent);
     }
     let agent = guard.as_mut().unwrap();
+    state.cancel.store(false, Ordering::Relaxed);
 
-    let result = agent.run(&message, &output).await;
+    let result = agent.run(&message, &output, Some(state.cancel.as_ref())).await;
     agent.ctx.clear_runtime_injections();
 
     // Persist only the messages added this turn to SQLite.
@@ -465,6 +483,11 @@ async fn send_message(state: State<'_, AppState>, app: AppHandle, message: Strin
             Err(format!("{e}"))
         }
     }
+}
+
+#[tauri::command]
+fn stop_agent(state: State<'_, AppState>) {
+    state.cancel.store(true, Ordering::Relaxed);
 }
 
 #[tauri::command]
@@ -535,7 +558,8 @@ fn confirm_response(state: State<'_, AppState>, approved: bool) -> Result<(), St
 #[tauri::command]
 async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     let (provider, api_url, model, api_key) = load_settings(&state.store).await;
-    Ok(Settings { provider, api_url, model, has_api_key: !api_key.is_empty() })
+    let locale = load_locale(&state.store).await;
+    Ok(Settings { provider, api_url, model, has_api_key: !api_key.is_empty(), locale })
 }
 
 #[tauri::command]
@@ -559,6 +583,12 @@ async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Result<
     state.store.set_setting("provider", &provider).await.map_err(|e| format!("{e}"))?;
     state.store.set_setting("api_url", api_url).await.map_err(|e| format!("{e}"))?;
     state.store.set_setting("model", model).await.map_err(|e| format!("{e}"))?;
+    let locale = match settings.locale.trim() {
+        "zh" | "zh-CN" | "zh-TW" => "zh",
+        other if !other.is_empty() => other,
+        _ => "en",
+    };
+    state.store.set_setting("locale", locale).await.map_err(|e| format!("{e}"))?;
     // Reset the cached agent so the next turn picks up the new provider.
     *state.agent.lock().await = None;
     Ok(())
@@ -841,11 +871,50 @@ async fn register_artifact(
     Ok(ArtifactInfo { id, name: filename, kind: mime, path: storage, ts })
 }
 
+/// Release builds: hide WebView2's native context menu (Inspect, etc.), like operon/web-dist.
+/// Debug / `cargo tauri dev` keeps the default menu for DevTools.
+#[cfg(not(debug_assertions))]
+const BLOCK_CONTEXT_MENU_SCRIPT: &str = r#"
+    (function () {
+        var root = document.documentElement;
+        if (root.dataset.wispContextMenuBlocked) return;
+        root.dataset.wispContextMenuBlocked = "1";
+        document.addEventListener("contextmenu", function (e) { e.preventDefault(); }, true);
+    })();
+"#;
+
+#[cfg(not(debug_assertions))]
+fn install_context_menu_guard(window: &tauri::WebviewWindow) {
+    let _ = window.eval(BLOCK_CONTEXT_MENU_SCRIPT);
+}
+
+#[cfg(not(debug_assertions))]
+fn block_native_context_menu(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    install_context_menu_guard(&window);
+    let reload = window.clone();
+    window.on_page_load(move |_, payload| {
+        use tauri::webview::PageLoadEvent;
+        if payload.event() == PageLoadEvent::Finished {
+            install_context_menu_guard(&reload);
+        }
+    });
+}
+
+#[cfg(debug_assertions)]
+fn block_native_context_menu(_app: &tauri::AppHandle) {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("wisp=info".parse().unwrap()))
-        .init();
+    let filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive("wisp=info".parse().unwrap());
+    let subscriber = tracing_subscriber::fmt().with_env_filter(filter);
+    #[cfg(all(not(debug_assertions), target_os = "windows"))]
+    subscriber.with_writer(std::io::sink).init();
+    #[cfg(not(all(not(debug_assertions), target_os = "windows")))]
+    subscriber.init();
 
     tauri::Builder::default()
         .setup(|app| {
@@ -882,12 +951,15 @@ pub fn run() {
                 session: tokio::sync::Mutex::new(SessionState { frame_id: None, last_seq: 0 }),
                 confirm: Arc::new(StdMutex::new(None)),
                 bootstrap,
+                cancel: Arc::new(AtomicBool::new(false)),
             };
             app.manage(state);
+            block_native_context_menu(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             send_message,
+            stop_agent,
             new_session,
             list_sessions,
             load_session,

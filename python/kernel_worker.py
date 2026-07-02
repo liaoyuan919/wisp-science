@@ -126,6 +126,58 @@ def _configure_pandas():
         pass
 
 
+_EXEC_PREFIXES = (
+    "import ", "from ", "def ", "class ", "if ", "for ", "while ",
+    "with ", "try:", "try ", "except ", "finally:", "elif ", "else:",
+    "raise ", "return ", "del ", "global ", "nonlocal ", "assert ",
+    "async ", "match ", "case ", "yield ", "@",
+)
+
+
+def _looks_like_exec(code: str) -> bool:
+    """Heuristic: multi-line or statement-leading cells should skip eval."""
+    stripped = code.strip()
+    if not stripped:
+        return True
+    if "\n" in stripped:
+        return True
+    head = stripped.lstrip()
+    return any(head.startswith(p) for p in _EXEC_PREFIXES)
+
+
+def _kernel_init(namespace: dict) -> None:
+    """Pre-import common stdlib and optional deps into the persistent namespace."""
+    exec(compile(
+        "import json, math, os, re, sys, urllib.parse, urllib.request",
+        "<wisp-kernel:init>",
+        "exec",
+    ), namespace)
+    for mod in ("requests", "numpy", "pandas"):
+        try:
+            namespace[mod] = __import__(mod)
+        except ImportError:
+            pass
+    _configure_pandas()
+
+
+def _execute_cell(code: str, cell_tag: str, namespace: dict) -> None:
+    """Run one cell as eval (expression) or exec (statements)."""
+    if _looks_like_exec(code):
+        exec(compile(code, cell_tag, "exec"), namespace)
+        return
+    try:
+        compiled = compile(code, cell_tag, "eval")
+    except SyntaxError:
+        try:
+            exec(compile(code, cell_tag, "exec"), namespace)
+        except SyntaxError as e:
+            raise e from None
+        return
+    result = eval(compiled, namespace)
+    if result is not None:
+        print(repr(result))
+
+
 def main():
     import threading
 
@@ -153,6 +205,7 @@ def main():
         return mod
 
     builtins.__import__ = import_wrapper
+    _kernel_init(namespace)
 
     while True:
         line = protocol_in.readline()
@@ -190,14 +243,7 @@ def main():
             sys.stdout = stdout_cap
             sys.stderr = stderr_cap
             try:
-                try:
-                    compiled = compile(code, cell_tag, "eval")
-                    result = eval(compiled, namespace)
-                    if result is not None:
-                        print(repr(result))
-                except SyntaxError:
-                    compiled = compile(code, cell_tag, "exec")
-                    exec(compiled, namespace)
+                _execute_cell(code, cell_tag, namespace)
             except BaseException as e:  # noqa: BLE001 — survive hostile exceptions
                 error = traceback.format_exc()
                 error_lineno = _error_lineno(e, cell_tag)

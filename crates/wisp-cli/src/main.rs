@@ -238,7 +238,7 @@ async fn main() -> Result<()> {
         }
 
         let stamped = format!("{}, Current date: {}", input, chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
-        if let Err(e) = agent.run(&stamped, &out).await {
+        if let Err(e) = agent.run(&stamped, &out, None).await {
             eprintln!("{}Error: {}{}", out.red(), e, out.reset());
         }
         println!();

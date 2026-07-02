@@ -59,6 +59,7 @@ impl Tool for ShellTool {
             c
         };
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        crate::process::hide_console_async(&mut command);
         command.current_dir(env.project_root());
 
         let mut child = match command.spawn() {

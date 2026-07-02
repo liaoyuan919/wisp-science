@@ -46,7 +46,7 @@ export function tauriMock(): void {
           case "list_sessions":
             return [];
           case "get_settings":
-            return { provider: "", api_url: "https://api.deepseek.com", model: "deepseek-v4-pro", has_api_key: true };
+            return { provider: "", api_url: "https://api.deepseek.com", model: "deepseek-v4-pro", has_api_key: true, locale: "en" };
           case "get_project_info":
             return project;
           case "get_onboarding_state":

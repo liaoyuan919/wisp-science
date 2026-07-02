@@ -65,8 +65,23 @@ impl Agent {
         }
     }
 
-    pub async fn run(&mut self, user_input: &str, output: &dyn Output) -> anyhow::Result<()> {
-        agent_loop(&mut self.ctx, self.provider.as_ref(), &self.tools, &self.root, output, user_input, self.max_iter).await
+    pub async fn run(
+        &mut self,
+        user_input: &str,
+        output: &dyn Output,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> anyhow::Result<()> {
+        agent_loop(
+            &mut self.ctx,
+            self.provider.as_ref(),
+            &self.tools,
+            &self.root,
+            output,
+            user_input,
+            self.max_iter,
+            cancel,
+        )
+        .await
     }
 
     /// Register an extra tool (e.g. the Python `repl` tool or MCP tools).

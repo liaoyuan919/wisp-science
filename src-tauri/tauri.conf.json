@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "wisp-science",
   "version": "0.1.0",
-  "identifier": "science.wisp-science.app",
+  "identifier": "science.wisp-science",
   "build": {
     "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "withGlobalTauri": true,
     "windows": [
-      { "title": "wisp-science", "width": 1100, "height": 760, "resizable": true }
+      { "title": "wisp-science", "width": 1100, "height": 760, "resizable": true, "devtools": false }
     ],
     "security": { "csp": null }
   },
@@ -20,12 +20,12 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": false,
-    "resources": [
-      "../skills/**/*",
-      "../python/**/*",
-      "../mcp-servers/bio-tools/**/*",
-      "../seed/**/*"
-    ],
+    "resources": {
+      "../skills/": "skills/",
+      "../python/": "python/",
+      "../mcp-servers/bio-tools/": "mcp-servers/bio-tools/",
+      "../seed/": "seed/"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -7,7 +7,13 @@ static RESOURCE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 /// Set the install resource root (Tauri `resource_dir` in release builds).
 pub fn set_resource_root(root: PathBuf) {
-    let _ = RESOURCE_ROOT.set(root);
+    let _ = RESOURCE_ROOT.set(normalize_resource_root(root));
+}
+
+/// Tauri v2 list-form `../` resources land under `_up_/`; map-form bundles do not.
+pub fn normalize_resource_root(root: PathBuf) -> PathBuf {
+    let up = root.join("_up_");
+    if up.is_dir() { up } else { root }
 }
 
 fn dev_repo_root() -> PathBuf {
@@ -62,5 +68,17 @@ mod tests {
         assert!(python_dir().is_some());
         assert!(bio_tools_dir().is_some());
         assert!(seed_dir().is_some());
+    }
+
+    #[test]
+    fn normalize_up_resource_root() {
+        let tmp = std::env::temp_dir().join(format!("wisp-paths-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("_up_/skills")).unwrap();
+        assert_eq!(normalize_resource_root(tmp.clone()), tmp.join("_up_"));
+        let flat = tmp.join("flat");
+        std::fs::create_dir_all(flat.join("skills")).unwrap();
+        assert_eq!(normalize_resource_root(flat.clone()), flat);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

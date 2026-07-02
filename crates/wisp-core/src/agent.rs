@@ -7,6 +7,7 @@ use crate::output::{StreamSinkAdapter, ToolEnvAdapter};
 use crate::Output;
 use anyhow::Result;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use wisp_llm::{Content, Provider};
 use wisp_tools::Registry;
 
@@ -18,12 +19,16 @@ pub async fn agent_loop(
     output: &dyn Output,
     user_input: &str,
     max_iter: usize,
+    cancel: Option<&AtomicBool>,
 ) -> Result<()> {
     ctx.append_user(user_input);
 
     let env = ToolEnvAdapter::new(root.to_path_buf(), output);
     let mut iteration = 0usize;
     loop {
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            anyhow::bail!("stopped by user");
+        }
         iteration += 1;
         let messages = ctx.prepare_for_api(provider, output).await;
         let mut sink = StreamSinkAdapter::new(output);
@@ -61,6 +66,9 @@ pub async fn agent_loop(
         }
         if completed { break; }
         if iteration >= max_iter { break; }
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            anyhow::bail!("stopped by user");
+        }
     }
     Ok(())
 }

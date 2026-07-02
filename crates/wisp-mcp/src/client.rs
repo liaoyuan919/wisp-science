@@ -64,7 +64,8 @@ impl McpClient {
         cmd.args(args);
         cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit());
+            .stderr(std::process::Stdio::null());
+        wisp_tools::process::hide_console_async(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| anyhow!("spawn MCP server '{command}': {e}"))?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;

@@ -52,7 +52,7 @@ impl Tool for ReplTool {
         )
     }
     fn preview(&self, args: &serde_json::Value) -> String {
-        args.get("code").and_then(|v| v.as_str()).map(|s| s.lines().next().unwrap_or("").chars().take(120).collect()).unwrap_or_default()
+        args.get("code").and_then(|v| v.as_str()).unwrap_or("").to_string()
     }
     async fn run(&self, args: &serde_json::Value, env: &dyn ToolEnv) -> ToolResult {
         let code = match args.get("code").and_then(|v| v.as_str()) {

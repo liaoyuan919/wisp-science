@@ -1,8 +1,23 @@
+mod i18n;
+
+use i18n::{localize_backend, set_document_lang, tab_count, tf, t, use_locale, Locale};
 use leptos::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static NEXT_DOM_ID: AtomicUsize = AtomicUsize::new(0);
+
+fn unique_dom_id(prefix: &str) -> String {
+    format!("{prefix}-{}", NEXT_DOM_ID.fetch_add(1, Ordering::Relaxed))
+}
 use serde::{Deserialize, Serialize};
 use serde_wasm_bindgen::to_value;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+
+#[wasm_bindgen(module = "/src/highlight.js")]
+extern "C" {
+    async fn highlight_by_id(id: &str) -> JsValue;
+}
 
 #[wasm_bindgen(module = "/src/api.js")]
 extern "C" {
@@ -36,7 +51,7 @@ enum ChatItem {
     User(String),
     Assistant(String),
     Reasoning(String),
-    Tool { name: String, ok: Option<bool>, content: String },
+    Tool { name: String, ok: Option<bool>, input: String, output: String },
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -45,6 +60,8 @@ struct Settings {
     api_url: String,
     model: String,
     has_api_key: bool,
+    #[serde(default)]
+    locale: String,
 }
 
 impl Default for Settings {
@@ -54,6 +71,7 @@ impl Default for Settings {
             api_url: "https://api.deepseek.com".into(),
             model: "deepseek-v4-pro".into(),
             has_api_key: false,
+            locale: Locale::En.code().into(),
         }
     }
 }
@@ -61,7 +79,18 @@ impl Default for Settings {
 fn js_error_text(err: JsValue) -> String {
     err.as_string()
         .or_else(|| js_sys::Reflect::get(&err, &JsValue::from_str("message")).ok().and_then(|v| v.as_string()))
-        .unwrap_or_else(|| "Unknown error".into())
+        .unwrap_or_else(|| t(Locale::En, "err.unknown").into())
+}
+
+fn copy_text(text: String) {
+    if text.is_empty() {
+        return;
+    }
+    spawn_local(async move {
+        let Some(window) = web_sys::window() else { return; };
+        let promise = window.navigator().clipboard().write_text(&text);
+        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    });
 }
 
 fn dom_value(ev: &web_sys::Event) -> String {
@@ -108,18 +137,24 @@ fn normalized_settings(mut cfg: Settings) -> Settings {
     cfg
 }
 
-fn settings_required_error(cfg: &Settings, key: &str) -> Option<&'static str> {
+fn settings_required_error_key(cfg: &Settings, key: &str) -> Option<&'static str> {
     if cfg.api_url.trim().is_empty() {
-        return Some("API URL is required.");
+        return Some("err.api_url_required");
     }
     if cfg.model.trim().is_empty() {
-        return Some("Model is required.");
+        return Some("err.model_required");
     }
-    let has_new_key = !key.trim().is_empty() && !key.starts_with("(stored");
+    let stored = t(Locale::En, "settings.stored_key");
+    let has_new_key = !key.trim().is_empty() && !key.starts_with(&stored) && !key.starts_with("(stored");
     if !cfg.has_api_key && !has_new_key {
-        return Some("API key is required.");
+        return Some("err.api_key_required");
     }
     None
+}
+
+fn is_stored_key_placeholder(key: &str, locale: Locale) -> bool {
+    let stored = t(locale, "settings.stored_key");
+    key.starts_with(&stored) || key.starts_with("(stored")
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -162,7 +197,12 @@ impl LoadedItem {
         match self.role.as_str() {
             "user" => ChatItem::User(self.text),
             "reasoning" => ChatItem::Reasoning(self.text),
-            "tool" => ChatItem::Tool { name: self.tool_name.unwrap_or_else(|| "tool".into()), ok: self.ok, content: self.text },
+            "tool" => ChatItem::Tool {
+                name: self.tool_name.unwrap_or_else(|| "tool".into()),
+                ok: self.ok,
+                input: String::new(),
+                output: self.text,
+            },
             _ => ChatItem::Assistant(self.text),
         }
     }
@@ -189,6 +229,7 @@ enum PreviewData {
 
 #[derive(Clone, PartialEq)]
 struct Artifact {
+    id: String,
     name: String,
     kind: &'static str,
     data: PreviewData,
@@ -320,6 +361,125 @@ fn md_to_html(src: &str) -> String {
     out
 }
 
+/// Inline Markdown for table cells (bold, code, links, etc.).
+fn md_inline_to_html(src: &str) -> String {
+    if src.is_empty() { return String::new(); }
+    let html = md_to_html(src);
+    let s = html.trim();
+    if let Some(inner) = s.strip_prefix("<p>").and_then(|rest| rest.strip_suffix("</p>")) {
+        if !inner.contains("<p>") { return inner.to_string(); }
+    }
+    html
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn next_artifact_id(n: usize) -> String {
+    format!("{:08x}", n + 1)
+}
+
+fn art_label(a: &Artifact) -> String {
+    if a.name.len() <= 28 {
+        a.name.clone()
+    } else {
+        format!("artifact-{}", &a.id[..8.min(a.id.len())])
+    }
+}
+
+fn art_chip(idx: usize, a: &Artifact) -> String {
+    let label = html_escape(&art_label(a));
+    let title = html_escape(&a.name);
+    format!(
+        r#"<button type="button" class="art-ref" data-art-idx="{idx}" title="{title}">{label}</button>"#
+    )
+}
+
+fn artifact_matches_token(token: &str, id: &str) -> bool {
+    let t = token.trim();
+    t == id
+        || t.starts_with(id)
+        || id.starts_with(&t[..t.len().min(8)])
+        || t.starts_with(&id[..id.len().min(8)])
+}
+
+fn replace_artifact_tokens(mut html: String, arts: &[Artifact]) -> String {
+    while let Some(start) = html.find("{{artifact:") {
+        let (head, rest) = html.split_at(start);
+        let rest = &rest["{{artifact:".len()..];
+        let Some(end) = rest.find("}}") else { break; };
+        let token = rest[..end].trim();
+        let tail = &rest[end + 2..];
+        let chip = arts.iter().enumerate().find_map(|(i, a)| {
+            if artifact_matches_token(token, &a.id) {
+                Some(art_chip(i, a))
+            } else {
+                None
+            }
+        }).unwrap_or_else(|| {
+            let short = &token[..token.len().min(8)];
+            format!(r#"<span class="art-ref dead" title="{token}">artifact-{short}</span>"#)
+        });
+        html = format!("{head}{chip}{tail}");
+    }
+    html
+}
+
+/// Post-process rendered Markdown: artifact chips, code wrappers, filename links.
+fn enrich_md_html(mut html: String, arts: &[Artifact]) -> String {
+    html = replace_artifact_tokens(html, arts);
+    for (i, a) in arts.iter().enumerate() {
+        let chip = art_chip(i, a);
+        let marker = format!("{{{{artifact:{}}}}}", a.id);
+        html = html.replace(&marker, &chip);
+        let fname = html_escape(&a.name);
+        html = html.replace(
+            &format!("<code>{fname}</code>"),
+            &format!(r#"<button type="button" class="art-ref" data-art-idx="{i}" title="{fname}"><code>{fname}</code></button>"#),
+        );
+    }
+    html = html.replace("<pre><code", "<pre class=\"md-code\"><code");
+    html
+}
+
+fn tool_lang(name: &str) -> &'static str {
+    let n = name.trim().to_ascii_lowercase();
+    match n.as_str() {
+        "python" | "python3" => "python",
+        "bash" | "shell" | "sh" => "bash",
+        "javascript" | "js" => "javascript",
+        "json" => "json",
+        "sql" => "sql",
+        "rust" => "rust",
+        "r" => "r",
+        _ => "plaintext",
+    }
+}
+
+fn handle_md_click(ev: &web_sys::MouseEvent, on_artifact: &Callback<usize>) {
+    use wasm_bindgen::JsCast;
+    let mut el = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok());
+    while let Some(n) = el {
+        if n.class_list().contains("art-ref") {
+            if let Ok(idx) = n.get_attribute("data-art-idx").unwrap_or_default().parse::<usize>() {
+                on_artifact.call(idx);
+            }
+            return;
+        }
+        el = n.parent_element();
+    }
+}
+
+fn schedule_highlight(id: String) {
+    spawn_local(async move {
+        let _ = highlight_by_id(&id).await;
+    });
+}
+
 fn refresh_sessions(sessions: RwSignal<Vec<SessionInfo>>) {
     spawn_local(async move {
         let v = invoke("list_sessions", JsValue::UNDEFINED).await;
@@ -381,7 +541,9 @@ fn parse_csv_line(line: &str) -> Vec<String> {
 }
 
 fn file_kind(path: &str) -> Option<&'static str> {
-    let ext = path.rsplit('.').next()?.to_ascii_lowercase();
+    let (_, ext) = path.rsplit_once('.')?;
+    if ext.is_empty() { return None; }
+    let ext = ext.to_ascii_lowercase();
     Some(match ext.as_str() {
         "csv" | "tsv" => "csv",
         "pdf" => "pdf",
@@ -401,11 +563,12 @@ fn push_file_artifact(out: &mut Vec<Artifact>, seen: &mut std::collections::Hash
     let Some(kind) = file_kind(p) else { return; };
     seen.insert(p.to_string());
     let name = p.rsplit(['/', '\\']).next().unwrap_or(p).to_string();
-    out.push(Artifact { name, kind, data: PreviewData::File { path: p.to_string(), kind: kind.to_string() } });
+    let id = next_artifact_id(out.len());
+    out.push(Artifact { id, name, kind, data: PreviewData::File { path: p.to_string(), kind: kind.to_string() } });
 }
 
 /// Collect tables, code, latex, and file-path artifacts from the transcript.
-fn collect_artifacts(items: &[ChatItem]) -> Vec<Artifact> {
+fn collect_artifacts(items: &[ChatItem], locale: Locale) -> Vec<Artifact> {
     let mut out: Vec<Artifact> = vec![];
     let mut seen = std::collections::HashSet::<String>::new();
     let mut tbl_n = 0;
@@ -419,7 +582,13 @@ fn collect_artifacts(items: &[ChatItem]) -> Vec<Artifact> {
                 for seg in split_segments(s) {
                     if let Seg::Table(t) = seg {
                         tbl_n += 1;
-                        out.push(Artifact { name: format!("Table {tbl_n}"), kind: "table", data: PreviewData::Table(t) });
+                        let id = next_artifact_id(out.len());
+                        out.push(Artifact {
+                            id,
+                            name: tf(locale, "artifact.table", &[("n", &tbl_n.to_string())]),
+                            kind: "table",
+                            data: PreviewData::Table(t),
+                        });
                     }
                 }
                 let lines: Vec<&str> = s.lines().collect();
@@ -436,12 +605,20 @@ fn collect_artifacts(items: &[ChatItem]) -> Vec<Artifact> {
                                 let headers = parse_csv_line(body[0]);
                                 let rows: Vec<Vec<String>> = body[1..].iter().map(|l| parse_csv_line(l)).collect();
                                 csv_n += 1;
-                                out.push(Artifact { name: format!("data-{csv_n}.csv"), kind: "csv", data: PreviewData::Table(TableData { headers, rows }) });
+                                let id = next_artifact_id(out.len());
+                                out.push(Artifact { id, name: format!("data-{csv_n}.csv"), kind: "csv", data: PreviewData::Table(TableData { headers, rows }) });
                             } else if lang == "fasta" || lang == "fa" {
-                                out.push(Artifact { name: format!("alignment-{csv_n}.fasta"), kind: "msa", data: PreviewData::Fasta(body.join("\n")) });
+                                let id = next_artifact_id(out.len());
+                                out.push(Artifact { id, name: format!("alignment-{csv_n}.fasta"), kind: "msa", data: PreviewData::Fasta(body.join("\n")) });
                             } else {
                                 code_n += 1;
-                                out.push(Artifact { name: format!("Code {code_n}"), kind: "code", data: PreviewData::Code { lang, body: body.join("\n") } });
+                                let id = next_artifact_id(out.len());
+                                out.push(Artifact {
+                                    id,
+                                    name: tf(locale, "artifact.code", &[("n", &code_n.to_string())]),
+                                    kind: "code",
+                                    data: PreviewData::Code { lang, body: body.join("\n") },
+                                });
                             }
                         }
                         i = j + 1;
@@ -453,7 +630,13 @@ fn collect_artifacts(items: &[ChatItem]) -> Vec<Artifact> {
                         while j < lines.len() && !lines[j].trim().ends_with("$") { body.push(lines[j]); j += 1; }
                         if j < lines.len() { body.push(lines[j].trim().trim_end_matches("$")); }
                         tex_n += 1;
-                        out.push(Artifact { name: format!("Equation {tex_n}"), kind: "latex", data: PreviewData::Latex { tex: body.join("\n"), display: true } });
+                        let id = next_artifact_id(out.len());
+                        out.push(Artifact {
+                            id,
+                            name: tf(locale, "artifact.equation", &[("n", &tex_n.to_string())]),
+                            kind: "latex",
+                            data: PreviewData::Latex { tex: body.join("\n"), display: true },
+                        });
                         i = j + 1;
                         continue;
                     }
@@ -463,8 +646,9 @@ fn collect_artifacts(items: &[ChatItem]) -> Vec<Artifact> {
                     push_file_artifact(&mut out, &mut seen, word);
                 }
             }
-            ChatItem::Tool { content, .. } => {
-                for word in content.split(|c: char| c.is_whitespace() || c == '\n' || c == '"' || c == '\'') {
+            ChatItem::Tool { input, output, .. } => {
+                let text = if output.is_empty() { input.as_str() } else { output.as_str() };
+                for word in text.split(|c: char| c.is_whitespace() || c == '\n' || c == '"' || c == '\'') {
                     push_file_artifact(&mut out, &mut seen, word);
                 }
             }
@@ -474,16 +658,23 @@ fn collect_artifacts(items: &[ChatItem]) -> Vec<Artifact> {
     out
 }
 
-fn table_view(t: &TableData) -> impl IntoView {
-    let headers = t.headers.clone();
-    let rows: Vec<Vec<String>> = t.rows.iter().take(500).cloned().collect();
+fn table_view(t: &TableData, locale: Locale) -> impl IntoView {
+    let total = t.rows.len();
+    let truncated = total > 500;
+    let headers: Vec<String> = t.headers.iter().map(|h| md_inline_to_html(h)).collect();
+    let rows: Vec<Vec<String>> = t.rows.iter().take(500)
+        .map(|r| r.iter().map(|c| md_inline_to_html(c)).collect())
+        .collect();
     view! {
         <div class="tbl-wrap">
+            {truncated.then(|| view! {
+                <div class="tbl-note">{tf(locale, "table.rows_note", &[("total", &total.to_string())])}</div>
+            })}
             <table class="tbl">
-                <thead><tr>{headers.into_iter().map(|h| view! { <th>{h}</th> }).collect_view()}</tr></thead>
+                <thead><tr>{headers.into_iter().map(|h| view! { <th inner_html=h></th> }).collect_view()}</tr></thead>
                 <tbody>
                     {rows.into_iter().map(|r| view! {
-                        <tr>{r.into_iter().map(|c| view! { <td>{c}</td> }).collect_view()}</tr>
+                        <tr>{r.into_iter().map(|c| view! { <td inner_html=c></td> }).collect_view()}</tr>
                     }).collect_view()}
                 </tbody>
             </table>
@@ -491,15 +682,21 @@ fn table_view(t: &TableData) -> impl IntoView {
     }
 }
 
-fn artifact_meta(a: &Artifact) -> String {
+fn artifact_meta(a: &Artifact, locale: Locale) -> String {
     match &a.data {
-        PreviewData::Table(t) => format!("{} rows × {} cols", t.rows.len(), t.headers.len()),
-        PreviewData::Code { lang, body } => format!("{lang} · {} lines", body.lines().count()),
+        PreviewData::Table(t) => tf(locale, "artifact.meta.table", &[
+            ("rows", &t.rows.len().to_string()),
+            ("cols", &t.headers.len().to_string()),
+        ]),
+        PreviewData::Code { lang, body } => tf(locale, "artifact.meta.code", &[
+            ("lang", lang),
+            ("lines", &body.lines().count().to_string()),
+        ]),
         PreviewData::File { path, .. } => path.clone(),
-        PreviewData::Latex { .. } => "LaTeX".into(),
-        PreviewData::Fasta(s) => format!("{} lines", s.lines().count()),
+        PreviewData::Latex { .. } => t(locale, "artifact.latex").into(),
+        PreviewData::Fasta(s) => tf(locale, "artifact.meta.fasta", &[("lines", &s.lines().count().to_string())]),
         PreviewData::Smiles(s) => s.chars().take(28).collect(),
-        PreviewData::Text(s) | PreviewData::Markdown(s) => format!("{} chars", s.len()),
+        PreviewData::Text(s) | PreviewData::Markdown(s) => tf(locale, "artifact.meta.text", &[("chars", &s.len().to_string())]),
     }
 }
 
@@ -519,16 +716,28 @@ fn HeavyPreview(dom_id: String, kind: String, payload: String) -> impl IntoView 
 
 #[component]
 fn FilePreview(dom_id: String, path: String, kind: String) -> impl IntoView {
+    let locale = use_locale();
     let id_for_effect = dom_id.clone();
+    let path_for_effect = path.clone();
     create_effect(move |_| {
-        let path = path.clone();
+        let path = path_for_effect.clone();
         let kind = kind.clone();
         let dom_id = id_for_effect.clone();
+        let loc = locale.get();
         spawn_local(async move {
+            let doc = web_sys::window().and_then(|w| w.document());
+            let el = doc.as_ref().and_then(|d| d.get_element_by_id(&dom_id));
             let v = invoke("read_file", to_value(&serde_json::json!({ "path": path })).unwrap()).await;
-            let Ok(fc) = serde_wasm_bindgen::from_value::<FileContent>(v) else { return; };
+            let Ok(fc) = serde_wasm_bindgen::from_value::<FileContent>(v) else {
+                if let Some(el) = el {
+                    el.set_class_name("rp-heavy rp-error");
+                    el.set_text_content(Some(&tf(loc, "err.file_not_found", &[("path", &path)])));
+                }
+                return;
+            };
             if kind == "markdown" {
-                if let Some(el) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.get_element_by_id(&dom_id)) {
+                if let Some(el) = el {
+                    el.set_class_name("rp-heavy md");
                     el.set_inner_html(&md_to_html(fc.text.as_deref().unwrap_or("")));
                 }
                 return;
@@ -543,17 +752,16 @@ fn FilePreview(dom_id: String, path: String, kind: String) -> impl IntoView {
             let _ = mount_preview(mount_kind, &dom_id, &payload).await;
         });
     });
-    view! { <div class="rp-heavy" id=dom_id>"Loading…"</div> }
+    view! { <div class="rp-heavy" id=dom_id>{move || t(locale.get(), "loading")}</div> }
 }
 
-fn artifact_preview(a: &Artifact, dom_id: String) -> impl IntoView {
+fn artifact_preview(a: &Artifact, dom_id: String, locale: Locale) -> impl IntoView {
     match &a.data {
-        PreviewData::Table(t) => table_view(t).into_view(),
+        PreviewData::Table(t) => table_view(t, locale).into_view(),
         PreviewData::Text(s) => view! { <pre class="rp-pre">{s.clone()}</pre> }.into_view(),
         PreviewData::Markdown(s) => view! { <div class="md rp-md" inner_html=md_to_html(s)></div> }.into_view(),
         PreviewData::Code { lang, body } => view! {
-            <div class="rp-code-head">{lang.clone()}</div>
-            <pre class="rp-pre"><code>{body.clone()}</code></pre>
+            <CodeBlock lang=lang.clone() body=body.clone() />
         }.into_view(),
         PreviewData::Latex { tex, display } => {
             let payload = serde_json::json!({ "tex": tex, "display": display }).to_string();
@@ -574,7 +782,111 @@ fn artifact_preview(a: &Artifact, dom_id: String) -> impl IntoView {
 }
 
 #[component]
+fn CodeBlock(lang: String, body: String) -> impl IntoView {
+    let lang_class = if lang.is_empty() { "plaintext".to_string() } else { lang.clone() };
+    let hid = unique_dom_id("code");
+    let hid_for_effect = hid.clone();
+    let lang_track = lang_class.clone();
+    let body_track = body.clone();
+    create_effect(move |_| {
+        let _ = (&lang_track, &body_track);
+        schedule_highlight(hid_for_effect.clone());
+    });
+    view! {
+        <div class="code-block" id=hid.clone()>
+            {(!lang.is_empty()).then(|| view! { <div class="code-lang">{lang.clone()}</div> })}
+            <pre class="md-code"><code class=format!("language-{lang_class}")>{body.clone()}</code></pre>
+        </div>
+    }
+}
+
+#[component]
+fn AssistantMessage(
+    text: String,
+    artifacts: Vec<Artifact>,
+    on_artifact: Callback<usize>,
+) -> impl IntoView {
+    let html = create_memo(move |_| enrich_md_html(md_to_html(&text), &artifacts));
+    let hid = unique_dom_id("md");
+    let hid_for_effect = hid.clone();
+    create_effect(move |_| {
+        let _ = html.get();
+        schedule_highlight(hid_for_effect.clone());
+    });
+    let on_artifact = on_artifact.clone();
+    let locale = use_locale();
+    view! {
+        <div class="role">{move || t(locale.get(), "chat.assistant")}</div>
+        <div class="body md" id=hid.clone()
+            inner_html=move || html.get()
+            on:click=move |ev: web_sys::MouseEvent| handle_md_click(&ev, &on_artifact)></div>
+    }
+}
+
+#[component]
+fn ToolBlock(name: String, ok: Option<bool>, input: String, output: String) -> impl IntoView {
+    let locale = use_locale();
+    let open = ok != Some(true);
+    let lang = tool_lang(&name).to_string();
+    let hid = unique_dom_id("tool");
+    let hid_for_effect = hid.clone();
+    let has_input = !input.is_empty();
+    let has_output = !output.is_empty();
+    let input_track = input.clone();
+    let output_track = output.clone();
+    let lang_track = lang.clone();
+    create_effect(move |_| {
+        let _ = (&input_track, &output_track, &lang_track);
+        schedule_highlight(hid_for_effect.clone());
+    });
+    let name_for_label = name.clone();
+    let input_label = move || {
+        if name_for_label == "python" { t(locale.get(), "tool.copy_code") } else { t(locale.get(), "tool.copy_input") }
+    };
+
+    view! {
+        <details class="tool" open=open>
+            <summary class="head">
+                <span>{name.clone()}</span>
+                {match ok {
+                    Some(true) => view!{ <span class="ok">"✓"</span> }.into_view(),
+                    Some(false) => view!{ <span class="fail">"✗"</span> }.into_view(),
+                    None => view!{ <span class="run"><span class="run-dot"></span>{move || t(locale.get(), "tool.running")}</span> }.into_view(),
+                }}
+            </summary>
+            <div class="tool-panel" id=hid.clone()>
+                <div class="tool-actions">
+                    {has_input.then(|| {
+                        let text = input.clone();
+                        view! {
+                            <button type="button" class="tool-btn" on:click=move |_| copy_text(text.clone())>
+                                {input_label}
+                            </button>
+                        }
+                    })}
+                    {has_output.then(|| {
+                        let text = output.clone();
+                        view! {
+                            <button type="button" class="tool-btn" on:click=move |_| copy_text(text.clone())>{move || t(locale.get(), "tool.copy_output")}</button>
+                        }
+                    })}
+                </div>
+                {has_input.then(|| view! {
+                    <pre class="tool-input md-code"><code class=format!("language-{lang}")>{input.clone()}</code></pre>
+                })}
+                {has_output.then(|| view! {
+                    <pre class="tool-output md-code"><code class="language-plaintext">{output.clone()}</code></pre>
+                })}
+            </div>
+        </details>
+    }
+}
+
+#[component]
 fn App() -> impl IntoView {
+    let locale = create_rw_signal(Locale::detect_browser());
+    provide_context(locale.read_only());
+
     let items = create_rw_signal::<Vec<ChatItem>>(vec![]);
     let input = create_rw_signal(String::new());
     let busy = create_rw_signal(false);
@@ -601,7 +913,7 @@ fn App() -> impl IntoView {
     let drag_start_w = create_rw_signal(0.0_f64);
 
     // Artifacts (right pane): tables + CSV detected in the transcript.
-    let artifacts = create_memo(move |_| collect_artifacts(&items.get()));
+    let artifacts = create_memo(move |_| collect_artifacts(&items.get(), locale.get()));
     let sel_artifact = create_rw_signal(0usize);
     let right_tab = create_rw_signal(RightTab::Artifacts);
     let show_files = create_rw_signal(false);
@@ -615,10 +927,30 @@ fn App() -> impl IntoView {
     let show_onboarding = create_rw_signal(false);
     let onboard_step = create_rw_signal(0usize);
 
+    let on_artifact_select = Callback::new(move |idx: usize| {
+        let arts = artifacts.get();
+        if let Some(a) = arts.get(idx) {
+            show_right.set(true);
+            if let PreviewData::File { path, kind } = &a.data {
+                right_tab.set(RightTab::File);
+                open_file.set(Some((path.clone(), kind.clone())));
+            } else {
+                right_tab.set(RightTab::Artifacts);
+                sel_artifact.set(idx);
+            }
+        }
+    });
+
     spawn_local(async move {
         let v = invoke("get_project_info", JsValue::UNDEFINED).await;
         if let Ok(p) = serde_wasm_bindgen::from_value::<ProjectInfo>(v) {
             project_info.set(Some(p));
+        }
+        let v = invoke("get_settings", JsValue::UNDEFINED).await;
+        if let Ok(cfg) = serde_wasm_bindgen::from_value::<Settings>(v) {
+            let loc = Locale::from_code(&cfg.locale);
+            locale.set(loc);
+            set_document_lang(loc);
         }
         let v = invoke("get_onboarding_state", JsValue::UNDEFINED).await;
         if let Ok(s) = serde_wasm_bindgen::from_value::<OnboardingState>(v) {
@@ -634,6 +966,7 @@ fn App() -> impl IntoView {
     let items_cb = items;
     let busy_cb = busy;
     let status_cb = status;
+    let locale_cb = locale;
     let cb = Closure::wrap(Box::new(move |payload: JsValue| {
         let ev: AgentEvent = match serde_wasm_bindgen::from_value(payload) {
             Ok(e) => e,
@@ -655,21 +988,39 @@ fn App() -> impl IntoView {
                     _ => v.push(ChatItem::Reasoning(delta)),
                 }
             }),
-            AgentEvent::ToolCall { name, preview, .. } => items_cb.update(|v| v.push(ChatItem::Tool { name, ok: None, content: preview })),
+            AgentEvent::ToolCall { name, preview, .. } => items_cb.update(|v| {
+                v.push(ChatItem::Tool { name, ok: None, input: preview, output: String::new() })
+            }),
             AgentEvent::ToolResult { name, ok, content, .. } => items_cb.update(|v| {
                 let idx = v.iter().rposition(|c| matches!(c, ChatItem::Tool { name: n, ok: None, .. } if n == &name));
                 if let Some(i) = idx {
-                    if let ChatItem::Tool { ok: o, content: c, .. } = &mut v[i] { *o = Some(ok); *c = content; }
+                    if let ChatItem::Tool { ok: o, output, .. } = &mut v[i] {
+                        *o = Some(ok);
+                        *output = content;
+                    }
                 } else {
-                    v.push(ChatItem::Tool { name, ok: Some(ok), content });
+                    v.push(ChatItem::Tool { name, ok: Some(ok), input: String::new(), output: content });
                 }
             }),
             AgentEvent::Usage { input, output, ctx_tokens, max_context, .. } => {
                 let pct = if max_context > 0 { ctx_tokens * 100 / max_context } else { 0 };
-                status_cb.set(format!("{:.1}k in / {:.1}k out | ctx {}%", input as f64 / 1000.0, output as f64 / 1000.0, pct));
+                let loc = locale_cb.get();
+                status_cb.set(tf(loc, "status.usage", &[
+                    ("in", &format!("{:.1}", input as f64 / 1000.0)),
+                    ("out", &format!("{:.1}", output as f64 / 1000.0)),
+                    ("pct", &pct.to_string()),
+                ]));
             }
-            AgentEvent::Compaction { before, after, .. } => status_cb.set(format!("compact {} → {}", before, after)),
-            AgentEvent::Stdout { chunk, .. } => items_cb.update(|v| match v.last_mut() { Some(ChatItem::Tool { content, .. }) => content.push_str(&chunk), _ => v.push(ChatItem::Tool { name: "stdout".into(), ok: None, content: chunk }) }),
+            AgentEvent::Compaction { before, after, .. } => {
+                status_cb.set(tf(locale_cb.get(), "status.compact", &[
+                    ("before", &before.to_string()),
+                    ("after", &after.to_string()),
+                ]));
+            }
+            AgentEvent::Stdout { chunk, .. } => items_cb.update(|v| match v.last_mut() {
+                Some(ChatItem::Tool { output, .. }) => output.push_str(&chunk),
+                _ => v.push(ChatItem::Tool { name: "stdout".into(), ok: None, input: String::new(), output: chunk }),
+            }),
             AgentEvent::Done { .. } => { busy_cb.set(false); refresh_sessions(sessions); }
             AgentEvent::Error { message, .. } => { items_cb.update(|v| v.push(ChatItem::Assistant(format!("Error: {message}")))); busy_cb.set(false); }
             AgentEvent::Diff { .. } => {}
@@ -696,6 +1047,12 @@ fn App() -> impl IntoView {
     std::mem::forget(confirm_cb);
     spawn_local(async move { let _ = listen("confirm-request", &confirm_js).await; });
 
+    let stop = move |_| {
+        spawn_local(async {
+            let _ = invoke("stop_agent", JsValue::UNDEFINED).await;
+        });
+    };
+
     let send = move || {
         let text = input.get();
         if text.trim().is_empty() || busy.get() { return; }
@@ -708,7 +1065,8 @@ fn App() -> impl IntoView {
         let _ = args;
         spawn_local(async move {
             if let Err(err) = invoke_checked("send_message", arg).await {
-                status.set(format!("Send failed: {}", js_error_text(err)));
+                let loc = locale.get();
+                status.set(tf(loc, "status.send_failed", &[("msg", &localize_backend(loc, &js_error_text(err)))]));
                 busy.set(false);
             }
         });
@@ -721,16 +1079,17 @@ fn App() -> impl IntoView {
     let check_updates = move |_| {
         if settings_busy.get() { return; }
         settings_busy.set(true);
-        settings_message.set(Some((true, "Checking for updates...".into())));
+        settings_message.set(Some((true, t(locale.get(), "status.checking_updates").into())));
         let msg = settings_message;
         let busy = settings_busy;
+        let loc = locale;
         spawn_local(async move {
             match invoke_checked("check_for_updates", JsValue::UNDEFINED).await {
                 Ok(v) => {
-                    let text = v.as_string().unwrap_or_else(|| "Update check complete.".into());
-                    msg.set(Some((true, text)));
+                    let text = v.as_string().unwrap_or_else(|| t(loc.get(), "status.update_check_complete").into());
+                    msg.set(Some((true, localize_backend(loc.get(), &text))));
                 }
-                Err(err) => msg.set(Some((false, js_error_text(err)))),
+                Err(err) => msg.set(Some((false, localize_backend(loc.get(), &js_error_text(err))))),
             }
             busy.set(false);
         });
@@ -742,14 +1101,18 @@ fn App() -> impl IntoView {
         let s = settings;
         let api_key_input = api_key_input;
         let msg = settings_message;
+        let loc = locale;
         spawn_local(async move {
             let v = invoke("get_settings", JsValue::UNDEFINED).await;
             if let Ok(cfg) = serde_wasm_bindgen::from_value::<Settings>(v) {
                 let cfg = normalized_settings(cfg);
-                api_key_input.set(if cfg.has_api_key { "(stored — leave blank to keep)".into() } else { String::new() });
+                let l = Locale::from_code(&cfg.locale);
+                loc.set(l);
+                set_document_lang(l);
+                api_key_input.set(if cfg.has_api_key { t(l, "settings.stored_key").into() } else { String::new() });
                 s.set(cfg);
             } else {
-                msg.set(Some((false, "Failed to load settings".into())));
+                msg.set(Some((false, t(loc.get(), "status.failed_load_settings").into())));
             }
         });
     };
@@ -757,37 +1120,43 @@ fn App() -> impl IntoView {
     let save_settings = move |_| {
         if settings_busy.get() { return; }
         let mut cfg = normalized_settings(settings.get());
+        cfg.locale = locale.get().code().into();
         let key = api_key_input.get();
         let s = settings;
         let show = show_settings;
         let busy = settings_busy;
         let msg = settings_message;
         let status_msg = status;
-        if let Some(err) = settings_required_error(&cfg, &key) {
-            let text = format!("Save failed: {err}");
+        let loc = locale;
+        if let Some(err_key) = settings_required_error_key(&cfg, &key) {
+            let err = t(loc.get(), err_key);
+            let text = tf(loc.get(), "status.save_failed", &[("msg", &err)]);
             msg.set(Some((false, text.clone())));
             status_msg.set(text);
             return;
         }
         busy.set(true);
-        msg.set(Some((true, "Saving settings...".into())));
-        status_msg.set("Saving settings...".into());
+        let saving = t(loc.get(), "status.saving_settings").to_string();
+        msg.set(Some((true, saving.clone())));
+        status_msg.set(saving);
         spawn_local(async move {
             let settings_result = invoke_checked(
                 "set_settings",
                 to_value(&serde_json::json!({ "settings": cfg.clone() })).unwrap(),
             ).await;
             if let Err(err) = settings_result {
-                let text = format!("Save failed: {}", js_error_text(err));
+                let l = loc.get();
+                let text = tf(l, "status.save_failed", &[("msg", &localize_backend(l, &js_error_text(err)))]);
                 msg.set(Some((false, text.clone())));
                 status_msg.set(text);
                 busy.set(false);
                 return;
             }
-            let saved_new_key = !key.is_empty() && !key.starts_with("(stored");
+            let saved_new_key = !key.is_empty() && !is_stored_key_placeholder(&key, loc.get());
             if saved_new_key {
                 if let Err(err) = invoke_checked("set_api_key", to_value(&serde_json::json!({ "key": key })).unwrap()).await {
-                    let text = format!("API key save failed: {}", js_error_text(err));
+                    let l = loc.get();
+                    let text = tf(l, "status.api_key_save_failed", &[("msg", &localize_backend(l, &js_error_text(err)))]);
                     msg.set(Some((false, text.clone())));
                     status_msg.set(text);
                     busy.set(false);
@@ -796,7 +1165,7 @@ fn App() -> impl IntoView {
             }
             busy.set(false);
             show.set(false);
-            status_msg.set("Settings saved".into());
+            status_msg.set(t(loc.get(), "status.settings_saved").into());
             if saved_new_key {
                 cfg.has_api_key = true;
             }
@@ -811,15 +1180,18 @@ fn App() -> impl IntoView {
         let busy = settings_busy;
         let msg = settings_message;
         let status_msg = status;
-        if let Some(err) = settings_required_error(&cfg, &key) {
-            let text = format!("Validation failed: {err}");
+        let loc = locale;
+        if let Some(err_key) = settings_required_error_key(&cfg, &key) {
+            let err = t(loc.get(), err_key);
+            let text = tf(loc.get(), "status.validation_failed", &[("msg", &err)]);
             msg.set(Some((false, text.clone())));
             status_msg.set(text);
             return;
         }
         busy.set(true);
-        msg.set(Some((true, "Validating current settings...".into())));
-        status_msg.set("Validating current settings...".into());
+        let validating = t(loc.get(), "status.validating").to_string();
+        msg.set(Some((true, validating.clone())));
+        status_msg.set(validating);
         spawn_local(async move {
             let res = invoke_timeout(
                 "validate_settings",
@@ -828,12 +1200,15 @@ fn App() -> impl IntoView {
             ).await;
             match res {
                 Ok(v) => {
-                    let text = v.as_string().unwrap_or_else(|| "Validation succeeded".into());
+                    let l = loc.get();
+                    let raw = v.as_string().unwrap_or_else(|| t(l, "status.validation_succeeded").into());
+                    let text = localize_backend(l, &raw);
                     msg.set(Some((true, text.clone())));
                     status_msg.set(text);
                 }
                 Err(err) => {
-                    let text = format!("Validation failed: {}", js_error_text(err));
+                    let l = loc.get();
+                    let text = tf(l, "status.validation_failed", &[("msg", &localize_backend(l, &js_error_text(err)))]);
                     msg.set(Some((false, text.clone())));
                     status_msg.set(text);
                 }
@@ -895,7 +1270,7 @@ fn App() -> impl IntoView {
                 }
                 view.push(ChatItem::Assistant(demo.response.clone()));
                 items.set(view);
-                status_cb.set(format!("demo: {}", demo.title));
+                status_cb.set(tf(locale.get(), "status.demo", &[("title", &demo.title)]));
             }
             busy.set(false);
         });
@@ -947,24 +1322,25 @@ fn App() -> impl IntoView {
             <div class="proj">
                 <span class="logo"></span>
                 <span class="proj-name">{move || project_info.get().map(|p| p.name.clone()).unwrap_or_else(|| "wisp-science".into())}</span>
-                <button class="icon-btn" title="Collapse" on:click=move |_| show_sidebar.set(false)>"‹"</button>
+                <button class="icon-btn" title=move || t(locale.get(), "sidebar.collapse") on:click=move |_| show_sidebar.set(false)>"‹"</button>
             </div>
             <nav class="nav">
-                <button class="side-btn primary" on:click=new_session><span class="gi plus"></span>"New session"</button>
-                <button class="side-btn" on:click=open_demos><span class="gi grid"></span>"Open demo"</button>
-                <button class="side-btn" on:click=open_files><span class="gi doc"></span>"Files"</button>
+                <button class="side-btn primary" on:click=new_session><span class="gi plus"></span>{move || t(locale.get(), "sidebar.new_session")}</button>
+                <button class="side-btn" on:click=open_demos><span class="gi grid"></span>{move || t(locale.get(), "sidebar.open_demo")}</button>
+                <button class="side-btn" on:click=open_files><span class="gi doc"></span>{move || t(locale.get(), "sidebar.files")}</button>
             </nav>
-            <div class="side-section">"Sessions"</div>
+            <div class="side-section">{move || t(locale.get(), "sidebar.sessions")}</div>
             <div class="side-list">
                 {move || {
                     let list = sessions.get();
+                    let loc = locale.get();
                     if list.is_empty() {
-                        view! { <div class="side-hint">"No saved sessions yet."</div> }.into_view()
+                        view! { <div class="side-hint">{t(loc, "sidebar.no_sessions")}</div> }.into_view()
                     } else {
                         list.into_iter().map(|s| {
                             let id = s.id.clone();
                             let id_active = id.clone();
-                            let title = if s.title.trim().is_empty() { "Untitled session".to_string() } else { s.title.clone() };
+                            let title = if s.title.trim().is_empty() { t(loc, "sidebar.untitled").into() } else { s.title.clone() };
                             view! {
                                 <button class="side-item ses"
                                     class:active=move || active_session.get().as_deref() == Some(id_active.as_str())
@@ -978,25 +1354,49 @@ fn App() -> impl IntoView {
                 }}
             </div>
             <div class="side-foot">
-                {move || project_info.get().map(|p| view! {
+                {move || project_info.get().map(|p| {
+                    let loc = locale.get();
+                    view! {
                     <div class="proj-meta">
-                        <span>{format!("{} skills · {} MCP · {} mem", p.skill_count, p.mcp_server_count, p.memory_file_count)}</span>
+                        <span>{tf(loc, "sidebar.skills_meta", &[
+                            ("skills", &p.skill_count.to_string()),
+                            ("mcp", &p.mcp_server_count.to_string()),
+                            ("mem", &p.memory_file_count.to_string()),
+                        ])}</span>
                     </div>
-                })}
-                <button class="side-btn" on:click=open_capabilities><span class="gi grid"></span>"Capabilities"</button>
-                <button class="side-btn" on:click=open_settings><span class="gi gear"></span>"Settings"</button>
+                }})}
+                <button class="side-btn" on:click=open_capabilities><span class="gi grid"></span>{move || t(locale.get(), "sidebar.capabilities")}</button>
+                <button class="side-btn" on:click=open_settings><span class="gi gear"></span>{move || t(locale.get(), "sidebar.settings")}</button>
             </div>
         </aside>
 
         <main class="center">
             <div class="topbar">
                 {move || (!show_sidebar.get()).then(|| view! {
-                    <button class="icon-btn" title="Show sidebar" on:click=move |_| show_sidebar.set(true)>"›"</button>
+                    <button class="icon-btn" title=move || t(locale.get(), "sidebar.show") on:click=move |_| show_sidebar.set(true)>"›"</button>
                 })}
-                <span class="center-title">"New session"</span>
+                <span class="center-title">{move || {
+                    let loc = locale.get();
+                    if let Some(id) = active_session.get() {
+                        if let Some(s) = sessions.get().iter().find(|s| s.id == id) {
+                            let t = s.title.trim();
+                            if !t.is_empty() { return s.title.clone(); }
+                        }
+                    }
+                    items.get().iter().find_map(|i| match i {
+                        ChatItem::User(msg) => {
+                            let t = msg.trim();
+                            if t.is_empty() { None }
+                            else if t.chars().count() > 48 {
+                                Some(format!("{}…", t.chars().take(48).collect::<String>()))
+                            } else { Some(t.to_string()) }
+                        }
+                        _ => None,
+                    }).unwrap_or_else(|| i18n::t(loc, "center.new_session").into())
+                }}</span>
                 <span class="hint">{move || status.get()}</span>
                 <div class="spacer"></div>
-                <button class="icon-btn" title="Toggle panel"
+                <button class="icon-btn" title=move || t(locale.get(), "center.toggle_panel")
                     class:active=move || show_right.get()
                     on:click=move |_| show_right.update(|v| *v = !*v)><span class="gi panel"></span></button>
             </div>
@@ -1006,15 +1406,19 @@ fn App() -> impl IntoView {
                     {move || items.get().is_empty().then(|| view! {
                         <div class="empty">
                             <span class="empty-logo"></span>
-                            <h1>"How can I help with your science today?"</h1>
-                            <p>"Design experiments, analyze data, or explore ~80 biological databases — all running locally."</p>
+                            <h1>{move || t(locale.get(), "empty.title")}</h1>
+                            <p>{move || t(locale.get(), "empty.subtitle")}</p>
                         </div>
                     })}
-                    {move || items.get().into_iter().enumerate().map(|(i, item)| view! {
-                        <div class=format!("{}", class_for(&item)) key=i>
-                            {render_item(&item)}
-                        </div>
-                    }.into_view()).collect_view()}
+                    {move || {
+                        let arts = artifacts.get();
+                        let pick = on_artifact_select.clone();
+                        items.get().into_iter().enumerate().map(|(i, item)| view! {
+                            <div class=format!("{}", class_for(&item)) key=i>
+                                {render_item(&item, &arts, pick.clone())}
+                            </div>
+                        }.into_view()).collect_view()
+                    }}
                 </div>
             </div>
 
@@ -1024,11 +1428,16 @@ fn App() -> impl IntoView {
                         prop:value={move || input.get()}
                         on:input=move|ev| input.set(event_target_value(&ev))
                         on:keydown=on_send
-                        placeholder="Ask wisp-science to design, analyze, or build something…"
+                        prop:placeholder=move || t(locale.get(), "composer.placeholder")
                     ></textarea>
                     <div class="composer-actions">
-                        <span class="composer-hint">"Enter to send · Shift+Enter for newline"</span>
-                        <button class="send" disabled={move || busy.get()} on:click=move |_| send()>"Send"</button>
+                        <span class="composer-hint">{move || t(locale.get(), "composer.hint")}</span>
+                        <div class="composer-buttons">
+                            {move || busy.get().then(|| view! {
+                                <button type="button" class="stop" on:click=stop>{move || t(locale.get(), "composer.stop")}</button>
+                            })}
+                            <button class="send" disabled={move || busy.get()} on:click=move |_| send()>{move || t(locale.get(), "composer.send")}</button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1042,37 +1451,38 @@ fn App() -> impl IntoView {
                         on:click=move |_| right_tab.set(RightTab::Artifacts)>
                         {move || {
                             let n = artifacts.get().len();
-                            if n == 0 { "Artifacts".to_string() } else { format!("Artifacts ({n})") }
+                            tab_count(locale.get(), "right.artifacts", n)
                         }}
                     </button>
                     <button class="rp-tab" class:active=move || right_tab.get() == RightTab::File
-                        on:click=move |_| right_tab.set(RightTab::File)>"File"</button>
+                        on:click=move |_| right_tab.set(RightTab::File)>{move || t(locale.get(), "right.file")}</button>
                     <button class="rp-tab" class:active=move || right_tab.get() == RightTab::Provenance
                         on:click=move |_| right_tab.set(RightTab::Provenance)>
                         {move || {
                             let n = items.get().iter().filter(|i| matches!(i, ChatItem::Tool { .. })).count();
-                            if n == 0 { "Provenance".to_string() } else { format!("Provenance ({n})") }
+                            tab_count(locale.get(), "right.provenance", n)
                         }}
                     </button>
                     <div class="spacer"></div>
-                    <button class="icon-btn" title="Close panel" on:click=move |_| show_right.set(false)>"×"</button>
+                    <button class="icon-btn" title=move || t(locale.get(), "right.close") on:click=move |_| show_right.set(false)>"×"</button>
                 </div>
                 <div class="rp-doc">
                     {move || match right_tab.get() {
                         RightTab::Artifacts => {
                             let arts = artifacts.get();
+                            let loc = locale.get();
                             if arts.is_empty() {
                                 view! {
                                     <div class="rp-empty">
                                         <span class="rp-empty-icon"></span>
-                                        <div class="rp-empty-title">"No artifacts yet"</div>
-                                        <p>"Markdown tables and CSV blocks wisp-science produces will render here as sortable tables."</p>
+                                        <div class="rp-empty-title">{t(loc, "right.no_artifacts.title")}</div>
+                                        <p>{t(loc, "right.no_artifacts.body")}</p>
                                     </div>
                                 }.into_view()
                             } else {
                                 let sel = sel_artifact.get().min(arts.len() - 1);
                                 let tiles = arts.iter().enumerate().map(|(i, a)| {
-                                    let meta = artifact_meta(a);
+                                    let meta = artifact_meta(a, loc);
                                     view! {
                                         <button class="rp-tile" class:active=move || sel_artifact.get() == i
                                             on:click=move |_| sel_artifact.set(i)>
@@ -1090,19 +1500,20 @@ fn App() -> impl IntoView {
                                             <span class=format!("rp-badge {}", cur.kind)>{cur.kind}</span>
                                             <span class="rp-view-name">{cur.name.clone()}</span>
                                         </div>
-                                        {artifact_preview(&cur, dom_id)}
+                                        {artifact_preview(&cur, dom_id, loc)}
                                     </div>
                                 }.into_view()
                             }
                         }
                         RightTab::File => {
+                            let loc = locale.get();
                             match open_file.get() {
                                 None => view! {
                                     <div class="rp-empty">
                                         <span class="rp-empty-icon"></span>
-                                        <div class="rp-empty-title">"No file open"</div>
-                                        <p>"Browse project files from the sidebar Files button, or click a path in chat."</p>
-                                        <button class="side-btn" on:click=open_files>"Browse files"</button>
+                                        <div class="rp-empty-title">{t(loc, "right.no_file.title")}</div>
+                                        <p>{t(loc, "right.no_file.body")}</p>
+                                        <button class="side-btn" on:click=open_files>{t(loc, "right.browse_files")}</button>
                                     </div>
                                 }.into_view(),
                                 Some((path, kind)) => {
@@ -1122,22 +1533,23 @@ fn App() -> impl IntoView {
                             }
                         }
                         RightTab::Provenance => {
+                            let loc = locale.get();
                             let tools: Vec<_> = items.get().iter().filter_map(|it| match it {
-                                ChatItem::Tool { name, ok, content } => Some((name.clone(), *ok, content.clone())),
+                                ChatItem::Tool { name, ok, input, output } => Some((name.clone(), *ok, input.clone(), output.clone())),
                                 _ => None,
                             }).collect();
                             if tools.is_empty() {
                                 view! {
                                     <div class="rp-empty">
                                         <span class="rp-empty-icon"></span>
-                                        <div class="rp-empty-title">"No tool calls yet"</div>
-                                        <p>"Shell, Python, and MCP tool invocations appear here with inputs and outputs."</p>
+                                        <div class="rp-empty-title">{t(loc, "right.no_tools.title")}</div>
+                                        <p>{t(loc, "right.no_tools.body")}</p>
                                     </div>
                                 }.into_view()
                             } else {
                                 view! {
                                     <div class="prov-list">
-                                        {tools.into_iter().map(|(name, ok, content)| view! {
+                                        {tools.into_iter().map(|(name, ok, input, output)| view! {
                                             <details class="prov-item" open=ok != Some(true)>
                                                 <summary class="prov-head">
                                                     <span class="prov-name">{name.clone()}</span>
@@ -1147,7 +1559,14 @@ fn App() -> impl IntoView {
                                                         None => view! { <span class="run">"…"</span> }.into_view(),
                                                     }}
                                                 </summary>
-                                                <pre class="prov-body">{content.clone()}</pre>
+                                                {(!input.is_empty()).then(|| view! {
+                                                    <div class="prov-label">{move || t(locale.get(), "right.input")}</div>
+                                                    <pre class="prov-body">{input.clone()}</pre>
+                                                })}
+                                                {(!output.is_empty()).then(|| view! {
+                                                    <div class="prov-label">{move || t(locale.get(), "right.output")}</div>
+                                                    <pre class="prov-body">{output.clone()}</pre>
+                                                })}
                                             </details>
                                         }).collect_view()}
                                     </div>
@@ -1168,11 +1587,11 @@ fn App() -> impl IntoView {
         {move || confirm_state.get().map(|(fid, msg)| view! {
             <div class="overlay" key=fid>
                 <div class="modal">
-                    <h2>"Confirm action"</h2>
+                    <h2>{move || t(locale.get(), "confirm.title")}</h2>
                     <div class="hint">{msg}</div>
                     <div class="row">
-                        <button on:click=approve(false)>"Deny"</button>
-                        <button class="primary" on:click=approve(true)>"Approve"</button>
+                        <button on:click=approve(false)>{move || t(locale.get(), "confirm.deny")}</button>
+                        <button class="primary" on:click=approve(true)>{move || t(locale.get(), "confirm.approve")}</button>
                     </div>
                 </div>
             </div>
@@ -1181,8 +1600,8 @@ fn App() -> impl IntoView {
         {move || show_demos.get().then(|| view! {
             <div class="overlay">
                 <div class="modal">
-                    <h2>"Open a demo session"</h2>
-                    <span class="hint">"Pre-baked example runs from the bundled seed catalog (read-only)."</span>
+                    <h2>{move || t(locale.get(), "demos.title")}</h2>
+                    <span class="hint">{move || t(locale.get(), "demos.hint")}</span>
                     <div class="demo-list">
                         {move || demos.get().into_iter().map(|d| {
                             let d_click = d.clone();
@@ -1194,7 +1613,7 @@ fn App() -> impl IntoView {
                         }).collect_view()}
                     </div>
                     <div class="row">
-                        <button on:click=move |_| show_demos.set(false)>"Close"</button>
+                        <button on:click=move |_| show_demos.set(false)>{move || t(locale.get(), "demos.close")}</button>
                     </div>
                 </div>
             </div>
@@ -1203,45 +1622,60 @@ fn App() -> impl IntoView {
         {move || show_settings.get().then(|| view! {
             <div class="overlay">
                 <div class="modal">
-                    <h2>"Settings"</h2>
-                    <label>"Provider"
-                        <select on:input=move|ev| apply_provider_defaults(settings, dom_value(&ev))
-                            on:change=move|ev| apply_provider_defaults(settings, dom_value(&ev))
-                            prop:value={move || provider_value(&settings.get().provider).to_string()}>
-                            <option value="openai">"OpenAI-compatible"</option>
-                            <option value="openai_responses">"OpenAI (Responses API)"</option>
-                            <option value="anthropic">"Anthropic"</option>
+                    <h2>{move || t(locale.get(), "settings.title")}</h2>
+                    <label>{move || t(locale.get(), "settings.language")}
+                        <select
+                            on:change=move|ev| {
+                                let code = dom_value(&ev);
+                                let loc = Locale::from_code(&code);
+                                locale.set(loc);
+                                set_document_lang(loc);
+                                settings.update(|s| s.locale = code);
+                            }
+                            prop:value=move || locale.get().code().to_string()>
+                            <option value="en">{move || t(locale.get(), "settings.language.en")}</option>
+                            <option value="zh">{move || t(locale.get(), "settings.language.zh")}</option>
                         </select>
                     </label>
-                    <label>"API URL"
+                    <label>{move || t(locale.get(), "settings.provider")}
+                        <select data-testid="settings-provider"
+                            on:input=move|ev| apply_provider_defaults(settings, dom_value(&ev))
+                            on:change=move|ev| apply_provider_defaults(settings, dom_value(&ev))
+                            prop:value={move || provider_value(&settings.get().provider).to_string()}>
+                            <option value="openai">{move || t(locale.get(), "settings.provider.openai")}</option>
+                            <option value="openai_responses">{move || t(locale.get(), "settings.provider.openai_responses")}</option>
+                            <option value="anthropic">{move || t(locale.get(), "settings.provider.anthropic")}</option>
+                        </select>
+                    </label>
+                    <label>{move || t(locale.get(), "settings.api_url")}
                         <input on:input=move|ev| settings.update(|s| {
                                 normalize_settings_mut(s);
                                 s.api_url = event_target_input(&ev).value();
                             })
                             prop:value={move || settings.get().api_url} />
                     </label>
-                    <label>"Model"
+                    <label>{move || t(locale.get(), "settings.model")}
                         <input on:input=move|ev| settings.update(|s| {
                                 normalize_settings_mut(s);
                                 s.model = event_target_input(&ev).value();
                             })
                             prop:value={move || settings.get().model} />
                     </label>
-                    <label>"API key (stored in OS keyring)"
+                    <label>{move || t(locale.get(), "settings.api_key")}
                         <input on:input=move|ev| api_key_input.set(event_target_input(&ev).value())
                             prop:value={move || api_key_input.get()} type="password" />
                     </label>
-                    <span class="hint">"Tip: DeepSeek/OpenAI-compatible uses /chat/completions; Anthropic uses /v1/messages."</span>
+                    <span class="hint">{move || t(locale.get(), "settings.tip")}</span>
                     {move || settings_message.get().map(|(ok, text)| view! {
                         <div class="settings-status"
                             class:ok=move || ok
                             class:fail=move || !ok>{text}</div>
                     })}
                     <div class="row">
-                        <button type="button" disabled=move || settings_busy.get() on:click=check_updates>"Check for updates"</button>
-                        <button type="button" disabled=move || settings_busy.get() on:click=validate_settings>"Valid"</button>
-                        <button type="button" disabled=move || settings_busy.get() on:click=move |_| show_settings.set(false)>"Cancel"</button>
-                        <button type="button" class="primary" disabled=move || settings_busy.get() on:click=save_settings>"Save"</button>
+                        <button type="button" disabled=move || settings_busy.get() on:click=check_updates>{move || t(locale.get(), "settings.check_updates")}</button>
+                        <button type="button" disabled=move || settings_busy.get() on:click=validate_settings>{move || t(locale.get(), "settings.validate")}</button>
+                        <button type="button" disabled=move || settings_busy.get() on:click=move |_| show_settings.set(false)>{move || t(locale.get(), "settings.cancel")}</button>
+                        <button type="button" class="primary" disabled=move || settings_busy.get() on:click=save_settings>{move || t(locale.get(), "settings.save")}</button>
                     </div>
                 </div>
             </div>
@@ -1254,7 +1688,7 @@ fn App() -> impl IntoView {
                 <div class="overlay">
                     <div class="modal modal-wide">
                         <div class="fb-head">
-                            <h2>"Project files"</h2>
+                            <h2>{move || t(locale.get(), "files.title")}</h2>
                             <button class="icon-btn" on:click=move |_| show_files.set(false)>"×"</button>
                         </div>
                         <div class="fb-crumb">
@@ -1299,9 +1733,11 @@ fn App() -> impl IntoView {
                                 }
                             }).collect_view()}
                         </div>
-                        {move || project_info.get().map(|p| view! {
-                            <div class="hint fb-root">{format!("Root: {}", p.root)}</div>
-                        })}
+                        {move || project_info.get().map(|p| {
+                            let loc = locale.get();
+                            view! {
+                            <div class="hint fb-root">{tf(loc, "files.root", &[("path", &p.root)])}</div>
+                        }})}
                     </div>
                 </div>
             }.into_view()
@@ -1311,40 +1747,45 @@ fn App() -> impl IntoView {
             <div class="overlay">
                 <div class="modal modal-wide">
                     <div class="fb-head">
-                        <h2>"Capabilities"</h2>
+                        <h2>{move || t(locale.get(), "caps.title")}</h2>
                         <button class="icon-btn" on:click=move |_| show_capabilities.set(false)>"×"</button>
                     </div>
-                    {move || bootstrap.get().map(|b| view! {
+                    {move || bootstrap.get().map(|b| {
+                        let loc = locale.get();
+                        view! {
                         <div class="cap-section">
-                            <h3>{format!("Runtime v{}", b.app_version)}</h3>
-                            <p class="hint">{format!("Workspace: {}", b.workspace)}</p>
-                            <p class="hint">{format!(
-                                "Python: {} · uv: {} · bundled MCP packages: {}",
-                                if b.python_ok { "ready" } else { "missing" },
-                                if b.uv_ok { "found" } else { "missing" },
-                                b.mcp_catalog
-                            )}</p>
+                            <h3>{tf(loc, "caps.runtime", &[("version", &b.app_version)])}</h3>
+                            <p class="hint">{tf(loc, "caps.workspace", &[("path", &b.workspace)])}</p>
+                            <p class="hint">{{
+                                let ready = t(loc, "caps.ready");
+                                let missing = t(loc, "caps.missing");
+                                tf(loc, "caps.runtime_status", &[
+                                ("py", if b.python_ok { &ready } else { &missing }),
+                                ("uv", if b.uv_ok { &ready } else { &missing }),
+                                ("skills", &b.skills_loaded.to_string()),
+                                ("mcp", &b.mcp_catalog.to_string()),
+                            ])}}</p>
                             {(!b.errors.is_empty()).then(|| view! {
                                 <div class="settings-status fail">
                                     {b.errors.join("\n")}
                                 </div>
                             })}
                         </div>
-                    })}
+                    }})}
                     {move || caps.get().map(|c| view! {
                         <div class="cap-grid">
-                            <div class="cap-stat"><span class="cap-num">{c.project.skill_count}</span><span class="cap-label">"Skills"</span></div>
-                            <div class="cap-stat"><span class="cap-num">{c.mcp_servers.len()}</span><span class="cap-label">"MCP servers"</span></div>
-                            <div class="cap-stat"><span class="cap-num">{c.memory_files.len()}</span><span class="cap-label">"Memory files"</span></div>
+                            <div class="cap-stat"><span class="cap-num">{c.project.skill_count}</span><span class="cap-label">{move || t(locale.get(), "caps.skills")}</span></div>
+                            <div class="cap-stat"><span class="cap-num">{c.mcp_servers.len()}</span><span class="cap-label">{move || t(locale.get(), "caps.mcp_servers")}</span></div>
+                            <div class="cap-stat"><span class="cap-num">{c.memory_files.len()}</span><span class="cap-label">{move || t(locale.get(), "caps.memory_files")}</span></div>
                         </div>
                         <div class="cap-section">
-                            <h3>"MCP bio-tools"</h3>
+                            <h3>{move || t(locale.get(), "caps.mcp_bio")}</h3>
                             <div class="cap-tags">
                                 {c.mcp_servers.iter().map(|s| view! { <span class="cap-tag">{s.clone()}</span> }).collect_view()}
                             </div>
                         </div>
                         <div class="cap-section">
-                            <h3>"Skills"</h3>
+                            <h3>{move || t(locale.get(), "caps.skills_section")}</h3>
                             <div class="cap-skills">
                                 {c.skills.iter().map(|s| view! {
                                     <div class="cap-skill">
@@ -1355,12 +1796,12 @@ fn App() -> impl IntoView {
                             </div>
                         </div>
                         <div class="cap-section">
-                            <h3>"Permissions"</h3>
-                            <p class="hint">"Shell and destructive file operations require your approval in a confirm dialog before running."</p>
+                            <h3>{move || t(locale.get(), "caps.permissions")}</h3>
+                            <p class="hint">{move || t(locale.get(), "caps.permissions_hint")}</p>
                         </div>
                     })}
                     <div class="row">
-                        <button on:click=move |_| show_capabilities.set(false)>"Close"</button>
+                        <button on:click=move |_| show_capabilities.set(false)>{move || t(locale.get(), "caps.close")}</button>
                     </div>
                 </div>
             </div>
@@ -1368,21 +1809,22 @@ fn App() -> impl IntoView {
 
         {move || show_onboarding.get().then(|| {
             let step = onboard_step.get();
+            let loc = locale.get();
             view! {
                 <div class="overlay onboard-overlay">
                     <div class="modal onboard">
                         {match step {
                             0 => view! {
-                                <h2>"Welcome to wisp-science"</h2>
-                                <p class="hint">"Your local science assistant — design experiments, analyze data, and query ~80 biological databases without leaving your machine."</p>
+                                <h2>{t(loc, "onboard.welcome.title")}</h2>
+                                <p class="hint">{t(loc, "onboard.welcome.body")}</p>
                             }.into_view(),
                             1 => view! {
-                                <h2>"Connect your model"</h2>
-                                <p class="hint">"Add an API key in Settings (OpenAI-compatible or Anthropic). Keys are stored in your OS keyring, not in the project folder."</p>
+                                <h2>{t(loc, "onboard.connect.title")}</h2>
+                                <p class="hint">{t(loc, "onboard.connect.body")}</p>
                             }.into_view(),
                             _ => view! {
-                                <h2>"What wisp-science can do"</h2>
-                                <p class="hint">"Run Python in a sandboxed REPL, call bio-tools MCP servers, preview PDFs/molecules/structures in the right panel, and browse project files from the sidebar."</p>
+                                <h2>{t(loc, "onboard.features.title")}</h2>
+                                <p class="hint">{t(loc, "onboard.features.body")}</p>
                             }.into_view(),
                         }}
                         <div class="onboard-dots">
@@ -1392,13 +1834,13 @@ fn App() -> impl IntoView {
                         </div>
                         <div class="row">
                             {if step > 0 {
-                                view! { <button on:click=move |_| onboard_step.update(|s| *s = s.saturating_sub(1))>"Back"</button> }.into_view()
+                                view! { <button on:click=move |_| onboard_step.update(|s| *s = s.saturating_sub(1))>{move || t(locale.get(), "onboard.back")}</button> }.into_view()
                             } else { view! { <span></span> }.into_view() }}
                             {if step < 2 {
-                                view! { <button class="primary" on:click=move |_| onboard_step.update(|s| *s += 1)>"Next"</button> }.into_view()
+                                view! { <button class="primary" on:click=move |_| onboard_step.update(|s| *s += 1)>{move || t(locale.get(), "onboard.next")}</button> }.into_view()
                             } else {
                                 view! {
-                                    <button class="primary" on:click=dismiss_onboard>"Get started"</button>
+                                    <button class="primary" on:click=dismiss_onboard>{move || t(locale.get(), "onboard.start")}</button>
                                 }.into_view()
                             }}
                         </div>
@@ -1414,36 +1856,22 @@ fn class_for(item: &ChatItem) -> &'static str {
     match item { ChatItem::User(_) => "msg user", ChatItem::Assistant(_) => "msg assistant", ChatItem::Reasoning(_) => "msg reasoning", ChatItem::Tool { .. } => "tool-wrap" }
 }
 
-fn render_item(item: &ChatItem) -> impl IntoView {
+fn render_item(item: &ChatItem, artifacts: &[Artifact], on_artifact: Callback<usize>) -> impl IntoView {
+    let locale = use_locale();
     match item {
-        ChatItem::User(s) => view! { <div class="role">"You"</div><div class="body">{s.clone()}</div> }.into_view(),
+        ChatItem::User(s) => view! { <div class="role">{move || t(locale.get(), "chat.you")}</div><div class="body">{s.clone()}</div> }.into_view(),
         ChatItem::Assistant(s) => view! {
-            <div class="role">"wisp-science"</div>
-            <div class="body md" inner_html=md_to_html(s)></div>
+            <AssistantMessage text=s.clone() artifacts=artifacts.to_vec() on_artifact=on_artifact />
         }.into_view(),
         ChatItem::Reasoning(s) => view! {
             <details class="rz">
-                <summary>"thinking"</summary>
+                <summary>{move || t(locale.get(), "chat.thinking")}</summary>
                 <div class="body">{s.clone()}</div>
             </details>
         }.into_view(),
-        ChatItem::Tool { name, ok, content } => {
-            // Collapse successful calls; keep running/failed ones expanded.
-            let open = *ok != Some(true);
-            view! {
-                <details class="tool" open=open>
-                    <summary class="head">
-                        <span>{name.clone()}</span>
-                        {match ok {
-                            Some(true) => view!{ <span class="ok">"✓"</span> }.into_view(),
-                            Some(false) => view!{ <span class="fail">"✗"</span> }.into_view(),
-                            None => view!{ <span class="run">"…"</span> }.into_view(),
-                        }}
-                    </summary>
-                    <div class="content">{content.clone()}</div>
-                </details>
-            }.into_view()
-        }
+        ChatItem::Tool { name, ok, input, output } => view! {
+            <ToolBlock name=name.clone() ok=*ok input=input.clone() output=output.clone() />
+        }.into_view(),
     }
 }
 
