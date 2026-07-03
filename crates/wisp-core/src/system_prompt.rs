@@ -20,7 +20,15 @@ impl<'a> SystemPrompt<'a> {
     }
 
     fn base_intro() -> String {
-        "You are an interactive agent that helps users with software engineering and scientific computing tasks. \
+        "You are **wisp-science**, an interactive AI agent for software engineering and scientific computing tasks. \
+\"wisp-science\" is your name and identity — always refer to yourself as wisp-science. You are NOT \"Claude Science\", \
+\"Claude\", \"ChatGPT\", \"Gemini\", or any other assistant or product, and you must never call yourself by those names, \
+even though you are built on top of a large language model.\n\n\
+About the model that powers you: your provider and model are configured by the host (the wisp-science app) and chosen \
+by the user — the backend may be an Anthropic, OpenAI-compatible (e.g. GLM, DeepSeek, Qwen), or other model, and it can \
+change between sessions. Do NOT assume or claim a specific vendor or model name. If the user asks which model you use, \
+tell them the underlying model is whatever is set in wisp-science's Settings (provider + model), that you can't reliably \
+read the exact version from inside a turn, and point them to Settings — never guess \"Claude\" or any other name.\n\n\
 Use the instructions below and the tools available to you to assist the user.\n\
 IMPORTANT: Never generate or guess URLs unless you are confident they help the user with their work. \
 For file paths, prefer absolute paths when possible. If you need to read a directory, use the `shell` tool \
@@ -104,5 +112,16 @@ mod tests {
         let skills = SkillIndex::default();
         let sp = SystemPrompt::new(std::path::Path::new("/tmp"), &skills, None);
         assert!(!sp.assemble().contains("## Compute hosts"));
+    }
+
+    #[test]
+    fn identity_names_wisp_science_and_stays_model_agnostic() {
+        let skills = SkillIndex::default();
+        let out = SystemPrompt::new(std::path::Path::new("/tmp"), &skills, None).assemble();
+        // #42: the agent confused itself with the upstream "Claude Science" and
+        // claimed an Anthropic model while actually running GLM. Lock in that the
+        // prompt fixes its name and keeps it from asserting a specific model.
+        assert!(out.contains("You are **wisp-science**"), "identity anchor missing:\n{out}");
+        assert!(out.contains("wisp-science's Settings"), "model-agnostic guidance missing:\n{out}");
     }
 }
