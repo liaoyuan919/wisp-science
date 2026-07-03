@@ -203,18 +203,44 @@ struct SessionState {
     last_seq: i64,
 }
 
-struct AppState {
+#[derive(Clone)]
+struct ActiveProject {
+    id: String,
     root: PathBuf,
-    app_data: PathBuf,
-    store: Store,
-    project_id: String,
     skills: Arc<SkillIndex>,
     memory: Arc<MemoryManager>,
+}
+
+struct AppState {
+    app_data: PathBuf,
+    store: Store,
+    active: std::sync::RwLock<ActiveProject>,
     agent: tokio::sync::Mutex<Option<Agent>>,
     session: tokio::sync::Mutex<SessionState>,
     confirm: Arc<StdMutex<Option<std::sync::mpsc::Sender<bool>>>>,
     bootstrap: StdMutex<BootstrapStatus>,
     cancel: Arc<AtomicBool>,
+}
+
+impl AppState {
+    /// Snapshot the active project. Cheap: two `Arc` clones + a `String`/`PathBuf`.
+    /// Take the guard, clone, drop — never held across `.await`.
+    fn active(&self) -> ActiveProject {
+        self.active.read().unwrap().clone()
+    }
+}
+
+/// Ensure `dir` exists and is usable; fall back to `app_data/workspace` if not.
+/// Never panics unless even the fallback can't be created.
+fn ensure_writable(dir: PathBuf, app_data: &std::path::Path) -> PathBuf {
+    if std::fs::create_dir_all(&dir).is_ok() {
+        dir
+    } else {
+        let fallback = app_data.join("workspace");
+        tracing::warn!("workspace {:?} not writable; using {:?}", dir, fallback);
+        std::fs::create_dir_all(&fallback).expect("create fallback workspace dir");
+        fallback
+    }
 }
 
 /// `wisp_core::Output` backed by Tauri events. `confirm` blocks on a std
@@ -470,13 +496,14 @@ async fn send_message(state: State<'_, AppState>, app: AppHandle, message: Strin
     let max_context = state.store.get_setting("max_context").await.ok().flatten().and_then(|s| s.parse::<usize>().ok()).unwrap_or(1_000_000);
     let max_iter = state.store.get_setting("max_iter").await.ok().flatten().and_then(|s| s.parse::<usize>().ok()).unwrap_or(100);
 
+    let ap = state.active();
     let mut guard = state.agent.lock().await;
     if guard.is_none() {
-        let mut agent = Agent::new(cfg.clone(), state.skills.clone(), state.memory.clone(), state.root.clone(), max_context, max_iter);
+        let mut agent = Agent::new(cfg.clone(), ap.skills.clone(), ap.memory.clone(), ap.root.clone(), max_context, max_iter);
         // Load the persisted session from SQLite (replaces the JSON session file).
         let frame_id = {
             let mut sess = state.session.lock().await;
-            ensure_frame(&state.store, &state.project_id, &mut sess).await.map_err(|e| format!("{e}"))?
+            ensure_frame(&state.store, &ap.id, &mut sess).await.map_err(|e| format!("{e}"))?
         };
         match state.store.load_messages(&frame_id).await {
             Ok(msgs) => agent.ctx.messages = msgs,
@@ -487,7 +514,7 @@ async fn send_message(state: State<'_, AppState>, app: AppHandle, message: Strin
             sess.last_seq = agent.ctx.messages.len() as i64;
         }
         if agent.ctx.is_empty() {
-            agent.seed_system_prompt(&state.skills);
+            agent.seed_system_prompt(&ap.skills);
         }
         let wire_errors = wire_python_and_mcp(&mut agent, &state.app_data).await;
         if !wire_errors.is_empty() {
@@ -589,6 +616,7 @@ async fn new_session(state: State<'_, AppState>) -> Result<(), String> {
     // If a turn is mid-flight it holds the agent lock for its whole duration.
     // Signal cancellation first so it interrupts (killing any running child)
     // and releases the lock, instead of this command blocking for minutes (#15).
+    let ap = state.active();
     state.cancel.store(true, Ordering::Relaxed);
     let mut guard = state.agent.lock().await;
     // Reset even when the agent hasn't been created yet (lazy init in
@@ -598,11 +626,11 @@ async fn new_session(state: State<'_, AppState>) -> Result<(), String> {
     sess.last_seq = 0;
     if let Some(agent) = guard.as_mut() {
         agent.ctx.clear();
-        let frame_id = ensure_frame(&state.store, &state.project_id, &mut sess).await.map_err(|e| format!("{e}"))?;
+        let frame_id = ensure_frame(&state.store, &ap.id, &mut sess).await.map_err(|e| format!("{e}"))?;
         agent.ctx.messages = state.store.load_messages(&frame_id).await.unwrap_or_default();
         sess.last_seq = agent.ctx.messages.len() as i64;
         if agent.ctx.is_empty() {
-            agent.seed_system_prompt(&state.skills);
+            agent.seed_system_prompt(&ap.skills);
         }
     }
     Ok(())
@@ -610,7 +638,8 @@ async fn new_session(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionInfo>, String> {
-    let rows = state.store.list_sessions(&state.project_id).await.map_err(|e| format!("{e}"))?;
+    let ap = state.active();
+    let rows = state.store.list_sessions(&ap.id).await.map_err(|e| format!("{e}"))?;
     Ok(rows.into_iter().map(|(id, title, ts)| SessionInfo { id, title, ts }).collect())
 }
 
@@ -660,7 +689,8 @@ async fn load_session(state: State<'_, AppState>, id: String) -> Result<Vec<UiIt
 
 #[tauri::command]
 fn list_skills(state: State<'_, AppState>) -> Vec<SkillInfo> {
-    state.skills.all().iter().map(|s| SkillInfo { name: s.name.clone(), description: s.description.clone() }).collect()
+    let ap = state.active();
+    ap.skills.all().iter().map(|s| SkillInfo { name: s.name.clone(), description: s.description.clone() }).collect()
 }
 
 #[tauri::command]
@@ -670,7 +700,8 @@ fn list_demos() -> Vec<seed::DemoInfo> {
 
 #[tauri::command]
 fn load_demo(state: State<'_, AppState>, id: String) -> Result<seed::Demo, String> {
-    seed::extract_demo_assets(&id, &state.root)?;
+    let ap = state.active();
+    seed::extract_demo_assets(&id, &ap.root)?;
     seed::load_demo(&id).ok_or_else(|| format!("demo '{id}' not found"))
 }
 
@@ -809,8 +840,9 @@ fn is_text_mime(mime: &str) -> bool {
 
 #[tauri::command]
 fn list_dir(state: State<'_, AppState>, path: Option<String>) -> Result<Vec<DirEntry>, String> {
+    let ap = state.active();
     let rel = path.unwrap_or_else(|| ".".into());
-    let dir = wisp_tools::safety::resolve_under_root(&state.root, &rel)?;
+    let dir = wisp_tools::safety::resolve_under_root(&ap.root, &rel)?;
     if !dir.is_dir() {
         return Err(format!("'{}' is not a directory", rel));
     }
@@ -827,7 +859,8 @@ fn list_dir(state: State<'_, AppState>, path: Option<String>) -> Result<Vec<DirE
 }
 
 fn read_file_at(state: &AppState, path: String, max_bytes: Option<u64>) -> Result<FileContent, String> {
-    let real = wisp_tools::safety::validate_file_path(&state.root, &path)?;
+    let ap = state.active();
+    let real = wisp_tools::safety::validate_file_path(&ap.root, &path)?;
     let mime = mime_for_path(&real);
     let cap = max_bytes.unwrap_or(8 * 1024 * 1024).min(32 * 1024 * 1024);
     let bytes = std::fs::read(&real).map_err(|e| format!("{e}"))?;
@@ -916,15 +949,16 @@ fn list_memory_files(memory: &MemoryManager) -> Vec<MemoryFile> {
 }
 
 async fn build_project_info(state: &AppState) -> ProjectInfo {
+    let ap = state.active();
     let (_, _, _, api_key) = load_settings(&state.store).await;
-    let mcp = list_mcp_servers(&state.root);
-    let name = state.root.file_name().and_then(|n| n.to_str()).unwrap_or("Workspace").to_string();
+    let mcp = list_mcp_servers(&ap.root);
+    let name = ap.root.file_name().and_then(|n| n.to_str()).unwrap_or("Workspace").to_string();
     ProjectInfo {
         name,
-        root: state.root.to_string_lossy().into_owned(),
-        skill_count: state.skills.all().len(),
+        root: ap.root.to_string_lossy().into_owned(),
+        skill_count: ap.skills.all().len(),
         mcp_server_count: mcp.len(),
-        memory_file_count: count_memory_files(&state.memory),
+        memory_file_count: count_memory_files(&ap.memory),
         has_api_key: !api_key.is_empty(),
     }
 }
@@ -936,19 +970,21 @@ async fn get_project_info(state: State<'_, AppState>) -> Result<ProjectInfo, Str
 
 #[tauri::command]
 async fn get_capabilities(state: State<'_, AppState>) -> Result<Capabilities, String> {
+    let ap = state.active();
     let project = build_project_info(&state).await;
-    let skills = state.skills.all().iter().map(|s| SkillInfo { name: s.name.clone(), description: s.description.clone() }).collect();
+    let skills = ap.skills.all().iter().map(|s| SkillInfo { name: s.name.clone(), description: s.description.clone() }).collect();
     Ok(Capabilities {
         skills,
-        mcp_servers: list_mcp_servers(&state.root),
-        memory_files: list_memory_files(&state.memory),
+        mcp_servers: list_mcp_servers(&ap.root),
+        memory_files: list_memory_files(&ap.memory),
         project,
     })
 }
 
 #[tauri::command]
 fn list_memory(state: State<'_, AppState>) -> Result<Vec<MemoryFile>, String> {
-    Ok(list_memory_files(&state.memory))
+    let ap = state.active();
+    Ok(list_memory_files(&ap.memory))
 }
 
 #[tauri::command]
@@ -1038,14 +1074,15 @@ async fn register_artifact_at(
     path: String,
     content_type: Option<String>,
 ) -> Result<ArtifactInfo, String> {
-    let real = wisp_tools::safety::validate_file_path(&state.root, &path)?;
+    let ap = state.active();
+    let real = wisp_tools::safety::validate_file_path(&ap.root, &path)?;
     let mut sess = state.session.lock().await;
-    let frame_id = ensure_frame(&state.store, &state.project_id, &mut sess).await.map_err(|e| format!("{e}"))?;
+    let frame_id = ensure_frame(&state.store, &ap.id, &mut sess).await.map_err(|e| format!("{e}"))?;
     let id = Uuid::new_v4().to_string();
     let filename = real.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
     let mime = content_type.unwrap_or_else(|| mime_for_path(&real).to_string());
     let storage = real.to_string_lossy().into_owned();
-    state.store.save_artifact(&id, &state.project_id, &frame_id, &filename, &mime, &storage).await.map_err(|e| format!("{e}"))?;
+    state.store.save_artifact(&id, &ap.id, &frame_id, &filename, &mime, &storage).await.map_err(|e| format!("{e}"))?;
     let ts = chrono::Utc::now().timestamp();
     Ok(ArtifactInfo { id, name: filename, kind: mime, path: storage, ts })
 }
@@ -1065,12 +1102,13 @@ async fn upload_file(
     if bytes.len() > cap {
         return Err(format!("file exceeds {cap} byte limit"));
     }
-    let upload_dir = state.root.join("uploads");
+    let ap = state.active();
+    let upload_dir = ap.root.join("uploads");
     std::fs::create_dir_all(&upload_dir).map_err(|e| format!("{e}"))?;
-    let dest = unique_upload_path(&state.root, "uploads", &name);
+    let dest = unique_upload_path(&ap.root, "uploads", &name);
     std::fs::write(&dest, &bytes).map_err(|e| format!("{e}"))?;
     let rel = dest
-        .strip_prefix(&state.root)
+        .strip_prefix(&ap.root)
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_else(|_| dest.to_string_lossy().into_owned());
     register_artifact_at(&state, rel, None).await
@@ -1117,43 +1155,42 @@ pub fn run() {
             std::fs::create_dir_all(&app_data).expect("create app data dir");
             let db_path = app_data.join("wisp.sqlite");
             let store = tauri::async_runtime::block_on(Store::open(&db_path)).expect("open store");
-            let _ = tauri::async_runtime::block_on(store.create_project("default", "Workspace"));
 
-            // Resolve the workspace/data root: env override, then the saved
-            // setting, then the platform default (Documents/wisp-science). Lets
-            // users move it off C:/OneDrive (#6, #13); applies on next launch
-            // since AppState.root is fixed for the life of the process.
-            let default_workspace = app
-                .path()
-                .document_dir()
+            let (active_id, ws) = tauri::async_runtime::block_on(async {
+                // Legacy single-workspace installs stored one global `workspace_dir`
+                // setting. Backfill the `default` project's dir from it (or the
+                // platform default) so its existing sessions stay reachable. Env
+                // override is applied to the *root* below, not persisted here.
+                let default_workspace = app.path().document_dir()
+                    .map(|d| d.join("wisp-science"))
+                    .unwrap_or_else(|_| app_data.join("workspace"));
+                let legacy_ws = store.get_setting("workspace_dir").await.ok().flatten()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| default_workspace.to_string_lossy().into_owned());
+                store.create_project("default", "Workspace", &legacy_ws).await.ok();
+                let active_id = match store.get_setting("active_project_id").await.ok().flatten() {
+                    Some(id) if store.get_project(&id).await.ok().flatten().is_some() => id,
+                    _ => "default".to_string(),
+                };
+                let (_, dir) = store.get_project(&active_id).await.ok().flatten()
+                    .unwrap_or_else(|| ("Workspace".into(), legacy_ws.clone()));
+                (active_id, dir)
+            });
+
+            // Env override wins for the active root only (dev escape hatch; not persisted).
+            let default_workspace = app.path().document_dir()
                 .map(|d| d.join("wisp-science"))
                 .unwrap_or_else(|_| app_data.join("workspace"));
-            let workspace = resolve_workspace(
-                std::env::var("WISP_WORKSPACE").ok(),
-                tauri::async_runtime::block_on(store.get_setting("workspace_dir")).ok().flatten(),
-                default_workspace,
-            );
-            // Never panic the app on launch if the resolved workspace turns out
-            // unwritable (e.g. a saved path on an offline OneDrive/external
-            // drive): fall back to app_data, which we already created above.
-            let workspace = if std::fs::create_dir_all(&workspace).is_ok() {
-                workspace
-            } else {
-                let fallback = app_data.join("workspace");
-                tracing::warn!("workspace {:?} not writable; using {:?}", workspace, fallback);
-                std::fs::create_dir_all(&fallback).expect("create fallback workspace dir");
-                fallback
-            };
-            let skills = Arc::new(SkillIndex::load(&skill_paths(&workspace)));
-            let memory = Arc::new(MemoryManager::new(&workspace));
-            let bootstrap = StdMutex::new(initial_bootstrap(&app_data, &workspace, skills.all().len()));
+            let root = resolve_workspace(std::env::var("WISP_WORKSPACE").ok(), Some(ws), default_workspace);
+            let root = ensure_writable(root, &app_data);
+
+            let skills = Arc::new(SkillIndex::load(&skill_paths(&root)));
+            let memory = Arc::new(MemoryManager::new(&root));
+            let bootstrap = StdMutex::new(initial_bootstrap(&app_data, &root, skills.all().len()));
             let state = AppState {
-                root: workspace,
                 app_data,
                 store,
-                project_id: "default".into(),
-                skills,
-                memory,
+                active: std::sync::RwLock::new(ActiveProject { id: active_id, root, skills, memory }),
                 agent: tokio::sync::Mutex::new(None),
                 session: tokio::sync::Mutex::new(SessionState { frame_id: None, last_seq: 0 }),
                 confirm: Arc::new(StdMutex::new(None)),
