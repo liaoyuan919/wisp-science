@@ -949,7 +949,11 @@ async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Result<
         if !ws.is_absolute() {
             return Err("Workspace directory must be an absolute path.".into());
         }
-        std::fs::create_dir_all(ws).map_err(|e| format!("Failed to create workspace directory: {e}"))?;
+        // Don't create the dir here. It only takes effect next launch, where
+        // `ensure_writable` creates it (with a fallback). Creating it eagerly
+        // during save can block the whole command on a bad/removable path —
+        // e.g. Windows pops a modal "insert a disk in drive D:" — wedging the
+        // UI at "Saving…" forever (#40). Just persist the string.
         state.store.set_setting("workspace_dir", workspace_dir).await.map_err(|e| format!("{e}"))?;
     }
 
@@ -1092,6 +1096,23 @@ async fn list_artifacts(state: State<'_, AppState>, session_id: Option<String>) 
         path,
         ts,
     }).collect())
+}
+
+/// Given candidate artifact file paths (as they appear in chat), return the
+/// subset that can't be previewed: resolved against the project root and
+/// missing on disk, or outside the root. The UI drops these so a stale
+/// intermediate file doesn't linger as an artifact that 404s on click (#41).
+#[tauri::command]
+fn missing_files(state: State<'_, AppState>, paths: Vec<String>) -> Result<Vec<String>, String> {
+    let ap = state.active();
+    Ok(paths
+        .into_iter()
+        .filter(|p| {
+            wisp_tools::safety::validate_file_path(&ap.root, p)
+                .map(|real| !real.exists())
+                .unwrap_or(true)
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -1436,6 +1457,7 @@ pub fn run() {
             read_file,
             list_artifacts,
             read_artifact,
+            missing_files,
             upload_file,
             register_artifact,
             get_project_info,
