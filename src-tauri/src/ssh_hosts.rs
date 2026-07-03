@@ -55,6 +55,35 @@ pub fn parse_ssh_config_aliases(config: &str) -> Vec<String> {
     out
 }
 
+pub fn render_hosts_section(hosts: &[SshHost]) -> Option<String> {
+    if hosts.is_empty() {
+        return None;
+    }
+    let mut s = String::from(
+        "## Compute hosts\n\n\
+The user has these SSH hosts available. Run remote commands with the shell \
+tool: `ssh <alias> '<cmd>'`. Prefer them for heavy jobs; remote paths live on \
+the host, not on this machine.\n\n",
+    );
+    for h in hosts {
+        let mut conn = String::new();
+        if let Some(u) = &h.user {
+            conn.push_str(u);
+            conn.push('@');
+        }
+        conn.push_str(&h.alias);
+        if let Some(p) = h.port {
+            conn.push_str(&format!(":{p}"));
+        }
+        s.push_str(&format!("- {} — {}", h.alias, conn));
+        if let Some(n) = h.notes.as_deref().filter(|n| !n.trim().is_empty()) {
+            s.push_str(&format!(" — {n}"));
+        }
+        s.push('\n');
+    }
+    Some(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,5 +130,24 @@ Host gpu-box
             parse_ssh_config_aliases(cfg),
             vec!["gpu-box".to_string(), "lab-gpu".to_string(), "biowulf".to_string()]
         );
+    }
+
+    #[test]
+    fn render_empty_is_none() {
+        assert!(render_hosts_section(&[]).is_none());
+    }
+
+    #[test]
+    fn render_lists_conn_and_notes() {
+        let hosts = vec![
+            SshHost { alias: "gpu".into(), user: Some("alice".into()), port: Some(2222), identity_file: None, notes: Some("slurm; sbatch".into()) },
+            host("plain", None),
+        ];
+        let s = render_hosts_section(&hosts).unwrap();
+        assert!(s.starts_with("## Compute hosts"), "{s}");
+        assert!(s.contains("ssh <alias>"), "must teach the shell invocation:\n{s}");
+        assert!(s.contains("alice@gpu:2222"), "conn missing:\n{s}");
+        assert!(s.contains("slurm; sbatch"), "notes missing:\n{s}");
+        assert!(s.contains("- plain"), "bare alias missing:\n{s}");
     }
 }
