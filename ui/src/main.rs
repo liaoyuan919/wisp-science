@@ -1160,13 +1160,29 @@ fn FilePreview(dom_id: String, path: String, kind: String) -> impl IntoView {
         spawn_local(async move {
             let doc = web_sys::window().and_then(|w| w.document());
             let el = doc.as_ref().and_then(|d| d.get_element_by_id(&dom_id));
-            let v = invoke("read_file", to_value(&serde_json::json!({ "path": path })).unwrap()).await;
-            let Ok(fc) = serde_wasm_bindgen::from_value::<FileContent>(v) else {
-                if let Some(el) = el {
-                    el.set_class_name("rp-heavy rp-error");
-                    el.set_text_content(Some(&tf(loc, "err.file_not_found", &[("path", &path)])));
+            // Allow up to the backend's 32 MB ceiling so a large produced figure or
+            // PDF still renders (the default 8 MB cap silently rejected them, #35).
+            // On failure, surface the real backend error (size limit / outside project
+            // root / …) instead of a blanket "file not found".
+            let arg = to_value(&serde_json::json!({ "path": path, "max_bytes": 32u64 * 1024 * 1024 })).unwrap();
+            let fc = match invoke_checked("read_file", arg).await {
+                Ok(v) => match serde_wasm_bindgen::from_value::<FileContent>(v) {
+                    Ok(fc) => fc,
+                    Err(_) => {
+                        if let Some(el) = el {
+                            el.set_class_name("rp-heavy rp-error");
+                            el.set_text_content(Some(&tf(loc, "err.file_not_found", &[("path", &path)])));
+                        }
+                        return;
+                    }
+                },
+                Err(err) => {
+                    if let Some(el) = el {
+                        el.set_class_name("rp-heavy rp-error");
+                        el.set_text_content(Some(&localize_backend(loc, &js_error_text(err))));
+                    }
+                    return;
                 }
-                return;
             };
             if kind == "markdown" {
                 if let Some(el) = el {
@@ -1850,6 +1866,9 @@ fn App() -> impl IntoView {
         let status = status;
         let running = running;
         let active_session = active_session;
+        let items = items;
+        let transcripts = transcripts;
+        let sessions = sessions;
         spawn_local(async move {
             // Resolve the target session: use the active one, or create a fresh
             // frame up front so streamed events can be routed before the first delta.
@@ -1872,10 +1891,42 @@ fn App() -> impl IntoView {
             active_session.set(Some(id.clone()));
             running.update(|r| { r.insert(id.clone()); });
             let arg = to_value(&SendMessageArgs { session_id: Some(id.clone()), message }).unwrap();
-            if let Err(err) = invoke_checked("send_message", arg).await {
-                let loc = locale.get();
-                status.set(tf(loc, "status.send_failed", &[("msg", &localize_backend(loc, &js_error_text(err)))]));
-                running.update(|r| { r.remove(&id); });
+            match invoke_checked("send_message", arg).await {
+                Ok(_) => {
+                    // send_message is awaited for the whole turn, so it resolves only
+                    // once the turn has finished AND been persisted. Clear `running`
+                    // here rather than trusting the separate `Done` broadcast — a
+                    // dropped broadcast used to pin the session on "运行中" until an
+                    // app restart (#34).
+                    running.update(|r| { r.remove(&id); });
+                    // If the live view desynced (a tool row left unresolved by a
+                    // missed event), reconcile it from the authoritative DB so the
+                    // completed result shows without a restart. Healthy turns keep
+                    // their richer streamed view (incl. tool inputs) untouched.
+                    let is_active = active_session.get().as_deref() == Some(&id);
+                    let stranded = if is_active {
+                        items.with(|v| v.iter().any(|c| matches!(c, ChatItem::Tool { ok: None, .. })))
+                    } else {
+                        transcripts.with(|m| m.get(&id).map_or(false, |v| v.iter().any(|c| matches!(c, ChatItem::Tool { ok: None, .. }))))
+                    };
+                    if stranded {
+                        let v = invoke("load_session", to_value(&serde_json::json!({ "id": id })).unwrap()).await;
+                        if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<LoadedItem>>(v) {
+                            let chats: Vec<ChatItem> = list.into_iter().map(LoadedItem::into_chat).collect();
+                            transcripts.update(|m| { m.insert(id.clone(), chats.clone()); });
+                            if active_session.get().as_deref() == Some(&id) {
+                                items.set(chats);
+                                force_chat_bottom();
+                            }
+                        }
+                    }
+                    refresh_sessions(sessions);
+                }
+                Err(err) => {
+                    let loc = locale.get();
+                    status.set(tf(loc, "status.send_failed", &[("msg", &localize_backend(loc, &js_error_text(err)))]));
+                    running.update(|r| { r.remove(&id); });
+                }
             }
         });
     };
@@ -2050,7 +2101,14 @@ fn App() -> impl IntoView {
     let validate_settings = move |_| {
         if settings_busy.get() { return; }
         let cfg = normalized_settings(settings.get());
-        let key = api_key_input.get();
+        // If the field still shows the "stored key" placeholder, send an empty
+        // key so the backend falls back to the saved secret. The placeholder
+        // text is localized, so match it locale-aware (fixes #36: validating in
+        // Chinese sent `（已保存…）` as the key and 401'd).
+        let key = {
+            let raw = api_key_input.get();
+            if is_stored_key_placeholder(&raw, locale.get()) { String::new() } else { raw }
+        };
         let busy = settings_busy;
         let msg = settings_message;
         let status_msg = status;
@@ -2149,10 +2207,16 @@ fn App() -> impl IntoView {
                 running.update(|r| { r.insert(id.clone()); });
                 refresh_sessions(sessions);
                 let arg = to_value(&SendMessageArgs { session_id: Some(id.clone()), message: text }).unwrap();
-                if let Err(err) = invoke_checked("send_message", arg).await {
-                    let loc = locale.get();
-                    status.set(tf(loc, "status.send_failed", &[("msg", &localize_backend(loc, &js_error_text(err)))]));
-                    running.update(|r| { r.clear(); });
+                match invoke_checked("send_message", arg).await {
+                    // The awaited command resolving is the reliable turn-complete
+                    // signal; clear `running` here so a dropped `Done` broadcast
+                    // can't pin the session on "运行中" (#34).
+                    Ok(_) => { running.update(|r| { r.remove(&id); }); refresh_sessions(sessions); }
+                    Err(err) => {
+                        let loc = locale.get();
+                        status.set(tf(loc, "status.send_failed", &[("msg", &localize_backend(loc, &js_error_text(err)))]));
+                        running.update(|r| { r.clear(); });
+                    }
                 }
             });
         }
@@ -2544,11 +2608,21 @@ fn App() -> impl IntoView {
                         let pick = on_artifact_select.clone();
                         let open_link = on_file_link.clone();
                         let is_busy = busy.read_only();
-                        items.get().into_iter().enumerate().map(|(i, item)| view! {
-                            <div class=format!("{}", class_for(&item)) key=i>
-                                {render_item(i, &item, &arts, pick.clone(), open_link.clone(), is_busy, edit_message)}
-                            </div>
-                        }.into_view()).collect_view()
+                        let list = items.get();
+                        let last = list.len().saturating_sub(1);
+                        // Skip items that render nothing (empty streaming placeholder,
+                        // attempt_completion) so their wrapper <div> doesn't leave a
+                        // `.thread` gap between real messages (#19).
+                        list.into_iter().enumerate()
+                            .filter(|(_, item)| !renders_nothing(item))
+                            .map(|(i, item)| {
+                                let is_last = i == last;
+                                view! {
+                                    <div class=format!("{}", class_for(&item)) key=i>
+                                        {render_item(i, &item, &arts, pick.clone(), open_link.clone(), is_busy, is_last, edit_message)}
+                                    </div>
+                                }.into_view()
+                            }).collect_view()
                     }}
                 </div>
             </div>
@@ -2778,7 +2852,12 @@ fn App() -> impl IntoView {
                                     </div>
                                 }.into_view()
                             } else {
-                                let sel = sel_artifact.get().min(arts.len() - 1);
+                                // Build the tile list from `arts` only — do NOT read
+                                // `sel_artifact` in this (outer) scope, or selecting a
+                                // tile re-runs the whole branch and rebuilds `.rp-tiles`,
+                                // resetting its scroll to the top (#25). Selection is
+                                // isolated to the `.active` class and the nested `.rp-view`
+                                // closure below, so the scroll container is preserved.
                                 let tiles = arts.iter().enumerate().map(|(i, a)| {
                                     let name = a.name.clone();
                                     let kind = a.kind.to_string();
@@ -2795,18 +2874,25 @@ fn App() -> impl IntoView {
                                         </button>
                                     }.into_view()
                                 }).collect_view();
-                                let cur = arts[sel].clone();
-                                let dom_id = format!("rp-{sel}");
+                                let arts_for_view = arts.clone();
                                 view! {
                                     <div class="rp-artifacts-body">
                                         <div class="rp-tiles">{tiles}</div>
-                                        <div class="rp-view">
-                                            <div class="rp-view-head">
-                                                <span class=format!("rp-badge {}", cur.kind)>{cur.kind.to_string()}</span>
-                                                <span class="rp-view-name">{cur.name.clone()}</span>
-                                            </div>
-                                            {artifact_preview(&cur, dom_id, loc)}
-                                        </div>
+                                        {move || {
+                                            let arts = arts_for_view.clone();
+                                            let sel = sel_artifact.get().min(arts.len().saturating_sub(1));
+                                            let cur = arts[sel].clone();
+                                            let dom_id = format!("rp-{sel}");
+                                            view! {
+                                                <div class="rp-view">
+                                                    <div class="rp-view-head">
+                                                        <span class=format!("rp-badge {}", cur.kind)>{cur.kind.to_string()}</span>
+                                                        <span class="rp-view-name">{cur.name.clone()}</span>
+                                                    </div>
+                                                    {artifact_preview(&cur, dom_id, loc)}
+                                                </div>
+                                            }
+                                        }}
                                     </div>
                                 }.into_view()
                             }
@@ -3257,6 +3343,13 @@ fn App() -> impl IntoView {
     }
 }
 
+/// True for items whose `render_item` produces an empty view, so the thread
+/// loop can drop their wrapper `<div>` and avoid a dangling `.thread` gap (#19).
+fn renders_nothing(item: &ChatItem) -> bool {
+    matches!(item, ChatItem::Assistant(s) if s.trim().is_empty())
+        || matches!(item, ChatItem::Tool { name, .. } if name == "attempt_completion")
+}
+
 fn class_for(item: &ChatItem) -> &'static str {
     match item {
         ChatItem::User(_) => "msg user",
@@ -3275,6 +3368,7 @@ fn render_item(
     on_artifact: Callback<usize>,
     on_file: Callback<(String, String)>,
     busy: ReadSignal<bool>,
+    is_last: bool,
     on_edit: impl Fn(usize) + Clone + 'static,
 ) -> impl IntoView {
     let locale = use_locale();
@@ -3291,11 +3385,17 @@ fn render_item(
         ChatItem::Assistant(s) if s.trim().is_empty() => view! {}.into_view(),
         ChatItem::Assistant(s) if s.starts_with("Error: ") => {
             let msg = s.strip_prefix("Error: ").unwrap_or(s).to_string();
+            let copy = msg.clone();
             view! {
                 <div class="finding err">
                     <div class="finding-head">
                         <span class="finding-tag">{move || format!("● {}", t(locale.get(), "chat.error"))}</span>
                         <span class="finding-title">{msg}</span>
+                        <button type="button" class="tool-btn card-copy"
+                            title=move || t(locale.get(), "ctx.copy_message")
+                            on:click=move |_| copy_text(copy.clone())>
+                            {move || t(locale.get(), "msg.copy")}
+                        </button>
                     </div>
                 </div>
             }.into_view()
@@ -3310,24 +3410,39 @@ fn render_item(
             />
         }.into_view(),
         ChatItem::Tool { name, .. } if name == "attempt_completion" => view! {}.into_view(),
-        ChatItem::Reasoning(s) => view! {
-            <details class="rz">
-                <summary>{move || t(locale.get(), "chat.thinking")}</summary>
-                <div class="body">{s.clone()}</div>
-            </details>
-        }.into_view(),
+        ChatItem::Reasoning(s) => {
+            // Auto-expand the block while it is the live, streaming item. The thread
+            // is a non-keyed re-render, so every reasoning delta rebuilds this
+            // <details> from scratch; a DOM-only open state would snap shut on the
+            // next chunk and the user could never watch the live thinking (#31).
+            let live = is_last && busy.get();
+            view! {
+                <details class="rz" open=live>
+                    <summary>{move || t(locale.get(), "chat.thinking")}</summary>
+                    <div class="body">{s.clone()}</div>
+                </details>
+            }.into_view()
+        }
         ChatItem::Tool { name, ok, input, output } => view! {
             <ToolBlock name=name.clone() ok=*ok input=input.clone() output=output.clone() />
         }.into_view(),
-        ChatItem::Review(md) => view! {
-            <div class="review-card">
-                <div class="review-head">
-                    <span class="review-badge">"🔍"</span>
-                    {move || t(locale.get(), "review.title")}
+        ChatItem::Review(md) => {
+            let copy = md.clone();
+            view! {
+                <div class="review-card">
+                    <div class="review-head">
+                        <span class="review-badge">"🔍"</span>
+                        {move || t(locale.get(), "review.title")}
+                        <button type="button" class="tool-btn card-copy"
+                            title=move || t(locale.get(), "ctx.copy_message")
+                            on:click=move |_| copy_text(copy.clone())>
+                            {move || t(locale.get(), "msg.copy")}
+                        </button>
+                    </div>
+                    <div class="md review-md" inner_html=md_to_html(md)></div>
                 </div>
-                <div class="md review-md" inner_html=md_to_html(md)></div>
-            </div>
-        }.into_view(),
+            }.into_view()
+        }
     }
 }
 
