@@ -106,6 +106,23 @@ struct SessionInfo {
     ts: i64,
 }
 
+#[derive(Serialize, Clone)]
+struct ProjectSummary {
+    id: String,
+    name: String,
+    workspace_dir: String,
+    session_count: i64,
+    updated_at: i64,
+}
+
+async fn build_project_summary(state: &AppState, id: &str) -> ProjectSummary {
+    // Project counts are tiny; filtering the full list is fine.
+    state.store.list_projects().await.ok()
+        .and_then(|v| v.into_iter().find(|r| r.0 == id))
+        .map(|(id, name, ws, _c, upd, cnt)| ProjectSummary { id, name, workspace_dir: ws, session_count: cnt, updated_at: upd })
+        .unwrap_or(ProjectSummary { id: id.into(), name: String::new(), workspace_dir: String::new(), session_count: 0, updated_at: 0 })
+}
+
 /// A reloaded transcript row for the UI to render (role in
 /// user|assistant|reasoning|tool).
 #[derive(Serialize, Clone)]
@@ -643,6 +660,77 @@ async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionInfo>, S
     Ok(rows.into_iter().map(|(id, title, ts)| SessionInfo { id, title, ts }).collect())
 }
 
+#[tauri::command]
+async fn list_recent_sessions(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
+    let rows = state.store.list_recent_sessions(12).await.map_err(|e| format!("{e}"))?;
+    Ok(rows.into_iter().map(|(id, pid, title, ts)| serde_json::json!({
+        "id": id, "project_id": pid, "title": title, "ts": ts
+    })).collect())
+}
+
+#[tauri::command]
+async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectSummary>, String> {
+    let rows = state.store.list_projects().await.map_err(|e| format!("{e}"))?;
+    Ok(rows.into_iter()
+        .map(|(id, name, ws, _c, upd, cnt)| ProjectSummary { id, name, workspace_dir: ws, session_count: cnt, updated_at: upd })
+        .collect())
+}
+
+#[tauri::command]
+async fn pick_directory(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_folder(move |p| { let _ = tx.send(p); });
+    let picked = rx.await.map_err(|e| format!("{e}"))?;
+    Ok(picked.map(|fp| fp.to_string()))
+}
+
+#[tauri::command]
+async fn create_project(state: State<'_, AppState>, name: String, workspace_dir: String) -> Result<ProjectSummary, String> {
+    if name.trim().is_empty() { return Err("Project name is required".into()); }
+    let dir = workspace_dir.trim();
+    if dir.is_empty() { return Err("A working directory is required".into()); }
+    let path = PathBuf::from(dir);
+    std::fs::create_dir_all(&path).map_err(|e| format!("Failed to create working directory: {e}"))?;
+    // Writability probe: create + remove a temp marker.
+    let marker = path.join(".wisp-write-test");
+    std::fs::write(&marker, b"").map_err(|e| format!("Working directory is not writable: {e}"))?;
+    let _ = std::fs::remove_file(&marker);
+
+    let id = Uuid::new_v4().to_string();
+    state.store.create_project(&id, name.trim(), dir).await.map_err(|e| format!("{e}"))?;
+    Ok(build_project_summary(&state, &id).await)
+}
+
+#[tauri::command]
+async fn open_project(state: State<'_, AppState>, id: String) -> Result<ProjectSummary, String> {
+    let (name, ws) = state.store.get_project(&id).await.map_err(|e| format!("{e}"))?
+        .ok_or_else(|| "Project not found".to_string())?;
+    // Interrupt any running turn and drop the cached agent so the next
+    // send_message rebuilds against the new project (mirrors new_session; #11/#15).
+    state.cancel.store(true, Ordering::Relaxed);
+    { let mut a = state.agent.lock().await; *a = None; }
+    let root = ensure_writable(PathBuf::from(&ws), &state.app_data);
+    let skills = Arc::new(SkillIndex::load(&skill_paths(&root)));
+    let memory = Arc::new(MemoryManager::new(&root));
+    { *state.active.write().unwrap() = ActiveProject { id: id.clone(), root: root.clone(), skills, memory }; }
+    { *state.session.lock().await = SessionState { frame_id: None, last_seq: 0 }; }
+    state.cancel.store(false, Ordering::Relaxed);
+    { state.bootstrap.lock().unwrap().workspace = root.to_string_lossy().into_owned(); }
+    let _ = state.store.set_setting("active_project_id", &id).await;
+    let _ = state.store.create_project(&id, &name, &ws).await; // touch updated_at → sorts to top
+    Ok(build_project_summary(&state, &id).await)
+}
+
+#[tauri::command]
+async fn delete_project(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    if state.active().id == id {
+        return Err("Return to the projects list before deleting the active project".into());
+    }
+    state.store.delete_project(&id).await.map_err(|e| format!("{e}"))?;
+    Ok(())
+}
+
 /// Switch the active session to `id`, load its transcript, and return the
 /// rendered rows so the UI can repopulate the conversation view.
 /// Rewind the active session to just before the given user turn (for message edit).
@@ -1143,6 +1231,7 @@ pub fn run() {
     subscriber.init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if let Ok(res) = app.path().resource_dir() {
                 wisp_paths::set_resource_root(res);
@@ -1206,6 +1295,12 @@ pub fn run() {
             stop_agent,
             new_session,
             list_sessions,
+            list_recent_sessions,
+            list_projects,
+            pick_directory,
+            create_project,
+            open_project,
+            delete_project,
             load_session,
             rewind_session,
             list_skills,
