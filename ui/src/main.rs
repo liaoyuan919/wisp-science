@@ -4,6 +4,7 @@ mod i18n;
 use context_menu::{ContextMenuPortal, CtxMenu};
 use i18n::{localize_backend, set_document_lang, tab_count, tf, t, use_locale, Locale};
 use leptos::{ev, window_event_listener, *};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static NEXT_DOM_ID: AtomicUsize = AtomicUsize::new(0);
@@ -366,7 +367,10 @@ struct Demo {
 }
 
 #[derive(Serialize)]
-struct SendArgs<'a> { message: &'a str }
+struct SendMessageArgs {
+    session_id: Option<String>,
+    message: String,
+}
 
 #[derive(Deserialize, Clone)]
 struct SessionInfo {
@@ -1583,6 +1587,23 @@ fn ProjectsScreen(locale: RwSignal<Locale>, on_open: Callback<String>, on_open_s
     }
 }
 
+/// Apply a transcript mutation to the right session: the live `items` view when
+/// `fid` is the active session, otherwise the background cache keyed by `fid`.
+/// This is what lets a second conversation stream while the user views another.
+fn route_items(
+    active: RwSignal<Option<String>>,
+    items: RwSignal<Vec<ChatItem>>,
+    transcripts: RwSignal<HashMap<String, Vec<ChatItem>>>,
+    fid: &str,
+    f: impl FnOnce(&mut Vec<ChatItem>),
+) {
+    if active.get().as_deref() == Some(fid) {
+        items.update(f);
+    } else {
+        transcripts.update(|m| f(m.entry(fid.to_string()).or_insert_with(Vec::new)));
+    }
+}
+
 #[component]
 fn App() -> impl IntoView {
     let locale = create_rw_signal(Locale::detect_browser());
@@ -1593,6 +1614,11 @@ fn App() -> impl IntoView {
     let attachments = create_rw_signal::<Vec<ComposerAttachment>>(vec![]);
     let uploading = create_rw_signal(false);
     let drag_over = create_rw_signal(false);
+    // Per-session streaming state. `running` is the set of session ids with an
+    // in-flight turn; `transcripts` caches the live transcript of background
+    // (non-active) sessions so switching to them shows streaming progress.
+    let running = create_rw_signal::<HashSet<String>>(HashSet::new());
+    let transcripts = create_rw_signal::<HashMap<String, Vec<ChatItem>>>(HashMap::new());
     let busy = create_rw_signal(false);
     let show_settings = create_rw_signal(false);
     let settings = create_rw_signal(Settings::default());
@@ -1608,6 +1634,15 @@ fn App() -> impl IntoView {
     let sessions = create_rw_signal::<Vec<SessionInfo>>(vec![]);
     let active_session = create_rw_signal::<Option<String>>(None);
     refresh_sessions(sessions);
+
+    // `busy` is "the active session is currently streaming" — derived from the
+    // per-session `running` set so it stays correct when the user switches
+    // conversations or a background turn finishes.
+    create_effect(move |_| {
+        let r = running.get();
+        let b = active_session.get().map(|id| r.contains(&id)).unwrap_or(false);
+        busy.set(b);
+    });
 
     // Three-pane layout state (mirrors web-dist: sidebar / conversation / right pane).
     let show_sidebar = create_rw_signal(true);
@@ -1681,9 +1716,14 @@ fn App() -> impl IntoView {
         schedule_chat_follow();
     });
 
-    // Wire the agent event stream once.
+    // Wire the agent event stream once. Every event carries the session frame
+    // id; route transcript mutations to `items` (active session) or the
+    // `transcripts` cache (background session) so parallel conversations don't
+    // interleave in the view.
     let items_cb = items;
-    let busy_cb = busy;
+    let active_cb = active_session;
+    let transcripts_cb = transcripts;
+    let running_cb = running;
     let status_cb = status;
     let locale_cb = locale;
     let cb = Closure::wrap(Box::new(move |payload: JsValue| {
@@ -1695,22 +1735,22 @@ fn App() -> impl IntoView {
             }
         };
         match ev {
-            AgentEvent::Text { delta, .. } => items_cb.update(|v| {
+            AgentEvent::Text { frame_id, delta } => route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
                 match v.last_mut() {
                     Some(ChatItem::Assistant(s)) => s.push_str(&delta),
                     _ => v.push(ChatItem::Assistant(delta)),
                 }
             }),
-            AgentEvent::Reasoning { delta, .. } => items_cb.update(|v| {
+            AgentEvent::Reasoning { frame_id, delta } => route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
                 match v.last_mut() {
                     Some(ChatItem::Reasoning(s)) => s.push_str(&delta),
                     _ => v.push(ChatItem::Reasoning(delta)),
                 }
             }),
-            AgentEvent::ToolCall { name, preview, .. } => items_cb.update(|v| {
+            AgentEvent::ToolCall { frame_id, name, preview } => route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
                 v.push(ChatItem::Tool { name, ok: None, input: preview, output: String::new() })
             }),
-            AgentEvent::ToolResult { name, ok, content, .. } => items_cb.update(|v| {
+            AgentEvent::ToolResult { frame_id, name, ok, content } => route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
                 let idx = v.iter().rposition(|c| matches!(c, ChatItem::Tool { name: n, ok: None, .. } if n == &name));
                 if let Some(i) = idx {
                     if let ChatItem::Tool { ok: o, output, .. } = &mut v[i] {
@@ -1724,30 +1764,40 @@ fn App() -> impl IntoView {
                     promote_assistant_text(v, &content);
                 }
             }),
-            AgentEvent::Usage { input, output, ctx_tokens, max_context, .. } => {
-                let pct = if max_context > 0 { ctx_tokens * 100 / max_context } else { 0 };
-                let loc = locale_cb.get();
-                status_cb.set(tf(loc, "status.usage", &[
-                    ("in", &format!("{:.1}", input as f64 / 1000.0)),
-                    ("out", &format!("{:.1}", output as f64 / 1000.0)),
-                    ("pct", &pct.to_string()),
-                ]));
+            AgentEvent::Usage { frame_id, input, output, ctx_tokens, max_context, .. } => {
+                // Status bar reflects only the active session's usage.
+                if active_cb.get().as_deref() == Some(&frame_id) {
+                    let pct = if max_context > 0 { ctx_tokens * 100 / max_context } else { 0 };
+                    let loc = locale_cb.get();
+                    status_cb.set(tf(loc, "status.usage", &[
+                        ("in", &format!("{:.1}", input as f64 / 1000.0)),
+                        ("out", &format!("{:.1}", output as f64 / 1000.0)),
+                        ("pct", &pct.to_string()),
+                    ]));
+                }
             }
-            AgentEvent::Compaction { before, after, .. } => {
-                status_cb.set(tf(locale_cb.get(), "status.compact", &[
-                    ("before", &before.to_string()),
-                    ("after", &after.to_string()),
-                ]));
+            AgentEvent::Compaction { frame_id, before, after, .. } => {
+                if active_cb.get().as_deref() == Some(&frame_id) {
+                    status_cb.set(tf(locale_cb.get(), "status.compact", &[
+                        ("before", &before.to_string()),
+                        ("after", &after.to_string()),
+                    ]));
+                }
             }
-            AgentEvent::Stdout { chunk, .. } => items_cb.update(|v| match v.last_mut() {
+            AgentEvent::Stdout { frame_id, chunk } => route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| match v.last_mut() {
                 Some(ChatItem::Tool { output, .. }) => output.push_str(&chunk),
                 _ => v.push(ChatItem::Tool { name: "stdout".into(), ok: None, input: String::new(), output: chunk }),
             }),
-            AgentEvent::Done { .. } => { busy_cb.set(false); refresh_sessions(sessions); }
-            AgentEvent::Error { message, .. } => { items_cb.update(|v| v.push(ChatItem::Assistant(format!("Error: {message}")))); busy_cb.set(false); }
-            AgentEvent::Review { markdown, .. } => {
-                items_cb.update(|v| v.push(ChatItem::Review(markdown)));
-                status_cb.set(t(locale_cb.get(), "status.review_done"));
+            AgentEvent::Done { frame_id } => { running_cb.update(|r| { r.remove(&frame_id); }); refresh_sessions(sessions); }
+            AgentEvent::Error { frame_id, message } => {
+                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| v.push(ChatItem::Assistant(format!("Error: {message}"))));
+                running_cb.update(|r| { r.remove(&frame_id); });
+            }
+            AgentEvent::Review { frame_id, markdown } => {
+                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| v.push(ChatItem::Review(markdown)));
+                if active_cb.get().as_deref() == Some(&frame_id) {
+                    status_cb.set(t(locale_cb.get(), "status.review_done"));
+                }
             }
             AgentEvent::Diff { .. } => {}
         }
@@ -1774,8 +1824,11 @@ fn App() -> impl IntoView {
     spawn_local(async move { let _ = listen("confirm-request", &confirm_js).await; });
 
     let stop = move |_| {
-        spawn_local(async {
-            let _ = invoke("stop_agent", JsValue::UNDEFINED).await;
+        // Stop only the active session's turn; background conversations keep running.
+        let sid = active_session.get();
+        spawn_local(async move {
+            let arg = to_value(&serde_json::json!({ "session_id": sid })).unwrap();
+            let _ = invoke("stop_agent", arg).await;
         });
     };
 
@@ -1783,21 +1836,46 @@ fn App() -> impl IntoView {
         let text = input.get();
         let paths = attachment_paths(&attachments.get());
         let message = message_with_attachments(&text, &paths);
-        if message.trim().is_empty() || busy.get() || uploading.get() { return; }
+        if message.trim().is_empty() || uploading.get() { return; }
+        // Block only if the *active* session is already streaming.
+        let active = active_session.get();
+        if let Some(id) = &active {
+            if running.get().contains(id) { return; }
+        }
         items.update(|v| { v.push(ChatItem::User(message.clone())); v.push(ChatItem::Assistant(String::new())); });
         force_chat_bottom();
         input.set(String::new());
         attachments.set(vec![]);
-        busy.set(true);
-        let args = to_value(&SendArgs { message: "" }).unwrap();
-        // Re-serialize with the real text (SendArgs borrows; build a fresh value).
-        let arg = to_value(&serde_json::json!({ "message": message })).unwrap();
-        let _ = args;
+        let locale = locale;
+        let status = status;
+        let running = running;
+        let active_session = active_session;
         spawn_local(async move {
+            // Resolve the target session: use the active one, or create a fresh
+            // frame up front so streamed events can be routed before the first delta.
+            let id = match active.clone() {
+                Some(id) => id,
+                None => {
+                    let v = invoke("new_session", JsValue::UNDEFINED).await;
+                    match v.as_string() {
+                        Some(s) => s,
+                        None => {
+                            // Bridge returned no id (e.g. legacy mock); bail without
+                            // flipping running so the user can retry.
+                            let loc = locale.get();
+                            status.set(t(loc, "status.send_failed").into());
+                            return;
+                        }
+                    }
+                }
+            };
+            active_session.set(Some(id.clone()));
+            running.update(|r| { r.insert(id.clone()); });
+            let arg = to_value(&SendMessageArgs { session_id: Some(id.clone()), message }).unwrap();
             if let Err(err) = invoke_checked("send_message", arg).await {
                 let loc = locale.get();
                 status.set(tf(loc, "status.send_failed", &[("msg", &localize_backend(loc, &js_error_text(err)))]));
-                busy.set(false);
+                running.update(|r| { r.remove(&id); });
             }
         });
     };
@@ -1821,8 +1899,9 @@ fn App() -> impl IntoView {
         items.set(list.into_iter().take(ui_index).collect());
         input.set(draft);
         focus_composer();
+        let sid = active_session.get();
         spawn_local(async move {
-            let arg = to_value(&serde_json::json!({ "user_index": user_idx })).unwrap();
+            let arg = to_value(&serde_json::json!({ "session_id": sid, "user_index": user_idx })).unwrap();
             let _ = invoke("rewind_session", arg).await;
         });
     };
@@ -2014,44 +2093,28 @@ fn App() -> impl IntoView {
 
     let new_session = move |_| {
         demo_mode.set(false); // starting a fresh chat leaves the demo view
-        // ponytail: mid-upload switch can still re-add chips when the upload
-        // finishes; add a generation guard if that ever bites.
-        if busy.get() {
-            // A turn is running: stop it first so the backend cancels it and
-            // releases the agent lock, then create the session and clear the
-            // view. No optimistic wipe that strands a running turn behind an
-            // empty chat (#15).
-            spawn_local(async move {
-                let _ = invoke("stop_agent", JsValue::UNDEFINED).await;
-                let _ = invoke("new_session", JsValue::UNDEFINED).await;
-                items.set(vec![]);
-                attachments.set(vec![]);
-                active_session.set(None);
-                sel_artifact.set(0);
-                open_file.set(None);
-                right_tab.set(RightTab::Artifacts);
-                // We abandoned the running turn; clear the spinner ourselves
-                // rather than waiting on the cancelled turn's Done/Error event.
-                busy.set(false);
-                refresh_sessions(sessions);
-            });
-        } else {
-            items.set(vec![]);
-            attachments.set(vec![]);
-            active_session.set(None);
-            sel_artifact.set(0);
-            open_file.set(None);
-            right_tab.set(RightTab::Artifacts);
-            spawn_local(async move {
-                let _ = invoke("new_session", JsValue::UNDEFINED).await;
-                refresh_sessions(sessions);
-            });
+        // Stash the current transcript under its id so a running turn keeps
+        // streaming into the cache, then create a fresh frame and show it.
+        // We do NOT cancel any running turn — parallel conversations keep going.
+        if let Some(old) = active_session.get() {
+            transcripts.update(|m| { m.insert(old, items.get()); });
         }
+        attachments.set(vec![]);
+        sel_artifact.set(0);
+        open_file.set(None);
+        right_tab.set(RightTab::Artifacts);
+        spawn_local(async move {
+            let v = invoke("new_session", JsValue::UNDEFINED).await;
+            let id = v.as_string();
+            active_session.set(id);
+            items.set(vec![]);
+            refresh_sessions(sessions);
+        });
     };
 
     let start_env_setup = {
         let items = items;
-        let busy = busy;
+        let running = running;
         let status = status;
         let locale = locale;
         let show_capabilities = show_capabilities;
@@ -2064,7 +2127,6 @@ fn App() -> impl IntoView {
             if busy.get() { return; }
             show_capabilities.set(false);
             attachments.set(vec![]);
-            active_session.set(None);
             sel_artifact.set(0);
             open_file.set(None);
             right_tab.set(RightTab::Artifacts);
@@ -2074,15 +2136,23 @@ fn App() -> impl IntoView {
                 ChatItem::Assistant(String::new()),
             ]);
             force_chat_bottom();
-            busy.set(true);
             spawn_local(async move {
-                let _ = invoke("new_session", JsValue::UNDEFINED).await;
+                // Fresh frame for the setup turn; route events to it.
+                let v = invoke("new_session", JsValue::UNDEFINED).await;
+                let id = v.as_string().unwrap_or_default();
+                if id.is_empty() {
+                    let loc = locale.get();
+                    status.set(t(loc, "status.send_failed").into());
+                    return;
+                }
+                active_session.set(Some(id.clone()));
+                running.update(|r| { r.insert(id.clone()); });
                 refresh_sessions(sessions);
-                let arg = to_value(&serde_json::json!({ "message": text })).unwrap();
+                let arg = to_value(&SendMessageArgs { session_id: Some(id.clone()), message: text }).unwrap();
                 if let Err(err) = invoke_checked("send_message", arg).await {
                     let loc = locale.get();
                     status.set(tf(loc, "status.send_failed", &[("msg", &localize_backend(loc, &js_error_text(err)))]));
-                    busy.set(false);
+                    running.update(|r| { r.clear(); });
                 }
             });
         }
@@ -2090,26 +2160,41 @@ fn App() -> impl IntoView {
 
     let load_session = Callback::new(move |id: String| {
         attachments.set(vec![]);
-        active_session.set(Some(id.clone()));
         sel_artifact.set(0);
         open_file.set(None);
         right_tab.set(RightTab::Artifacts);
-        busy.set(true);
+        // Stash the transcript we're leaving under its id.
+        if let Some(old) = active_session.get() {
+            transcripts.update(|m| { m.insert(old, items.get()); });
+        }
+        let is_running = running.get().contains(&id);
+        active_session.set(Some(id.clone()));
+        if is_running {
+            // Mid-stream: render the cached transcript (live), no DB load needed.
+            items.set(transcripts.with(|m| m.get(&id).cloned().unwrap_or_default()));
+            force_chat_bottom();
+            return;
+        }
+        // Idle session: load from DB and overwrite any stale cache entry.
         spawn_local(async move {
             let v = invoke("load_session", to_value(&serde_json::json!({ "id": id })).unwrap()).await;
             if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<LoadedItem>>(v) {
-                items.set(list.into_iter().map(LoadedItem::into_chat).collect());
+                let chats: Vec<ChatItem> = list.into_iter().map(LoadedItem::into_chat).collect();
+                transcripts.update(|m| { m.insert(id.clone(), chats.clone()); });
+                items.set(chats);
                 force_chat_bottom();
             }
-            busy.set(false);
         });
     });
 
     let load_demo = move |info: DemoInfo| {
         let id = info.id.clone();
         let items = items;
-        let busy = busy;
-        busy.set(true);
+        // Demos are read-only transcripts; they don't stream, so we don't touch
+        // `running`. We do stash the current chat so returning to it is possible.
+        if let Some(old) = active_session.get() {
+            transcripts.update(|m| { m.insert(old, items.get()); });
+        }
         attachments.set(vec![]);
         sel_artifact.set(0);
         open_file.set(None);
@@ -2129,13 +2214,15 @@ fn App() -> impl IntoView {
                 force_chat_bottom();
                 status_cb.set(tf(locale.get(), "status.demo", &[("title", &demo.title)]));
             }
-            busy.set(false);
         });
     };
 
     let respond_confirm = Callback::new(move |approved: bool| {
+        // confirm_state holds (session_id, message); pass the id back so the
+        // backend unblocks the right turn.
+        let sid = confirm_state.get().map(|(f, _)| f).unwrap_or_default();
         confirm_state.set(None);
-        let arg = to_value(&serde_json::json!({ "approved": approved })).unwrap();
+        let arg = to_value(&serde_json::json!({ "session_id": sid, "approved": approved })).unwrap();
         spawn_local(async move { let _ = invoke("confirm_response", arg).await; });
     });
 
@@ -2358,12 +2445,14 @@ fn App() -> impl IntoView {
                         let id = s.id.clone();
                         let id_active = id.clone();
                         let id_attr = id.clone();
+                        let id_running = id.clone();
                         let title = if s.title.trim().is_empty() { t(loc, "sidebar.untitled").into() } else { s.title.clone() };
                         let title_attr = title.clone();
                         let open = load_session.clone();
                         view! {
                             <button class="side-item ses"
                                 class:active=move || active_session.get().as_deref() == Some(id_active.as_str())
+                                class:running=move || running.get().contains(&id_running)
                                 data-session-id=id_attr
                                 data-session-title=title_attr
                                 on:click=move |_| open.call(id.clone())>
@@ -2563,8 +2652,10 @@ fn App() -> impl IntoView {
                                                 compose_menu_open.set(false);
                                                 let loc = locale.get();
                                                 status.set(t(loc, "status.reviewing"));
+                                                let sid = active_session.get();
                                                 spawn_local(async move {
-                                                    if let Err(err) = invoke_checked("review_session", JsValue::UNDEFINED).await {
+                                                    let arg = to_value(&serde_json::json!({ "session_id": sid })).unwrap();
+                                                    if let Err(err) = invoke_checked("review_session", arg).await {
                                                         status.set(tf(loc, "status.review_failed", &[("msg", &localize_backend(loc, &js_error_text(err)))]));
                                                     }
                                                 });

@@ -86,6 +86,7 @@
           case "set_settings":
           case "set_api_key":
           case "new_session":
+            return `s-${Math.random().toString(36).slice(2)}`;
           case "rewind_session":
           case "confirm_response":
           case "dismiss_onboarding":
@@ -95,7 +96,7 @@
           case "validate_settings":
             return "Validated openai with deepseek-v4-pro";
           case "send_message": {
-            const fid = "mock-frame";
+            const fid = (args && args.session_id) || "mock-frame";
             setTimeout(() => {
               emit("agent", { kind: "Reasoning", frame_id: fid, delta: "Searching literature…" });
               emit("agent", { kind: "ToolCall", frame_id: fid, name: "python", preview: "scimaster-cli search FX-cell" });

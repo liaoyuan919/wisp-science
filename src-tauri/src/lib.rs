@@ -2,6 +2,7 @@
 //! events to the webview, plus a settings/confirm surface.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -219,9 +220,22 @@ struct BootstrapStatus {
     errors: Vec<String>,
 }
 
-struct SessionState {
-    frame_id: Option<String>,
-    last_seq: i64,
+/// Per-session runtime: one agent (with its own Python kernel + MCP), one
+/// cancel flag, and the persisted-seq cursor. Keyed by frame id in
+/// `AppState.sessions`, so different conversations run concurrently on
+/// independent mutexes.
+struct SessionRuntime {
+    agent: tokio::sync::Mutex<Option<Agent>>,
+    cancel: Arc<AtomicBool>,
+    last_seq: StdMutex<i64>,
+}
+
+impl SessionRuntime {
+    fn new() -> Self {
+        Self { agent: tokio::sync::Mutex::new(None), cancel: Arc::new(AtomicBool::new(false)), last_seq: StdMutex::new(0) }
+    }
+    fn last_seq(&self) -> i64 { *self.last_seq.lock().unwrap() }
+    fn set_last_seq(&self, v: i64) { *self.last_seq.lock().unwrap() = v; }
 }
 
 #[derive(Clone)]
@@ -236,11 +250,16 @@ struct AppState {
     app_data: PathBuf,
     store: Store,
     active: std::sync::RwLock<ActiveProject>,
-    agent: tokio::sync::Mutex<Option<Agent>>,
-    session: tokio::sync::Mutex<SessionState>,
-    confirm: Arc<StdMutex<Option<std::sync::mpsc::Sender<bool>>>>,
+    /// One runtime per conversation frame id. Locked only briefly to clone the
+    /// `Arc`; the per-session `agent` mutex is what serializes turns *within*
+    /// one conversation — different conversations never block each other.
+    sessions: tokio::sync::Mutex<HashMap<String, Arc<SessionRuntime>>>,
+    /// The frame id the UI is currently viewing. Drives artifact attachment
+    /// (`upload_file`/`register_artifact`) and `list_artifacts` fallback.
+    active_frame: std::sync::RwLock<Option<String>>,
+    /// Per-session confirm channels, keyed by frame id.
+    confirms: Arc<StdMutex<HashMap<String, std::sync::mpsc::Sender<bool>>>>,
     bootstrap: StdMutex<BootstrapStatus>,
-    cancel: Arc<AtomicBool>,
     /// Guards against a second `review_session` running concurrently.
     reviewing: Arc<AtomicBool>,
 }
@@ -267,11 +286,12 @@ fn ensure_writable(dir: PathBuf, app_data: &std::path::Path) -> PathBuf {
 }
 
 /// `wisp_core::Output` backed by Tauri events. `confirm` blocks on a std
-/// channel satisfied by the `confirm_response` command.
+/// channel satisfied by the `confirm_response` command. `frame_id` is the
+/// session frame id (carried on every event so the UI can route by session).
 struct TauriOutput {
     app: AppHandle,
     frame_id: String,
-    confirm: Arc<StdMutex<Option<std::sync::mpsc::Sender<bool>>>>,
+    confirms: Arc<StdMutex<HashMap<String, std::sync::mpsc::Sender<bool>>>>,
     /// Incremental-persistence sink: each message the turn produces is sent here
     /// and written to SQLite by a background task, so a crash or mid-turn "new
     /// session" no longer discards the whole turn. `None` disables it.
@@ -312,10 +332,11 @@ impl Output for TauriOutput {
     }
     fn confirm(&self, message: &str) -> bool {
         let (tx, rx) = std::sync::mpsc::channel::<bool>();
-        *self.confirm.lock().unwrap() = Some(tx);
+        self.confirms.lock().unwrap().insert(self.frame_id.clone(), tx);
         let _ = self.app.emit("confirm-request", ConfirmRequest { frame_id: self.frame_id.clone(), message: message.into() });
-        // Block until the UI responds; default to deny on timeout/missing.
-        rx.recv_timeout(std::time::Duration::from_secs(180)).unwrap_or(false)
+        let approved = rx.recv_timeout(std::time::Duration::from_secs(180)).unwrap_or(false);
+        self.confirms.lock().unwrap().remove(&self.frame_id);
+        approved
     }
     fn on_message(&self, msg: &Message) {
         if let Some(tx) = &self.persist {
@@ -499,20 +520,29 @@ async fn register_mcp(agent: &mut wisp_core::Agent, client: std::sync::Arc<wisp_
 }
 
 /// Get the active session frame id, creating a new SQLite frame if none.
-async fn ensure_frame(store: &Store, project_id: &str, sess: &mut SessionState) -> anyhow::Result<String> {
-    if let Some(id) = sess.frame_id.clone() {
+/// Create a brand-new SQLite frame for the active project and return its id.
+/// Used by `new_session` (and the lazy first-send path) to hand the UI a
+/// concrete session id before streaming starts.
+async fn create_session_frame(store: &Store, project_id: &str) -> Result<String, String> {
+    let id = Uuid::new_v4().to_string();
+    store.create_frame(&id, project_id, "OPERON", "wisp").await.map_err(|e| format!("{e}"))?;
+    Ok(id)
+}
+
+/// Return the active frame id, creating one if the UI hasn't picked a session
+/// yet. Used by artifact registration so uploads attach to the conversation
+/// the user is composing in.
+async fn ensure_active_frame(state: &AppState, ap: &ActiveProject) -> Result<String, String> {
+    if let Some(id) = state.active_frame.read().unwrap().clone() {
         return Ok(id);
     }
-    let id = Uuid::new_v4().to_string();
-    store.create_frame(&id, project_id, "OPERON", "wisp").await?;
-    sess.frame_id = Some(id.clone());
-    sess.last_seq = 0;
+    let id = create_session_frame(&state.store, &ap.id).await?;
+    *state.active_frame.write().unwrap() = Some(id.clone());
     Ok(id)
 }
 
 #[tauri::command]
-async fn send_message(state: State<'_, AppState>, app: AppHandle, message: String) -> Result<String, String> {
-    let turn_id = Uuid::new_v4().to_string();
+async fn send_message(state: State<'_, AppState>, app: AppHandle, session_id: Option<String>, message: String) -> Result<String, String> {
     let (provider, api_url, model, api_key) = load_settings(&state.store).await;
     let cfg = build_provider_config(&provider, &api_url, &api_key, &model)?;
 
@@ -520,22 +550,32 @@ async fn send_message(state: State<'_, AppState>, app: AppHandle, message: Strin
     let max_iter = state.store.get_setting("max_iter").await.ok().flatten().and_then(|s| s.parse::<usize>().ok()).unwrap_or(100);
 
     let ap = state.active();
-    let mut guard = state.agent.lock().await;
+
+    // Resolve the target session frame: an explicit id wins, else lazily create
+    // one (mirrors the legacy first-send behavior). The frame id is what every
+    // streamed event carries, so the UI can route by session.
+    let frame_id = match session_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(id) => id.to_string(),
+        None => create_session_frame(&state.store, &ap.id).await?,
+    };
+    *state.active_frame.write().unwrap() = Some(frame_id.clone());
+
+    // Get or create this session's runtime. The map mutex is dropped here —
+    // the per-session `agent` mutex (not this map) is what the turn holds,
+    // so a turn in session A never blocks a turn in session B.
+    let rt = {
+        let mut sessions = state.sessions.lock().await;
+        sessions.entry(frame_id.clone()).or_insert_with(|| Arc::new(SessionRuntime::new())).clone()
+    };
+
+    let mut guard = rt.agent.lock().await;
     if guard.is_none() {
         let mut agent = Agent::new(cfg.clone(), ap.skills.clone(), ap.memory.clone(), ap.root.clone(), max_context, max_iter);
-        // Load the persisted session from SQLite (replaces the JSON session file).
-        let frame_id = {
-            let mut sess = state.session.lock().await;
-            ensure_frame(&state.store, &ap.id, &mut sess).await.map_err(|e| format!("{e}"))?
-        };
         match state.store.load_messages(&frame_id).await {
             Ok(msgs) => agent.ctx.messages = msgs,
             Err(e) => tracing::warn!("load session from sqlite failed: {e}"),
         }
-        {
-            let mut sess = state.session.lock().await;
-            sess.last_seq = agent.ctx.messages.len() as i64;
-        }
+        rt.set_last_seq(agent.ctx.messages.len() as i64);
         if agent.ctx.is_empty() {
             let hosts = ssh_hosts::stored_hosts(&state.store).await;
             agent.seed_system_prompt(&ap.skills, ssh_hosts::render_hosts_section(&hosts));
@@ -547,116 +587,114 @@ async fn send_message(state: State<'_, AppState>, app: AppHandle, message: Strin
         *guard = Some(agent);
     }
     let agent = guard.as_mut().unwrap();
-    state.cancel.store(false, Ordering::Relaxed);
+    rt.cancel.store(false, Ordering::Relaxed);
 
     // Incremental persistence: a background task appends each message the turn
     // produces to SQLite as it arrives (via TauriOutput::on_message), so a crash
-    // or a mid-turn "new session" no longer loses the whole turn (#14, #15). The
-    // task owns the running seq, so it stays correct even if the in-memory
-    // context is compacted mid-turn.
+    // no longer loses the whole turn. The task owns the running seq, so it stays
+    // correct even if the in-memory context is compacted mid-turn.
     //
     // First flush any messages already in the context but not yet persisted
-    // (e.g. a system prompt seeded here or by `new_session`), so the incremental
-    // seq lines up with what a later reload expects.
-    let (persist_frame, start_seq) = {
-        let mut sess = state.session.lock().await;
-        let frame = sess.frame_id.clone();
-        if let Some(frame_id) = &frame {
-            let start = sess.last_seq as usize;
-            if start < agent.ctx.messages.len() {
-                let mut seq = sess.last_seq;
-                for m in &agent.ctx.messages[start..] {
-                    seq += 1;
-                    let _ = state.store.append_message(frame_id, seq, m).await;
-                }
-                sess.last_seq = agent.ctx.messages.len() as i64;
+    // (e.g. a system prompt seeded here), so the incremental seq lines up with
+    // what a later reload expects.
+    let start_seq = {
+        let start = rt.last_seq() as usize;
+        if start < agent.ctx.messages.len() {
+            let mut seq = rt.last_seq();
+            for m in &agent.ctx.messages[start..] {
+                seq += 1;
+                let _ = state.store.append_message(&frame_id, seq, m).await;
             }
+            rt.set_last_seq(agent.ctx.messages.len() as i64);
         }
-        (frame, sess.last_seq)
+        rt.last_seq()
     };
-    let (persist_handle, persist_tx) = match persist_frame {
-        Some(frame_id) => {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
-            let store = state.store.clone();
-            let mut seq = start_seq;
-            let handle = tokio::spawn(async move {
-                while let Some(msg) = rx.recv().await {
-                    seq += 1;
-                    if let Err(e) = store.append_message(&frame_id, seq, &msg).await {
-                        tracing::warn!("incremental persist seq {seq} failed: {e}");
-                    }
+
+    let (persist_handle, persist_tx) = {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
+        let store = state.store.clone();
+        let fid = frame_id.clone();
+        let mut seq = start_seq;
+        let handle = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                seq += 1;
+                if let Err(e) = store.append_message(&fid, seq, &msg).await {
+                    tracing::warn!("incremental persist seq {seq} failed: {e}");
                 }
-                seq
-            });
-            (Some(handle), Some(tx))
-        }
-        None => (None, None),
+            }
+            seq
+        });
+        (handle, tx)
     };
 
     let output = TauriOutput {
         app: app.clone(),
-        frame_id: turn_id.clone(),
-        confirm: state.confirm.clone(),
-        persist: persist_tx,
+        frame_id: frame_id.clone(),
+        confirms: state.confirms.clone(),
+        persist: Some(persist_tx),
     };
 
-    let result = agent.run(&message, &output, Some(state.cancel.as_ref())).await;
+    let result = agent.run(&message, &output, Some(&rt.cancel)).await;
     agent.ctx.clear_runtime_injections();
 
     // Close the persist channel and wait for the task to flush; its final seq is
     // the authoritative persisted count.
     drop(output);
-    if let Some(handle) = persist_handle {
-        match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
-            Ok(Ok(final_seq)) => { state.session.lock().await.last_seq = final_seq; }
-            other => {
-                tracing::warn!("persist task did not finish cleanly: {other:?}");
-                let mut sess = state.session.lock().await;
-                sess.last_seq = agent.ctx.messages.len() as i64;
-            }
+    match tokio::time::timeout(std::time::Duration::from_secs(5), persist_handle).await {
+        Ok(Ok(final_seq)) => rt.set_last_seq(final_seq),
+        other => {
+            tracing::warn!("persist task did not finish cleanly: {other:?}");
+            rt.set_last_seq(agent.ctx.messages.len() as i64);
         }
     }
     drop(guard);
 
     match result {
         Ok(_) => {
-            let _ = app.emit("agent", AgentEvent::Done { frame_id: turn_id.clone() });
-            Ok(turn_id)
+            let _ = app.emit("agent", AgentEvent::Done { frame_id: frame_id.clone() });
+            Ok(frame_id)
         }
         Err(e) => {
-            let _ = app.emit("agent", AgentEvent::Error { frame_id: turn_id.clone(), message: format!("{e}") });
+            let _ = app.emit("agent", AgentEvent::Error { frame_id: frame_id.clone(), message: format!("{e}") });
             Err(format!("{e}"))
         }
     }
 }
 
 #[tauri::command]
-fn stop_agent(state: State<'_, AppState>) {
-    state.cancel.store(true, Ordering::Relaxed);
+async fn stop_agent(state: State<'_, AppState>, session_id: Option<String>) -> Result<(), String> {
+    // Cancel only the named session's turn; other conversations keep running.
+    let targets: Vec<Arc<SessionRuntime>> = match session_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(id) => state.sessions.lock().await.get(id).cloned().into_iter().collect(),
+        None => state.sessions.lock().await.values().cloned().collect(),
+    };
+    for rt in targets {
+        rt.cancel.store(true, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 /// L1 session review: one read-only reviewer LLM call over the current
 /// transcript. No sub-agent, no tools — traces claims and reports findings.
 #[tauri::command]
-async fn review_session(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+async fn review_session(state: State<'_, AppState>, app: AppHandle, session_id: Option<String>) -> Result<(), String> {
     if state.reviewing.swap(true, Ordering::SeqCst) {
         return Err("A review is already running.".into());
     }
     let out: Result<(), String> = async {
-        // Refuse while a turn is mid-flight — send_message holds the agent lock
-        // for the whole turn, and we don't want two concurrent LLM turns.
-        let _busy = state
-            .agent
-            .try_lock()
-            .map_err(|_| "Session is busy — wait for the current turn to finish.".to_string())?;
+        // Refuse only if *that* session has a turn mid-flight — a parallel
+        // conversation running elsewhere must not block the review.
+        let frame_id = match session_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(id) => id.to_string(),
+            None => state.active_frame.read().unwrap().clone()
+                .ok_or_else(|| "No active session to review.".to_string())?,
+        };
+        if let Some(rt) = state.sessions.lock().await.get(&frame_id).cloned() {
+            if rt.agent.try_lock().is_err() {
+                return Err("Session is busy — wait for the current turn to finish.".to_string());
+            }
+        }
 
-        let frame_id = state
-            .session
-            .lock()
-            .await
-            .frame_id
-            .clone()
-            .ok_or_else(|| "No active session to review.".to_string())?;
         let msgs = state.store.load_messages(&frame_id).await.map_err(|e| format!("{e}"))?;
         if msgs.iter().all(|m| matches!(m.role, wisp_llm::Role::System)) {
             return Err("Nothing to review yet.".into());
@@ -689,29 +727,16 @@ async fn review_session(state: State<'_, AppState>, app: AppHandle) -> Result<()
 }
 
 #[tauri::command]
-async fn new_session(state: State<'_, AppState>) -> Result<(), String> {
-    // If a turn is mid-flight it holds the agent lock for its whole duration.
-    // Signal cancellation first so it interrupts (killing any running child)
-    // and releases the lock, instead of this command blocking for minutes (#15).
+async fn new_session(state: State<'_, AppState>) -> Result<String, String> {
+    // Create a fresh frame and hand its id to the UI up front, so the UI can
+    // route streamed events to the right transcript *before* the first delta
+    // arrives. Does NOT cancel any running turn — parallel conversations keep
+    // running. Empty frames are filtered out of the sidebar until they get a
+    // user message.
     let ap = state.active();
-    state.cancel.store(true, Ordering::Relaxed);
-    let mut guard = state.agent.lock().await;
-    // Reset even when the agent hasn't been created yet (lazy init in
-    // send_message), otherwise the next message lands in the old frame.
-    let mut sess = state.session.lock().await;
-    sess.frame_id = None;
-    sess.last_seq = 0;
-    if let Some(agent) = guard.as_mut() {
-        agent.ctx.clear();
-        let frame_id = ensure_frame(&state.store, &ap.id, &mut sess).await.map_err(|e| format!("{e}"))?;
-        agent.ctx.messages = state.store.load_messages(&frame_id).await.unwrap_or_default();
-        sess.last_seq = agent.ctx.messages.len() as i64;
-        if agent.ctx.is_empty() {
-            let hosts = ssh_hosts::stored_hosts(&state.store).await;
-            agent.seed_system_prompt(&ap.skills, ssh_hosts::render_hosts_section(&hosts));
-        }
-    }
-    Ok(())
+    let id = create_session_frame(&state.store, &ap.id).await?;
+    *state.active_frame.write().unwrap() = Some(id.clone());
+    Ok(id)
 }
 
 #[tauri::command]
@@ -767,22 +792,22 @@ async fn create_project(state: State<'_, AppState>, name: String, workspace_dir:
 async fn open_project(state: State<'_, AppState>, id: String) -> Result<ProjectSummary, String> {
     let (name, ws) = state.store.get_project(&id).await.map_err(|e| format!("{e}"))?
         .ok_or_else(|| "Project not found".to_string())?;
-    // Interrupt any running turn and hold the agent lock across the whole
-    // project swap (mirrors new_session; #11/#15). Holding the lock the entire
-    // time — not just for the `= None` reset — closes a race where a concurrent
-    // send_message snapshots `active` (old project) before taking this same
-    // lock, finds the agent empty, and runs a turn against the old root while
-    // we swap `active` underneath it.
-    state.cancel.store(true, Ordering::Relaxed);
-    let mut guard = state.agent.lock().await;
-    *guard = None;
+    // Switching projects tears down every running conversation in the old
+    // project: signal cancel on each, then drop the runtime map so the next
+    // turn rebuilds agents against the new workspace root. Cross-project
+    // parallelism is intentionally not supported (single active project).
+    {
+        let sessions = state.sessions.lock().await.clone();
+        for rt in sessions.values() {
+            rt.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+    state.sessions.lock().await.clear();
     let root = ensure_writable(PathBuf::from(&ws), &state.app_data);
     let skills = Arc::new(SkillIndex::load(&skill_paths(&root)));
     let memory = Arc::new(MemoryManager::new(&root));
     { *state.active.write().unwrap() = ActiveProject { id: id.clone(), root: root.clone(), skills, memory }; }
-    { *state.session.lock().await = SessionState { frame_id: None, last_seq: 0 }; }
-    state.cancel.store(false, Ordering::Relaxed);
-    drop(guard);
+    { *state.active_frame.write().unwrap() = None; }
     { state.bootstrap.lock().unwrap().workspace = root.to_string_lossy().into_owned(); }
     let _ = state.store.set_setting("active_project_id", &id).await;
     let _ = state.store.create_project(&id, &name, &ws).await; // touch updated_at → sorts to top
@@ -800,44 +825,51 @@ async fn delete_project(state: State<'_, AppState>, id: String) -> Result<(), St
 
 /// Switch the active session to `id`, load its transcript, and return the
 /// rendered rows so the UI can repopulate the conversation view.
-/// Rewind the active session to just before the given user turn (for message edit).
+/// Rewind the named session to just before the given user turn (for message
+/// edit). Only touches that session's agent context and DB rows.
 #[tauri::command]
-async fn rewind_session(state: State<'_, AppState>, user_index: usize) -> Result<(), String> {
-    let keep = {
-        let guard = state.agent.lock().await;
-        guard
-            .as_ref()
-            .map(|agent| user_message_start(&agent.ctx.messages, user_index))
-            .unwrap_or(0)
+async fn rewind_session(state: State<'_, AppState>, session_id: Option<String>, user_index: usize) -> Result<(), String> {
+    let frame_id = match session_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(id) => id.to_string(),
+        None => state.active_frame.read().unwrap().clone()
+            .ok_or_else(|| "No active session to rewind.".to_string())?,
     };
-    {
-        let mut guard = state.agent.lock().await;
+    let rt = state.sessions.lock().await.get(&frame_id).cloned();
+    let keep = if let Some(rt) = rt {
+        let mut guard = rt.agent.lock().await;
         if let Some(agent) = guard.as_mut() {
-            agent.ctx.messages.truncate(keep);
+            let k = user_message_start(&agent.ctx.messages, user_index);
+            agent.ctx.messages.truncate(k);
+            k
+        } else {
+            user_index_to_keep_after_db(&state.store, &frame_id, user_index).await?
         }
-    }
-    let mut sess = state.session.lock().await;
-    if let Some(frame_id) = sess.frame_id.clone() {
-        state
-            .store
-            .truncate_messages(&frame_id, keep as i64)
-            .await
-            .map_err(|e| format!("{e}"))?;
-        sess.last_seq = keep as i64;
+    } else {
+        user_index_to_keep_after_db(&state.store, &frame_id, user_index).await?
+    };
+    state.store.truncate_messages(&frame_id, keep as i64).await.map_err(|e| format!("{e}"))?;
+    if let Some(rt) = state.sessions.lock().await.get(&frame_id) {
+        rt.set_last_seq(keep as i64);
     }
     Ok(())
+}
+
+/// Compute the `keep` index purely from persisted messages when no in-memory
+/// agent exists for the session yet.
+async fn user_index_to_keep_after_db(store: &Store, frame_id: &str, user_index: usize) -> Result<usize, String> {
+    let msgs = store.load_messages(frame_id).await.map_err(|e| format!("{e}"))?;
+    Ok(user_message_start(&msgs, user_index))
 }
 
 #[tauri::command]
 async fn load_session(state: State<'_, AppState>, id: String) -> Result<Vec<UiItem>, String> {
     let msgs = state.store.load_messages(&id).await.map_err(|e| format!("{e}"))?;
-    {
-        let mut sess = state.session.lock().await;
-        sess.frame_id = Some(id.clone());
-        sess.last_seq = msgs.len() as i64;
-    }
-    if let Some(agent) = state.agent.lock().await.as_mut() {
-        agent.ctx.messages = msgs.clone();
+    // Track which session the UI is viewing. If a runtime exists for it (e.g.
+    // it's mid-stream), keep the in-memory agent context authoritative — the UI
+    // will render the cached streaming transcript instead of this DB snapshot.
+    *state.active_frame.write().unwrap() = Some(id.clone());
+    if let Some(rt) = state.sessions.lock().await.get(&id).cloned() {
+        rt.set_last_seq(msgs.len() as i64);
     }
     Ok(messages_to_items(&msgs))
 }
@@ -861,8 +893,8 @@ fn load_demo(state: State<'_, AppState>, id: String) -> Result<seed::Demo, Strin
 }
 
 #[tauri::command]
-fn confirm_response(state: State<'_, AppState>, approved: bool) -> Result<(), String> {
-    if let Some(tx) = state.confirm.lock().unwrap().take() {
+fn confirm_response(state: State<'_, AppState>, session_id: String, approved: bool) -> Result<(), String> {
+    if let Some(tx) = state.confirms.lock().unwrap().remove(&session_id) {
         let _ = tx.send(approved);
         Ok(())
     } else {
@@ -921,8 +953,15 @@ async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Result<
         state.store.set_setting("workspace_dir", workspace_dir).await.map_err(|e| format!("{e}"))?;
     }
 
-    // Reset the cached agent so the next turn picks up the new provider.
-    *state.agent.lock().await = None;
+    // Reset cached agents so the next turn picks up the new provider. A turn
+    // currently running holds its agent mutex and keeps the old config; only
+    // idle runtimes are rebuilt.
+    let runtimes = state.sessions.lock().await.values().cloned().collect::<Vec<_>>();
+    for rt in runtimes {
+        if let Ok(mut guard) = rt.agent.try_lock() {
+            *guard = None;
+        }
+    }
     Ok(())
 }
 
@@ -1039,8 +1078,11 @@ fn read_file(state: State<'_, AppState>, path: String, max_bytes: Option<u64>) -
 }
 
 #[tauri::command]
-async fn list_artifacts(state: State<'_, AppState>) -> Result<Vec<ArtifactInfo>, String> {
-    let frame_id = state.session.lock().await.frame_id.clone();
+async fn list_artifacts(state: State<'_, AppState>, session_id: Option<String>) -> Result<Vec<ArtifactInfo>, String> {
+    let frame_id = match session_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(id) => Some(id.to_string()),
+        None => state.active_frame.read().unwrap().clone(),
+    };
     let Some(fid) = frame_id else { return Ok(vec![]); };
     let rows = state.store.list_artifacts(&fid).await.map_err(|e| format!("{e}"))?;
     Ok(rows.into_iter().map(|(id, name, ct, path, ts)| ArtifactInfo {
@@ -1231,8 +1273,7 @@ async fn register_artifact_at(
     content_type: Option<String>,
 ) -> Result<ArtifactInfo, String> {
     let real = wisp_tools::safety::validate_file_path(&ap.root, &path)?;
-    let mut sess = state.session.lock().await;
-    let frame_id = ensure_frame(&state.store, &ap.id, &mut sess).await.map_err(|e| format!("{e}"))?;
+    let frame_id = ensure_active_frame(state, ap).await?;
     let id = Uuid::new_v4().to_string();
     let filename = real.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
     let mime = content_type.unwrap_or_else(|| mime_for_path(&real).to_string());
@@ -1348,11 +1389,10 @@ pub fn run() {
                 app_data,
                 store,
                 active: std::sync::RwLock::new(ActiveProject { id: active_id, root, skills, memory }),
-                agent: tokio::sync::Mutex::new(None),
-                session: tokio::sync::Mutex::new(SessionState { frame_id: None, last_seq: 0 }),
-                confirm: Arc::new(StdMutex::new(None)),
+                sessions: tokio::sync::Mutex::new(HashMap::new()),
+                active_frame: std::sync::RwLock::new(None),
+                confirms: Arc::new(StdMutex::new(HashMap::new())),
                 bootstrap,
-                cancel: Arc::new(AtomicBool::new(false)),
                 reviewing: Arc::new(AtomicBool::new(false)),
             };
             app.manage(state);

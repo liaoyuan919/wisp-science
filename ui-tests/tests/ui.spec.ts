@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { tauriMock } from "./mock-tauri";
+import { tauriMock, parallelMock } from "./mock-tauri";
 
 function providerSelect(page: Page) {
   return page.getByTestId("settings-provider");
@@ -116,4 +116,36 @@ test("new project form enables Create after name and folder are set", async ({ p
   await page.locator(".pn-dir .btn-ghost").click(); // Choose folder → mock path
   await expect(page.locator(".pn-dir .path")).toHaveText("/mock/root/new-project");
   await expect(create).toBeEnabled();
+});
+
+test("a second conversation can run in parallel without interleaving transcripts", async ({ page }) => {
+  await page.addInitScript(parallelMock);
+  await page.goto("/");
+  await page.locator(".proj-card:not(.proj-example)").first().click();
+  await expect(page.getByRole("button", { name: "New session" })).toBeVisible();
+
+  // Start conversation A. The mock streams "echo:alpha" at once but delays Done,
+  // so A stays "running".
+  await page.getByPlaceholder(/Ask wisp-science/i).fill("alpha");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText("echo:alpha")).toBeVisible({ timeout: 10_000 });
+
+  // While A is still running, open a fresh session. The composer must be usable
+  // (per-session busy: A running does NOT block B).
+  await page.getByRole("button", { name: "New session" }).click();
+  await expect(page.getByPlaceholder(/Ask wisp-science/i)).toBeEmpty();
+  await page.getByPlaceholder(/Ask wisp-science/i).fill("beta");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText("echo:beta")).toBeVisible({ timeout: 10_000 });
+
+  // A's transcript must not leak into B's view.
+  await expect(page.getByText("echo:alpha")).toHaveCount(0);
+
+  // A is still running → its sidebar entry shows the running indicator.
+  await expect(page.locator(".side-item.ses.running")).toBeVisible();
+
+  // Switch back to A: the cached (live) transcript renders, B's does not.
+  await page.locator(".side-item.ses", { hasText: "alpha" }).click();
+  await expect(page.getByText("echo:alpha")).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText("echo:beta")).toHaveCount(0);
 });

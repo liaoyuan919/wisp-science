@@ -90,11 +90,12 @@ export function tauriMock(): void {
           case "validate_settings":
             return "Validated openai with deepseek-v4-pro";
           case "new_session":
+            return `s-${Math.random().toString(36).slice(2)}`;
           case "confirm_response":
           case "dismiss_onboarding":
             return null;
           case "send_message": {
-            const fid = "t1";
+            const fid = (args && args.session_id) || "t1";
             setTimeout(() => {
               emit("agent", { kind: "Text", frame_id: fid, delta: "Hello " });
               emit("agent", { kind: "Text", frame_id: fid, delta: "from mock wisp-science." });
@@ -114,6 +115,71 @@ export function tauriMock(): void {
         return () => {
           listeners[event] = undefined;
         };
+      },
+    },
+  };
+}
+
+// Variant for parallel-session tests: each `send_message` streams an `echo:<msg>`
+// reply immediately but delays `Done` so the session stays "running" while the
+// test starts a second conversation. `list_sessions` reports every session that
+// received a user turn so the sidebar can list them.
+export function parallelMock(): void {
+  const listeners: Record<string, ((e: { payload: unknown }) => void) | undefined> = {};
+  const emit = (event: string, payload: unknown) => {
+    try { listeners[event]?.({ payload }); } catch { /* not registered yet */ }
+  };
+  const sessions: { id: string; title: string; ts: number }[] = [];
+
+  const project = { name: "wisp-science", root: "/mock/root", skill_count: 12, mcp_server_count: 8, memory_file_count: 2, has_api_key: true };
+
+  (window as any).__TAURI__ = {
+    core: {
+      invoke: async (cmd: string, args: any) => {
+        switch (cmd) {
+          case "list_demos": return [];
+          case "load_demo": return { id: "x", title: "x", request: "x", response: "x" };
+          case "list_sessions": return sessions.slice();
+          case "list_projects":
+            return [{ id: "default", name: project.name, workspace_dir: project.root, session_count: 0, updated_at: 1 }];
+          case "list_recent_sessions": return sessions.map((s) => ({ id: s.id, project_id: "default", title: s.title, ts: s.ts }));
+          case "pick_directory": return "/mock/root/new-project";
+          case "open_project":
+          case "create_project":
+            return { id: "default", name: project.name, workspace_dir: project.root, session_count: 0, updated_at: 1 };
+          case "delete_project": return null;
+          case "get_settings": return { provider: "openai", api_url: "https://api.deepseek.com", model: "deepseek-v4-pro", has_api_key: true, locale: "en" };
+          case "get_project_info": return project;
+          case "get_onboarding_state": return { show: false, has_api_key: true };
+          case "get_capabilities": return { skills: [], mcp_servers: [], memory_files: [], project };
+          case "list_dir": return [];
+          case "read_file": return { path: "x", mime: "text/plain", text: "", base64: null };
+          case "upload_file": return { id: "a", name: "x", kind: "text/csv", path: "x", ts: 1 };
+          case "new_session": return `s-${Math.random().toString(36).slice(2)}`;
+          case "stop_agent":
+          case "rewind_session":
+          case "confirm_response":
+          case "dismiss_onboarding":
+            return null;
+          case "validate_settings": return "ok";
+          case "send_message": {
+            const fid = (args && args.session_id) || "t1";
+            const msg = (args && args.message) || "";
+            sessions.push({ id: fid, title: msg, ts: Date.now() });
+            // Stream the reply at once, but keep the turn "running" (delayed Done)
+            // so a second conversation can start concurrently.
+            emit("agent", { kind: "Text", frame_id: fid, delta: `echo:${msg}` });
+            setTimeout(() => emit("agent", { kind: "Done", frame_id: fid }), 5000);
+            return fid;
+          }
+          default: return null;
+        }
+      },
+    },
+    event: {
+      listen: async (event: string, cb: (e: { payload: unknown }) => void) => {
+        listeners[event] = cb;
+        return () => { listeners[event] = undefined; };
       },
     },
   };

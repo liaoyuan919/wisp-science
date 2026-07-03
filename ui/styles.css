@@ -115,6 +115,7 @@ html, body {
 button.side-item { width: 100%; text-align: left; background: transparent; border: 1px solid transparent; font: inherit; font-size: 13px; cursor: pointer; }
 .side-item.active { background: var(--bg-elev); color: var(--text); box-shadow: var(--shadow-sm); }
 .side-item.active .dot { background: var(--clay); }
+.side-item.ses.running .dot { background: var(--clay); animation: tool-pulse 1s ease-in-out infinite; }
 .ses-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .side-hint { font-size: 12px; color: var(--text-faint); padding: 6px 10px; }
 
