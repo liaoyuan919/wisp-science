@@ -1669,10 +1669,34 @@ fn App() -> impl IntoView {
     let drag_start_w = create_rw_signal(0.0_f64);
 
     // Artifacts (right pane): tables + CSV detected in the transcript.
-    let artifacts = create_memo(move |_| collect_artifacts(&items.get(), locale.get()));
+    let artifacts_all = create_memo(move |_| collect_artifacts(&items.get(), locale.get()));
+    // File-backed artifacts are scraped from chat text, so a file that was
+    // renamed or overwritten still lingers and 404s on click (#41). Ask the
+    // backend which referenced files are gone and drop them from the list.
+    let missing_paths = create_rw_signal(std::collections::HashSet::<String>::new());
+    create_effect(move |_| {
+        let paths: Vec<String> = artifacts_all.get().iter()
+            .filter_map(|a| match &a.data { PreviewData::File { path, .. } => Some(path.clone()), _ => None })
+            .collect();
+        if paths.is_empty() { missing_paths.set(std::collections::HashSet::new()); return; }
+        spawn_local(async move {
+            let arg = to_value(&serde_json::json!({ "paths": paths })).unwrap();
+            let v = invoke("missing_files", arg).await;
+            if let Ok(m) = serde_wasm_bindgen::from_value::<Vec<String>>(v) {
+                missing_paths.set(m.into_iter().collect());
+            }
+        });
+    });
+    let artifacts = create_memo(move |_| {
+        let miss = missing_paths.get();
+        artifacts_all.get().into_iter()
+            .filter(|a| match &a.data { PreviewData::File { path, .. } => !miss.contains(path), _ => true })
+            .collect::<Vec<_>>()
+    });
     let sel_artifact = create_rw_signal(0usize);
     let right_tab = create_rw_signal(RightTab::Artifacts);
     let show_files = create_rw_signal(false);
+    let file_query = create_rw_signal(String::new());
     let file_cwd = create_rw_signal(".".to_string());
     let file_entries = create_rw_signal::<Vec<DirEntry>>(vec![]);
     let open_file = create_rw_signal::<Option<(String, String)>>(None);
@@ -2306,6 +2330,7 @@ fn App() -> impl IntoView {
     };
 
     let open_files = move |_| {
+        file_query.set(String::new());
         show_files.set(true);
         refresh_dir(file_cwd, file_entries);
     };
@@ -3199,19 +3224,28 @@ fn App() -> impl IntoView {
                             {parent.map(|p| {
                                 let p_click = p.clone();
                                 view! {
-                                    <button class="fb-up" on:click=move |_| { file_cwd.set(p_click.clone()); refresh_dir(file_cwd, file_entries); }>"↑"</button>
+                                    <button class="fb-up" on:click=move |_| { file_query.set(String::new()); file_cwd.set(p_click.clone()); refresh_dir(file_cwd, file_entries); }>"↑"</button>
                                 }.into_view()
                             })}
                             <span class="fb-path">{cwd.clone()}</span>
                         </div>
+                        <input class="fb-search" type="text"
+                            placeholder=move || t(locale.get(), "files.search")
+                            prop:value=move || file_query.get()
+                            on:input=move |ev| file_query.set(event_target_value(&ev)) />
                         <div class="fb-list">
-                            {move || file_entries.get().into_iter().map(|e| {
+                            {move || {
+                                let q = file_query.get().to_lowercase();
+                                file_entries.get().into_iter()
+                                    .filter(move |e| q.is_empty() || e.name.to_lowercase().contains(&q))
+                                    .map(|e| {
                                 let name = e.name.clone();
                                 let full = join_path(&file_cwd.get(), &name);
                                 if e.is_dir {
                                     let full_click = full.clone();
                                     view! {
                                         <button class="fb-row dir" on:click=move |_| {
+                                            file_query.set(String::new());
                                             file_cwd.set(full_click.clone());
                                             refresh_dir(file_cwd, file_entries);
                                         }>
@@ -3235,7 +3269,8 @@ fn App() -> impl IntoView {
                                         </button>
                                     }.into_view()
                                 }
-                            }).collect_view()}
+                            }).collect_view()
+                            }}
                         </div>
                         {move || project_info.get().map(|p| {
                             let loc = locale.get();
