@@ -524,9 +524,11 @@ button.stop:hover { background: hsl(0 70% 50% / 0.08); border-color: hsl(0 70% 5
 
 /* --- Sidebar brand wordmark + Beta tag --- */
 .brand { display: flex; align-items: baseline; gap: 8px; padding: 6px 6px 8px; }
-.brand-name { font-family: var(--font-serif); font-size: 19px; font-weight: 500; letter-spacing: -0.02em; color: var(--text); line-height: 1; }
+.brand-name { font-family: var(--font-serif); font-size: 19px; font-weight: 500; letter-spacing: -0.02em; color: var(--text); line-height: 1; cursor: pointer; }
+.brand-name:hover { color: var(--clay); }
 .brand-beta { font-size: 10.5px; font-weight: 500; letter-spacing: .01em; color: var(--text-faint); }
-.brand .icon-btn { margin-left: auto; align-self: center; }
+.brand .spacer { flex: 1; }
+.brand .icon-btn { align-self: center; }
 
 /* --- Project switcher row (back arrow + name + caret) --- */
 .proj-switch {

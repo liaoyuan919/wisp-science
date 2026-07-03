@@ -2262,13 +2262,16 @@ fn App() -> impl IntoView {
         <div class="app" class:app-hidden=move || show_projects.get() on:contextmenu=on_context_menu>
         <aside class="sidebar" class:collapsed=move || !show_sidebar.get()>
             <div class="brand">
-                <span class="brand-name">"Wisp Science"</span>
+                <span class="brand-name" title=move || t(locale.get(), "sidebar.back_projects")
+                    on:click=move |_| { demo_mode.set(false); show_projects.set(true); }>"Wisp Science"</span>
                 <span class="brand-beta">"Beta"</span>
+                <span class="spacer"></span>
+                <button class="icon-btn" title=move || t(locale.get(), "sidebar.back_projects")
+                    on:click=move |_| { demo_mode.set(false); show_projects.set(true); }><span class="gi grid"></span></button>
                 <button class="icon-btn" title=move || t(locale.get(), "sidebar.collapse") on:click=move |_| show_sidebar.set(false)>"‹"</button>
             </div>
             <button class="proj-switch" on:click=move |_| { demo_mode.set(false); show_projects.set(true); }>
                 <span class="proj-name">{move || if demo_mode.get() { t(locale.get(), "projects.example").to_string() } else { project_info.get().map(|p| p.name.clone()).unwrap_or_else(|| "wisp-science".into()) }}</span>
-                <span class="caret">"▾"</span>
             </button>
             <nav class="nav">
                 <button class="side-btn primary" on:click=new_session><span class="gi plus"></span>{move || t(locale.get(), "sidebar.new_session")}</button>
