@@ -513,7 +513,7 @@ struct OnboardingState {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum RightTab { Artifacts, File, Provenance }
+enum RightTab { Artifacts, File, Provenance, Hosts }
 
 fn join_path(base: &str, name: &str) -> String {
     if base == "." || base.is_empty() { name.to_string() }
@@ -1301,6 +1301,7 @@ fn compose_icon(kind: &str) -> impl IntoView {
         "folder" => view! { <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/> }.into_view(),
         "review" => view! { <circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18Z" fill="currentColor" stroke="none"/> }.into_view(),
         "skill" => view! { <path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/> }.into_view(),
+        "server" => view! { <rect x="3" y="4" width="18" height="7" rx="1"/><rect x="3" y="13" width="18" height="7" rx="1"/><circle cx="7" cy="7.5" r="0.5" fill="currentColor"/><circle cx="7" cy="16.5" r="0.5" fill="currentColor"/> }.into_view(),
         _ => view! { <path d="M9 18l6-6-6-6"/> }.into_view(), // chevron
     };
     let size = if kind == "chevron" { "16" } else { "18" };
@@ -2177,6 +2178,7 @@ fn App() -> impl IntoView {
 
     let ctx_menu = create_rw_signal::<Option<CtxMenu>>(None);
     let compose_menu_open = create_rw_signal(false);
+    let compute_menu_open = create_rw_signal(false);
     let ssh_hosts = create_rw_signal::<Vec<SshHost>>(vec![]);
     let show_add_host = create_rw_signal(false);
     let config_aliases = create_rw_signal::<Vec<String>>(vec![]);
@@ -2585,6 +2587,48 @@ fn App() -> impl IntoView {
                                     </div>
                                 </div>
                             })}
+                            <button type="button" class="composer-compute"
+                                class:active=move || compute_menu_open.get()
+                                title=move || t(locale.get(), "compute.button")
+                                on:click=move |_| compute_menu_open.update(|o| *o = !*o)>
+                                {compose_icon("server")}
+                            </button>
+                            {move || compute_menu_open.get().then(|| view! {
+                                <div class="compose-backdrop" on:click=move |_| compute_menu_open.set(false)></div>
+                                <div class="compose-menu compute-menu">
+                                    <button type="button" class="compose-item" on:click=move |_| {
+                                        compute_menu_open.set(false);
+                                        show_add_host.set(true);
+                                        spawn_local(async move {
+                                            let v = invoke("list_ssh_config_aliases", JsValue::UNDEFINED).await;
+                                            if let Ok(a) = serde_wasm_bindgen::from_value::<Vec<String>>(v) { config_aliases.set(a); }
+                                        });
+                                    }>
+                                        <span class="compose-item-icon">{compose_icon("server")}</span>
+                                        <span class="compose-item-text">
+                                            <span class="compose-item-label">{move || t(locale.get(), "compute.add_host")}</span>
+                                        </span>
+                                    </button>
+                                    <div class="compose-group">
+                                        <div class="compose-group-label">{move || t(locale.get(), "hosts.title")}</div>
+                                        {move || {
+                                            let hs = ssh_hosts.get();
+                                            if hs.is_empty() {
+                                                view! { <div class="compose-item-sub" style="padding:6px 18px">{move || t(locale.get(), "compute.none")}</div> }.into_view()
+                                            } else {
+                                                hs.into_iter().map(|h| view! {
+                                                    <button type="button" class="compose-item" on:click=move |_| {
+                                                        compute_menu_open.set(false); right_tab.set(RightTab::Hosts); show_right.set(true);
+                                                    }>
+                                                        <span class="compose-item-icon">{compose_icon("server")}</span>
+                                                        <span class="compose-item-text"><span class="compose-item-label">{h.alias.clone()}</span></span>
+                                                    </button>
+                                                }.into_view()).collect_view()
+                                            }
+                                        }}
+                                    </div>
+                                </div>
+                            })}
                         </div>
                         <div class="composer-buttons">
                             {move || busy.get().then(|| view! {
@@ -2745,6 +2789,7 @@ fn App() -> impl IntoView {
                                 }.into_view()
                             }
                         }
+                        RightTab::Hosts => view!{}.into_view(),
                     }}
                 </div>
             </section>
