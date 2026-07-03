@@ -2693,7 +2693,6 @@ fn App() -> impl IntoView {
                                 on:click=move |_| compose_menu_open.update(|o| *o = !*o)>
                                 <span class="gi plus"></span>
                             </button>
-                            <span class="composer-hint">{move || t(locale.get(), "composer.hint")}</span>
                             {move || compose_menu_open.get().then(|| view! {
                                 <div class="compose-backdrop" on:click=move |_| compose_menu_open.set(false)></div>
                                 <div class="compose-menu">
@@ -2763,6 +2762,7 @@ fn App() -> impl IntoView {
                                 on:click=move |_| compute_menu_open.update(|o| *o = !*o)>
                                 {compose_icon("server")}
                             </button>
+                            <span class="composer-hint">{move || t(locale.get(), "composer.hint")}</span>
                             {move || compute_menu_open.get().then(|| view! {
                                 <div class="compose-backdrop" on:click=move |_| compute_menu_open.set(false)></div>
                                 <div class="compose-menu compute-menu">
