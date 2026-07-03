@@ -1397,6 +1397,13 @@ pub fn run() {
             };
             app.manage(state);
             set_dev_flag(app.handle());
+            // dev runs the bare debug binary, which doesn't grab focus on macOS —
+            // pull the window to the front so it doesn't hide behind the terminal.
+            // release launches from the .app bundle and activates normally.
+            #[cfg(debug_assertions)]
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.set_focus();
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
