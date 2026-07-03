@@ -706,16 +706,22 @@ async fn create_project(state: State<'_, AppState>, name: String, workspace_dir:
 async fn open_project(state: State<'_, AppState>, id: String) -> Result<ProjectSummary, String> {
     let (name, ws) = state.store.get_project(&id).await.map_err(|e| format!("{e}"))?
         .ok_or_else(|| "Project not found".to_string())?;
-    // Interrupt any running turn and drop the cached agent so the next
-    // send_message rebuilds against the new project (mirrors new_session; #11/#15).
+    // Interrupt any running turn and hold the agent lock across the whole
+    // project swap (mirrors new_session; #11/#15). Holding the lock the entire
+    // time — not just for the `= None` reset — closes a race where a concurrent
+    // send_message snapshots `active` (old project) before taking this same
+    // lock, finds the agent empty, and runs a turn against the old root while
+    // we swap `active` underneath it.
     state.cancel.store(true, Ordering::Relaxed);
-    { let mut a = state.agent.lock().await; *a = None; }
+    let mut guard = state.agent.lock().await;
+    *guard = None;
     let root = ensure_writable(PathBuf::from(&ws), &state.app_data);
     let skills = Arc::new(SkillIndex::load(&skill_paths(&root)));
     let memory = Arc::new(MemoryManager::new(&root));
     { *state.active.write().unwrap() = ActiveProject { id: id.clone(), root: root.clone(), skills, memory }; }
     { *state.session.lock().await = SessionState { frame_id: None, last_seq: 0 }; }
     state.cancel.store(false, Ordering::Relaxed);
+    drop(guard);
     { state.bootstrap.lock().unwrap().workspace = root.to_string_lossy().into_owned(); }
     let _ = state.store.set_setting("active_project_id", &id).await;
     let _ = state.store.create_project(&id, &name, &ws).await; // touch updated_at → sorts to top
@@ -1159,10 +1165,10 @@ fn unique_upload_path(root: &std::path::Path, dir: &str, name: &str) -> std::pat
 
 async fn register_artifact_at(
     state: &AppState,
+    ap: &ActiveProject,
     path: String,
     content_type: Option<String>,
 ) -> Result<ArtifactInfo, String> {
-    let ap = state.active();
     let real = wisp_tools::safety::validate_file_path(&ap.root, &path)?;
     let mut sess = state.session.lock().await;
     let frame_id = ensure_frame(&state.store, &ap.id, &mut sess).await.map_err(|e| format!("{e}"))?;
@@ -1199,7 +1205,7 @@ async fn upload_file(
         .strip_prefix(&ap.root)
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_else(|_| dest.to_string_lossy().into_owned());
-    register_artifact_at(&state, rel, None).await
+    register_artifact_at(&state, &ap, rel, None).await
 }
 
 #[tauri::command]
@@ -1208,7 +1214,8 @@ async fn register_artifact(
     path: String,
     content_type: Option<String>,
 ) -> Result<ArtifactInfo, String> {
-    register_artifact_at(&state, path, content_type).await
+    let ap = state.active();
+    register_artifact_at(&state, &ap, path, content_type).await
 }
 
 /// Tell the webview whether we're in dev (keep native context menu / DevTools).

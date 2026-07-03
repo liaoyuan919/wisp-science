@@ -451,8 +451,8 @@ struct ProjectSummary {
 
 #[derive(Clone, Deserialize)]
 struct RecentSession {
-    #[allow(dead_code)] id: String,
-    #[allow(dead_code)] project_id: String,
+    id: String,
+    project_id: String,
     title: String,
     #[allow(dead_code)] ts: i64,
 }
@@ -1413,7 +1413,7 @@ fn ToolBlock(name: String, ok: Option<bool>, input: String, output: String) -> i
 }
 
 #[component]
-fn ProjectsScreen(locale: RwSignal<Locale>, on_open: Callback<String>) -> impl IntoView {
+fn ProjectsScreen(locale: RwSignal<Locale>, on_open: Callback<String>, on_open_session: Callback<(String, String)>) -> impl IntoView {
     let projects = create_rw_signal(Vec::<ProjectSummary>::new());
     let recent = create_rw_signal(Vec::<RecentSession>::new());
     let creating = create_rw_signal(false);
@@ -1519,8 +1519,13 @@ fn ProjectsScreen(locale: RwSignal<Locale>, on_open: Callback<String>) -> impl I
                 </div>
                 <div class="projects-col">
                     <h2>{move || t(locale.get(), "projects.recent")}</h2>
-                    {move || recent.get().into_iter().map(|s| view! {
-                        <div class="proj-card"><div class="pc-name">{s.title}</div></div>
+                    {move || recent.get().into_iter().map(|s| {
+                        let (pid, sid) = (s.project_id.clone(), s.id.clone());
+                        view! {
+                            <div class="proj-card" on:click=move |_| on_open_session.call((pid.clone(), sid.clone()))>
+                                <div class="pc-name">{s.title.clone()}</div>
+                            </div>
+                        }
                     }).collect_view()}
                 </div>
             </div>
@@ -2223,7 +2228,24 @@ fn App() -> impl IntoView {
                     }
                 });
             });
-            view! { <ProjectsScreen locale=locale on_open=open /> }
+            let open_session = load_session.clone();
+            let on_open_session = Callback::new(move |(project_id, session_id): (String, String)| {
+                show_projects.set(false);
+                let open_session = open_session.clone();
+                spawn_local(async move {
+                    let arg = to_value(&serde_json::json!({ "id": project_id })).unwrap();
+                    let _ = invoke("open_project", arg).await;
+                    // Project swap must land before loading the session (it switches
+                    // the backend's active project + session frame out from under us).
+                    open_session.call(session_id);
+                    refresh_sessions(sessions);
+                    let v = invoke("get_project_info", JsValue::UNDEFINED).await;
+                    if let Ok(p) = serde_wasm_bindgen::from_value::<ProjectInfo>(v) {
+                        project_info.set(Some(p));
+                    }
+                });
+            });
+            view! { <ProjectsScreen locale=locale on_open=open on_open_session=on_open_session /> }
         })}
         <div class="app" class:app-hidden=move || show_projects.get() on:contextmenu=on_context_menu>
         <aside class="sidebar" class:collapsed=move || !show_sidebar.get()>
