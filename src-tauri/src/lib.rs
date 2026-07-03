@@ -13,6 +13,7 @@ use wisp_skills::SkillIndex;
 use wisp_store::Store;
 
 mod review;
+mod ssh_hosts;
 mod seed;
 
 /// One streamed agent event, tagged for the frontend to match on.
