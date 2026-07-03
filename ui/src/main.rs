@@ -2666,6 +2666,10 @@ fn App() -> impl IntoView {
                             tab_count(locale.get(), "right.provenance", n)
                         }}
                     </button>
+                    <button class="rp-tab" class:active=move || right_tab.get() == RightTab::Hosts
+                        on:click=move |_| right_tab.set(RightTab::Hosts)>
+                        {move || t(locale.get(), "hosts.title")}
+                    </button>
                     <div class="spacer"></div>
                     <button class="icon-btn" title=move || t(locale.get(), "right.close") on:click=move |_| show_right.set(false)>"×"</button>
                 </div>
@@ -2794,7 +2798,54 @@ fn App() -> impl IntoView {
                                 }.into_view()
                             }
                         }
-                        RightTab::Hosts => view!{}.into_view(),
+                        RightTab::Hosts => {
+                            let loc = locale.get();
+                            let hs = ssh_hosts.get();
+                            view! {
+                                <div class="rp-hosts">
+                                    <button type="button" class="rp-empty-action" style="margin:10px"
+                                        on:click=move |_| {
+                                            show_add_host.set(true);
+                                            spawn_local(async move {
+                                                let v = invoke("list_ssh_config_aliases", JsValue::UNDEFINED).await;
+                                                if let Ok(a) = serde_wasm_bindgen::from_value::<Vec<String>>(v) { config_aliases.set(a); }
+                                            });
+                                        }>{t(loc, "hosts.add")}</button>
+                                    {if hs.is_empty() {
+                                        view! { <div class="rp-empty"><div class="rp-empty-title">{t(loc, "hosts.empty")}</div></div> }.into_view()
+                                    } else {
+                                        hs.into_iter().map(|h| {
+                                            let alias = h.alias.clone();
+                                            let conn = {
+                                                let mut c = String::new();
+                                                if let Some(u) = &h.user { c.push_str(u); c.push('@'); }
+                                                c.push_str(&h.alias);
+                                                if let Some(p) = h.port { c.push_str(&format!(":{p}")); }
+                                                c
+                                            };
+                                            view! {
+                                                <div class="host-card">
+                                                    <div class="host-card-head">
+                                                        <span class="host-card-alias">{h.alias.clone()}</span>
+                                                        <button type="button" class="host-card-remove"
+                                                            on:click=move |_| {
+                                                                let alias = alias.clone();
+                                                                let arg = to_value(&serde_json::json!({ "alias": alias })).unwrap();
+                                                                spawn_local(async move {
+                                                                    let v = invoke("remove_ssh_host", arg).await;
+                                                                    if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<SshHost>>(v) { ssh_hosts.set(list); }
+                                                                });
+                                                            }>"×"</button>
+                                                    </div>
+                                                    <div class="host-card-conn">{conn}</div>
+                                                    {h.notes.clone().map(|n| view! { <div class="host-card-notes">{n}</div> })}
+                                                </div>
+                                            }
+                                        }).collect_view()
+                                    }}
+                                </div>
+                            }.into_view()
+                        }
                     }}
                 </div>
             </section>
