@@ -92,6 +92,30 @@ struct MemoryFile {
     bytes: u64,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum McpTransport {
+    Stdio {
+        command: String,
+        #[serde(default)] args: Vec<String>,
+        #[serde(default)] env: Vec<(String, String)>,
+        #[serde(default)] cwd: Option<String>,
+    },
+    Http {
+        url: String,
+        #[serde(default)] headers: Vec<(String, String)>,
+    },
+}
+
+/// A user-configured MCP server connection. Not yet wired into the agent (see C2).
+#[derive(Serialize, Deserialize, Clone)]
+struct McpConnection {
+    id: String,
+    name: String,
+    enabled: bool,
+    transport: McpTransport,
+}
+
 #[derive(Serialize, Clone)]
 struct Capabilities {
     skills: Vec<SkillInfo>,
@@ -414,6 +438,35 @@ async fn save_disabled_skills(store: &Store, set: &HashSet<String>) -> Result<()
     v.sort();
     let json = serde_json::to_string(&v).map_err(|e| format!("{e}"))?;
     store.set_setting("disabled_skills", &json).await.map_err(|e| format!("{e}"))
+}
+
+// ponytail: not called yet — C2 wires these into the agent/MCP flow.
+#[allow(dead_code)]
+async fn load_mcp_connections(store: &Store) -> Vec<McpConnection> {
+    store.get_setting("mcp_connections").await.ok().flatten()
+        .and_then(|s| serde_json::from_str::<Vec<McpConnection>>(&s).ok())
+        .unwrap_or_default()
+}
+
+// ponytail: not called yet — C2 wires these into the agent/MCP flow.
+#[allow(dead_code)]
+async fn save_mcp_connections(store: &Store, conns: &[McpConnection]) -> Result<(), String> {
+    let json = serde_json::to_string(conns).map_err(|e| format!("{e}"))?;
+    store.set_setting("mcp_connections", &json).await.map_err(|e| format!("{e}"))
+}
+
+// ponytail: not called yet — C2 wires these into the agent/MCP flow.
+#[allow(dead_code)]
+async fn load_bio_tools_enabled(store: &Store) -> bool {
+    store.get_setting("bio_tools_enabled").await.ok().flatten()
+        .and_then(|s| serde_json::from_str::<bool>(&s).ok())
+        .unwrap_or(true)
+}
+
+// ponytail: not called yet — C2 wires these into the agent/MCP flow.
+#[allow(dead_code)]
+async fn save_bio_tools_enabled(store: &Store, on: bool) -> Result<(), String> {
+    store.set_setting("bio_tools_enabled", &on.to_string()).await.map_err(|e| format!("{e}"))
 }
 
 fn default_api_url(provider: &str) -> &'static str {
@@ -1704,5 +1757,27 @@ mod tests {
             set_dir
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    use super::{McpConnection, McpTransport};
+
+    #[test]
+    fn mcp_connection_serde_roundtrip() {
+        let stdio = McpConnection {
+            id: "1".into(), name: "local".into(), enabled: true,
+            transport: McpTransport::Stdio { command: "python".into(), args: vec!["s.py".into()], env: vec![("K".into(),"V".into())], cwd: None },
+        };
+        let http = McpConnection {
+            id: "2".into(), name: "remote".into(), enabled: false,
+            transport: McpTransport::Http { url: "https://x/mcp".into(), headers: vec![("Authorization".into(),"Bearer t".into())] },
+        };
+        for c in [stdio, http] {
+            let json = serde_json::to_string(&c).unwrap();
+            let back: McpConnection = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        }
+        // tag shape
+        let j = serde_json::to_value(&McpConnection { id:"3".into(), name:"n".into(), enabled:true, transport: McpTransport::Http{ url:"u".into(), headers: vec![] } }).unwrap();
+        assert_eq!(j["transport"]["kind"], "http");
     }
 }
