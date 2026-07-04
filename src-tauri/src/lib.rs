@@ -3112,6 +3112,14 @@ fn get_bootstrap_status(state: State<'_, AppState>) -> BootstrapStatus {
 }
 
 #[tauri::command]
+fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn check_for_updates() -> Result<String, String> {
     Ok("In-app auto-update is disabled until release signing is configured. Download new builds from GitHub Releases.".into())
 }
@@ -3250,6 +3258,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             if let Ok(res) = app.path().resource_dir() {
                 wisp_paths::set_resource_root(res);
@@ -3409,6 +3418,7 @@ pub fn run() {
             dismiss_onboarding,
             get_bootstrap_status,
             check_for_updates,
+            open_external_url,
             list_mcp_connections,
             add_mcp_connection,
             update_mcp_connection,

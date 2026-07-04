@@ -211,6 +211,9 @@ export function tauriMock(): void {
             }, 50);
             return fid;
           }
+          case "open_external_url":
+            if (arg("url")) window.open(String(arg("url")), "_blank", "noopener,noreferrer");
+            return null;
           default:
             return null;
         }
@@ -292,6 +295,9 @@ export function parallelMock(): void {
             await current;
             return fid;
           }
+          case "open_external_url":
+            if (arg("url")) window.open(String(arg("url")), "_blank", "noopener,noreferrer");
+            return null;
           default: return null;
         }
       },

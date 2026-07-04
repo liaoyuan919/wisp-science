@@ -60,3 +60,12 @@ pub(crate) fn schedule_highlight(id: String) {
         let _ = highlight_by_id(&id).await;
     });
 }
+
+/// Open an http(s)/mailto/tel link in the OS default handler (not the app webview).
+pub(crate) fn open_external_url(url: String) {
+    spawn_local(async move {
+        let args = serde_wasm_bindgen::to_value(&serde_json::json!({ "url": url }))
+            .unwrap_or(JsValue::UNDEFINED);
+        let _ = invoke("open_external_url", args).await;
+    });
+}

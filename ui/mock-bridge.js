@@ -178,6 +178,11 @@
             }, 80);
             return fid;
           }
+          case "check_for_updates":
+            return "mock: up to date";
+          case "open_external_url":
+            if (args?.url) window.open(args.url, "_blank", "noopener,noreferrer");
+            return null;
           default:
             return null;
         }

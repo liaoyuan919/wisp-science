@@ -137,6 +137,15 @@ pub(crate) fn is_external_href(href: &str) -> bool {
         || h.starts_with("javascript:")
 }
 
+/// Hrefs that should open in the system browser / mail client, not in the webview.
+pub(crate) fn opens_in_system_browser(href: &str) -> bool {
+    let h = href.trim();
+    h.starts_with("http://")
+        || h.starts_with("https://")
+        || h.starts_with("mailto:")
+        || h.starts_with("tel:")
+}
+
 pub(crate) fn extract_href_from_tag(tag: &str) -> Option<String> {
     let lower = tag.to_ascii_lowercase();
     let i = lower.find("href=")?;

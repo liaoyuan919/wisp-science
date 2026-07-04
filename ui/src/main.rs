@@ -6,8 +6,8 @@ mod text;
 
 use bindings::{
     attach_chat_autoscroll, force_chat_bottom, invoke, invoke_checked, invoke_timeout, listen,
-    mount_preview, schedule_chat_follow, schedule_highlight, upload_files, upload_input_files,
-    CHAT_SCROLLER_ID, CHAT_THREAD_ID,
+    mount_preview, open_external_url, schedule_chat_follow, schedule_highlight, upload_files,
+    upload_input_files, CHAT_SCROLLER_ID, CHAT_THREAD_ID,
 };
 use context_menu::{ContextMenuPortal, CtxMenu};
 use dto::*;
@@ -18,7 +18,7 @@ use text::{
     dom_value, event_target_checked, event_target_input, event_target_value, extract_href_from_tag,
     fasta_seq_count, file_kind, format_bytes, html_escape, is_external_href, is_separator,
     is_table_row, join_path, md_inline_to_html, md_to_html, next_artifact_id, normalize_path,
-    parent_path, parse_csv_line, provider_defaults, provider_value, split_row, tool_lang,
+    opens_in_system_browser, parent_path, parse_csv_line, provider_defaults, provider_value, split_row, tool_lang,
     unique_dom_id,
 };
 use serde_wasm_bindgen::to_value;
@@ -724,6 +724,12 @@ fn handle_md_click(
         }
         if n.tag_name().eq_ignore_ascii_case("a") {
             if let Some(href) = n.get_attribute("href") {
+                if opens_in_system_browser(&href) {
+                    ev.prevent_default();
+                    ev.stop_propagation();
+                    open_external_url(href);
+                    return;
+                }
                 if !is_external_href(&href) {
                     ev.prevent_default();
                     ev.stop_propagation();
