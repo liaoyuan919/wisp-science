@@ -188,6 +188,14 @@ struct SessionInfo {
     id: String,
     title: String,
     ts: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    folder_id: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+struct FolderInfo {
+    id: String,
+    name: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -1455,8 +1463,83 @@ async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionInfo>, S
         .map_err(|e| format!("{e}"))?;
     Ok(rows
         .into_iter()
-        .map(|(id, title, ts)| SessionInfo { id, title, ts })
+        .map(|(id, title, ts, folder_id)| SessionInfo {
+            id,
+            title,
+            ts,
+            folder_id,
+        })
         .collect())
+}
+
+#[tauri::command]
+async fn list_folders(state: State<'_, AppState>) -> Result<Vec<FolderInfo>, String> {
+    let ap = state.active();
+    let rows = state
+        .store
+        .list_folders(&ap.id)
+        .await
+        .map_err(|e| format!("{e}"))?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, name, _)| FolderInfo { id, name })
+        .collect())
+}
+
+#[tauri::command]
+async fn create_folder(state: State<'_, AppState>, name: String) -> Result<FolderInfo, String> {
+    let ap = state.active();
+    let id = Uuid::new_v4().to_string();
+    state
+        .store
+        .create_folder(&id, &ap.id, &name)
+        .await
+        .map_err(|e| format!("{e}"))?;
+    Ok(FolderInfo {
+        id,
+        name: name.trim().to_string(),
+    })
+}
+
+#[tauri::command]
+async fn rename_folder(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> Result<(), String> {
+    let ap = state.active();
+    state
+        .store
+        .rename_folder(&id, &ap.id, &name)
+        .await
+        .map_err(|e| format!("{e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_folder(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let ap = state.active();
+    state
+        .store
+        .delete_folder(&id, &ap.id)
+        .await
+        .map_err(|e| format!("{e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn move_session(
+    state: State<'_, AppState>,
+    id: String,
+    folder_id: Option<String>,
+) -> Result<(), String> {
+    let ap = state.active();
+    state
+        .store
+        .move_session_to_folder(&id, &ap.id, folder_id.as_deref())
+        .await
+        .map_err(|e| format!("{e}"))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2916,6 +2999,11 @@ pub fn run() {
             list_sessions,
             delete_session,
             rename_session,
+            list_folders,
+            create_folder,
+            rename_folder,
+            delete_folder,
+            move_session,
             list_recent_sessions,
             list_projects,
             pick_directory,

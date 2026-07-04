@@ -12,6 +12,15 @@ CREATE TABLE IF NOT EXISTS projects (
     updated_at    INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS folders (
+    id         TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_folders_project ON folders(project_id);
+
 CREATE TABLE IF NOT EXISTS frames (
     id              TEXT PRIMARY KEY,
     parent_frame_id TEXT REFERENCES frames(id) ON DELETE SET NULL,
@@ -19,6 +28,7 @@ CREATE TABLE IF NOT EXISTS frames (
     agent_name      TEXT NOT NULL,
     status          TEXT NOT NULL,
     project_id      TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    folder_id       TEXT REFERENCES folders(id) ON DELETE SET NULL,
     model           TEXT,
     input_tokens    INTEGER,
     output_tokens   INTEGER,
@@ -28,6 +38,7 @@ CREATE TABLE IF NOT EXISTS frames (
 );
 CREATE INDEX IF NOT EXISTS ix_frames_project_id ON frames(project_id);
 CREATE INDEX IF NOT EXISTS ix_frames_root ON frames(root_frame_id);
+CREATE INDEX IF NOT EXISTS ix_frames_folder ON frames(folder_id);
 
 CREATE TABLE IF NOT EXISTS messages (
     id          TEXT PRIMARY KEY,

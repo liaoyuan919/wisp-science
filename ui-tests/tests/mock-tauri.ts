@@ -67,6 +67,13 @@ export function tauriMock(): void {
             return demo;
           case "list_sessions":
             return [];
+          case "list_folders":
+            return [];
+          case "create_folder":
+          case "rename_folder":
+          case "delete_folder":
+          case "move_session":
+            return null;
           case "list_projects":
             return [{ id: "default", name: project.name, workspace_dir: project.root, session_count: 0, updated_at: 1, running_count: 0, needs_you_count: 0 }];
           case "list_recent_sessions":

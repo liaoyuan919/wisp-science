@@ -712,6 +712,33 @@ fn refresh_sessions(sessions: RwSignal<Vec<SessionInfo>>) {
     });
 }
 
+fn refresh_folders(folders: RwSignal<Vec<FolderInfo>>) {
+    spawn_local(async move {
+        let v = invoke("list_folders", JsValue::UNDEFINED).await;
+        if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<FolderInfo>>(v) {
+            folders.set(list);
+        }
+    });
+}
+
+fn bucket_sessions_by_date(list: &[SessionInfo]) -> (Vec<SessionInfo>, Vec<SessionInfo>) {
+    let now_ms = js_sys::Date::now();
+    let (mut today, mut earlier) = (Vec::new(), Vec::new());
+    for s in list {
+        let ts_ms = if s.ts > 1_000_000_000_000 {
+            s.ts as f64
+        } else {
+            s.ts as f64 * 1000.0
+        };
+        if s.ts > 0 && ts_ms >= now_ms - 86_400_000.0 {
+            today.push(s.clone());
+        } else {
+            earlier.push(s.clone());
+        }
+    }
+    (today, earlier)
+}
+
 // --- Artifact detection (Markdown tables + fenced CSV) -----------------------
 
 /// Segment assistant text into plain-text and rendered Markdown-table chunks.
@@ -1570,8 +1597,13 @@ fn App() -> impl IntoView {
 
     // Session history (left sidebar).
     let sessions = create_rw_signal::<Vec<SessionInfo>>(vec![]);
+    let folders = create_rw_signal::<Vec<FolderInfo>>(vec![]);
+    let collapsed_folders = create_rw_signal::<HashSet<String>>(HashSet::new());
+    let drag_session = create_rw_signal::<Option<String>>(None);
+    let drop_target = create_rw_signal::<Option<String>>(None);
     let active_session = create_rw_signal::<Option<String>>(None);
     refresh_sessions(sessions);
+    refresh_folders(folders);
 
     // `busy` is "the active session is currently streaming" — derived from the
     // per-session `running` set so it stays correct when the user switches
@@ -2466,7 +2498,49 @@ fn App() -> impl IntoView {
         let pending_turns = pending_turns;
         let rename_session_target = rename_session_target;
         let rename_session_input = rename_session_input;
+        let folders = folders;
         Callback::new(move |(action, payload): (String, String)| {
+            if let Some(act) = context_menu::folder_action(&action, &payload) {
+                match act {
+                    context_menu::FolderAction::Rename { id, name: _ } => {
+                        let loc = locale.get();
+                        let new_name = web_sys::window()
+                            .and_then(|w| w.prompt_with_message(&t(loc, "folder.rename_prompt")).ok())
+                            .flatten();
+                        let Some(new_name) = new_name else { return };
+                        if new_name.trim().is_empty() {
+                            return;
+                        }
+                        let folders = folders;
+                        let fid = id.clone();
+                        spawn_local(async move {
+                            let arg = to_value(&serde_json::json!({ "id": fid, "name": new_name.trim() })).unwrap();
+                            if invoke_checked("rename_folder", arg).await.is_ok() {
+                                refresh_folders(folders);
+                            }
+                        });
+                    }
+                    context_menu::FolderAction::Delete(id) => {
+                        let loc = locale.get();
+                        let ok = web_sys::window()
+                            .and_then(|w| w.confirm_with_message(&t(loc, "folder.delete_confirm")).ok())
+                            .unwrap_or(false);
+                        if !ok {
+                            return;
+                        }
+                        let folders = folders;
+                        let sessions = sessions;
+                        spawn_local(async move {
+                            let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
+                            if invoke_checked("delete_folder", arg).await.is_ok() {
+                                refresh_folders(folders);
+                                refresh_sessions(sessions);
+                            }
+                        });
+                    }
+                }
+                return;
+            }
             if let Some(act) = context_menu::session_action(&action, &payload) {
                 match act {
                     context_menu::SessionAction::Open(id) => open_session.call(id),
@@ -2585,7 +2659,9 @@ fn App() -> impl IntoView {
             let _ = invoke("open_project", arg).await;
             items.set(vec![]);
             active_session.set(None);
+            collapsed_folders.set(HashSet::new());
             refresh_sessions(sessions);
+            refresh_folders(folders);
             let v = invoke("get_project_info", JsValue::UNDEFINED).await;
             if let Ok(p) = serde_wasm_bindgen::from_value::<ProjectInfo>(v) { project_info.set(Some(p)); }
         });
@@ -2629,6 +2705,39 @@ fn App() -> impl IntoView {
         });
     };
 
+    let move_session_to = {
+        let sessions = sessions;
+        Callback::new(move |(session_id, folder_id): (String, Option<String>)| {
+            spawn_local(async move {
+                let arg = to_value(&serde_json::json!({ "id": session_id, "folder_id": folder_id })).unwrap();
+                if invoke_checked("move_session", arg).await.is_ok() {
+                    refresh_sessions(sessions);
+                }
+            });
+        })
+    };
+
+    let new_folder = {
+        let locale = locale;
+        let folders = folders;
+        move |_| {
+            let loc = locale.get();
+            let name = web_sys::window()
+                .and_then(|w| w.prompt_with_message(&t(loc, "folder.new_prompt")).ok())
+                .flatten();
+            let Some(name) = name else { return };
+            if name.trim().is_empty() {
+                return;
+            }
+            spawn_local(async move {
+                let arg = to_value(&serde_json::json!({ "name": name.trim() })).unwrap();
+                if invoke_checked("create_folder", arg).await.is_ok() {
+                    refresh_folders(folders);
+                }
+            });
+        }
+    };
+
     view! {
         {move || show_projects.get().then(|| {
             let open = Callback::new(move |id: String| {
@@ -2641,7 +2750,9 @@ fn App() -> impl IntoView {
                     // its project info + session list (reuses the existing helpers).
                     items.set(vec![]);
                     active_session.set(None);
+                    collapsed_folders.set(HashSet::new());
                     refresh_sessions(sessions);
+                    refresh_folders(folders);
                     let v = invoke("get_project_info", JsValue::UNDEFINED).await;
                     if let Ok(p) = serde_wasm_bindgen::from_value::<ProjectInfo>(v) {
                         project_info.set(Some(p));
@@ -2722,6 +2833,7 @@ fn App() -> impl IntoView {
             })}
             <nav class="nav">
                 <button class="side-btn primary" on:click=new_session><span class="gi plus"></span>{move || t(locale.get(), "sidebar.new_session")}</button>
+                <button class="side-btn" on:click=new_folder><span class="gi folder"></span>{move || t(locale.get(), "sidebar.new_folder")}</button>
                 <button class="side-btn" on:click=open_files><span class="gi doc"></span>{move || t(locale.get(), "sidebar.files")}</button>
             </nav>
             <div class="side-list">
@@ -2741,46 +2853,151 @@ fn App() -> impl IntoView {
                         }).collect_view();
                     }
                     let list = sessions.get();
-                    if list.is_empty() {
+                    let folder_list = folders.get();
+                    if list.is_empty() && folder_list.is_empty() {
                         return view! { <div class="side-hint">{t(loc, "sidebar.no_sessions")}</div> }.into_view();
                     }
+                    let dragging = drag_session.get();
+                    let dragging_for_make = dragging.clone();
                     let make = move |s: &SessionInfo| {
                         let id = s.id.clone();
                         let id_active = id.clone();
                         let id_attr = id.clone();
                         let id_running = id.clone();
+                        let id_drag = id.clone();
                         let title = if s.title.trim().is_empty() { t(loc, "sidebar.untitled").into() } else { s.title.clone() };
                         let title_attr = title.clone();
                         let open = load_session.clone();
+                        let is_dragging = dragging_for_make.as_deref() == Some(id_drag.as_str());
                         view! {
                             <button class="side-item ses"
                                 class:active=move || active_session.get().as_deref() == Some(id_active.as_str())
                                 class:running=move || running.get().contains(&id_running)
+                                class:dragging=is_dragging
+                                draggable="true"
                                 data-session-id=id_attr
                                 data-session-title=title_attr
-                                on:click=move |_| open.call(id.clone())>
+                                on:click=move |_| open.call(id.clone())
+                                on:dragstart=move |ev: web_sys::DragEvent| {
+                                    if let Some(dt) = ev.data_transfer() {
+                                        let _ = dt.set_effect_allowed("move");
+                                        let _ = dt.set_data("text/plain", &id_drag);
+                                    }
+                                    drag_session.set(Some(id_drag.clone()));
+                                }
+                                on:dragend=move |_| {
+                                    drag_session.set(None);
+                                    drop_target.set(None);
+                                }>
                                 <span class="dot"></span>
                                 <span class="ses-title">{title}</span>
                             </button>
                         }.into_view()
                     };
-                    // ponytail: bucket by 24h recency (Today / Earlier); calendar-day
-                    // grouping if session timestamps ever gain finer granularity.
-                    let now_ms = js_sys::Date::now();
-                    let (mut today, mut earlier) = (Vec::new(), Vec::new());
-                    for s in &list {
-                        let ts_ms = if s.ts > 1_000_000_000_000 { s.ts as f64 } else { s.ts as f64 * 1000.0 };
-                        if s.ts > 0 && ts_ms >= now_ms - 86_400_000.0 { today.push(s.clone()); }
-                        else { earlier.push(s.clone()); }
-                    }
+                    let ungrouped: Vec<SessionInfo> = list.iter()
+                        .filter(|s| s.folder_id.is_none())
+                        .cloned()
+                        .collect();
+                    let (today, earlier) = bucket_sessions_by_date(&ungrouped);
+                    let target = drop_target.get();
+                    let move_to = move_session_to.clone();
+                    let folder_views = folder_list.into_iter().map(|f| {
+                        let fid = f.id.clone();
+                        let fid_toggle = fid.clone();
+                        let fid_drop = fid.clone();
+                        let fid_target = format!("folder:{fid_drop}");
+                        let fid_target_over = fid_target.clone();
+                        let fid_target_leave = fid_target.clone();
+                        let fname = if f.name.trim().is_empty() {
+                            t(loc, "folder.untitled").into()
+                        } else {
+                            f.name.clone()
+                        };
+                        let fname_attr = fname.clone();
+                        let collapsed = collapsed_folders.get().contains(&fid_toggle);
+                        let in_folder: Vec<SessionInfo> = list.iter()
+                            .filter(|s| s.folder_id.as_deref() == Some(fid.as_str()))
+                            .cloned()
+                            .collect();
+                        let is_target = target.as_deref() == Some(fid_target.as_str());
+                        view! {
+                            <div class="side-folder-wrap">
+                                <div class="side-folder"
+                                    class:drop-target=is_target
+                                    data-folder-id=fid.clone()
+                                    data-folder-name=fname_attr
+                                    on:click=move |_| {
+                                        collapsed_folders.update(|set| {
+                                            if set.contains(&fid_toggle) { set.remove(&fid_toggle); }
+                                            else { set.insert(fid_toggle.clone()); }
+                                        });
+                                    }
+                                    on:dragover=move |ev: web_sys::DragEvent| {
+                                        ev.prevent_default();
+                                        if let Some(dt) = ev.data_transfer() { let _ = dt.set_drop_effect("move"); }
+                                        drop_target.set(Some(fid_target_over.clone()));
+                                    }
+                                    on:dragleave=move |_| {
+                                        if drop_target.get().as_deref() == Some(fid_target_leave.as_str()) {
+                                            drop_target.set(None);
+                                        }
+                                    }
+                                    on:drop=move |ev: web_sys::DragEvent| {
+                                        ev.prevent_default();
+                                        let sid = drag_session.get();
+                                        drag_session.set(None);
+                                        drop_target.set(None);
+                                        if let Some(id) = sid {
+                                            move_to.call((id, Some(fid_drop.clone())));
+                                        }
+                                    }>
+                                    <span class="side-folder-caret" class:collapsed=collapsed>"▾"</span>
+                                    <span class="gi folder"></span>
+                                    <span class="side-folder-name">{fname}</span>
+                                    <span class="side-folder-count">{in_folder.len()}</span>
+                                </div>
+                                {(!collapsed).then(|| view! {
+                                    <div class="side-folder-sessions">
+                                        {in_folder.iter().map(&make).collect_view()}
+                                    </div>
+                                })}
+                            </div>
+                        }
+                    }).collect_view();
+                    let ungrouped_target = target.as_deref() == Some("ungrouped");
                     view! {
-                        {(!today.is_empty()).then(|| view! {
-                            <div class="side-group-title">{t(loc, "sidebar.today")}</div>
-                            {today.iter().map(&make).collect_view()}
-                        })}
-                        {(!earlier.is_empty()).then(|| view! {
-                            <div class="side-group-title">{t(loc, "sidebar.earlier")}</div>
-                            {earlier.iter().map(&make).collect_view()}
+                        {folder_views}
+                        {( !ungrouped.is_empty() || dragging.is_some() ).then(|| view! {
+                            <div class="side-ungrouped"
+                                class:drop-target=ungrouped_target
+                                on:dragover=move |ev: web_sys::DragEvent| {
+                                    ev.prevent_default();
+                                    if let Some(dt) = ev.data_transfer() { let _ = dt.set_drop_effect("move"); }
+                                    drop_target.set(Some("ungrouped".into()));
+                                }
+                                on:dragleave=move |_| {
+                                    if drop_target.get().as_deref() == Some("ungrouped") {
+                                        drop_target.set(None);
+                                    }
+                                }
+                                on:drop=move |ev: web_sys::DragEvent| {
+                                    ev.prevent_default();
+                                    let sid = drag_session.get();
+                                    drag_session.set(None);
+                                    drop_target.set(None);
+                                    if let Some(id) = sid {
+                                        move_to.call((id, None));
+                                    }
+                                }>
+                                {(!today.is_empty()).then(|| view! {
+                                    <div class="side-group-title">{t(loc, "sidebar.today")}</div>
+                                    {today.iter().map(&make).collect_view()}
+                                })}
+                                {(!earlier.is_empty()).then(|| view! {
+                                    <div class="side-group-title">{t(loc, "sidebar.earlier")}</div>
+                                    {earlier.iter().map(&make).collect_view()}
+                                })}
+                            </div>
                         })}
                     }.into_view()
                 }}

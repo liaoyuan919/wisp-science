@@ -80,6 +80,12 @@ pub enum SessionAction {
     Rename { id: String, title: String },
 }
 
+#[derive(Clone, PartialEq)]
+pub enum FolderAction {
+    Rename { id: String, name: String },
+    Delete(String),
+}
+
 pub fn build(ev: &web_sys::MouseEvent, locale: Locale) -> Option<CtxMenu> {
     if dev_mode() {
         return None;
@@ -147,6 +153,29 @@ pub fn build(ev: &web_sys::MouseEvent, locale: Locale) -> Option<CtxMenu> {
         return Some(CtxMenu { x, y, items });
     }
 
+    if let Some(folder) = closest(&target, ".side-folder") {
+        let name = folder.get_attribute("data-folder-name").unwrap_or_default();
+        let id = folder.get_attribute("data-folder-id").unwrap_or_default();
+        if !id.is_empty() {
+            return Some(CtxMenu {
+                x,
+                y,
+                items: vec![
+                    item(
+                        "renameFolder",
+                        i18n::t(locale, "ctx.rename_folder"),
+                        format!("{id}\u{1e}{name}"),
+                    ),
+                    item(
+                        "deleteFolder",
+                        i18n::t(locale, "ctx.delete_folder"),
+                        id,
+                    ),
+                ],
+            });
+        }
+    }
+
     if let Some(tile) = closest(&target, ".rp-tile") {
         let name = tile.get_attribute("data-artifact-name").unwrap_or_default();
         if !name.is_empty() {
@@ -206,6 +235,20 @@ pub fn session_action(action: &str, payload: &str) -> Option<SessionAction> {
     }
 }
 
+pub fn folder_action(action: &str, payload: &str) -> Option<FolderAction> {
+    match action {
+        "renameFolder" if !payload.is_empty() => {
+            let (id, name) = payload.split_once('\u{1e}')?;
+            Some(FolderAction::Rename {
+                id: id.to_string(),
+                name: name.to_string(),
+            })
+        }
+        "deleteFolder" if !payload.is_empty() => Some(FolderAction::Delete(payload.to_string())),
+        _ => None,
+    }
+}
+
 #[component]
 pub fn ContextMenuPortal(
     menu: ReadSignal<Option<CtxMenu>>,
@@ -229,7 +272,7 @@ pub fn ContextMenuPortal(
                     {items.into_iter().map(|it| {
                         let action = it.action.clone();
                         let payload = it.payload.clone();
-                        let danger = action == "deleteSession";
+                        let danger = action == "deleteSession" || action == "deleteFolder";
                         view! {
                             <button
                                 type="button"
