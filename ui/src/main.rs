@@ -1640,6 +1640,7 @@ fn App() -> impl IntoView {
     let transcripts = create_rw_signal::<HashMap<String, Vec<ChatItem>>>(HashMap::new());
     let busy = create_rw_signal(false);
     let show_settings = create_rw_signal(false);
+    let settings_section = create_rw_signal("general");
     let settings = create_rw_signal(Settings::default());
     let api_key_input = create_rw_signal(String::new());
     let settings_busy = create_rw_signal(false);
@@ -3116,68 +3117,91 @@ fn App() -> impl IntoView {
 
         {move || show_settings.get().then(|| view! {
             <div class="overlay">
-                <div class="modal">
-                    <h2>{move || t(locale.get(), "settings.title")}</h2>
-                    <label>{move || t(locale.get(), "settings.language")}
-                        <select
-                            on:change=move|ev| {
-                                let code = dom_value(&ev);
-                                let loc = Locale::from_code(&code);
-                                locale.set(loc);
-                                set_document_lang(loc);
-                                settings.update(|s| s.locale = code);
-                            }
-                            prop:value=move || locale.get().code().to_string()>
-                            <option value="en">{move || t(locale.get(), "settings.language.en")}</option>
-                            <option value="zh">{move || t(locale.get(), "settings.language.zh")}</option>
-                        </select>
-                    </label>
-                    <label>{move || t(locale.get(), "settings.provider")}
-                        <select data-testid="settings-provider"
-                            on:input=move|ev| apply_provider_defaults(settings, dom_value(&ev))
-                            on:change=move|ev| apply_provider_defaults(settings, dom_value(&ev))
-                            prop:value={move || provider_value(&settings.get().provider).to_string()}>
-                            <option value="openai">{move || t(locale.get(), "settings.provider.openai")}</option>
-                            <option value="openai_responses">{move || t(locale.get(), "settings.provider.openai_responses")}</option>
-                            <option value="anthropic">{move || t(locale.get(), "settings.provider.anthropic")}</option>
-                        </select>
-                    </label>
-                    <label>{move || t(locale.get(), "settings.api_url")}
-                        <input on:input=move|ev| settings.update(|s| {
-                                normalize_settings_mut(s);
-                                s.api_url = event_target_input(&ev).value();
-                            })
-                            prop:value={move || settings.get().api_url} />
-                    </label>
-                    <label>{move || t(locale.get(), "settings.model")}
-                        <input on:input=move|ev| settings.update(|s| {
-                                normalize_settings_mut(s);
-                                s.model = event_target_input(&ev).value();
-                            })
-                            prop:value={move || settings.get().model} />
-                    </label>
-                    <label>{move || t(locale.get(), "settings.api_key")}
-                        <input on:input=move|ev| api_key_input.set(event_target_input(&ev).value())
-                            prop:value={move || api_key_input.get()} type="password" />
-                    </label>
-                    <label>{move || t(locale.get(), "settings.workspace_dir")}
-                        <input on:input=move|ev| settings.update(|s| {
-                                s.workspace_dir = event_target_input(&ev).value();
-                            })
-                            prop:value={move || settings.get().workspace_dir}
-                            placeholder=move || bootstrap.get().map(|b| b.workspace).unwrap_or_default() />
-                    </label>
-                    <span class="hint">{move || t(locale.get(), "settings.tip")}</span>
-                    {move || settings_message.get().map(|(ok, text)| view! {
-                        <div class="settings-status"
-                            class:ok=move || ok
-                            class:fail=move || !ok>{text}</div>
-                    })}
-                    <div class="row">
-                        <button type="button" disabled=move || settings_busy.get() on:click=check_updates>{move || t(locale.get(), "settings.check_updates")}</button>
-                        <button type="button" disabled=move || settings_busy.get() on:click=validate_settings>{move || t(locale.get(), "settings.validate")}</button>
-                        <button type="button" disabled=move || settings_busy.get() on:click=move |_| show_settings.set(false)>{move || t(locale.get(), "settings.cancel")}</button>
-                        <button type="button" class="primary" disabled=move || settings_busy.get() on:click=save_settings>{move || t(locale.get(), "settings.save")}</button>
+                <div class="modal settings-modal">
+                    <div class="settings-nav">
+                        <button class:active=move || settings_section.get()=="general"
+                            on:click=move |_| settings_section.set("general")>
+                            {move || t(locale.get(), "settings.nav.general")}</button>
+                        <button class:active=move || settings_section.get()=="skills"
+                            on:click=move |_| settings_section.set("skills")>
+                            {move || t(locale.get(), "settings.nav.skills")}</button>
+                        <button class:active=move || settings_section.get()=="connections"
+                            on:click=move |_| settings_section.set("connections")>
+                            {move || t(locale.get(), "settings.nav.connections")}</button>
+                    </div>
+                    <div class="settings-content">
+                        <h2>{move || t(locale.get(), "settings.title")}</h2>
+                        {move || (settings_section.get() == "general").then(|| view! {
+                            <div class="settings-pane">
+                                <label>{move || t(locale.get(), "settings.language")}
+                                    <select
+                                        on:change=move|ev| {
+                                            let code = dom_value(&ev);
+                                            let loc = Locale::from_code(&code);
+                                            locale.set(loc);
+                                            set_document_lang(loc);
+                                            settings.update(|s| s.locale = code);
+                                        }
+                                        prop:value=move || locale.get().code().to_string()>
+                                        <option value="en">{move || t(locale.get(), "settings.language.en")}</option>
+                                        <option value="zh">{move || t(locale.get(), "settings.language.zh")}</option>
+                                    </select>
+                                </label>
+                                <label>{move || t(locale.get(), "settings.provider")}
+                                    <select data-testid="settings-provider"
+                                        on:input=move|ev| apply_provider_defaults(settings, dom_value(&ev))
+                                        on:change=move|ev| apply_provider_defaults(settings, dom_value(&ev))
+                                        prop:value={move || provider_value(&settings.get().provider).to_string()}>
+                                        <option value="openai">{move || t(locale.get(), "settings.provider.openai")}</option>
+                                        <option value="openai_responses">{move || t(locale.get(), "settings.provider.openai_responses")}</option>
+                                        <option value="anthropic">{move || t(locale.get(), "settings.provider.anthropic")}</option>
+                                    </select>
+                                </label>
+                                <label>{move || t(locale.get(), "settings.api_url")}
+                                    <input on:input=move|ev| settings.update(|s| {
+                                            normalize_settings_mut(s);
+                                            s.api_url = event_target_input(&ev).value();
+                                        })
+                                        prop:value={move || settings.get().api_url} />
+                                </label>
+                                <label>{move || t(locale.get(), "settings.model")}
+                                    <input on:input=move|ev| settings.update(|s| {
+                                            normalize_settings_mut(s);
+                                            s.model = event_target_input(&ev).value();
+                                        })
+                                        prop:value={move || settings.get().model} />
+                                </label>
+                                <label>{move || t(locale.get(), "settings.api_key")}
+                                    <input on:input=move|ev| api_key_input.set(event_target_input(&ev).value())
+                                        prop:value={move || api_key_input.get()} type="password" />
+                                </label>
+                                <label>{move || t(locale.get(), "settings.workspace_dir")}
+                                    <input on:input=move|ev| settings.update(|s| {
+                                            s.workspace_dir = event_target_input(&ev).value();
+                                        })
+                                        prop:value={move || settings.get().workspace_dir}
+                                        placeholder=move || bootstrap.get().map(|b| b.workspace).unwrap_or_default() />
+                                </label>
+                                <span class="hint">{move || t(locale.get(), "settings.tip")}</span>
+                                {move || settings_message.get().map(|(ok, text)| view! {
+                                    <div class="settings-status"
+                                        class:ok=move || ok
+                                        class:fail=move || !ok>{text}</div>
+                                })}
+                                <div class="row">
+                                    <button type="button" disabled=move || settings_busy.get() on:click=check_updates>{move || t(locale.get(), "settings.check_updates")}</button>
+                                    <button type="button" disabled=move || settings_busy.get() on:click=validate_settings>{move || t(locale.get(), "settings.validate")}</button>
+                                    <button type="button" disabled=move || settings_busy.get() on:click=move |_| show_settings.set(false)>{move || t(locale.get(), "settings.cancel")}</button>
+                                    <button type="button" class="primary" disabled=move || settings_busy.get() on:click=save_settings>{move || t(locale.get(), "settings.save")}</button>
+                                </div>
+                            </div>
+                        }.into_view())}
+                        {move || (settings_section.get() == "skills").then(|| view! {
+                            <div class="settings-pane"></div>
+                        }.into_view())}
+                        {move || (settings_section.get() == "connections").then(|| view! {
+                            <div class="settings-pane"></div>
+                        }.into_view())}
                     </div>
                 </div>
             </div>

@@ -507,6 +507,12 @@ textarea.host-input { min-height:64px; resize:vertical; }
 .settings-status.ok { color: var(--ok); }
 .settings-status.fail { color: var(--err); }
 
+.settings-modal { display: flex; gap: 0; min-width: 640px; max-width: 820px; padding: 0; }
+.settings-nav { display: flex; flex-direction: column; gap: 2px; padding: 16px 8px; border-right: 1px solid var(--border); min-width: 150px; }
+.settings-nav button { text-align: left; padding: 8px 12px; border: 0; background: transparent; border-radius: 6px; cursor: pointer; font: inherit; color: var(--text); }
+.settings-nav button.active { background: var(--bg-sunken); font-weight: 600; }
+.settings-content { flex: 1; padding: 16px 20px; overflow-y: auto; max-height: 70vh; }
+
 .hint { font-size: 12px; color: var(--text-faint); line-height: 1.45; }
 .demo-list { display: flex; flex-direction: column; gap: 7px; max-height: 340px; overflow-y: auto; margin: -2px; padding: 2px; }
 .demo-item { text-align: left; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; cursor: pointer; font: inherit; font-size: 14px; transition: border-color .12s ease, background .12s ease; }
