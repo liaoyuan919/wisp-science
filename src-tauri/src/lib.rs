@@ -22,6 +22,10 @@ mod ssh_hosts;
 #[derive(Serialize, Clone)]
 #[serde(tag = "kind")]
 enum AgentEvent {
+    User {
+        frame_id: String,
+        text: String,
+    },
     Text {
         frame_id: String,
         delta: String,
@@ -591,6 +595,12 @@ impl Output for TauriOutput {
         approved
     }
     fn on_message(&self, msg: &Message) {
+        if msg.role == wisp_llm::Role::User {
+            self.emit(AgentEvent::User {
+                frame_id: self.frame_id.clone(),
+                text: msg.content.as_text(),
+            });
+        }
         if let Some(tx) = &self.persist {
             let _ = tx.send(msg.clone());
         }

@@ -199,3 +199,24 @@ test("a second conversation can run in parallel without interleaving transcripts
   await expect(page.getByText("echo:alpha")).toBeVisible({ timeout: 10_000 });
   await expect(page.getByText("echo:beta")).toHaveCount(0);
 });
+
+test("a running conversation accepts another message for queueing", async ({ page }) => {
+  await page.addInitScript(parallelMock);
+  await page.goto("/");
+  await page.locator(".proj-card:not(.proj-example)").first().click();
+  await expect(page.getByRole("button", { name: "New session" })).toBeVisible();
+
+  await page.getByPlaceholder(/Ask wisp-science/i).fill("alpha");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText("echo:alpha")).toBeVisible({ timeout: 10_000 });
+
+  await page.getByPlaceholder(/Ask wisp-science/i).fill("queued");
+  const send = page.getByRole("button", { name: "Queue" });
+  await expect(send).toBeEnabled({ timeout: 500 });
+  await send.click();
+
+  await expect.poll(async () => page.evaluate(() => {
+    const calls = ((window as any).__sendInvokeLog ?? []).filter((c: any) => c.cmd === "send_message");
+    return calls.map((c: any) => c.args?.message);
+  })).toEqual(["alpha", "queued"]);
+});
