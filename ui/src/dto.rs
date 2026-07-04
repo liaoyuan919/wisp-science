@@ -216,6 +216,7 @@ pub(crate) struct DirEntry {
 #[derive(Deserialize, Clone)]
 #[allow(dead_code)]
 pub(crate) struct ProjectInfo {
+    #[serde(default)] pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) root: String,
     pub(crate) skill_count: usize,
@@ -228,11 +229,22 @@ pub(crate) struct ProjectInfo {
 pub(crate) struct ProjectSummary {
     pub(crate) id: String,
     pub(crate) name: String,
+    #[serde(default)] pub(crate) description: String,
     #[allow(dead_code)] #[serde(default)] pub(crate) workspace_dir: String,
     #[serde(default)] pub(crate) session_count: i64,
     #[serde(default)] pub(crate) updated_at: i64,
     #[serde(default)] pub(crate) running_count: i64,
     #[serde(default)] pub(crate) needs_you_count: i64,
+}
+
+/// Editable project settings (Project Settings modal). `agent_context` is the
+/// project's `.wisp/WISP.md`, injected into every seeded system prompt.
+#[derive(Clone, Deserialize, Default)]
+pub(crate) struct ProjectSettings {
+    #[allow(dead_code)] #[serde(default)] pub(crate) id: String,
+    #[serde(default)] pub(crate) name: String,
+    #[serde(default)] pub(crate) description: String,
+    #[serde(default)] pub(crate) agent_context: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

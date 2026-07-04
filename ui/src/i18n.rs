@@ -301,6 +301,14 @@ fn lookup(locale: Locale, key: &str) -> Option<&'static str> {
         (Locale::En, "projects.delete_confirm") => Some("Remove this project from Wisp? Your files on disk are kept."),
         (Locale::En, "projects.back") => Some("Projects"),
 
+        (Locale::En, "proj_menu.settings") => Some("Project settings"),
+        (Locale::En, "proj_settings.title") => Some("Project Settings"),
+        (Locale::En, "proj_settings.name") => Some("Name"),
+        (Locale::En, "proj_settings.description") => Some("Description"),
+        (Locale::En, "proj_settings.description_hint") => Some("Shown in the project switcher for your reference — not included in the agent's prompt."),
+        (Locale::En, "proj_settings.agent_context") => Some("Agent Context"),
+        (Locale::En, "proj_settings.agent_context_hint") => Some("Included in every agent's system prompt for this project. Use it for background, conventions, or instructions all agents should follow. Takes effect on the next new session."),
+
         (Locale::En, "sess_status.running") => Some("Running"),
         (Locale::En, "sess_status.needs_you") => Some("Needs you"),
         (Locale::En, "sess_status.complete") => Some("Complete"),
@@ -564,6 +572,14 @@ fn lookup(locale: Locale, key: &str) -> Option<&'static str> {
         (Locale::Zh, "projects.delete") => Some("删除"),
         (Locale::Zh, "projects.delete_confirm") => Some("从 Wisp 移除该项目？磁盘上的文件会保留。"),
         (Locale::Zh, "projects.back") => Some("项目"),
+
+        (Locale::Zh, "proj_menu.settings") => Some("项目设置"),
+        (Locale::Zh, "proj_settings.title") => Some("项目设置"),
+        (Locale::Zh, "proj_settings.name") => Some("名称"),
+        (Locale::Zh, "proj_settings.description") => Some("描述"),
+        (Locale::Zh, "proj_settings.description_hint") => Some("显示在项目切换器中供你参考 —— 不会包含在 Agent 的提示词里。"),
+        (Locale::Zh, "proj_settings.agent_context") => Some("Agent 上下文"),
+        (Locale::Zh, "proj_settings.agent_context_hint") => Some("会包含在本项目每个 Agent 的系统提示词中。可用于填写背景信息、约定或所有 Agent 都应遵循的指令。下次新建会话时生效。"),
 
         (Locale::Zh, "sess_status.running") => Some("运行中"),
         (Locale::Zh, "sess_status.needs_you") => Some("需要你"),

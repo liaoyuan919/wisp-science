@@ -1425,6 +1425,12 @@ fn App() -> impl IntoView {
     let demos = create_rw_signal::<Vec<DemoInfo>>(vec![]);
     let show_projects = create_rw_signal(true); // app lands on the Projects screen
     let demo_mode = create_rw_signal(false); // true = the synthetic "Example project" is open
+    // Top-nav project switcher dropdown + Project Settings modal.
+    let show_proj_menu = create_rw_signal(false);
+    let proj_list = create_rw_signal::<Vec<ProjectSummary>>(vec![]);
+    let show_proj_settings = create_rw_signal(false);
+    let proj_settings = create_rw_signal(ProjectSettings::default());
+    let proj_settings_busy = create_rw_signal(false);
 
     // Session history (left sidebar).
     let sessions = create_rw_signal::<Vec<SessionInfo>>(vec![]);
@@ -2379,6 +2385,61 @@ fn App() -> impl IntoView {
         }
     });
 
+    // --- Top-nav project switcher + Project Settings ---
+    // Switch the active project inline (same flow as the Projects screen).
+    let switch_project = Callback::new(move |id: String| {
+        show_proj_menu.set(false);
+        show_projects.set(false);
+        demo_mode.set(false);
+        spawn_local(async move {
+            let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
+            let _ = invoke("open_project", arg).await;
+            items.set(vec![]);
+            active_session.set(None);
+            refresh_sessions(sessions);
+            let v = invoke("get_project_info", JsValue::UNDEFINED).await;
+            if let Ok(p) = serde_wasm_bindgen::from_value::<ProjectInfo>(v) { project_info.set(Some(p)); }
+        });
+    });
+    let toggle_proj_menu = move |_| {
+        let opening = !show_proj_menu.get();
+        show_proj_menu.set(opening);
+        if opening {
+            spawn_local(async move {
+                let v = invoke("list_projects", JsValue::UNDEFINED).await;
+                if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ProjectSummary>>(v) { proj_list.set(list); }
+            });
+        }
+    };
+    let open_proj_settings = move |_| {
+        show_proj_menu.set(false);
+        spawn_local(async move {
+            let v = invoke("get_project_settings", JsValue::UNDEFINED).await;
+            if let Ok(s) = serde_wasm_bindgen::from_value::<ProjectSettings>(v) {
+                proj_settings.set(s);
+                show_proj_settings.set(true);
+            }
+        });
+    };
+    let save_proj_settings = move |_| {
+        if proj_settings_busy.get() { return; }
+        let form = proj_settings.get();
+        if form.name.trim().is_empty() { return; }
+        proj_settings_busy.set(true);
+        spawn_local(async move {
+            let arg = to_value(&serde_json::json!({
+                "name": form.name, "description": form.description, "agentContext": form.agent_context,
+            })).unwrap();
+            let res = invoke_checked("update_project", arg).await;
+            proj_settings_busy.set(false);
+            if res.is_ok() {
+                show_proj_settings.set(false);
+                let v = invoke("get_project_info", JsValue::UNDEFINED).await;
+                if let Ok(p) = serde_wasm_bindgen::from_value::<ProjectInfo>(v) { project_info.set(Some(p)); }
+            }
+        });
+    };
+
     view! {
         {move || show_projects.get().then(|| {
             let open = Callback::new(move |id: String| {
@@ -2430,18 +2491,46 @@ fn App() -> impl IntoView {
         })}
         <div class="app" class:app-hidden=move || show_projects.get() on:contextmenu=on_context_menu>
         <aside class="sidebar" class:collapsed=move || !show_sidebar.get()>
-            <div class="brand">
-                <span class="brand-name" title=move || t(locale.get(), "sidebar.back_projects")
-                    on:click=move |_| { demo_mode.set(false); show_projects.set(true); }>"Wisp Science"</span>
-                <span class="brand-beta">"Beta"</span>
-                <span class="spacer"></span>
-                <button class="icon-btn" title=move || t(locale.get(), "sidebar.back_projects")
-                    on:click=move |_| { demo_mode.set(false); show_projects.set(true); }><span class="gi grid"></span></button>
+            <div class="sidebar-head">
+                <button class="side-back" title=move || t(locale.get(), "sidebar.back_projects")
+                    on:click=move |_| { show_proj_menu.set(false); demo_mode.set(false); show_projects.set(true); }>"←"</button>
+                <button class="proj-switch" class:active=move || show_proj_menu.get() on:click=toggle_proj_menu>
+                    <span class="proj-name">{move || if demo_mode.get() { t(locale.get(), "projects.example").to_string() } else { project_info.get().map(|p| p.name.clone()).unwrap_or_else(|| "wisp-science".into()) }}</span>
+                    <span class="caret">"▾"</span>
+                </button>
                 <button class="icon-btn" title=move || t(locale.get(), "sidebar.collapse") on:click=move |_| show_sidebar.set(false)>"‹"</button>
             </div>
-            <button class="proj-switch" on:click=move |_| { demo_mode.set(false); show_projects.set(true); }>
-                <span class="proj-name">{move || if demo_mode.get() { t(locale.get(), "projects.example").to_string() } else { project_info.get().map(|p| p.name.clone()).unwrap_or_else(|| "wisp-science".into()) }}</span>
-            </button>
+            {move || show_proj_menu.get().then(|| view! {
+                <div class="proj-menu-backdrop" on:click=move |_| show_proj_menu.set(false)></div>
+                <div class="proj-menu">
+                    <button type="button" class="proj-menu-item" on:click=open_proj_settings>
+                        <span class="gi gear"></span>
+                        {move || t(locale.get(), "proj_menu.settings")}
+                    </button>
+                    <div class="proj-menu-sep"></div>
+                    <div class="proj-menu-list">
+                        {move || {
+                            let active_id = project_info.get().map(|p| p.id.clone()).unwrap_or_default();
+                            let dm = demo_mode.get();
+                            proj_list.get().into_iter().map(|p| {
+                                let is_active = !dm && p.id == active_id;
+                                let pid = p.id.clone();
+                                let desc = p.description.clone();
+                                view! {
+                                    <button type="button" class="proj-menu-row" class:active=is_active
+                                        on:click=move |_| switch_project.call(pid.clone())>
+                                        <span class="pm-text">
+                                            <span class="pm-name">{p.name.clone()}</span>
+                                            {(!desc.trim().is_empty()).then(|| view! { <span class="pm-desc">{desc.clone()}</span> })}
+                                        </span>
+                                        {is_active.then(|| view! { <span class="pm-check">"✓"</span> })}
+                                    </button>
+                                }
+                            }).collect_view()
+                        }}
+                    </div>
+                </div>
+            })}
             <nav class="nav">
                 <button class="side-btn primary" on:click=new_session><span class="gi plus"></span>{move || t(locale.get(), "sidebar.new_session")}</button>
                 <button class="side-btn" on:click=open_files><span class="gi doc"></span>{move || t(locale.get(), "sidebar.files")}</button>
@@ -3149,6 +3238,44 @@ fn App() -> impl IntoView {
         }.into_view()
         })}
 
+        {move || show_proj_settings.get().then(|| view! {
+            <div class="overlay">
+                <div class="modal proj-settings-modal">
+                    <div class="ps-head">
+                        <h2>{move || t(locale.get(), "proj_settings.title")}</h2>
+                        <button type="button" class="ps-close"
+                            title=move || t(locale.get(), "settings.cancel")
+                            on:click=move |_| show_proj_settings.set(false)>"×"</button>
+                    </div>
+                    <label>
+                        {move || t(locale.get(), "proj_settings.name")}
+                        <input prop:value=move || proj_settings.get().name
+                            on:input=move |ev| { let v = event_target_value(&ev); proj_settings.update(|s| s.name = v); } />
+                    </label>
+                    <label>
+                        {move || t(locale.get(), "proj_settings.description")}
+                        <span class="ps-hint">{move || t(locale.get(), "proj_settings.description_hint")}</span>
+                        <textarea class="ps-textarea" rows="2"
+                            prop:value=move || proj_settings.get().description
+                            on:input=move |ev| { let v = event_target_value(&ev); proj_settings.update(|s| s.description = v); }></textarea>
+                    </label>
+                    <label>
+                        {move || t(locale.get(), "proj_settings.agent_context")}
+                        <span class="ps-hint">{move || t(locale.get(), "proj_settings.agent_context_hint")}</span>
+                        <textarea class="ps-textarea ps-ctx" rows="8"
+                            prop:value=move || proj_settings.get().agent_context
+                            on:input=move |ev| { let v = event_target_value(&ev); proj_settings.update(|s| s.agent_context = v); }></textarea>
+                    </label>
+                    <div class="row">
+                        <button type="button" disabled=move || proj_settings_busy.get()
+                            on:click=move |_| show_proj_settings.set(false)>{move || t(locale.get(), "settings.cancel")}</button>
+                        <button type="button" class="primary"
+                            disabled=move || proj_settings_busy.get() || proj_settings.get().name.trim().is_empty()
+                            on:click=save_proj_settings>{move || t(locale.get(), "settings.save")}</button>
+                    </div>
+                </div>
+            </div>
+        })}
         {move || show_settings.get().then(|| view! {
             <div class="overlay">
                 <div class="modal settings-modal">

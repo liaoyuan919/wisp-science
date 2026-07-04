@@ -78,15 +78,39 @@
 </div>
 <div class="app">
   <aside class="sidebar">
-    <div class="brand">
-      <span class="brand-name">Wisp Science</span>
-      <span class="brand-beta">Beta</span>
+    <div class="sidebar-head">
+      <button class="side-back" title="Back to projects">&larr;</button>
+      <button class="proj-switch active">
+        <span class="proj-name">Cross-species scRNA-seq</span>
+        <span class="caret">&#9662;</span>
+      </button>
       <button class="icon-btn" title="Collapse">&lsaquo;</button>
     </div>
-    <button class="proj-switch">
-      <span class="proj-name">wisp-science</span>
-      <span class="caret">&#9662;</span>
-    </button>
+    <div class="proj-menu">
+      <button class="proj-menu-item"><span class="gi gear"></span>Project settings</button>
+      <div class="proj-menu-sep"></div>
+      <div class="proj-menu-list">
+        <button class="proj-menu-row active">
+          <span class="pm-text">
+            <span class="pm-name">Cross-species scRNA-seq</span>
+            <span class="pm-desc">Integration methods benchmark &amp; review</span>
+          </span>
+          <span class="pm-check">&check;</span>
+        </button>
+        <button class="proj-menu-row">
+          <span class="pm-text">
+            <span class="pm-name">Run a first-pass analysis</span>
+            <span class="pm-desc">Your first project, created during onboarding.</span>
+          </span>
+        </button>
+        <button class="proj-menu-row">
+          <span class="pm-text">
+            <span class="pm-name">Example project</span>
+            <span class="pm-desc">New to Wisp? These analyses show what's possible.</span>
+          </span>
+        </button>
+      </div>
+    </div>
     <nav class="nav">
       <button class="side-btn primary"><span class="gi plus"></span>New session</button>
       <button class="side-btn"><span class="gi grid"></span>Open demo</button>
