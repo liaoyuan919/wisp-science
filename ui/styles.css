@@ -79,6 +79,7 @@ html, body {
 
 /* ---------- Left sidebar ---------- */
 .sidebar {
+  position: relative;
   flex: 0 0 248px; width: 248px;
   background: var(--bg-sunken);
   border-right: 1px solid var(--border);
@@ -1418,26 +1419,75 @@ textarea.host-input { min-height:64px; resize:vertical; }
    step summary, finding cards. Reuses existing tokens.
    ================================================================ */
 
-/* --- Sidebar brand wordmark + Beta tag --- */
-.brand { display: flex; align-items: baseline; gap: 8px; padding: 6px 6px 8px; }
-.brand-name { font-family: var(--font-serif); font-size: 19px; font-weight: 500; letter-spacing: -0.02em; color: var(--text); line-height: 1; cursor: pointer; }
-.brand-name:hover { color: var(--clay); }
-.brand-beta { font-size: 10.5px; font-weight: 500; letter-spacing: .01em; color: var(--text-faint); }
-.brand .spacer { flex: 1; }
-.brand .icon-btn { align-self: center; }
-
-/* --- Project switcher row (back arrow + name + caret) --- */
-.proj-switch {
-  display: flex; align-items: center; gap: 7px; width: 100%;
-  text-align: left; background: transparent; border: 1px solid transparent;
-  border-radius: var(--radius-sm); padding: 6px 8px; margin-bottom: 2px;
-  font: inherit; cursor: pointer; color: var(--text);
-  transition: background .12s ease;
+/* --- Sidebar header: back arrow + project switcher + collapse --- */
+.sidebar-head { position: relative; display: flex; align-items: center; gap: 4px; padding: 4px 4px 6px; }
+.side-back {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; padding: 0; border: 1px solid transparent; border-radius: 7px;
+  background: transparent; color: var(--text-faint); font-size: 16px; line-height: 1; cursor: pointer;
+  transition: background .12s ease, color .12s ease;
 }
-.proj-switch:hover { background: var(--bg-elev); }
-.proj-switch .proj-back { color: var(--text-faint); font-size: 15px; line-height: 1; flex: 0 0 auto; }
+.side-back:hover { background: var(--bg-elev); color: var(--text); }
+
+/* --- Project switcher pill (name + caret, opens dropdown) --- */
+.proj-switch {
+  flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 6px;
+  text-align: left; background: transparent; border: 1px solid transparent;
+  border-radius: var(--radius-sm); padding: 5px 8px;
+  font: inherit; cursor: pointer; color: var(--text);
+  transition: background .12s ease, border-color .12s ease;
+}
+.proj-switch:hover, .proj-switch.active { background: var(--bg-elev); }
 .proj-switch .proj-name { font-weight: 600; font-size: 14px; letter-spacing: -0.015em; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .proj-switch .caret { color: var(--text-faint); font-size: 10px; flex: 0 0 auto; }
+
+/* --- Project switcher dropdown --- */
+.proj-menu-backdrop { position: fixed; inset: 0; z-index: 40; }
+.proj-menu {
+  position: absolute; z-index: 41; top: 42px; left: 6px; right: 6px;
+  background: var(--bg-elev); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm); box-shadow: 0 8px 28px rgba(0,0,0,.14);
+  padding: 6px; max-height: 60vh; overflow-y: auto;
+}
+.proj-menu-item {
+  width: 100%; display: flex; align-items: center; gap: 8px;
+  background: transparent; border: none; border-radius: 8px;
+  padding: 8px 10px; font: inherit; font-size: 13px; color: var(--text);
+  cursor: pointer; text-align: left;
+}
+.proj-menu-item:hover { background: var(--bg-sunken); }
+.proj-menu-item .gi { width: 15px; height: 15px; flex: 0 0 auto; opacity: .8; }
+.proj-menu-sep { height: 1px; background: var(--border); margin: 6px 4px; }
+.proj-menu-list { display: flex; flex-direction: column; gap: 1px; }
+.proj-menu-row {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: transparent; border: none; border-radius: 8px;
+  padding: 7px 10px; font: inherit; color: var(--text); cursor: pointer; text-align: left;
+}
+.proj-menu-row:hover { background: var(--bg-sunken); }
+.proj-menu-row.active { background: var(--clay-soft); }
+.pm-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
+.pm-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pm-desc { font-size: 11px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pm-check { flex: 0 0 auto; color: var(--clay-strong); font-weight: 700; }
+
+/* --- Project Settings modal --- */
+.proj-settings-modal { width: min(560px, 92vw); max-width: 560px; }
+.proj-settings-modal .ps-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.proj-settings-modal .ps-close {
+  flex: 0 0 auto; background: transparent; border: none; color: var(--text-faint);
+  font-size: 20px; line-height: 1; padding: 2px 6px; border-radius: 7px; cursor: pointer;
+}
+.proj-settings-modal .ps-close:hover { color: var(--text); background: var(--bg-sunken); }
+.proj-settings-modal .ps-hint { font-size: 11.5px; line-height: 1.4; font-weight: 400; color: var(--text-faint); }
+.proj-settings-modal .ps-textarea {
+  width: 100%; box-sizing: border-box; background: var(--bg-input); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm); padding: 9px 11px;
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.5; resize: vertical; outline: none;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+.proj-settings-modal .ps-textarea:focus { border-color: var(--clay); box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.14); }
+.proj-settings-modal .ps-ctx { min-height: 150px; }
 
 /* --- Session group headers inside the list (Today / Earlier) --- */
 .side-group-title { font-size: 11px; font-weight: 600; letter-spacing: .02em; color: var(--text-faint); padding: 12px 10px 4px; }

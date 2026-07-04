@@ -78,6 +78,7 @@ struct ArtifactInfo {
 
 #[derive(Serialize, Clone)]
 struct ProjectInfo {
+    id: String,
     name: String,
     root: String,
     skill_count: usize,
@@ -143,6 +144,7 @@ struct SessionInfo {
 struct ProjectSummary {
     id: String,
     name: String,
+    description: String,
     workspace_dir: String,
     session_count: i64,
     updated_at: i64,
@@ -152,16 +154,16 @@ struct ProjectSummary {
 
 async fn build_project_summary(state: &AppState, id: &str) -> ProjectSummary {
     let running = state.running_turns.lock().await.clone();
-    let Some((id, name, ws, _c, upd, cnt)) = state.store.list_projects().await.ok()
+    let Some((id, name, ws, _c, upd, cnt, desc)) = state.store.list_projects().await.ok()
         .and_then(|v| v.into_iter().find(|r| r.0 == id))
     else {
         return ProjectSummary {
-            id: id.into(), name: String::new(), workspace_dir: String::new(),
+            id: id.into(), name: String::new(), description: String::new(), workspace_dir: String::new(),
             session_count: 0, updated_at: 0, running_count: 0, needs_you_count: 0,
         };
     };
     let (running_count, needs_you_count) = project_status_counts(&state.store, &id, &running).await;
-    ProjectSummary { id, name, workspace_dir: ws, session_count: cnt, updated_at: upd, running_count, needs_you_count }
+    ProjectSummary { id, name, description: desc, workspace_dir: ws, session_count: cnt, updated_at: upd, running_count, needs_you_count }
 }
 
 fn session_runtime_status(id: &str, last_role: Option<&str>, running: &HashSet<String>) -> &'static str {
@@ -1018,9 +1020,9 @@ async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectSummary>
     let running = state.running_turns.lock().await.clone();
     let rows = state.store.list_projects().await.map_err(|e| format!("{e}"))?;
     let mut out = vec![];
-    for (id, name, ws, _c, upd, cnt) in rows {
+    for (id, name, ws, _c, upd, cnt, desc) in rows {
         let (running_count, needs_you_count) = project_status_counts(&state.store, &id, &running).await;
-        out.push(ProjectSummary { id, name, workspace_dir: ws, session_count: cnt, updated_at: upd, running_count, needs_you_count });
+        out.push(ProjectSummary { id, name, description: desc, workspace_dir: ws, session_count: cnt, updated_at: upd, running_count, needs_you_count });
     }
     Ok(out)
 }
@@ -1085,6 +1087,46 @@ async fn delete_project(state: State<'_, AppState>, id: String) -> Result<(), St
     }
     state.store.delete_project(&id).await.map_err(|e| format!("{e}"))?;
     Ok(())
+}
+
+#[derive(Serialize, Clone)]
+struct ProjectSettings {
+    id: String,
+    name: String,
+    description: String,
+    agent_context: String,
+}
+
+/// Read the active project's editable settings for the Project Settings modal.
+/// Agent Context is `.wisp/WISP.md`, injected into every seeded system prompt.
+#[tauri::command]
+async fn get_project_settings(state: State<'_, AppState>) -> Result<ProjectSettings, String> {
+    let ap = state.active();
+    let (name, description, _ws) = state.store.get_project_meta(&ap.id).await
+        .map_err(|e| format!("{e}"))?
+        .unwrap_or_default();
+    let agent_context = std::fs::read_to_string(ap.root.join(".wisp").join("WISP.md")).unwrap_or_default();
+    Ok(ProjectSettings { id: ap.id.clone(), name, description, agent_context })
+}
+
+/// Save the active project's name/description (DB) and Agent Context (.wisp/WISP.md).
+/// An empty Agent Context removes WISP.md so the prompt falls back to "no rules".
+/// Takes effect on the next seeded session; already-running agents keep their prompt.
+#[tauri::command]
+async fn update_project(state: State<'_, AppState>, name: String, description: String, agent_context: String) -> Result<ProjectSummary, String> {
+    if name.trim().is_empty() { return Err("Project name is required".into()); }
+    let ap = state.active();
+    state.store.update_project(&ap.id, name.trim(), description.trim()).await.map_err(|e| format!("{e}"))?;
+    let wisp_dir = ap.root.join(".wisp");
+    let wisp_md = wisp_dir.join("WISP.md");
+    let ctx = agent_context.trim();
+    if ctx.is_empty() {
+        let _ = std::fs::remove_file(&wisp_md);
+    } else {
+        std::fs::create_dir_all(&wisp_dir).map_err(|e| format!("Failed to write Agent Context: {e}"))?;
+        std::fs::write(&wisp_md, ctx).map_err(|e| format!("Failed to write Agent Context: {e}"))?;
+    }
+    Ok(build_project_summary(&state, &ap.id).await)
 }
 
 /// Switch the active session to `id`, load its transcript, and return the
@@ -1619,8 +1661,14 @@ async fn build_project_info(state: &AppState) -> ProjectInfo {
     let ap = state.active();
     let (_, _, _, api_key) = load_settings(&state.store).await;
     let mcp = list_mcp_servers(&ap.root);
-    let name = ap.root.file_name().and_then(|n| n.to_str()).unwrap_or("Workspace").to_string();
+    // Prefer the user-set project name (Project Settings) over the folder name.
+    let db_name = state.store.get_project(&ap.id).await.ok().flatten()
+        .map(|(n, _)| n).unwrap_or_default();
+    let name = if db_name.trim().is_empty() {
+        ap.root.file_name().and_then(|n| n.to_str()).unwrap_or("Workspace").to_string()
+    } else { db_name };
     ProjectInfo {
+        id: ap.id.clone(),
         name,
         root: ap.root.to_string_lossy().into_owned(),
         skill_count: ap.skills.all().len(),
@@ -1993,6 +2041,8 @@ pub fn run() {
             create_project,
             open_project,
             delete_project,
+            get_project_settings,
+            update_project,
             load_session,
             rewind_session,
             list_skills,
