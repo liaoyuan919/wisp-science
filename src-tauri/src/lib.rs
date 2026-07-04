@@ -85,6 +85,27 @@ enum AgentEvent {
 struct ConfirmRequest {
     frame_id: String,
     message: String,
+    /// Tool name when known (`python`, `shell`, …).
+    #[serde(default)]
+    tool: String,
+    /// Code / command preview for the inline approval card.
+    #[serde(default)]
+    preview: String,
+}
+
+/// Parse a blocking-confirm message into (tool, preview) for the UI card.
+fn parse_confirm_payload(message: &str) -> (String, String) {
+    if let Some(rest) = message.strip_prefix("Run tool '") {
+        if let Some((tool, _)) = rest.split_once("'?") {
+            return (tool.to_string(), String::new());
+        }
+    }
+    if message.starts_with("Dangerous command detected") {
+        if let Some((_, cmd)) = message.rsplit_once(": ") {
+            return ("shell".into(), cmd.to_string());
+        }
+    }
+    (String::new(), String::new())
 }
 
 #[derive(Serialize, Clone)]
@@ -336,6 +357,7 @@ struct ProjectSummary {
 
 async fn build_project_summary(state: &AppState, id: &str) -> ProjectSummary {
     let running = state.running_turns.lock().await.clone();
+    let awaiting = state.awaiting_confirm.lock().unwrap().clone();
     let Some((id, name, ws, _c, upd, cnt, desc)) = state
         .store
         .list_projects()
@@ -354,7 +376,8 @@ async fn build_project_summary(state: &AppState, id: &str) -> ProjectSummary {
             needs_you_count: 0,
         };
     };
-    let (running_count, needs_you_count) = project_status_counts(&state.store, &id, &running).await;
+    let (running_count, needs_you_count) =
+        project_status_counts(&state.store, &id, &running, &awaiting).await;
     ProjectSummary {
         id,
         name,
@@ -371,8 +394,11 @@ fn session_runtime_status(
     id: &str,
     last_role: Option<&str>,
     running: &HashSet<String>,
+    awaiting: &HashSet<String>,
 ) -> &'static str {
-    if running.contains(id) {
+    if awaiting.contains(id) {
+        "needs_you"
+    } else if running.contains(id) {
         "running"
     } else if last_role == Some("assistant") {
         "needs_you"
@@ -385,6 +411,7 @@ async fn project_status_counts(
     store: &wisp_store::Store,
     project_id: &str,
     running: &HashSet<String>,
+    awaiting: &HashSet<String>,
 ) -> (i64, i64) {
     let Ok(rows) = store.list_session_last_roles(project_id).await else {
         return (0, 0);
@@ -392,7 +419,9 @@ async fn project_status_counts(
     let mut running_count = 0i64;
     let mut needs_you_count = 0i64;
     for (id, role) in rows {
-        if running.contains(&id) {
+        if awaiting.contains(&id) {
+            needs_you_count += 1;
+        } else if running.contains(&id) {
             running_count += 1;
         } else if role.as_deref() == Some("assistant") {
             needs_you_count += 1;
@@ -603,6 +632,8 @@ struct AppState {
     active_frame: std::sync::RwLock<Option<String>>,
     /// Per-session confirm channels, keyed by frame id.
     confirms: Arc<StdMutex<HashMap<String, std::sync::mpsc::Sender<bool>>>>,
+    /// Sessions blocked on an inline approval card (Projects dashboard → Needs you).
+    awaiting_confirm: Arc<StdMutex<HashSet<String>>>,
     /// Live per-tool approval policy, read on every tool call by `TauriOutput`.
     approvals: Arc<StdRwLock<ApprovalPolicy>>,
     bootstrap: StdMutex<BootstrapStatus>,
@@ -638,6 +669,7 @@ struct TauriOutput {
     app: AppHandle,
     frame_id: String,
     confirms: Arc<StdMutex<HashMap<String, std::sync::mpsc::Sender<bool>>>>,
+    awaiting_confirm: Arc<StdMutex<HashSet<String>>>,
     /// Shared live approval policy (see `AppState::approvals`).
     approvals: Arc<StdRwLock<ApprovalPolicy>>,
     /// Incremental-persistence sink: each message the turn produces is sent here
@@ -712,22 +744,33 @@ impl Output for TauriOutput {
         });
     }
     fn confirm(&self, message: &str) -> bool {
+        let (tool, preview) = parse_confirm_payload(message);
         let (tx, rx) = std::sync::mpsc::channel::<bool>();
         self.confirms
             .lock()
             .unwrap()
             .insert(self.frame_id.clone(), tx);
+        self.awaiting_confirm
+            .lock()
+            .unwrap()
+            .insert(self.frame_id.clone());
         let _ = self.app.emit(
             "confirm-request",
             ConfirmRequest {
                 frame_id: self.frame_id.clone(),
                 message: message.into(),
+                tool,
+                preview,
             },
         );
         let approved = rx
             .recv_timeout(std::time::Duration::from_secs(180))
             .unwrap_or(false);
         self.confirms.lock().unwrap().remove(&self.frame_id);
+        self.awaiting_confirm
+            .lock()
+            .unwrap()
+            .remove(&self.frame_id);
         approved
     }
     fn approval_mode(&self, tool: &str) -> wisp_tools::Approval {
@@ -1320,15 +1363,33 @@ async fn wire_python_and_mcp(
         }
     }
 
-    // User-configured connections.
-    for conn in load_mcp_connections(store)
+    // User-configured connections. Connect concurrently: each HTTP server has
+    // a 10s connect timeout, so a sequential loop could stall first-message
+    // startup by 10s per unreachable server (#67). Registration stays in
+    // config order so tool ordering is deterministic.
+    let conns: Vec<McpConnection> = load_mcp_connections(store)
         .await
         .into_iter()
         .filter(|c| c.enabled)
-    {
-        match connect_mcp(&conn).await {
+        .collect();
+    let mut set = tokio::task::JoinSet::new();
+    for (i, conn) in conns.into_iter().enumerate() {
+        set.spawn(async move {
+            let res = connect_mcp(&conn).await;
+            (i, conn.name, res)
+        });
+    }
+    let mut results = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok(r) = joined {
+            results.push(r);
+        }
+    }
+    results.sort_by_key(|(i, _, _)| *i);
+    for (_, name, res) in results {
+        match res {
             Ok(client) => register_mcp(agent, std::sync::Arc::new(client)).await,
-            Err(e) => errors.push(format!("MCP '{}': {e}", conn.name)),
+            Err(e) => errors.push(format!("MCP '{name}': {e}")),
         }
     }
     errors
@@ -1517,6 +1578,7 @@ async fn send_message(
         app: app.clone(),
         frame_id: frame_id.clone(),
         confirms: state.confirms.clone(),
+        awaiting_confirm: state.awaiting_confirm.clone(),
         approvals: state.approvals.clone(),
         persist: Some(persist_tx),
     };
@@ -1802,6 +1864,7 @@ async fn list_recent_sessions(
     state: State<'_, AppState>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let running = state.running_turns.lock().await.clone();
+    let awaiting = state.awaiting_confirm.lock().unwrap().clone();
     let rows = state
         .store
         .list_recent_sessions_detail(RECENT_SESSIONS_LIMIT)
@@ -1810,7 +1873,8 @@ async fn list_recent_sessions(
     Ok(rows
         .into_iter()
         .map(|r| {
-            let status = session_runtime_status(&r.id, r.last_role.as_deref(), &running);
+            let status =
+                session_runtime_status(&r.id, r.last_role.as_deref(), &running, &awaiting);
             serde_json::json!({
                 "id": r.id,
                 "project_id": r.project_id,
@@ -1825,6 +1889,7 @@ async fn list_recent_sessions(
 #[tauri::command]
 async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectSummary>, String> {
     let running = state.running_turns.lock().await.clone();
+    let awaiting = state.awaiting_confirm.lock().unwrap().clone();
     let rows = state
         .store
         .list_projects()
@@ -1833,7 +1898,7 @@ async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectSummary>
     let mut out = vec![];
     for (id, name, ws, _c, upd, cnt, desc) in rows {
         let (running_count, needs_you_count) =
-            project_status_counts(&state.store, &id, &running).await;
+            project_status_counts(&state.store, &id, &running, &awaiting).await;
         out.push(ProjectSummary {
             id,
             name,
@@ -3338,6 +3403,7 @@ pub fn run() {
                 running_turns: tokio::sync::Mutex::new(HashSet::new()),
                 active_frame: std::sync::RwLock::new(None),
                 confirms: Arc::new(StdMutex::new(HashMap::new())),
+                awaiting_confirm: Arc::new(StdMutex::new(HashSet::new())),
                 approvals,
                 bootstrap,
                 reviewing: Arc::new(AtomicBool::new(false)),
@@ -3361,6 +3427,7 @@ pub fn run() {
             ssh_hosts::add_ssh_host,
             ssh_hosts::remove_ssh_host,
             ssh_hosts::list_ssh_config_aliases,
+            ssh_hosts::import_ssh_config_hosts,
             new_session,
             list_sessions,
             delete_session,
@@ -3447,17 +3514,24 @@ mod tests {
     fn session_runtime_status_labels() {
         let mut running = HashSet::new();
         running.insert("s1".into());
+        let awaiting = HashSet::new();
         assert_eq!(
-            session_runtime_status("s1", Some("user"), &running),
+            session_runtime_status("s1", Some("user"), &running, &awaiting),
             "running"
         );
         assert_eq!(
-            session_runtime_status("s2", Some("assistant"), &running),
+            session_runtime_status("s2", Some("assistant"), &running, &awaiting),
             "needs_you"
         );
         assert_eq!(
-            session_runtime_status("s3", Some("user"), &running),
+            session_runtime_status("s3", Some("user"), &running, &awaiting),
             "complete"
+        );
+        let mut awaiting = HashSet::new();
+        awaiting.insert("s1".into());
+        assert_eq!(
+            session_runtime_status("s1", Some("user"), &running, &awaiting),
+            "needs_you"
         );
     }
 

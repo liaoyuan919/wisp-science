@@ -147,6 +147,33 @@ pub async fn list_ssh_config_aliases() -> Result<Vec<String>, String> {
     Ok(parse_ssh_config_aliases(&text))
 }
 
+/// Merge every connectable `Host` alias from ~/.ssh/config into the registry,
+/// keeping hosts the user already configured (notes etc.) untouched (#56/#67).
+pub fn merge_config_aliases(mut hosts: Vec<SshHost>, aliases: Vec<String>) -> Vec<SshHost> {
+    for alias in aliases {
+        if !hosts.iter().any(|h| h.alias == alias) {
+            hosts.push(SshHost {
+                alias,
+                user: None,
+                port: None,
+                identity_file: None,
+                notes: None,
+            });
+        }
+    }
+    hosts
+}
+
+#[tauri::command]
+pub async fn import_ssh_config_hosts(
+    state: State<'_, crate::AppState>,
+) -> Result<Vec<SshHost>, String> {
+    let aliases = list_ssh_config_aliases().await?;
+    let hosts = merge_config_aliases(load(&state.store).await, aliases);
+    save(&state.store, &hosts).await?;
+    Ok(hosts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +242,22 @@ Host gpu-box
                 "biowulf".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn merge_config_aliases_adds_new_keeps_existing() {
+        let existing = vec![host("gpu-box", Some("slurm cluster"))];
+        let merged = merge_config_aliases(
+            existing,
+            vec!["gpu-box".into(), "biowulf".into()],
+        );
+        assert_eq!(
+            merged.iter().map(|h| h.alias.as_str()).collect::<Vec<_>>(),
+            ["gpu-box", "biowulf"]
+        );
+        // The pre-existing entry (with its notes) must not be overwritten.
+        assert_eq!(merged[0].notes.as_deref(), Some("slurm cluster"));
+        assert!(merged[1].notes.is_none());
     }
 
     #[test]

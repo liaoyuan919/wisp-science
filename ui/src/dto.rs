@@ -35,7 +35,29 @@ pub(crate) enum ChatItem {
     Assistant { text: String, model: Option<String> },
     Reasoning(String),
     Tool { name: String, ok: Option<bool>, input: String, output: String },
+    /// Inline tool-approval card (replaces the old centered modal).
+    ApprovalPending { tool: String, preview: String, message: String },
     Review(String),
+}
+
+impl ChatItem {
+    /// Content hash used as the keyed-list key in the chat thread: a row is
+    /// rebuilt only when this changes, so streaming updates to one message
+    /// don't re-render the whole conversation.
+    pub(crate) fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        match self {
+            Self::User(s) => (0u8, s).hash(&mut h),
+            Self::QueuedUser(s) => (1u8, s).hash(&mut h),
+            Self::Assistant { text, model } => (2u8, text, model).hash(&mut h),
+            Self::Reasoning(s) => (3u8, s).hash(&mut h),
+            Self::Tool { name, ok, input, output } => (4u8, name, ok, input, output).hash(&mut h),
+            Self::ApprovalPending { tool, preview, message } => (6u8, tool, preview, message).hash(&mut h),
+            Self::Review(s) => (5u8, s).hash(&mut h),
+        }
+        h.finish()
+    }
 }
 
 pub(crate) fn active_model_label(models: &[ModelProfile]) -> Option<String> {

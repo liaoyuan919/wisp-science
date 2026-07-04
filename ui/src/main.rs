@@ -13,7 +13,9 @@ use context_menu::{ContextMenuPortal, CtxMenu};
 use dto::*;
 use i18n::{localize_backend, set_document_lang, tab_count, tf, t, use_locale, Locale};
 use leptos::{ev, window_event_listener, *};
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 use text::{
     dom_value, event_target_checked, event_target_input, event_target_value, extract_href_from_tag,
     fasta_seq_count, file_kind, format_bytes, html_escape, is_external_href, is_separator,
@@ -392,6 +394,26 @@ fn clear_running_if_idle(pending: RwSignal<HashMap<String, usize>>, running: RwS
     }
 }
 
+fn strip_approval_pending(items: &mut Vec<ChatItem>) {
+    items.retain(|i| !matches!(i, ChatItem::ApprovalPending { .. }));
+}
+
+fn last_tool_input(items: &[ChatItem], tool: &str) -> String {
+    items
+        .iter()
+        .rev()
+        .find_map(|i| match i {
+            ChatItem::Tool {
+                name,
+                input,
+                ok: None,
+                ..
+            } if name == tool => Some(input.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 fn trailing_queue_start(items: &[ChatItem]) -> usize {
     items
         .iter()
@@ -450,6 +472,98 @@ fn append_reasoning_delta(items: &mut Vec<ChatItem>, delta: String) {
         }
     }
     items.insert(queue_start, ChatItem::Reasoning(delta));
+}
+
+fn append_stdout_chunk(items: &mut Vec<ChatItem>, chunk: String) {
+    let queue_start = trailing_queue_start(items);
+    if let Some(idx) = items[..queue_start]
+        .iter()
+        .rposition(|item| matches!(item, ChatItem::Tool { .. }))
+    {
+        if let ChatItem::Tool { output, .. } = &mut items[idx] {
+            output.push_str(&chunk);
+            return;
+        }
+    }
+    items.insert(queue_start, ChatItem::Tool { name: "stdout".into(), ok: None, input: String::new(), output: chunk });
+}
+
+// --- Streaming delta batching (#65) ------------------------------------------
+//
+// The backend emits one `agent` event per LLM/stdout chunk. Applying each one
+// writes the `items` signal, and every write re-runs the thread view and the
+// artifact scan — O(conversation length) work per token, which freezes long
+// conversations. Buffer the append-only deltas and flush them on a short timer
+// so the signal is written at most ~20×/s regardless of token rate.
+
+enum PendingDelta {
+    Text(String),
+    Reasoning(String),
+    Stdout(String),
+}
+
+type DeltaBuf = Rc<RefCell<HashMap<String, Vec<PendingDelta>>>>;
+
+/// Append a delta to a session's queue, coalescing consecutive same-kind chunks.
+fn queue_delta(buf: &DeltaBuf, fid: String, d: PendingDelta) {
+    let mut map = buf.borrow_mut();
+    let q = map.entry(fid).or_default();
+    match (q.last_mut(), d) {
+        (Some(PendingDelta::Text(s)), PendingDelta::Text(n)) => s.push_str(&n),
+        (Some(PendingDelta::Reasoning(s)), PendingDelta::Reasoning(n)) => s.push_str(&n),
+        (Some(PendingDelta::Stdout(s)), PendingDelta::Stdout(n)) => s.push_str(&n),
+        (_, d) => q.push(d),
+    }
+}
+
+/// Apply all buffered deltas to their sessions in arrival order.
+fn flush_delta_buf(
+    buf: &DeltaBuf,
+    active: RwSignal<Option<String>>,
+    items: RwSignal<Vec<ChatItem>>,
+    transcripts: RwSignal<HashMap<String, Vec<ChatItem>>>,
+    models: RwSignal<Vec<ModelProfile>>,
+) {
+    let drained: Vec<_> = buf.borrow_mut().drain().collect();
+    if drained.is_empty() {
+        return;
+    }
+    let fallback_model = active_model_label(&models.get_untracked());
+    for (fid, deltas) in drained {
+        let model = fallback_model.clone();
+        route_items(active, items, transcripts, &fid, move |v| {
+            for d in deltas {
+                match d {
+                    PendingDelta::Text(s) => append_assistant_delta(v, s, model.clone()),
+                    PendingDelta::Reasoning(s) => append_reasoning_delta(v, s),
+                    PendingDelta::Stdout(s) => append_stdout_chunk(v, s),
+                }
+            }
+        });
+    }
+}
+
+fn schedule_delta_flush(
+    buf: &DeltaBuf,
+    scheduled: &Rc<Cell<bool>>,
+    active: RwSignal<Option<String>>,
+    items: RwSignal<Vec<ChatItem>>,
+    transcripts: RwSignal<HashMap<String, Vec<ChatItem>>>,
+    models: RwSignal<Vec<ModelProfile>>,
+) {
+    if scheduled.get() {
+        return;
+    }
+    scheduled.set(true);
+    let buf = buf.clone();
+    let scheduled = scheduled.clone();
+    set_timeout(
+        move || {
+            scheduled.set(false);
+            flush_delta_buf(&buf, active, items, transcripts, models);
+        },
+        std::time::Duration::from_millis(50),
+    );
 }
 
 fn format_relative_time(ts: i64, locale: Locale) -> String {
@@ -922,6 +1036,18 @@ fn promote_assistant_text(items: &mut Vec<ChatItem>, text: &str) {
     items.push(ChatItem::Assistant { text: text.to_string(), model: None });
 }
 
+/// Identity hash of the artifact list as seen by assistant markdown (chip
+/// index, id, and label). Mixed into assistant row keys so chips re-render
+/// when the artifact list changes, and nothing re-renders when it doesn't.
+fn artifacts_fingerprint(arts: &[Artifact]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for a in arts {
+        (&a.id, &a.name).hash(&mut h);
+    }
+    h.finish()
+}
+
 /// Collect tables, code, latex, and file-path artifacts from the transcript.
 fn collect_artifacts(items: &[ChatItem], locale: Locale) -> Vec<Artifact> {
     let mut out: Vec<Artifact> = vec![];
@@ -1390,9 +1516,70 @@ fn ToolBlock(name: String, ok: Option<bool>, input: String, output: String) -> i
 }
 
 #[component]
+fn ApprovalCard(
+    tool: String,
+    preview: String,
+    session_id: String,
+    on_decide: Callback<(String, bool)>,
+) -> impl IntoView {
+    let locale = use_locale();
+    let lang = tool_lang(&tool).to_string();
+    let tool_for_title = tool.clone();
+    let title = move || {
+        let loc = locale.get();
+        match tool_for_title.as_str() {
+            "python" => t(loc, "approval.run_python"),
+            "shell" => t(loc, "approval.run_shell"),
+            _ => tf(loc, "approval.run_tool", &[("tool", &tool_for_title)]),
+        }
+    };
+    let sid_allow = session_id.clone();
+    let sid_deny = session_id;
+    view! {
+        <div class="approval-wrap">
+            <div class="approval-wait-line">{move || t(locale.get(), "approval.waiting_line")}</div>
+            <div class="approval-card">
+                <div class="approval-head">
+                    <span class="approval-title">{title}</span>
+                    <span class="approval-status">
+                        <span class="approval-dot"></span>
+                        {move || t(locale.get(), "approval.waiting")}
+                    </span>
+                </div>
+                {(!tool.is_empty()).then(|| view! {
+                    <div class="approval-tags"><span class="approval-tag">{tool.clone()}</span></div>
+                })}
+                {(!preview.is_empty()).then(|| {
+                    let p = preview.clone();
+                    let lang = lang.clone();
+                    view! {
+                        <details class="approval-code" open=true>
+                            <summary>{move || t(locale.get(), "approval.code")}</summary>
+                            <pre><code class=format!("language-{lang}")>{p}</code></pre>
+                        </details>
+                    }
+                })}
+                <p class="approval-hint">{move || t(locale.get(), "approval.hint")}</p>
+                <div class="approval-actions">
+                    <button type="button" class="primary"
+                        on:click=move |_| on_decide.call((sid_allow.clone(), true))>
+                        {move || t(locale.get(), "approval.allow_session")}
+                    </button>
+                    <button type="button"
+                        on:click=move |_| on_decide.call((sid_deny.clone(), false))>
+                        {move || t(locale.get(), "confirm.deny")}
+                    </button>
+                </div>
+            </div>
+        </div>
+    }
+}
+
+#[component]
 fn ProjectsScreen(
     locale: RwSignal<Locale>,
     running: RwSignal<HashSet<String>>,
+    approval_pending: ReadSignal<HashSet<String>>,
     on_open: Callback<String>,
     on_open_session: Callback<(String, String)>,
     on_open_demo: Callback<()>,
@@ -1416,9 +1603,10 @@ fn ProjectsScreen(
     };
     reload();
 
-    // Refresh dashboard when a background turn starts or finishes.
+    // Refresh dashboard when a background turn starts/finishes or waits on approval.
     create_effect(move |_| {
         running.get();
+        approval_pending.get();
         reload();
     });
 
@@ -1586,6 +1774,7 @@ fn App() -> impl IntoView {
     // in-flight turn; `transcripts` caches the live transcript of background
     // (non-active) sessions so switching to them shows streaming progress.
     let running = create_rw_signal::<HashSet<String>>(HashSet::new());
+    let approval_pending = create_rw_signal::<HashSet<String>>(HashSet::new());
     let pending_turns = create_rw_signal::<HashMap<String, usize>>(HashMap::new());
     let transcripts = create_rw_signal::<HashMap<String, Vec<ChatItem>>>(HashMap::new());
     let busy = create_rw_signal(false);
@@ -1768,9 +1957,16 @@ fn App() -> impl IntoView {
     let transcripts_cb = transcripts;
     let running_cb = running;
     let pending_cb = pending_turns;
+    let approval_cb = approval_pending;
     let status_cb = status;
     let locale_cb = locale;
     let models_cb = models;
+    // Streaming deltas are buffered and flushed on a timer (~20 fps) instead of
+    // being applied per token; see the "Streaming delta batching" block above.
+    let delta_buf: DeltaBuf = Rc::new(RefCell::new(HashMap::new()));
+    let flush_scheduled = Rc::new(Cell::new(false));
+    let cb_buf = delta_buf.clone();
+    let cb_scheduled = flush_scheduled.clone();
     let cb = Closure::wrap(Box::new(move |payload: JsValue| {
         let ev: AgentEvent = match serde_wasm_bindgen::from_value(payload) {
             Ok(e) => e,
@@ -1779,23 +1975,28 @@ fn App() -> impl IntoView {
                 return;
             }
         };
+        // Ordered, non-delta events (tool calls, results, done…) must observe
+        // every delta buffered before them, so drain the buffer first.
+        let flush_now = || flush_delta_buf(&cb_buf, active_cb, items_cb, transcripts_cb, models_cb);
+        let queue = |fid: String, d: PendingDelta| {
+            queue_delta(&cb_buf, fid, d);
+            schedule_delta_flush(&cb_buf, &cb_scheduled, active_cb, items_cb, transcripts_cb, models_cb);
+        };
         match ev {
-            AgentEvent::User { frame_id, text } => route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
-                let model = active_model_label(&models_cb.get());
-                start_user_turn(v, text, model);
-            }),
-            AgentEvent::Text { frame_id, delta } => route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
-                let fallback_model = active_model_label(&models_cb.get());
-                append_assistant_delta(v, delta, fallback_model);
-            }),
-            AgentEvent::Reasoning { frame_id, delta } => {
-                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| append_reasoning_delta(v, delta))
+            AgentEvent::User { frame_id, text } => {
+                flush_now();
+                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
+                    let model = active_model_label(&models_cb.get());
+                    start_user_turn(v, text, model);
+                })
             }
-            AgentEvent::ToolCall { frame_id, name, preview } => route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
+            AgentEvent::Text { frame_id, delta } => queue(frame_id, PendingDelta::Text(delta)),
+            AgentEvent::Reasoning { frame_id, delta } => queue(frame_id, PendingDelta::Reasoning(delta)),
+            AgentEvent::ToolCall { frame_id, name, preview } => { flush_now(); route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
                 let idx = trailing_queue_start(v);
                 v.insert(idx, ChatItem::Tool { name, ok: None, input: preview, output: String::new() });
-            }),
-            AgentEvent::ToolResult { frame_id, name, ok, content } => route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
+            }) }
+            AgentEvent::ToolResult { frame_id, name, ok, content } => { flush_now(); route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
                 let queue_start = trailing_queue_start(v);
                 let idx = v[..queue_start].iter().rposition(|c| matches!(c, ChatItem::Tool { name: n, ok: None, .. } if n == &name));
                 if let Some(i) = idx {
@@ -1809,7 +2010,7 @@ fn App() -> impl IntoView {
                 if name == "attempt_completion" && ok {
                     promote_assistant_text(v, &content);
                 }
-            }),
+            }) }
             AgentEvent::Usage { frame_id, input, output, ctx_tokens, max_context, .. } => {
                 // Status bar reflects only the active session's usage.
                 if active_cb.get().as_deref() == Some(&frame_id) {
@@ -1830,20 +2031,11 @@ fn App() -> impl IntoView {
                     ]));
                 }
             }
-            AgentEvent::Stdout { frame_id, chunk } => route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
-                let queue_start = trailing_queue_start(v);
-                if let Some(idx) = v[..queue_start]
-                    .iter()
-                    .rposition(|item| matches!(item, ChatItem::Tool { .. }))
-                {
-                    if let ChatItem::Tool { output, .. } = &mut v[idx] {
-                        output.push_str(&chunk);
-                        return;
-                    }
-                }
-                v.insert(queue_start, ChatItem::Tool { name: "stdout".into(), ok: None, input: String::new(), output: chunk });
-            }),
+            AgentEvent::Stdout { frame_id, chunk } => queue(frame_id, PendingDelta::Stdout(chunk)),
             AgentEvent::Done { frame_id } => {
+                flush_now();
+                route_items(active_cb, items_cb, transcripts_cb, &frame_id, strip_approval_pending);
+                approval_cb.update(|s| { s.remove(&frame_id); });
                 clear_running_if_idle(pending_cb, running_cb, &frame_id);
                 if stopping_session.get().as_deref() == Some(&frame_id) {
                     stopping_session.set(None);
@@ -1851,16 +2043,20 @@ fn App() -> impl IntoView {
                 refresh_sessions(sessions);
             }
             AgentEvent::Error { frame_id, message } => {
+                flush_now();
                 let model = active_model_label(&models_cb.get());
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
+                    strip_approval_pending(v);
                     v.push(ChatItem::Assistant { text: format!("Error: {message}"), model });
                 });
+                approval_cb.update(|s| { s.remove(&frame_id); });
                 clear_running_if_idle(pending_cb, running_cb, &frame_id);
                 if stopping_session.get().as_deref() == Some(&frame_id) {
                     stopping_session.set(None);
                 }
             }
             AgentEvent::Review { frame_id, markdown } => {
+                flush_now();
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| v.push(ChatItem::Review(markdown)));
                 if active_cb.get().as_deref() == Some(&frame_id) {
                     status_cb.set(t(locale_cb.get(), "status.review_done"));
@@ -1875,15 +2071,45 @@ fn App() -> impl IntoView {
     // future is polled, so we must await `listen` (not fire-and-forget it).
     spawn_local(async move { let _ = listen("agent", &agent_js).await; });
 
-    // Confirm handler: the backend denies on timeout, so the UI MUST surface
-    // confirm-request. We render an inline Approve/Deny and call
-    // confirm_response.
-    let confirm_state = create_rw_signal::<Option<(String, String)>>(None);
+    // Confirm handler: render an inline approval card in the session thread
+    // (not a global modal — see README inline tool-approval card).
+    let confirm_active = active_session;
+    let confirm_items = items;
+    let confirm_transcripts = transcripts;
+    let confirm_pending = approval_pending;
     let confirm_cb = Closure::wrap(Box::new(move |payload: JsValue| {
         if let Ok(v) = serde_wasm_bindgen::from_value::<serde_json::Value>(payload) {
             let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
             let fid = v.get("frame_id").and_then(|m| m.as_str()).unwrap_or("").to_string();
-            if !msg.is_empty() { confirm_state.set(Some((fid, msg))); }
+            if msg.is_empty() || fid.is_empty() {
+                return;
+            }
+            let mut tool = v.get("tool").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            let mut preview = v.get("preview").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            if tool.is_empty() {
+                if let Some(rest) = msg.strip_prefix("Run tool '") {
+                    if let Some((t, _)) = rest.split_once("'?") {
+                        tool = t.to_string();
+                    }
+                } else if msg.starts_with("Dangerous command detected") {
+                    tool = "shell".into();
+                }
+            }
+            route_items(confirm_active, confirm_items, confirm_transcripts, &fid, |v| {
+                strip_approval_pending(v);
+                if preview.is_empty() {
+                    preview = last_tool_input(v, &tool);
+                }
+                v.push(ChatItem::ApprovalPending {
+                    tool,
+                    preview,
+                    message: msg,
+                });
+            });
+            confirm_pending.update(|s| {
+                s.insert(fid);
+            });
+            force_chat_bottom();
         }
     }) as Box<dyn FnMut(JsValue)>);
     let confirm_js = confirm_cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
@@ -2439,16 +2665,20 @@ fn App() -> impl IntoView {
         });
     };
 
-    let respond_confirm = Callback::new(move |approved: bool| {
-        // confirm_state holds (session_id, message); pass the id back so the
-        // backend unblocks the right turn.
-        let sid = confirm_state.get().map(|(f, _)| f).unwrap_or_default();
-        confirm_state.set(None);
-        let arg = to_value(&tauri_args::confirm_response(&sid, approved)).unwrap();
-        spawn_local(async move { let _ = invoke("confirm_response", arg).await; });
-    });
-
-    let approve = move |v: bool| move |_| respond_confirm.call(v);
+    let respond_confirm = {
+        let active_session = active_session;
+        let items = items;
+        let transcripts = transcripts;
+        let approval_pending = approval_pending;
+        Callback::new(move |(sid, approved): (String, bool)| {
+            route_items(active_session, items, transcripts, &sid, strip_approval_pending);
+            approval_pending.update(|s| {
+                s.remove(&sid);
+            });
+            let arg = to_value(&tauri_args::confirm_response(&sid, approved)).unwrap();
+            spawn_local(async move { let _ = invoke("confirm_response", arg).await; });
+        })
+    };
 
     let on_resize_start = move |ev: web_sys::MouseEvent| {
         ev.prevent_default();
@@ -2606,9 +2836,14 @@ fn App() -> impl IntoView {
             return;
         }
 
-        if confirm_state.get().is_some() {
+        if active_session
+            .get()
+            .is_some_and(|_sid| items.get().iter().any(|i| matches!(i, ChatItem::ApprovalPending { .. })))
+        {
             ev.prevent_default();
-            respond_confirm.call(false);
+            if let Some(sid) = active_session.get() {
+                respond_confirm.call((sid, false));
+            }
             return;
         }
         if ctx_menu.get().is_some() {
@@ -2814,7 +3049,7 @@ fn App() -> impl IntoView {
                     if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<DemoInfo>>(v) { demos.set(list); }
                 });
             });
-            view! { <ProjectsScreen locale=locale running=running on_open=open on_open_session=on_open_session on_open_demo=on_open_demo /> }
+            view! { <ProjectsScreen locale=locale running=running approval_pending=approval_pending.read_only() on_open=open on_open_session=on_open_session on_open_demo=on_open_demo /> }
         })}
         <div class="app" class:app-hidden=move || show_projects.get() on:contextmenu=on_context_menu>
         <aside class="sidebar" class:collapsed=move || !show_sidebar.get()>
@@ -3127,27 +3362,45 @@ fn App() -> impl IntoView {
                             <p>{move || t(locale.get(), "empty.subtitle")}</p>
                         </div>
                     })}
-                    {move || {
-                        let arts = artifacts.get();
-                        let pick = on_artifact_select.clone();
-                        let open_link = on_file_link.clone();
-                        let is_busy = busy.read_only();
-                        let list = items.get();
-                        let last = list.len().saturating_sub(1);
-                        // Skip items that render nothing (empty streaming placeholder,
-                        // attempt_completion) so their wrapper <div> doesn't leave a
-                        // `.thread` gap between real messages (#19).
-                        list.into_iter().enumerate()
-                            .filter(|(_, item)| !renders_nothing(item))
-                            .map(|(i, item)| {
-                                let is_last = i == last;
-                                view! {
-                                    <div class=format!("{}", class_for(&item)) key=i>
-                                        {render_item(i, &item, &arts, pick.clone(), open_link.clone(), is_busy, is_last, edit_message)}
-                                    </div>
-                                }.into_view()
-                            }).collect_view()
-                    }}
+                    // Keyed rows (#65): the key is a content fingerprint, so a
+                    // streaming delta rebuilds only the message it touched, not
+                    // the whole thread (which froze long conversations).
+                    <For
+                        each=move || {
+                            let arts_fp = artifacts.with(|a| artifacts_fingerprint(a));
+                            let busy_now = busy.get();
+                            let list = items.get();
+                            let last = list.len().saturating_sub(1);
+                            // Skip items that render nothing (empty streaming placeholder,
+                            // attempt_completion) so their wrapper <div> doesn't leave a
+                            // `.thread` gap between real messages (#19).
+                            list.into_iter().enumerate()
+                                .filter(|(_, item)| !renders_nothing(item))
+                                .map(|(i, item)| {
+                                    let is_last = i == last;
+                                    let mut fp = item.fingerprint();
+                                    match &item {
+                                        // Assistant markdown embeds artifact chips (index + label).
+                                        ChatItem::Assistant { .. } => fp ^= arts_fp,
+                                        // The live reasoning block auto-opens while streaming (#31).
+                                        ChatItem::Reasoning(_) => fp ^= (is_last && busy_now) as u64,
+                                        _ => {}
+                                    }
+                                    (i, fp, item, is_last)
+                                })
+                                .collect::<Vec<_>>()
+                        }
+                        key=|(i, fp, _, _)| (*i, *fp)
+                        children=move |(i, _, item, is_last)| {
+                            let arts = artifacts.get_untracked();
+                            let sid = active_session.get().unwrap_or_default();
+                            view! {
+                                <div class=class_for(&item)>
+                                    {render_item(i, &item, &arts, on_artifact_select, on_file_link, busy.read_only(), is_last, edit_message, sid, respond_confirm)}
+                                </div>
+                            }
+                        }
+                    />
                 </div>
             </div>
 
@@ -3610,6 +3863,13 @@ fn App() -> impl IntoView {
                                             <p>{t(loc, "hosts.empty")}</p>
                                             <span class="rp-empty-action">{t(loc, "hosts.add")}</span>
                                         </button>
+                                        <button type="button" class="rp-hosts-add"
+                                            on:click=move |_| {
+                                                spawn_local(async move {
+                                                    let v = invoke("import_ssh_config_hosts", JsValue::UNDEFINED).await;
+                                                    if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<SshHost>>(v) { ssh_hosts.set(list); }
+                                                });
+                                            }><span class="gi server"></span>{t(loc, "hosts.import")}</button>
                                     </div>
                                 }.into_view()
                             } else {
@@ -3623,6 +3883,13 @@ fn App() -> impl IntoView {
                                                 if let Ok(a) = serde_wasm_bindgen::from_value::<Vec<String>>(v) { config_aliases.set(a); }
                                             });
                                         }><span class="gi plus"></span>{t(loc, "hosts.add")}</button>
+                                    <button type="button" class="rp-hosts-add"
+                                        on:click=move |_| {
+                                            spawn_local(async move {
+                                                let v = invoke("import_ssh_config_hosts", JsValue::UNDEFINED).await;
+                                                if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<SshHost>>(v) { ssh_hosts.set(list); }
+                                            });
+                                        }><span class="gi server"></span>{t(loc, "hosts.import")}</button>
                                     {
                                         hs.into_iter().map(|h| {
                                             let alias = h.alias.clone();
@@ -4878,22 +5145,6 @@ fn App() -> impl IntoView {
         })}
         <ContextMenuPortal menu=ctx_menu.read_only() set_menu=ctx_menu.write_only() on_pick=on_ctx_pick />
         </div>
-
-        // The confirm/permission prompt lives OUTSIDE `.app` so `app-hidden`
-        // (Projects landing screen) can't swallow it: a background turn that
-        // hits a destructive command must still surface its approval card.
-        {move || confirm_state.get().map(|(fid, msg)| view! {
-            <div class="overlay" key=fid>
-                <div class="modal confirm-modal">
-                    <h2>{move || t(locale.get(), "confirm.title")}</h2>
-                    <div class="hint">{msg}</div>
-                    <div class="row">
-                        <button on:click=approve(false)>{move || t(locale.get(), "confirm.deny")}</button>
-                        <button class="primary" on:click=approve(true)>{move || t(locale.get(), "confirm.approve")}</button>
-                    </div>
-                </div>
-            </div>
-        }.into_view())}
     }
 }
 
@@ -4912,6 +5163,7 @@ fn class_for(item: &ChatItem) -> &'static str {
         ChatItem::Assistant { .. } => "msg assistant",
         ChatItem::Reasoning(_) => "msg reasoning",
         ChatItem::Tool { .. } => "tool-wrap",
+        ChatItem::ApprovalPending { .. } => "tool-wrap approval-wrap-row",
         ChatItem::Review(_) => "tool-wrap",
     }
 }
@@ -4925,6 +5177,8 @@ fn render_item(
     busy: ReadSignal<bool>,
     is_last: bool,
     on_edit: impl Fn(usize) + Clone + 'static,
+    session_id: String,
+    on_approval: Callback<(String, bool)>,
 ) -> impl IntoView {
     let locale = use_locale();
     match item {
@@ -4987,6 +5241,9 @@ fn render_item(
         }
         ChatItem::Tool { name, ok, input, output } => view! {
             <ToolBlock name=name.clone() ok=*ok input=input.clone() output=output.clone() />
+        }.into_view(),
+        ChatItem::ApprovalPending { tool, preview, message: _ } => view! {
+            <ApprovalCard tool=tool.clone() preview=preview.clone() session_id=session_id.clone() on_decide=on_approval />
         }.into_view(),
         ChatItem::Review(md) => {
             let copy = md.clone();

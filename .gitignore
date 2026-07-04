@@ -23,3 +23,6 @@ src-tauri/outputs/
 cladue_science.mp4
 *.mp4
 .cursor
+__pycache__/
+*.pyc
+*.pyo
