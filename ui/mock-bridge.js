@@ -89,7 +89,7 @@
           case "get_onboarding_state":
             return { show: false, has_api_key: true };
           case "get_bootstrap_status":
-            return { skills_loaded: 58, python_ok: true, mcp_catalog: 24, uv_ok: true, app_version: "0.3.0-mock", workspace: project.root, errors: [] };
+            return { skills_loaded: 58, python_ok: true, mcp_catalog: 24, uv_ok: true, app_version: "0.3.1-mock", workspace: project.root, errors: [] };
           case "get_capabilities":
             return {
               skills: [{ name: "bear-support", description: "Find papers supporting a claim." }],
