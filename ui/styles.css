@@ -800,12 +800,21 @@ textarea.host-input { min-height:64px; resize:vertical; }
   min-height: 240px;
 }
 .memory-delete-btn {
-  opacity: 1 !important;
-  width: auto;
-  height: auto;
+  font: inherit;
+  font-size: 13px;
   padding: 9px 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
 }
-.memory-file-list { margin-top: 2px; }
+.memory-delete-btn:hover {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 35%, var(--border-strong));
+  background: color-mix(in srgb, var(--err) 6%, var(--bg-input));
+}
 .settings-pane {
   flex: 1;
   min-height: 0;
@@ -1075,19 +1084,41 @@ textarea.host-input { min-height:64px; resize:vertical; }
 }
 
 .settings-pane-memory { gap: 12px; padding-top: 14px; }
-.memory-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
+.memory-toolbar { margin-bottom: 2px; }
 .memory-toolbar-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
 }
-.memory-clear-btn { opacity: 1 !important; width: auto; height: auto; padding: 6px 12px; font-size: 12.5px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); }
+.memory-clear-btn {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  padding: 8px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color .12s ease, color .12s ease, background .12s ease;
+}
+.memory-clear-btn:hover {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 35%, var(--border-strong));
+  background: color-mix(in srgb, var(--err) 6%, var(--bg-input));
+}
+.memory-file-list {
+  margin-top: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg-elev);
+}
+.memory-file-list .settings-list-row:last-child { border-bottom: none; }
 .memory-off-banner {
   display: flex;
   align-items: center;

@@ -3991,7 +3991,7 @@ fn App() -> impl IntoView {
                                                         <div class="settings-status" class:ok=ok class:fail=move || !ok>{text}</div>
                                                     })}
                                                     <div class="row settings-footer">
-                                                        <button type="button" class="settings-list-remove memory-delete-btn"
+                                                        <button type="button" class="memory-delete-btn"
                                                             on:click=move |_| {
                                                                 let n = name_del.clone();
                                                                 spawn_local(async move {
@@ -4029,7 +4029,7 @@ fn App() -> impl IntoView {
                             } else {
                                 view! {
                                 <div class="settings-pane settings-pane-memory">
-                                    <div class="memory-toolbar">
+                                    <div class="settings-toolbar settings-toolbar-end memory-toolbar">
                                         <span class="settings-filter">{move || {
                                             let n = memory_view.get().map(|v| v.files.len()).unwrap_or(0);
                                             format!("{} ({n})", t(locale.get(), "memory.notes"))
@@ -4055,7 +4055,7 @@ fn App() -> impl IntoView {
                                                     load_memory_file(today);
                                                 }
                                             }>{move || t(locale.get(), "memory.add")}</button>
-                                            <button type="button" class="settings-list-remove memory-clear-btn" on:click=move |_| {
+                                            <button type="button" class="memory-clear-btn" on:click=move |_| {
                                                 spawn_local(async move {
                                                     let v = invoke("clear_memory", JsValue::UNDEFINED).await;
                                                     if let Ok(files) = serde_wasm_bindgen::from_value::<Vec<MemoryFile>>(v) {
