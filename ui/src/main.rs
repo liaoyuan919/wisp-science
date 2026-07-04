@@ -590,6 +590,38 @@ struct SkillInfo {
     description: String,
 }
 
+#[derive(Clone, serde::Deserialize)]
+struct SkillRow { name: String, description: String, enabled: bool, builtin: bool, #[allow(dead_code)] dir: String }
+
+#[derive(Clone, serde::Deserialize)]
+struct ConnRow { id: String, name: String, enabled: bool, transport: ConnTransport }
+#[derive(Clone, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum ConnTransport {
+    Stdio { command: String, #[serde(default)] args: Vec<String>, #[allow(dead_code)] #[serde(default)] env: Vec<(String,String)>, #[allow(dead_code)] #[serde(default)] cwd: Option<String> },
+    Http  { url: String, #[serde(default)] headers: Vec<(String,String)> },
+}
+#[derive(Clone, serde::Deserialize)]
+struct ConnView { bio_tools_enabled: bool, connections: Vec<ConnRow> }
+
+// Simple flat form state (kind + raw text fields; args/env/headers entered as text, parsed on save).
+#[derive(Clone, Default)]
+struct ConnForm { id: Option<String>, name: String, kind: String, command: String, args: String, url: String, headers: String, enabled: bool }
+
+fn build_conn_json(f: &ConnForm, assign_id: bool) -> serde_json::Value {
+    let id = f.id.clone().unwrap_or_else(|| if assign_id {
+        format!("conn-{}", (js_sys::Math::random() * 1e9) as u64)
+    } else { "test".into() });
+    let transport = if f.kind == "http" {
+        let headers: Vec<(String,String)> = f.headers.lines().filter_map(|l| l.split_once(':').map(|(k,v)| (k.trim().to_string(), v.trim().to_string()))).collect();
+        serde_json::json!({ "kind": "http", "url": f.url.trim(), "headers": headers })
+    } else {
+        let args: Vec<String> = f.args.split_whitespace().map(|s| s.to_string()).collect();
+        serde_json::json!({ "kind": "stdio", "command": f.command.trim(), "args": args, "env": [], "cwd": null })
+    };
+    serde_json::json!({ "id": id, "name": f.name.trim(), "enabled": f.enabled, "transport": transport })
+}
+
 #[derive(Deserialize, Clone)]
 #[allow(dead_code)]
 struct MemoryFile {
@@ -671,6 +703,9 @@ fn event_target_value(ev: &web_sys::Event) -> String {
 fn event_target_input(ev: &web_sys::Event) -> web_sys::HtmlInputElement {
     use wasm_bindgen::JsCast;
     ev.target().unwrap().dyn_into::<web_sys::HtmlInputElement>().unwrap()
+}
+fn event_target_checked(ev: &web_sys::Event) -> bool {
+    ev.target().and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok()).map(|i| i.checked()).unwrap_or(false)
 }
 
 /// Render agent/assistant Markdown to HTML for `inner_html`. GFM tables,
@@ -1751,6 +1786,11 @@ fn App() -> impl IntoView {
     let transcripts = create_rw_signal::<HashMap<String, Vec<ChatItem>>>(HashMap::new());
     let busy = create_rw_signal(false);
     let show_settings = create_rw_signal(false);
+    let settings_section = create_rw_signal("general");
+    let skills_list = create_rw_signal(Vec::<SkillRow>::new());
+    let conns_view = create_rw_signal(None::<ConnView>);
+    let conn_form = create_rw_signal(None::<ConnForm>);
+    let conn_test_msg = create_rw_signal(None::<(bool,String)>);
     let settings = create_rw_signal(Settings::default());
     // Configured model profiles + the composer's bottom-right picker state.
     let models = create_rw_signal::<Vec<ModelProfile>>(vec![]);
@@ -2181,6 +2221,22 @@ fn App() -> impl IntoView {
         });
     };
 
+    let refresh_skills = move || {
+        spawn_local(async move {
+            let v = invoke("list_skills", JsValue::UNDEFINED).await;
+            if let Ok(rows) = serde_wasm_bindgen::from_value::<Vec<SkillRow>>(v) {
+                skills_list.set(rows);
+            }
+        });
+    };
+
+    let refresh_conns = move || {
+        spawn_local(async move {
+            let v = invoke("list_mcp_connections", JsValue::UNDEFINED).await;
+            if let Ok(view) = serde_wasm_bindgen::from_value::<ConnView>(v) { conns_view.set(Some(view)); }
+        });
+    };
+
     let open_settings_fn = move || {
         show_settings.set(true);
         settings_message.set(None);
@@ -2189,6 +2245,8 @@ fn App() -> impl IntoView {
         let api_key_input = api_key_input;
         let msg = settings_message;
         let loc = locale;
+        refresh_skills();
+        refresh_conns();
         spawn_local(async move {
             let v = invoke("get_settings", JsValue::UNDEFINED).await;
             if let Ok(cfg) = serde_wasm_bindgen::from_value::<Settings>(v) {
@@ -3432,103 +3490,318 @@ fn App() -> impl IntoView {
 
         {move || show_settings.get().then(|| view! {
             <div class="overlay">
-                <div class="modal">
-                    <h2>{move || t(locale.get(), "settings.title")}</h2>
-                    <label>{move || t(locale.get(), "settings.language")}
-                        <select
-                            on:change=move|ev| {
-                                let code = dom_value(&ev);
-                                let loc = Locale::from_code(&code);
-                                locale.set(loc);
-                                set_document_lang(loc);
-                                settings.update(|s| s.locale = code);
-                            }
-                            prop:value=move || locale.get().code().to_string()>
-                            <option value="en">{move || t(locale.get(), "settings.language.en")}</option>
-                            <option value="zh">{move || t(locale.get(), "settings.language.zh")}</option>
-                        </select>
-                    </label>
-                    <label>{move || t(locale.get(), "settings.provider")}
-                        <select data-testid="settings-provider"
-                            on:input=move|ev| apply_provider_defaults(settings, dom_value(&ev))
-                            on:change=move|ev| apply_provider_defaults(settings, dom_value(&ev))
-                            prop:value={move || provider_value(&settings.get().provider).to_string()}>
-                            <option value="openai">{move || t(locale.get(), "settings.provider.openai")}</option>
-                            <option value="openai_responses">{move || t(locale.get(), "settings.provider.openai_responses")}</option>
-                            <option value="anthropic">{move || t(locale.get(), "settings.provider.anthropic")}</option>
-                        </select>
-                    </label>
-                    <label>{move || t(locale.get(), "settings.api_url")}
-                        <input on:input=move|ev| settings.update(|s| {
-                                normalize_settings_mut(s);
-                                s.api_url = event_target_input(&ev).value();
-                            })
-                            prop:value={move || settings.get().api_url} />
-                    </label>
-                    <label>{move || t(locale.get(), "settings.label")}
-                        <input on:input=move|ev| settings.update(|s| {
-                                s.label = event_target_input(&ev).value();
-                            })
-                            prop:value={move || settings.get().label}
-                            placeholder=move || t(locale.get(), "settings.label_ph") />
-                    </label>
-                    <label>{move || t(locale.get(), "settings.model")}
-                        <input on:input=move|ev| settings.update(|s| {
-                                normalize_settings_mut(s);
-                                s.model = event_target_input(&ev).value();
-                            })
-                            prop:value={move || settings.get().model}
-                            placeholder=move || t(locale.get(), "settings.model_ph") />
-                    </label>
-                    <label>{move || t(locale.get(), "settings.api_key")}
-                        <input on:input=move|ev| api_key_input.set(event_target_input(&ev).value())
-                            prop:value={move || api_key_input.get()} type="password" />
-                    </label>
-                    <label>{move || t(locale.get(), "settings.workspace_dir")}
-                        <input on:input=move|ev| settings.update(|s| {
-                                s.workspace_dir = event_target_input(&ev).value();
-                            })
-                            prop:value={move || settings.get().workspace_dir}
-                            placeholder=move || bootstrap.get().map(|b| b.workspace).unwrap_or_default() />
-                    </label>
-                    <details class="host-advanced">
-                        <summary>{move || t(locale.get(), "settings.advanced")}</summary>
-                        <label>{move || t(locale.get(), "settings.max_tokens")}
-                            <input type="number" min="16" step="1"
-                                on:input=move|ev| settings.update(|s| {
-                                    s.max_tokens = dom_value(&ev).parse().unwrap_or(0);
-                                })
-                                prop:value=move || settings.get().max_tokens.to_string() />
-                        </label>
-                        <label>{move || t(locale.get(), "settings.reasoning_effort")}
-                            <select
-                                on:change=move|ev| settings.update(|s| s.reasoning_effort = dom_value(&ev))
-                                prop:value=move || {
-                                    let v = settings.get().reasoning_effort;
-                                    if v.is_empty() { "default".to_string() } else { v }
-                                }>
-                                <option value="default">{move || t(locale.get(), "settings.reasoning_effort.default")}</option>
-                                <option value="none">"none"</option>
-                                <option value="minimal">"minimal"</option>
-                                <option value="low">"low"</option>
-                                <option value="medium">"medium"</option>
-                                <option value="high">"high"</option>
-                                <option value="xhigh">"xhigh"</option>
-                            </select>
-                        </label>
-                        <span class="hint">{move || t(locale.get(), "settings.advanced_hint")}</span>
-                    </details>
-                    <span class="hint">{move || t(locale.get(), "settings.tip")}</span>
-                    {move || settings_message.get().map(|(ok, text)| view! {
-                        <div class="settings-status"
-                            class:ok=move || ok
-                            class:fail=move || !ok>{text}</div>
-                    })}
-                    <div class="row">
-                        <button type="button" disabled=move || settings_busy.get() on:click=check_updates>{move || t(locale.get(), "settings.check_updates")}</button>
-                        <button type="button" disabled=move || settings_busy.get() on:click=validate_settings>{move || t(locale.get(), "settings.validate")}</button>
-                        <button type="button" disabled=move || settings_busy.get() on:click=move |_| show_settings.set(false)>{move || t(locale.get(), "settings.cancel")}</button>
-                        <button type="button" class="primary" disabled=move || settings_busy.get() on:click=save_settings>{move || t(locale.get(), "settings.save")}</button>
+                <div class="modal settings-modal">
+                    <div class="settings-nav">
+                        <button class:active=move || settings_section.get()=="general"
+                            on:click=move |_| settings_section.set("general")>
+                            {move || t(locale.get(), "settings.nav.general")}</button>
+                        <button class:active=move || settings_section.get()=="skills"
+                            on:click=move |_| { settings_section.set("skills"); refresh_skills(); }>
+                            {move || t(locale.get(), "settings.nav.skills")}</button>
+                        <button class:active=move || settings_section.get()=="connections"
+                            on:click=move |_| { settings_section.set("connections"); refresh_conns(); }>
+                            {move || t(locale.get(), "settings.nav.connections")}</button>
+                    </div>
+                    <div class="settings-content">
+                        <h2>{move || t(locale.get(), "settings.title")}</h2>
+                        {move || (settings_section.get() == "general").then(|| view! {
+                            <div class="settings-pane">
+                                <label>{move || t(locale.get(), "settings.language")}
+                                    <select
+                                        on:change=move|ev| {
+                                            let code = dom_value(&ev);
+                                            let loc = Locale::from_code(&code);
+                                            locale.set(loc);
+                                            set_document_lang(loc);
+                                            settings.update(|s| s.locale = code);
+                                        }
+                                        prop:value=move || locale.get().code().to_string()>
+                                        <option value="en">{move || t(locale.get(), "settings.language.en")}</option>
+                                        <option value="zh">{move || t(locale.get(), "settings.language.zh")}</option>
+                                    </select>
+                                </label>
+                                <label>{move || t(locale.get(), "settings.provider")}
+                                    <select data-testid="settings-provider"
+                                        on:input=move|ev| apply_provider_defaults(settings, dom_value(&ev))
+                                        on:change=move|ev| apply_provider_defaults(settings, dom_value(&ev))
+                                        prop:value={move || provider_value(&settings.get().provider).to_string()}>
+                                        <option value="openai">{move || t(locale.get(), "settings.provider.openai")}</option>
+                                        <option value="openai_responses">{move || t(locale.get(), "settings.provider.openai_responses")}</option>
+                                        <option value="anthropic">{move || t(locale.get(), "settings.provider.anthropic")}</option>
+                                    </select>
+                                </label>
+                                <label>{move || t(locale.get(), "settings.api_url")}
+                                    <input on:input=move|ev| settings.update(|s| {
+                                            normalize_settings_mut(s);
+                                            s.api_url = event_target_input(&ev).value();
+                                        })
+                                        prop:value={move || settings.get().api_url} />
+                                </label>
+                                <label>{move || t(locale.get(), "settings.label")}
+                                    <input on:input=move|ev| settings.update(|s| {
+                                            s.label = event_target_input(&ev).value();
+                                        })
+                                        prop:value={move || settings.get().label}
+                                        placeholder=move || t(locale.get(), "settings.label_ph") />
+                                </label>
+                                <label>{move || t(locale.get(), "settings.model")}
+                                    <input on:input=move|ev| settings.update(|s| {
+                                            normalize_settings_mut(s);
+                                            s.model = event_target_input(&ev).value();
+                                        })
+                                        prop:value={move || settings.get().model}
+                                        placeholder=move || t(locale.get(), "settings.model_ph") />
+                                </label>
+                                <label>{move || t(locale.get(), "settings.api_key")}
+                                    <input on:input=move|ev| api_key_input.set(event_target_input(&ev).value())
+                                        prop:value={move || api_key_input.get()} type="password" />
+                                </label>
+                                <label>{move || t(locale.get(), "settings.workspace_dir")}
+                                    <input on:input=move|ev| settings.update(|s| {
+                                            s.workspace_dir = event_target_input(&ev).value();
+                                        })
+                                        prop:value={move || settings.get().workspace_dir}
+                                        placeholder=move || bootstrap.get().map(|b| b.workspace).unwrap_or_default() />
+                                </label>
+                                <details class="host-advanced">
+                                    <summary>{move || t(locale.get(), "settings.advanced")}</summary>
+                                    <label>{move || t(locale.get(), "settings.max_tokens")}
+                                        <input type="number" min="16" step="1"
+                                            on:input=move|ev| settings.update(|s| {
+                                                s.max_tokens = dom_value(&ev).parse().unwrap_or(0);
+                                            })
+                                            prop:value=move || settings.get().max_tokens.to_string() />
+                                    </label>
+                                    <label>{move || t(locale.get(), "settings.reasoning_effort")}
+                                        <select
+                                            on:change=move|ev| settings.update(|s| s.reasoning_effort = dom_value(&ev))
+                                            prop:value=move || {
+                                                let v = settings.get().reasoning_effort;
+                                                if v.is_empty() { "default".to_string() } else { v }
+                                            }>
+                                            <option value="default">{move || t(locale.get(), "settings.reasoning_effort.default")}</option>
+                                            <option value="none">"none"</option>
+                                            <option value="minimal">"minimal"</option>
+                                            <option value="low">"low"</option>
+                                            <option value="medium">"medium"</option>
+                                            <option value="high">"high"</option>
+                                            <option value="xhigh">"xhigh"</option>
+                                        </select>
+                                    </label>
+                                    <span class="hint">{move || t(locale.get(), "settings.advanced_hint")}</span>
+                                </details>
+                                <span class="hint">{move || t(locale.get(), "settings.tip")}</span>
+                                {move || settings_message.get().map(|(ok, text)| view! {
+                                    <div class="settings-status"
+                                        class:ok=move || ok
+                                        class:fail=move || !ok>{text}</div>
+                                })}
+                                <div class="row">
+                                    <button type="button" disabled=move || settings_busy.get() on:click=check_updates>{move || t(locale.get(), "settings.check_updates")}</button>
+                                    <button type="button" disabled=move || settings_busy.get() on:click=validate_settings>{move || t(locale.get(), "settings.validate")}</button>
+                                    <button type="button" disabled=move || settings_busy.get() on:click=move |_| show_settings.set(false)>{move || t(locale.get(), "settings.cancel")}</button>
+                                    <button type="button" class="primary" disabled=move || settings_busy.get() on:click=save_settings>{move || t(locale.get(), "settings.save")}</button>
+                                </div>
+                            </div>
+                        }.into_view())}
+                        {move || (settings_section.get() == "skills").then(|| view! {
+                            <div class="settings-pane">
+                                <div class="pane-head">
+                                    <span class="hint">{move || t(locale.get(), "settings.applies_new_session")}</span>
+                                    <div class="row">
+                                        <button on:click=move |_| {
+                                            spawn_local(async move {
+                                                let picked = invoke("pick_skill_source", JsValue::UNDEFINED).await;
+                                                if let Some(path) = picked.as_string() {
+                                                    let arg = to_value(&serde_json::json!({ "srcPath": path })).unwrap();
+                                                    let _ = invoke_checked("install_skill", arg).await;
+                                                    refresh_skills();
+                                                }
+                                            });
+                                        }>{move || t(locale.get(), "skills.add_file")}</button>
+                                        <button on:click=move |_| {
+                                            spawn_local(async move {
+                                                let picked = invoke("pick_directory", JsValue::UNDEFINED).await;
+                                                if let Some(path) = picked.as_string() {
+                                                    let arg = to_value(&serde_json::json!({ "srcPath": path })).unwrap();
+                                                    let _ = invoke_checked("install_skill", arg).await;
+                                                    refresh_skills();
+                                                }
+                                            });
+                                        }>{move || t(locale.get(), "skills.add_folder")}</button>
+                                    </div>
+                                </div>
+                                <div class="list">
+                                    <For each=move || skills_list.get() key=|s| s.name.clone() let:s>
+                                        {
+                                            let name_toggle = s.name.clone();
+                                            let name_remove = s.name.clone();
+                                            let enabled = s.enabled;
+                                            let builtin = s.builtin;
+                                            view! {
+                                                <div class="list-row">
+                                                    <div class="list-row-main">
+                                                        <div class="list-row-title">{s.name.clone()}</div>
+                                                        <div class="list-row-sub">{s.description.clone()}</div>
+                                                    </div>
+                                                    {(!builtin).then(|| { let n = name_remove.clone(); view! {
+                                                        <button class="icon-btn" title="remove" on:click=move |_| {
+                                                            let n = n.clone();
+                                                            spawn_local(async move {
+                                                                let arg = to_value(&serde_json::json!({ "name": n })).unwrap();
+                                                                let _ = invoke_checked("remove_skill", arg).await;
+                                                                refresh_skills();
+                                                            });
+                                                        }>"🗑"</button>
+                                                    }})}
+                                                    <input type="checkbox" prop:checked=enabled on:change=move |ev| {
+                                                        let n = name_toggle.clone();
+                                                        let on = event_target_checked(&ev);
+                                                        spawn_local(async move {
+                                                            let arg = to_value(&serde_json::json!({ "name": n, "enabled": on })).unwrap();
+                                                            let _ = invoke_checked("set_skill_enabled", arg).await;
+                                                        });
+                                                    } />
+                                                </div>
+                                            }
+                                        }
+                                    </For>
+                                </div>
+                            </div>
+                        }.into_view())}
+                        {move || (settings_section.get() == "connections").then(|| view! {
+                            <div class="settings-pane">
+                                <span class="hint">{move || t(locale.get(), "settings.applies_new_session")}</span>
+                                <div class="list-row">
+                                    <div class="list-row-main">
+                                        <div class="list-row-title">{move || t(locale.get(), "conn.biotools")}</div>
+                                        <div class="list-row-sub">{move || t(locale.get(), "conn.biotools.desc")}</div>
+                                    </div>
+                                    <input type="checkbox"
+                                        prop:checked=move || conns_view.get().map(|v| v.bio_tools_enabled).unwrap_or(true)
+                                        on:change=move |ev| {
+                                            let on = event_target_checked(&ev);
+                                            spawn_local(async move {
+                                                let arg = to_value(&serde_json::json!({ "enabled": on })).unwrap();
+                                                let _ = invoke_checked("set_bio_tools_enabled", arg).await;
+                                                refresh_conns();
+                                            });
+                                        } />
+                                </div>
+                                <div class="list">
+                                    <For each=move || conns_view.get().map(|v| v.connections).unwrap_or_default() key=|c| c.id.clone() let:c>
+                                        {
+                                            let id_del = c.id.clone();
+                                            let id_toggle = c.id.clone();
+                                            let row = c.clone();
+                                            let kind_badge = match &c.transport {
+                                                ConnTransport::Stdio { .. } => "stdio",
+                                                ConnTransport::Http { .. } => "http",
+                                            };
+                                            view! {
+                                                <div class="list-row">
+                                                    <div class="list-row-main">
+                                                        <div class="list-row-title">{c.name.clone()} <span class="badge">{kind_badge}</span></div>
+                                                        <div class="list-row-sub">
+                                                            {match &c.transport {
+                                                                ConnTransport::Stdio { command, .. } => command.clone(),
+                                                                ConnTransport::Http { url, .. } => url.clone(),
+                                                            }}
+                                                        </div>
+                                                    </div>
+                                                    <button class="icon-btn" title="edit" on:click=move |_| {
+                                                        let form = match &row.transport {
+                                                            ConnTransport::Stdio { command, args, .. } => ConnForm {
+                                                                id: Some(row.id.clone()), name: row.name.clone(), kind: "stdio".into(),
+                                                                command: command.clone(), args: args.join(" "), url: String::new(), headers: String::new(),
+                                                                enabled: row.enabled,
+                                                            },
+                                                            ConnTransport::Http { url, headers } => ConnForm {
+                                                                id: Some(row.id.clone()), name: row.name.clone(), kind: "http".into(),
+                                                                command: String::new(), args: String::new(), url: url.clone(),
+                                                                headers: headers.iter().map(|(k,v)| format!("{k}: {v}")).collect::<Vec<_>>().join("\n"),
+                                                                enabled: row.enabled,
+                                                            },
+                                                        };
+                                                        conn_form.set(Some(form));
+                                                        conn_test_msg.set(None);
+                                                    }>"✎"</button>
+                                                    <button class="icon-btn" title="remove" on:click=move |_| {
+                                                        let id = id_del.clone();
+                                                        spawn_local(async move {
+                                                            let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
+                                                            let _ = invoke_checked("delete_mcp_connection", arg).await;
+                                                            refresh_conns();
+                                                        });
+                                                    }>"🗑"</button>
+                                                    <input type="checkbox" prop:checked=c.enabled on:change=move |ev| {
+                                                        let id = id_toggle.clone();
+                                                        let on = event_target_checked(&ev);
+                                                        spawn_local(async move {
+                                                            let arg = to_value(&serde_json::json!({ "id": id, "enabled": on })).unwrap();
+                                                            let _ = invoke_checked("set_mcp_connection_enabled", arg).await;
+                                                            refresh_conns();
+                                                        });
+                                                    } />
+                                                </div>
+                                            }
+                                        }
+                                    </For>
+                                </div>
+                                <div class="row">
+                                    <button on:click=move |_| { conn_form.set(Some(ConnForm { kind: "stdio".into(), enabled: true, ..Default::default() })); conn_test_msg.set(None); }>
+                                        {move || t(locale.get(), "conn.add")}</button>
+                                </div>
+                                {move || conn_form.get().map(|f| view! {
+                                    <div class="conn-form">
+                                        <label>{move || t(locale.get(),"conn.name")}
+                                            <input prop:value=f.name.clone() on:input=move |ev| conn_form.update(|o| if let Some(o)=o { o.name = event_target_input(&ev).value(); }) /></label>
+                                        <label>{move || t(locale.get(),"conn.kind")}
+                                            <select prop:value=f.kind.clone() on:change=move |ev| conn_form.update(|o| if let Some(o)=o { o.kind = event_target_value(&ev); })>
+                                                <option value="stdio">{move || t(locale.get(),"conn.kind.stdio")}</option>
+                                                <option value="http">{move || t(locale.get(),"conn.kind.http")}</option>
+                                            </select></label>
+                                        // stdio fields
+                                        {move || (conn_form.get().map(|f| f.kind).as_deref() == Some("stdio")).then(|| view!{
+                                            <label>{move || t(locale.get(),"conn.command")}
+                                                <input prop:value=conn_form.get().map(|f|f.command).unwrap_or_default() on:input=move |ev| conn_form.update(|o| if let Some(o)=o { o.command = event_target_input(&ev).value(); }) /></label>
+                                            <label>{move || t(locale.get(),"conn.args")}
+                                                <input placeholder="arg1 arg2" prop:value=conn_form.get().map(|f|f.args).unwrap_or_default() on:input=move |ev| conn_form.update(|o| if let Some(o)=o { o.args = event_target_input(&ev).value(); }) /></label>
+                                        })}
+                                        // http fields
+                                        {move || (conn_form.get().map(|f| f.kind).as_deref() == Some("http")).then(|| view!{
+                                            <label>{move || t(locale.get(),"conn.url")}
+                                                <input placeholder="https://host/mcp" prop:value=conn_form.get().map(|f|f.url).unwrap_or_default() on:input=move |ev| conn_form.update(|o| if let Some(o)=o { o.url = event_target_input(&ev).value(); }) /></label>
+                                            <label>{move || t(locale.get(),"conn.headers")}
+                                                <input placeholder="Authorization: Bearer xxx" prop:value=conn_form.get().map(|f|f.headers).unwrap_or_default() on:input=move |ev| conn_form.update(|o| if let Some(o)=o { o.headers = event_target_input(&ev).value(); }) /></label>
+                                        })}
+                                        {move || conn_test_msg.get().map(|(ok,msg)| view!{ <div class="settings-status" class:ok=ok class:fail=move||!ok>{msg}</div> })}
+                                        <div class="row">
+                                            <button on:click=move |_| { let f = conn_form.get().unwrap_or_default();
+                                                spawn_local(async move {
+                                                    let conn = build_conn_json(&f, false);
+                                                    match invoke_checked("test_mcp_connection", to_value(&serde_json::json!({"conn": conn})).unwrap()).await {
+                                                        Ok(v) => { let n = v.as_f64().unwrap_or(0.0) as i64; conn_test_msg.set(Some((true, format!("OK — {n} tools")))); }
+                                                        Err(e) => conn_test_msg.set(Some((false, format!("{e:?}")))),
+                                                    }
+                                                });
+                                            }>{move || t(locale.get(),"conn.test")}</button>
+                                            <button on:click=move |_| { conn_form.set(None); conn_test_msg.set(None); }>{move || t(locale.get(),"settings.cancel")}</button>
+                                            <button class="primary" on:click=move |_| { let f = conn_form.get().unwrap_or_default();
+                                                spawn_local(async move {
+                                                    let editing = f.id.is_some();
+                                                    let conn = build_conn_json(&f, true);
+                                                    let cmd = if editing { "update_mcp_connection" } else { "add_mcp_connection" };
+                                                    if invoke_checked(cmd, to_value(&serde_json::json!({"conn": conn})).unwrap()).await.is_ok() {
+                                                        conn_form.set(None); conn_test_msg.set(None); refresh_conns();
+                                                    }
+                                                });
+                                            }>{move || t(locale.get(),"settings.save")}</button>
+                                        </div>
+                                    </div>
+                                })}
+                            </div>
+                        }.into_view())}
                     </div>
                 </div>
             </div>
