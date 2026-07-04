@@ -383,9 +383,87 @@ struct Demo {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SendMessageArgs {
+    // Tauri v2 maps JS camelCase keys to snake_case params; the JS side must
+    // send `sessionId` or the backend sees `None` and forks a new conversation.
     session_id: Option<String>,
     message: String,
+}
+
+/// Single source of truth for `invoke` argument payloads.
+///
+/// Tauri v2 deserializes command arguments from JS **camelCase** keys onto the
+/// Rust **snake_case** parameters. A snake_case key (`session_id`) never binds:
+/// an `Option` param silently becomes `None`, which once made every send fork a
+/// brand-new conversation instead of continuing the active one. Keep every
+/// multi-word key camelCase here; `tauri_args_tests` pins them.
+mod tauri_args {
+    use serde_json::{json, Value};
+
+    pub fn stop_agent(session_id: &Option<String>) -> Value {
+        json!({ "sessionId": session_id })
+    }
+    pub fn review_session(session_id: &Option<String>) -> Value {
+        json!({ "sessionId": session_id })
+    }
+    pub fn rewind_session(session_id: &Option<String>, user_index: usize) -> Value {
+        json!({ "sessionId": session_id, "userIndex": user_index })
+    }
+    pub fn confirm_response(session_id: &str, approved: bool) -> Value {
+        json!({ "sessionId": session_id, "approved": approved })
+    }
+    pub fn read_file(path: &str, max_bytes: Option<u64>) -> Value {
+        match max_bytes {
+            Some(n) => json!({ "path": path, "maxBytes": n }),
+            None => json!({ "path": path }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tauri_args_tests {
+    use super::*;
+
+    // Guard the exact regression: `session_id` must reach the backend as the
+    // camelCase `sessionId`, or `send_message` starts a new conversation.
+    #[test]
+    fn send_message_args_serialize_camel_case() {
+        let v = serde_json::to_value(SendMessageArgs {
+            session_id: Some("frame-1".into()),
+            message: "hi".into(),
+        })
+        .unwrap();
+        assert_eq!(v["sessionId"], "frame-1");
+        assert_eq!(v["message"], "hi");
+        assert!(v.get("session_id").is_none(), "snake_case key would bind to None on the backend");
+    }
+
+    #[test]
+    fn session_command_args_use_camel_case_keys() {
+        let sid = Some("frame-1".to_string());
+
+        let v = tauri_args::stop_agent(&sid);
+        assert_eq!(v["sessionId"], "frame-1");
+        assert!(v.get("session_id").is_none());
+
+        let v = tauri_args::review_session(&sid);
+        assert_eq!(v["sessionId"], "frame-1");
+
+        let v = tauri_args::rewind_session(&sid, 3);
+        assert_eq!(v["sessionId"], "frame-1");
+        assert_eq!(v["userIndex"], 3);
+        assert!(v.get("user_index").is_none());
+
+        let v = tauri_args::confirm_response("frame-1", true);
+        assert_eq!(v["sessionId"], "frame-1");
+        assert_eq!(v["approved"], true);
+
+        let v = tauri_args::read_file("a.txt", Some(1024));
+        assert_eq!(v["path"], "a.txt");
+        assert_eq!(v["maxBytes"], 1024);
+        assert!(v.get("max_bytes").is_none());
+    }
 }
 
 #[derive(Deserialize, Clone)]
@@ -1194,7 +1272,7 @@ fn FilePreview(dom_id: String, path: String, kind: String) -> impl IntoView {
             // PDF still renders (the default 8 MB cap silently rejected them, #35).
             // On failure, surface the real backend error (size limit / outside project
             // root / …) instead of a blanket "file not found".
-            let arg = to_value(&serde_json::json!({ "path": path, "max_bytes": 32u64 * 1024 * 1024 })).unwrap();
+            let arg = to_value(&tauri_args::read_file(&path, Some(32 * 1024 * 1024))).unwrap();
             let fc = match invoke_checked("read_file", arg).await {
                 Ok(v) => match serde_wasm_bindgen::from_value::<FileContent>(v) {
                     Ok(fc) => fc,
@@ -1919,7 +1997,7 @@ fn App() -> impl IntoView {
         // Stop only the active session's turn; background conversations keep running.
         let sid = active_session.get();
         spawn_local(async move {
-            let arg = to_value(&serde_json::json!({ "session_id": sid })).unwrap();
+            let arg = to_value(&tauri_args::stop_agent(&sid)).unwrap();
             let _ = invoke("stop_agent", arg).await;
         });
     };
@@ -2035,7 +2113,7 @@ fn App() -> impl IntoView {
         focus_composer();
         let sid = active_session.get();
         spawn_local(async move {
-            let arg = to_value(&serde_json::json!({ "session_id": sid, "user_index": user_idx })).unwrap();
+            let arg = to_value(&tauri_args::rewind_session(&sid, user_idx)).unwrap();
             let _ = invoke("rewind_session", arg).await;
         });
     };
@@ -2377,7 +2455,7 @@ fn App() -> impl IntoView {
         // backend unblocks the right turn.
         let sid = confirm_state.get().map(|(f, _)| f).unwrap_or_default();
         confirm_state.set(None);
-        let arg = to_value(&serde_json::json!({ "session_id": sid, "approved": approved })).unwrap();
+        let arg = to_value(&tauri_args::confirm_response(&sid, approved)).unwrap();
         spawn_local(async move { let _ = invoke("confirm_response", arg).await; });
     });
 
@@ -2830,7 +2908,7 @@ fn App() -> impl IntoView {
                                                 status.set(t(loc, "status.reviewing"));
                                                 let sid = active_session.get();
                                                 spawn_local(async move {
-                                                    let arg = to_value(&serde_json::json!({ "session_id": sid })).unwrap();
+                                                    let arg = to_value(&tauri_args::review_session(&sid)).unwrap();
                                                     if let Err(err) = invoke_checked("review_session", arg).await {
                                                         status.set(tf(loc, "status.review_failed", &[("msg", &localize_backend(loc, &js_error_text(err)))]));
                                                     }
