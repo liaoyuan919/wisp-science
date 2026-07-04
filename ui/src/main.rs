@@ -493,7 +493,7 @@ struct ConnRow { id: String, name: String, enabled: bool, transport: ConnTranspo
 #[derive(Clone, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum ConnTransport {
-    Stdio { command: String, #[serde(default)] args: Vec<String>, #[serde(default)] env: Vec<(String,String)>, #[serde(default)] cwd: Option<String> },
+    Stdio { command: String, #[serde(default)] args: Vec<String>, #[allow(dead_code)] #[serde(default)] env: Vec<(String,String)>, #[allow(dead_code)] #[serde(default)] cwd: Option<String> },
     Http  { url: String, #[serde(default)] headers: Vec<(String,String)> },
 }
 #[derive(Clone, serde::Deserialize)]
@@ -501,7 +501,7 @@ struct ConnView { bio_tools_enabled: bool, connections: Vec<ConnRow> }
 
 // Simple flat form state (kind + raw text fields; args/env/headers entered as text, parsed on save).
 #[derive(Clone, Default)]
-struct ConnForm { id: Option<String>, name: String, kind: String, command: String, args: String, url: String, headers: String }
+struct ConnForm { id: Option<String>, name: String, kind: String, command: String, args: String, url: String, headers: String, enabled: bool }
 
 fn build_conn_json(f: &ConnForm, assign_id: bool) -> serde_json::Value {
     let id = f.id.clone().unwrap_or_else(|| if assign_id {
@@ -514,7 +514,7 @@ fn build_conn_json(f: &ConnForm, assign_id: bool) -> serde_json::Value {
         let args: Vec<String> = f.args.split_whitespace().map(|s| s.to_string()).collect();
         serde_json::json!({ "kind": "stdio", "command": f.command.trim(), "args": args, "env": [], "cwd": null })
     };
-    serde_json::json!({ "id": id, "name": f.name.trim(), "enabled": true, "transport": transport })
+    serde_json::json!({ "id": id, "name": f.name.trim(), "enabled": f.enabled, "transport": transport })
 }
 
 #[derive(Deserialize, Clone)]
@@ -3363,11 +3363,13 @@ fn App() -> impl IntoView {
                                                             ConnTransport::Stdio { command, args, .. } => ConnForm {
                                                                 id: Some(row.id.clone()), name: row.name.clone(), kind: "stdio".into(),
                                                                 command: command.clone(), args: args.join(" "), url: String::new(), headers: String::new(),
+                                                                enabled: row.enabled,
                                                             },
                                                             ConnTransport::Http { url, headers } => ConnForm {
                                                                 id: Some(row.id.clone()), name: row.name.clone(), kind: "http".into(),
                                                                 command: String::new(), args: String::new(), url: url.clone(),
                                                                 headers: headers.iter().map(|(k,v)| format!("{k}: {v}")).collect::<Vec<_>>().join("\n"),
+                                                                enabled: row.enabled,
                                                             },
                                                         };
                                                         conn_form.set(Some(form));
@@ -3396,7 +3398,7 @@ fn App() -> impl IntoView {
                                     </For>
                                 </div>
                                 <div class="row">
-                                    <button on:click=move |_| { conn_form.set(Some(ConnForm { kind: "stdio".into(), ..Default::default() })); conn_test_msg.set(None); }>
+                                    <button on:click=move |_| { conn_form.set(Some(ConnForm { kind: "stdio".into(), enabled: true, ..Default::default() })); conn_test_msg.set(None); }>
                                         {move || t(locale.get(), "conn.add")}</button>
                                 </div>
                                 {move || conn_form.get().map(|f| view! {
