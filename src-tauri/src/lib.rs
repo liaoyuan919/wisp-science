@@ -301,6 +301,10 @@ struct BootstrapStatus {
     python_ok: bool,
     mcp_catalog: usize,
     uv_ok: bool,
+    node_ok: bool,
+    npm_ok: bool,
+    sci_ok: bool,
+    pixi_ok: bool,
     app_version: String,
     workspace: String,
     errors: Vec<String>,
@@ -1747,6 +1751,10 @@ fn initial_bootstrap(app_data: &std::path::Path, workspace: &std::path::Path, sk
         python_ok: false,
         mcp_catalog: list_mcp_servers(workspace).len(),
         uv_ok: wisp_python::PythonEnv::find_uv().is_some(),
+        node_ok: wisp_python::PythonEnv::find_node().is_some(),
+        npm_ok: wisp_python::PythonEnv::find_npm().is_some(),
+        sci_ok: wisp_python::PythonEnv::find_sci().is_some(),
+        pixi_ok: wisp_python::PythonEnv::find_pixi().is_some(),
         app_version: env!("CARGO_PKG_VERSION").into(),
         workspace: workspace.to_string_lossy().into_owned(),
         errors: vec![],
@@ -1756,6 +1764,16 @@ fn initial_bootstrap(app_data: &std::path::Path, workspace: &std::path::Path, sk
     }
     if !status.uv_ok {
         status.errors.push("uv not found on PATH; install uv or set UV_PATH.".into());
+    }
+    if !status.node_ok {
+        status.errors.push("Node.js not found on PATH; bear-* literature skills need Node >= 20.".into());
+    } else if !status.npm_ok {
+        status.errors.push("npm not found on PATH; install Node.js (includes npm) for scimaster-cli.".into());
+    } else if !status.sci_ok {
+        status.errors.push("scimaster-cli (`sci`) not found; run `npm install -g scimaster-cli` then `sci init`.".into());
+    }
+    if !status.pixi_ok {
+        status.errors.push("pixi not found on PATH; optional for local bioinformatics multi-env workflows.".into());
     }
     match wisp_python::PythonEnv::ensure(app_data) {
         Ok(_) => status.python_ok = true,

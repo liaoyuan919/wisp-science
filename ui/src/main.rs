@@ -797,6 +797,10 @@ struct BootstrapStatus {
     python_ok: bool,
     mcp_catalog: usize,
     uv_ok: bool,
+    node_ok: bool,
+    npm_ok: bool,
+    sci_ok: bool,
+    pixi_ok: bool,
     app_version: String,
     workspace: String,
     errors: Vec<String>,
@@ -4534,6 +4538,9 @@ fn App() -> impl IntoView {
                                 tf(loc, "caps.runtime_status", &[
                                 ("py", if b.python_ok { &ready } else { &missing }),
                                 ("uv", if b.uv_ok { &ready } else { &missing }),
+                                ("node", if b.node_ok { &ready } else { &missing }),
+                                ("sci", if b.sci_ok { &ready } else { &missing }),
+                                ("pixi", if b.pixi_ok { &ready } else { &missing }),
                                 ("skills", &b.skills_loaded.to_string()),
                                 ("mcp", &b.mcp_catalog.to_string()),
                             ])}}</p>
@@ -4574,7 +4581,7 @@ fn App() -> impl IntoView {
                     })}
                     <div class="row">
                         <button on:click=move |_| show_capabilities.set(false)>{move || t(locale.get(), "caps.close")}</button>
-                        {move || bootstrap.get().filter(|b| !b.python_ok || !b.uv_ok).map(|_| view! {
+                        {move || bootstrap.get().filter(|b| !b.python_ok || !b.uv_ok || !b.node_ok || !b.sci_ok || !b.pixi_ok).map(|_| view! {
                             <button class="primary" disabled=move || busy.get() on:click=start_env_setup.clone()>
                                 {move || t(locale.get(), "caps.setup_env")}
                             </button>
