@@ -193,6 +193,8 @@ button.msg-icon-btn:disabled { opacity: .3; cursor: default; }
 button.msg-icon-btn .gi { width: 14px; height: 14px; }
 .msg.user .role { text-align: right; }
 .msg.assistant .role { display: flex; align-items: center; gap: 7px; color: var(--text-muted); font-weight: 600; letter-spacing: 0.05em; }
+.msg.assistant .role-brand { text-transform: uppercase; }
+.msg.assistant .role-model { font-size: 10.5px; font-weight: 500; font-family: var(--font-mono); color: var(--text-faint); letter-spacing: 0; text-transform: none; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg-elev); }
 .msg.assistant .role::before { content: ""; width: 15px; height: 15px; border-radius: 5px; background: center / contain no-repeat url("logo.svg"); }
 .msg.assistant .body { color: var(--text); font-family: var(--font-response); }
 .msg.assistant .body.md { display: block; font-size: 15px; line-height: 1.65; letter-spacing: -0.006em; }

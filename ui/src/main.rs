@@ -77,10 +77,14 @@ enum AgentEvent {
 #[derive(Clone)]
 enum ChatItem {
     User(String),
-    Assistant(String),
+    Assistant { text: String, model: Option<String> },
     Reasoning(String),
     Tool { name: String, ok: Option<bool>, input: String, output: String },
     Review(String),
+}
+
+fn active_model_label(models: &[ModelProfile]) -> Option<String> {
+    models.iter().find(|m| m.active).or_else(|| models.first()).map(|m| m.label.clone()).filter(|s| !s.is_empty())
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -399,6 +403,8 @@ struct LoadedItem {
     text: String,
     tool_name: Option<String>,
     ok: Option<bool>,
+    #[serde(default)]
+    model_name: Option<String>,
 }
 
 impl LoadedItem {
@@ -412,7 +418,7 @@ impl LoadedItem {
                 input: String::new(),
                 output: self.text,
             },
-            _ => ChatItem::Assistant(self.text),
+            _ => ChatItem::Assistant { text: self.text, model: self.model_name },
         }
     }
 }
@@ -1022,15 +1028,15 @@ fn collect_markdown_artifacts(
 /// completion as the final markdown response, not a collapsed tool row).
 fn promote_assistant_text(items: &mut Vec<ChatItem>, text: &str) {
     if text.trim().is_empty() { return; }
-    if let Some(i) = items.iter().rposition(|i| matches!(i, ChatItem::Assistant(_))) {
-        if let ChatItem::Assistant(s) = &mut items[i] {
+    if let Some(i) = items.iter().rposition(|i| matches!(i, ChatItem::Assistant { .. })) {
+        if let ChatItem::Assistant { text: s, .. } = &mut items[i] {
             if s.is_empty() {
                 s.push_str(text);
                 return;
             }
         }
     }
-    items.push(ChatItem::Assistant(text.to_string()));
+    items.push(ChatItem::Assistant { text: text.to_string(), model: None });
 }
 
 /// Collect tables, code, latex, and file-path artifacts from the transcript.
@@ -1047,7 +1053,7 @@ fn collect_artifacts(items: &[ChatItem], locale: Locale) -> Vec<Artifact> {
                     push_file_artifact(&mut out, &mut seen, word);
                 }
             }
-            ChatItem::Assistant(s) => collect_markdown_artifacts(&mut out, &mut seen, s, locale, &mut scan),
+            ChatItem::Assistant { text: s, .. } => collect_markdown_artifacts(&mut out, &mut seen, s, locale, &mut scan),
             ChatItem::Tool { name, input, output, .. } => {
                 if name == "attempt_completion" && !output.is_empty() {
                     collect_markdown_artifacts(&mut out, &mut seen, output, locale, &mut scan);
@@ -1391,6 +1397,7 @@ fn UserMessage(
 #[component]
 fn AssistantMessage(
     text: String,
+    model: Option<String>,
     artifacts: Vec<Artifact>,
     on_artifact: Callback<usize>,
     on_file: Callback<(String, String)>,
@@ -1412,7 +1419,12 @@ fn AssistantMessage(
     let text_for_click_copy = text;
     let locale = use_locale();
     view! {
-        <div class="role">{move || t(locale.get(), "chat.assistant")}</div>
+        <div class="role">
+            <span class="role-brand">{move || t(locale.get(), "chat.assistant")}</span>
+            {move || model.clone().filter(|m| !m.is_empty()).map(|m| view! {
+                <span class="role-model">{m}</span>
+            })}
+        </div>
         <div class="assistant-wrap">
             <div class="body md" id=hid.clone()
                 inner_html=move || html.get()
@@ -1696,7 +1708,7 @@ fn App() -> impl IntoView {
 
     // Three-pane layout state (mirrors web-dist: sidebar / conversation / right pane).
     let show_sidebar = create_rw_signal(true);
-    let show_right = create_rw_signal(true);
+    let show_right = create_rw_signal(false);
     let right_w = create_rw_signal(440.0_f64);
     let dragging = create_rw_signal(false);
     let drag_start_x = create_rw_signal(0.0_f64);
@@ -1801,6 +1813,7 @@ fn App() -> impl IntoView {
     let running_cb = running;
     let status_cb = status;
     let locale_cb = locale;
+    let models_cb = models;
     let cb = Closure::wrap(Box::new(move |payload: JsValue| {
         let ev: AgentEvent = match serde_wasm_bindgen::from_value(payload) {
             Ok(e) => e,
@@ -1811,9 +1824,10 @@ fn App() -> impl IntoView {
         };
         match ev {
             AgentEvent::Text { frame_id, delta } => route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
+                let fallback_model = active_model_label(&models_cb.get());
                 match v.last_mut() {
-                    Some(ChatItem::Assistant(s)) => s.push_str(&delta),
-                    _ => v.push(ChatItem::Assistant(delta)),
+                    Some(ChatItem::Assistant { text, .. }) => text.push_str(&delta),
+                    _ => v.push(ChatItem::Assistant { text: delta, model: fallback_model }),
                 }
             }),
             AgentEvent::Reasoning { frame_id, delta } => route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
@@ -1865,7 +1879,10 @@ fn App() -> impl IntoView {
             }),
             AgentEvent::Done { frame_id } => { running_cb.update(|r| { r.remove(&frame_id); }); refresh_sessions(sessions); }
             AgentEvent::Error { frame_id, message } => {
-                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| v.push(ChatItem::Assistant(format!("Error: {message}"))));
+                let model = active_model_label(&models_cb.get());
+                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
+                    v.push(ChatItem::Assistant { text: format!("Error: {message}"), model });
+                });
                 running_cb.update(|r| { r.remove(&frame_id); });
             }
             AgentEvent::Review { frame_id, markdown } => {
@@ -1918,7 +1935,11 @@ fn App() -> impl IntoView {
             if running.get().contains(id) { return; }
         }
         needs_api_key.set(false);
-        items.update(|v| { v.push(ChatItem::User(message.clone())); v.push(ChatItem::Assistant(String::new())); });
+        let turn_model = active_model_label(&models.get());
+        items.update(|v| {
+            v.push(ChatItem::User(message.clone()));
+            v.push(ChatItem::Assistant { text: String::new(), model: turn_model });
+        });
         force_chat_bottom();
         input.set(String::new());
         attachments.set(vec![]);
@@ -2247,6 +2268,7 @@ fn App() -> impl IntoView {
         let open_file = open_file;
         let right_tab = right_tab;
         let sessions = sessions;
+        let models = models;
         move |_| {
             if busy.get() { return; }
             show_capabilities.set(false);
@@ -2255,9 +2277,10 @@ fn App() -> impl IntoView {
             open_file.set(None);
             right_tab.set(RightTab::Artifacts);
             let text: String = t(locale.get(), "caps.env_setup_prompt").into();
+            let turn_model = active_model_label(&models.get());
             items.set(vec![
                 ChatItem::User(text.clone()),
-                ChatItem::Assistant(String::new()),
+                ChatItem::Assistant { text: String::new(), model: turn_model },
             ]);
             force_chat_bottom();
             spawn_local(async move {
@@ -2341,7 +2364,7 @@ fn App() -> impl IntoView {
                 if let Some(t) = &demo.thinking {
                     if !t.is_empty() { view.push(ChatItem::Reasoning(t.clone())); }
                 }
-                view.push(ChatItem::Assistant(demo.response.clone()));
+                view.push(ChatItem::Assistant { text: demo.response.clone(), model: None });
                 items.set(view);
                 force_chat_bottom();
                 status_cb.set(tf(locale.get(), "status.demo", &[("title", &demo.title)]));
@@ -2908,8 +2931,16 @@ fn App() -> impl IntoView {
                                                                 let id = pick_id.clone();
                                                                 spawn_local(async move {
                                                                     let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
-                                                                    let v = invoke("set_active_model", arg).await;
-                                                                    if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(v) { models.set(list); }
+                                                                    match invoke_checked("set_active_model", arg).await {
+                                                                        Ok(v) => {
+                                                                            if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(v) {
+                                                                                models.set(list);
+                                                                            }
+                                                                        }
+                                                                        Err(err) => {
+                                                                            web_sys::console::warn_1(&format!("set_active_model failed: {:?}", err).into());
+                                                                        }
+                                                                    }
                                                                 });
                                                             }>
                                                                 <span class="model-menu-text">
@@ -3564,15 +3595,15 @@ fn App() -> impl IntoView {
 /// True for items whose `render_item` produces an empty view, so the thread
 /// loop can drop their wrapper `<div>` and avoid a dangling `.thread` gap (#19).
 fn renders_nothing(item: &ChatItem) -> bool {
-    matches!(item, ChatItem::Assistant(s) if s.trim().is_empty())
+    matches!(item, ChatItem::Assistant { text, .. } if text.trim().is_empty())
         || matches!(item, ChatItem::Tool { name, .. } if name == "attempt_completion")
 }
 
 fn class_for(item: &ChatItem) -> &'static str {
     match item {
         ChatItem::User(_) => "msg user",
-        ChatItem::Assistant(s) if s.starts_with("Error: ") => "tool-wrap",
-        ChatItem::Assistant(_) => "msg assistant",
+        ChatItem::Assistant { text, .. } if text.starts_with("Error: ") => "tool-wrap",
+        ChatItem::Assistant { .. } => "msg assistant",
         ChatItem::Reasoning(_) => "msg reasoning",
         ChatItem::Tool { .. } => "tool-wrap",
         ChatItem::Review(_) => "tool-wrap",
@@ -3600,9 +3631,9 @@ fn render_item(
                 on_edit=Callback::new(on_edit)
             />
         }.into_view(),
-        ChatItem::Assistant(s) if s.trim().is_empty() => view! {}.into_view(),
-        ChatItem::Assistant(s) if s.starts_with("Error: ") => {
-            let msg = s.strip_prefix("Error: ").unwrap_or(s).to_string();
+        ChatItem::Assistant { text, .. } if text.trim().is_empty() => view! {}.into_view(),
+        ChatItem::Assistant { text, .. } if text.starts_with("Error: ") => {
+            let msg = text.strip_prefix("Error: ").unwrap_or(text.as_str()).to_string();
             let copy = msg.clone();
             view! {
                 <div class="finding err">
@@ -3618,9 +3649,10 @@ fn render_item(
                 </div>
             }.into_view()
         }
-        ChatItem::Assistant(s) => view! {
+        ChatItem::Assistant { text, model } => view! {
             <AssistantMessage
-                text=s.clone()
+                text=text.clone()
+                model=model.clone()
                 artifacts=artifacts.to_vec()
                 on_artifact=on_artifact
                 on_file=on_file

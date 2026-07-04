@@ -16,10 +16,10 @@ pub struct ModelProfile {
     pub api_url: String,
     pub model: String,
     /// Computed on read from the keyring; never part of the persisted JSON.
-    #[serde(default, skip_serializing)]
+    #[serde(default)]
     pub has_api_key: bool,
     /// Computed on read; true for the active profile.
-    #[serde(default, skip_serializing)]
+    #[serde(default)]
     pub active: bool,
 }
 
@@ -262,6 +262,7 @@ pub async fn set_active_model(state: State<'_, crate::AppState>, id: String) -> 
         return Err("Unknown model.".into());
     }
     state.store.set_setting(ACTIVE_KEY, &id).await.map_err(|e| e.to_string())?;
+    crate::clear_idle_agents(&state).await;
     Ok(decorated(&state.store).await)
 }
 

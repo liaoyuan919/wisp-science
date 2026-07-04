@@ -60,6 +60,16 @@ impl Store {
                 .execute(pool)
                 .await?;
         }
+        let has_model_name: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='model_name'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if has_model_name.0 == 0 {
+            sqlx::query("ALTER TABLE messages ADD COLUMN model_name TEXT")
+                .execute(pool)
+                .await?;
+        }
         Ok(())
     }
 
@@ -172,13 +182,14 @@ impl Store {
         let role = format!("{:?}", msg.role).to_ascii_lowercase();
         let content = serde_json::to_string(&msg.content)?;
         let tool_calls = if msg.tool_calls.is_empty() { None } else { Some(serde_json::to_string(&msg.tool_calls)?) };
-        sqlx::query("INSERT INTO messages(id,frame_id,seq,role,content,tool_calls,tool_call_id,tool_name,reasoning,ts) VALUES(?,?,?,?,?,?,?,?,?,?)")
+        sqlx::query("INSERT INTO messages(id,frame_id,seq,role,content,tool_calls,tool_call_id,tool_name,reasoning,ts,model_name) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
             .bind(id).bind(frame_id).bind(seq).bind(role).bind(content)
             .bind(tool_calls)
             .bind(msg.tool_call_id.as_deref())
             .bind(msg.tool_name.as_deref())
             .bind(msg.reasoning.as_deref())
             .bind(msg.ts)
+            .bind(msg.model_name.as_deref())
             .execute(&self.pool).await?;
         Ok(())
     }
@@ -195,7 +206,7 @@ impl Store {
 
     /// Load all messages for a frame, ordered by sequence.
     pub async fn load_messages(&self, frame_id: &str) -> Result<Vec<Message>> {
-        let rows = sqlx::query("SELECT role,content,tool_calls,tool_call_id,tool_name,reasoning,ts FROM messages WHERE frame_id=? ORDER BY seq ASC")
+        let rows = sqlx::query("SELECT role,content,tool_calls,tool_call_id,tool_name,reasoning,ts,model_name FROM messages WHERE frame_id=? ORDER BY seq ASC")
             .bind(frame_id)
             .fetch_all(&self.pool).await?;
         let mut out = vec![];
@@ -211,8 +222,9 @@ impl Store {
             let tool_name: Option<String> = row.try_get("tool_name")?;
             let reasoning: Option<String> = row.try_get("reasoning")?;
             let ts: i64 = row.try_get("ts")?;
+            let model_name: Option<String> = row.try_get("model_name")?;
             let role = parse_role(&role);
-            out.push(Message { role, content, tool_calls, tool_call_id, tool_name, reasoning, ts });
+            out.push(Message { role, content, tool_calls, tool_call_id, tool_name, reasoning, ts, model_name });
         }
         Ok(out)
     }

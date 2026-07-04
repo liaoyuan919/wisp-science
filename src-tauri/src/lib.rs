@@ -137,6 +137,8 @@ struct UiItem {
     text: String,
     tool_name: Option<String>,
     ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_name: Option<String>,
 }
 
 /// Index in `msgs` where the `user_index`‑th user turn starts (0-based user count).
@@ -162,28 +164,34 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
             wisp_llm::Role::User => {
                 let t = m.content.as_text();
                 if !t.trim().is_empty() {
-                    out.push(UiItem { role: "user".into(), text: t, tool_name: None, ok: None });
+                    out.push(UiItem { role: "user".into(), text: t, tool_name: None, ok: None, model_name: None });
                 }
             }
             wisp_llm::Role::Assistant => {
                 if let Some(r) = &m.reasoning {
                     if !r.trim().is_empty() {
-                        out.push(UiItem { role: "reasoning".into(), text: r.clone(), tool_name: None, ok: None });
+                        out.push(UiItem { role: "reasoning".into(), text: r.clone(), tool_name: None, ok: None, model_name: None });
                     }
                 }
                 let t = m.content.as_text();
                 if !t.trim().is_empty() {
-                    out.push(UiItem { role: "assistant".into(), text: t, tool_name: None, ok: None });
+                    out.push(UiItem {
+                        role: "assistant".into(),
+                        text: t,
+                        tool_name: None,
+                        ok: None,
+                        model_name: m.model_name.clone(),
+                    });
                 }
             }
             wisp_llm::Role::Tool => {
                 let text = m.content.as_text();
                 if m.tool_name.as_deref() == Some("attempt_completion") {
                     if !text.trim().is_empty() {
-                        out.push(UiItem { role: "assistant".into(), text, tool_name: None, ok: None });
+                        out.push(UiItem { role: "assistant".into(), text, tool_name: None, ok: None, model_name: m.model_name.clone() });
                     }
                 } else {
-                    out.push(UiItem { role: "tool".into(), text, tool_name: m.tool_name.clone(), ok: Some(true) });
+                    out.push(UiItem { role: "tool".into(), text, tool_name: m.tool_name.clone(), ok: Some(true), model_name: None });
                 }
             }
             wisp_llm::Role::System => {}
@@ -213,6 +221,16 @@ struct Settings {
     /// OpenAI reasoning effort (none/minimal/low/medium/high/xhigh). Empty = provider default.
     #[serde(default)]
     reasoning_effort: String,
+}
+
+/// Drop cached per-session agents so the next turn picks up new model settings.
+async fn clear_idle_agents(state: &AppState) {
+    let runtimes = state.sessions.lock().await.values().cloned().collect::<Vec<_>>();
+    for rt in runtimes {
+        if let Ok(mut guard) = rt.agent.try_lock() {
+            *guard = None;
+        }
+    }
 }
 
 fn default_locale() -> String {
@@ -599,6 +617,7 @@ async fn ensure_active_frame(state: &AppState, ap: &ActiveProject) -> Result<Str
 async fn send_message(state: State<'_, AppState>, app: AppHandle, session_id: Option<String>, message: String) -> Result<String, String> {
     let (provider, api_url, model, api_key) = load_settings(&state.store).await;
     let (max_tokens, reasoning_effort) = load_llm_advanced(&state.store).await;
+    let model_label = models::active_label(&state.store).await;
     let cfg = build_provider_config(&provider, &api_url, &api_key, &model, max_tokens, &reasoning_effort)?;
 
     let max_context = state.store.get_setting("max_context").await.ok().flatten().and_then(|s| s.parse::<usize>().ok()).unwrap_or(1_000_000);
@@ -669,9 +688,13 @@ async fn send_message(state: State<'_, AppState>, app: AppHandle, session_id: Op
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
         let store = state.store.clone();
         let fid = frame_id.clone();
+        let stamp = model_label.clone();
         let mut seq = start_seq;
         let handle = tokio::spawn(async move {
-            while let Some(msg) = rx.recv().await {
+            while let Some(mut msg) = rx.recv().await {
+                if msg.role == wisp_llm::Role::Assistant && msg.model_name.is_none() {
+                    msg.model_name = Some(stamp.clone());
+                }
                 seq += 1;
                 if let Err(e) = store.append_message(&fid, seq, &msg).await {
                     tracing::warn!("incremental persist seq {seq} failed: {e}");
@@ -1021,15 +1044,8 @@ async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Result<
     let reasoning_effort = settings.reasoning_effort.trim();
     state.store.set_setting("reasoning_effort", reasoning_effort).await.map_err(|e| format!("{e}"))?;
 
-    // Reset cached agents so the next turn picks up the new provider. A turn
-    // currently running holds its agent mutex and keeps the old config; only
-    // idle runtimes are rebuilt.
-    let runtimes = state.sessions.lock().await.values().cloned().collect::<Vec<_>>();
-    for rt in runtimes {
-        if let Ok(mut guard) = rt.agent.try_lock() {
-            *guard = None;
-        }
-    }
+    // Reset cached agents so the next turn picks up the new provider.
+    clear_idle_agents(&state).await;
     Ok(())
 }
 
