@@ -54,6 +54,9 @@ impl OpenAiResponsesProvider {
         if !tools_json.is_empty() {
             body["tools"] = json!(tools_json);
         }
+        if let Some(effort) = &self.cfg.reasoning_effort {
+            body["reasoning"] = json!({ "effort": effort });
+        }
         body
     }
 

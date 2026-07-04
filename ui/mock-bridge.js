@@ -62,7 +62,7 @@
               thinking: "Planning kinome coverage.",
             };
           case "get_settings":
-            return { provider: "openai", api_url: "https://api.deepseek.com", model: "deepseek-v4-pro", has_api_key: true, locale: "en" };
+            return { provider: "openai", api_url: "https://api.deepseek.com", model: "deepseek-v4-pro", label: "deepseek-v4-pro", has_api_key: true, locale: "en" };
           case "get_project_info":
             return project;
           case "get_onboarding_state":

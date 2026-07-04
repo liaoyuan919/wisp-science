@@ -233,11 +233,17 @@ struct Settings {
     provider: String,
     api_url: String,
     model: String,
+    #[serde(default)]
+    label: String,
     has_api_key: bool,
     #[serde(default)]
     locale: String,
     #[serde(default)]
     workspace_dir: String,
+    #[serde(default)]
+    max_tokens: u64,
+    #[serde(default)]
+    reasoning_effort: String,
 }
 
 impl Default for Settings {
@@ -246,9 +252,12 @@ impl Default for Settings {
             provider: "openai".into(),
             api_url: "https://api.deepseek.com".into(),
             model: "deepseek-v4-pro".into(),
+            label: "deepseek-v4-pro".into(),
             has_api_key: false,
             locale: Locale::En.code().into(),
             workspace_dir: String::new(),
+            max_tokens: 4096,
+            reasoning_effort: String::new(),
         }
     }
 }
@@ -2833,7 +2842,6 @@ fn App() -> impl IntoView {
                                 on:click=move |_| compute_menu_open.update(|o| *o = !*o)>
                                 {compose_icon("server")}
                             </button>
-                            <span class="composer-hint">{move || t(locale.get(), "composer.hint")}</span>
                             {move || compute_menu_open.get().then(|| view! {
                                 <div class="compose-backdrop" on:click=move |_| compute_menu_open.set(false)></div>
                                 <div class="compose-menu compute-menu">
@@ -2933,8 +2941,9 @@ fn App() -> impl IntoView {
                                                 let (provider, api_url, model) = base
                                                     .map(|b| (b.provider.clone(), b.api_url.clone(), b.model.clone()))
                                                     .unwrap_or_default();
+                                                let label = if model.is_empty() { "New model".into() } else { format!("{model}-copy") };
                                                 spawn_local(async move {
-                                                    let profile = serde_json::json!({ "id": "", "label": "New model", "provider": provider, "api_url": api_url, "model": model });
+                                                    let profile = serde_json::json!({ "id": "", "label": label, "provider": provider, "api_url": api_url, "model": model });
                                                     let arg = to_value(&serde_json::json!({ "profile": profile })).unwrap();
                                                     let v = invoke("save_model", arg).await;
                                                     if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(v) { models.set(list); }
@@ -2951,6 +2960,7 @@ fn App() -> impl IntoView {
                             <button class="send" disabled=composer_blocked on:click=move |_| send()>{move || t(locale.get(), "composer.send")}</button>
                         </div>
                     </div>
+                    <div class="composer-hint">{move || t(locale.get(), "composer.hint")}</div>
                 </div>
             </div>
         </main>
@@ -3245,12 +3255,20 @@ fn App() -> impl IntoView {
                             })
                             prop:value={move || settings.get().api_url} />
                     </label>
+                    <label>{move || t(locale.get(), "settings.label")}
+                        <input on:input=move|ev| settings.update(|s| {
+                                s.label = event_target_input(&ev).value();
+                            })
+                            prop:value={move || settings.get().label}
+                            placeholder=move || t(locale.get(), "settings.label_ph") />
+                    </label>
                     <label>{move || t(locale.get(), "settings.model")}
                         <input on:input=move|ev| settings.update(|s| {
                                 normalize_settings_mut(s);
                                 s.model = event_target_input(&ev).value();
                             })
-                            prop:value={move || settings.get().model} />
+                            prop:value={move || settings.get().model}
+                            placeholder=move || t(locale.get(), "settings.model_ph") />
                     </label>
                     <label>{move || t(locale.get(), "settings.api_key")}
                         <input on:input=move|ev| api_key_input.set(event_target_input(&ev).value())
@@ -3263,6 +3281,33 @@ fn App() -> impl IntoView {
                             prop:value={move || settings.get().workspace_dir}
                             placeholder=move || bootstrap.get().map(|b| b.workspace).unwrap_or_default() />
                     </label>
+                    <details class="host-advanced">
+                        <summary>{move || t(locale.get(), "settings.advanced")}</summary>
+                        <label>{move || t(locale.get(), "settings.max_tokens")}
+                            <input type="number" min="16" step="1"
+                                on:input=move|ev| settings.update(|s| {
+                                    s.max_tokens = dom_value(&ev).parse().unwrap_or(0);
+                                })
+                                prop:value=move || settings.get().max_tokens.to_string() />
+                        </label>
+                        <label>{move || t(locale.get(), "settings.reasoning_effort")}
+                            <select
+                                on:change=move|ev| settings.update(|s| s.reasoning_effort = dom_value(&ev))
+                                prop:value=move || {
+                                    let v = settings.get().reasoning_effort;
+                                    if v.is_empty() { "default".to_string() } else { v }
+                                }>
+                                <option value="default">{move || t(locale.get(), "settings.reasoning_effort.default")}</option>
+                                <option value="none">"none"</option>
+                                <option value="minimal">"minimal"</option>
+                                <option value="low">"low"</option>
+                                <option value="medium">"medium"</option>
+                                <option value="high">"high"</option>
+                                <option value="xhigh">"xhigh"</option>
+                            </select>
+                        </label>
+                        <span class="hint">{move || t(locale.get(), "settings.advanced_hint")}</span>
+                    </details>
                     <span class="hint">{move || t(locale.get(), "settings.tip")}</span>
                     {move || settings_message.get().map(|(ok, text)| view! {
                         <div class="settings-status"

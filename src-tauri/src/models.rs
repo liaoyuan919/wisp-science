@@ -113,20 +113,36 @@ pub async fn active_config(store: &wisp_store::Store) -> (String, String, String
     (p.provider, p.api_url, p.model, key_for(&p.id))
 }
 
-/// Update the active profile's provider/api_url/model. The classic Settings
+/// Update the active profile's provider/api_url/model/label. The classic Settings
 /// form now edits whichever model is active, rather than a single global config.
-pub async fn set_active_fields(store: &wisp_store::Store, provider: &str, api_url: &str, model: &str) -> Result<(), String> {
+pub async fn set_active_fields(
+    store: &wisp_store::Store,
+    provider: &str,
+    api_url: &str,
+    model: &str,
+    label: &str,
+) -> Result<(), String> {
     let mut profiles = ensure(store).await;
     let id = active_id(store, &profiles).await;
     if let Some(p) = profiles.iter_mut().find(|p| p.id == id) {
         p.provider = provider.to_string();
         p.api_url = api_url.to_string();
         p.model = model.to_string();
-        if p.label.trim().is_empty() {
-            p.label = model.to_string();
-        }
+        let alias = label.trim();
+        p.label = if alias.is_empty() { model.to_string() } else { alias.to_string() };
     }
     save_raw(store, &profiles).await
+}
+
+/// Display alias for the active profile (shown in the composer picker).
+pub async fn active_label(store: &wisp_store::Store) -> String {
+    let profiles = ensure(store).await;
+    let id = active_id(store, &profiles).await;
+    profiles
+        .iter()
+        .find(|p| p.id == id)
+        .map(|p| p.label.clone())
+        .unwrap_or_default()
 }
 
 /// Set (or clear, when empty) the active profile's key in the keyring.

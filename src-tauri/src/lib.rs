@@ -197,6 +197,9 @@ struct Settings {
     provider: String,
     api_url: String,
     model: String,
+    /// User-facing alias for the active model profile (composer picker label).
+    #[serde(default)]
+    label: String,
     has_api_key: bool,
     #[serde(default = "default_locale")]
     locale: String,
@@ -204,6 +207,12 @@ struct Settings {
     /// (Documents/wisp-science). Applied on next launch (#6, #13).
     #[serde(default)]
     workspace_dir: String,
+    /// Max output tokens per LLM turn. 0 = provider default.
+    #[serde(default)]
+    max_tokens: u64,
+    /// OpenAI reasoning effort (none/minimal/low/medium/high/xhigh). Empty = provider default.
+    #[serde(default)]
+    reasoning_effort: String,
 }
 
 fn default_locale() -> String {
@@ -385,6 +394,40 @@ async fn load_locale(store: &Store) -> String {
     }
 }
 
+async fn load_llm_advanced(store: &Store) -> (u64, String) {
+    let max_tokens = store
+        .get_setting("max_tokens")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let reasoning_effort = store.get_setting("reasoning_effort").await.ok().flatten().unwrap_or_default();
+    (max_tokens, reasoning_effort)
+}
+
+fn default_max_tokens(provider: &str) -> u64 {
+    match normalized_provider(provider).as_str() {
+        "anthropic" => 8192,
+        _ => 4096,
+    }
+}
+
+fn effective_max_tokens(configured: u64, provider: &str) -> u64 {
+    let v = if configured >= 16 { configured } else { default_max_tokens(provider) };
+    v.max(16)
+}
+
+fn effective_reasoning_effort(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() || s == "default" { None } else { Some(s.to_string()) }
+}
+
+fn apply_llm_advanced(cfg: &mut ProviderConfig, max_tokens: u64, reasoning_effort: &str, provider: &str) {
+    cfg.max_tokens = effective_max_tokens(max_tokens, provider);
+    cfg.reasoning_effort = effective_reasoning_effort(reasoning_effort);
+}
+
 async fn load_settings(store: &Store) -> (String, String, String, String) {
     // Resolve through the active model profile (migrates legacy single-model
     // installs on first read), then apply env/default fallbacks so a blank
@@ -413,7 +456,14 @@ fn default_model(provider: &str) -> &'static str {
     }
 }
 
-fn build_provider_config(provider: &str, api_url: &str, api_key: &str, model: &str) -> Result<ProviderConfig, String> {
+fn build_provider_config(
+    provider: &str,
+    api_url: &str,
+    api_key: &str,
+    model: &str,
+    max_tokens: u64,
+    reasoning_effort: &str,
+) -> Result<ProviderConfig, String> {
     let provider = normalized_provider(provider);
     let api_url = api_url.trim();
     let api_key = api_key.trim();
@@ -427,12 +477,14 @@ fn build_provider_config(provider: &str, api_url: &str, api_key: &str, model: &s
     if api_key.is_empty() {
         return Err("No API key set. Open Settings and paste your provider API key.".into());
     }
-    Ok(match provider.as_str() {
+    let mut cfg = match provider.as_str() {
         "anthropic" => ProviderConfig::anthropic(api_url, api_key, model),
         "openai_responses" => ProviderConfig::openai_responses(api_url, api_key, model),
         "openai" => ProviderConfig::openai(api_url, api_key, model),
         _ => return Err(format!("Unsupported provider: {provider}")),
-    })
+    };
+    apply_llm_advanced(&mut cfg, max_tokens, reasoning_effort, &provider);
+    Ok(cfg)
 }
 
 fn effective_api_key(new_key: Option<String>, stored_key: String) -> String {
@@ -546,7 +598,8 @@ async fn ensure_active_frame(state: &AppState, ap: &ActiveProject) -> Result<Str
 #[tauri::command]
 async fn send_message(state: State<'_, AppState>, app: AppHandle, session_id: Option<String>, message: String) -> Result<String, String> {
     let (provider, api_url, model, api_key) = load_settings(&state.store).await;
-    let cfg = build_provider_config(&provider, &api_url, &api_key, &model)?;
+    let (max_tokens, reasoning_effort) = load_llm_advanced(&state.store).await;
+    let cfg = build_provider_config(&provider, &api_url, &api_key, &model, max_tokens, &reasoning_effort)?;
 
     let max_context = state.store.get_setting("max_context").await.ok().flatten().and_then(|s| s.parse::<usize>().ok()).unwrap_or(1_000_000);
     let max_iter = state.store.get_setting("max_iter").await.ok().flatten().and_then(|s| s.parse::<usize>().ok()).unwrap_or(100);
@@ -704,7 +757,8 @@ async fn review_session(state: State<'_, AppState>, app: AppHandle, session_id: 
         let transcript = review::serialize_transcript(&msgs);
 
         let (provider, api_url, model, api_key) = load_settings(&state.store).await;
-        let cfg = build_provider_config(&provider, &api_url, &api_key, &model)?;
+        let (max_tokens, reasoning_effort) = load_llm_advanced(&state.store).await;
+        let cfg = build_provider_config(&provider, &api_url, &api_key, &model, max_tokens, &reasoning_effort)?;
         let llm = wisp_llm::build(cfg);
 
         let review_msgs = vec![
@@ -909,8 +963,10 @@ async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     let (provider, api_url, model, _api_key) = load_settings(&state.store).await;
     let locale = load_locale(&state.store).await;
     let workspace_dir = state.store.get_setting("workspace_dir").await.ok().flatten().unwrap_or_default();
+    let (max_tokens, reasoning_effort) = load_llm_advanced(&state.store).await;
     let has_api_key = models::active_has_key(&state.store).await;
-    Ok(Settings { provider, api_url, model, has_api_key, locale, workspace_dir })
+    let label = models::active_label(&state.store).await;
+    Ok(Settings { provider, api_url, model, label, has_api_key, locale, workspace_dir, max_tokens, reasoning_effort })
 }
 
 #[tauri::command]
@@ -933,7 +989,7 @@ async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Result<
     );
     // provider/api_url/model belong to the *active* model profile now, not a
     // single global config — the classic form edits whichever model is active.
-    models::set_active_fields(&state.store, &provider, api_url, model).await?;
+    models::set_active_fields(&state.store, &provider, api_url, model, settings.label.trim()).await?;
     let locale = match settings.locale.trim() {
         "zh" | "zh-CN" | "zh-TW" => "zh",
         other if !other.is_empty() => other,
@@ -960,6 +1016,11 @@ async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Result<
         state.store.set_setting("workspace_dir", workspace_dir).await.map_err(|e| format!("{e}"))?;
     }
 
+    let max_tokens = settings.max_tokens;
+    state.store.set_setting("max_tokens", &max_tokens.to_string()).await.map_err(|e| format!("{e}"))?;
+    let reasoning_effort = settings.reasoning_effort.trim();
+    state.store.set_setting("reasoning_effort", reasoning_effort).await.map_err(|e| format!("{e}"))?;
+
     // Reset cached agents so the next turn picks up the new provider. A turn
     // currently running holds its agent mutex and keeps the old config; only
     // idle runtimes are rebuilt.
@@ -984,8 +1045,16 @@ async fn validate_settings(state: State<'_, AppState>, settings: Settings, key: 
     let (_, _, _, stored_key) = load_settings(&state.store).await;
     let api_key = effective_api_key(key, stored_key);
     let provider_name = normalized_provider(&settings.provider);
-    let mut cfg = build_provider_config(&settings.provider, &settings.api_url, &api_key, &settings.model)?;
-    cfg.max_tokens = 1;
+    let mut cfg = build_provider_config(
+        &settings.provider,
+        &settings.api_url,
+        &api_key,
+        &settings.model,
+        settings.max_tokens,
+        &settings.reasoning_effort,
+    )?;
+    // Keep the ping cheap but respect API minimum (Responses API needs >= 16).
+    cfg.max_tokens = cfg.max_tokens.min(64).max(16);
 
     tracing::info!(
         target: "wisp",
