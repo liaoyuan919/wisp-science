@@ -68,6 +68,13 @@ impl SkillIndex {
             .filter(|s| s.name.to_ascii_lowercase().contains(&k) || s.tags.iter().any(|t| t.to_ascii_lowercase().contains(&k)) || s.description.to_ascii_lowercase().contains(&k))
             .collect()
     }
+
+    /// A new index without any skill whose name is in `disabled`.
+    pub fn filtered(&self, disabled: &std::collections::HashSet<String>) -> SkillIndex {
+        SkillIndex {
+            skills: self.skills.iter().filter(|s| !disabled.contains(&s.name)).cloned().collect(),
+        }
+    }
 }
 
 fn parse_skill(path: &Path, dir: PathBuf) -> Option<Skill> {
@@ -114,4 +121,26 @@ pub fn list_resources(skill: &Skill) -> (Vec<String>, Vec<String>) {
             .collect()
     };
     (collect("scripts"), collect("references"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    fn skill(name: &str) -> Skill {
+        Skill { name: name.into(), description: format!("desc {name}"), tags: vec![], body: String::new(), dir: PathBuf::new() }
+    }
+
+    #[test]
+    fn filtered_drops_disabled_skills() {
+        let idx = SkillIndex { skills: vec![skill("a"), skill("b"), skill("c")] };
+        let disabled: HashSet<String> = ["b".to_string()].into_iter().collect();
+        let out = idx.filtered(&disabled);
+        let names: Vec<_> = out.all().iter().map(|s| s.name.clone()).collect();
+        assert_eq!(names, vec!["a", "c"]);
+        assert!(out.get("b").is_none());
+        assert!(out.get("a").is_some());
+    }
 }
