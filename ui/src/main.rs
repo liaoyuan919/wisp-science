@@ -485,6 +485,9 @@ struct SkillInfo {
     description: String,
 }
 
+#[derive(Clone, serde::Deserialize)]
+struct SkillRow { name: String, description: String, enabled: bool, builtin: bool, #[allow(dead_code)] dir: String }
+
 #[derive(Deserialize, Clone)]
 #[allow(dead_code)]
 struct MemoryFile {
@@ -566,6 +569,9 @@ fn event_target_value(ev: &web_sys::Event) -> String {
 fn event_target_input(ev: &web_sys::Event) -> web_sys::HtmlInputElement {
     use wasm_bindgen::JsCast;
     ev.target().unwrap().dyn_into::<web_sys::HtmlInputElement>().unwrap()
+}
+fn event_target_checked(ev: &web_sys::Event) -> bool {
+    ev.target().and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok()).map(|i| i.checked()).unwrap_or(false)
 }
 
 /// Render agent/assistant Markdown to HTML for `inner_html`. GFM tables,
@@ -1641,6 +1647,7 @@ fn App() -> impl IntoView {
     let busy = create_rw_signal(false);
     let show_settings = create_rw_signal(false);
     let settings_section = create_rw_signal("general");
+    let skills_list = create_rw_signal(Vec::<SkillRow>::new());
     let settings = create_rw_signal(Settings::default());
     let api_key_input = create_rw_signal(String::new());
     let settings_busy = create_rw_signal(false);
@@ -2054,6 +2061,15 @@ fn App() -> impl IntoView {
         });
     };
 
+    let refresh_skills = move || {
+        spawn_local(async move {
+            let v = invoke("list_skills", JsValue::UNDEFINED).await;
+            if let Ok(rows) = serde_wasm_bindgen::from_value::<Vec<SkillRow>>(v) {
+                skills_list.set(rows);
+            }
+        });
+    };
+
     let open_settings = move |_| {
         show_settings.set(true);
         settings_message.set(None);
@@ -2062,6 +2078,7 @@ fn App() -> impl IntoView {
         let api_key_input = api_key_input;
         let msg = settings_message;
         let loc = locale;
+        refresh_skills();
         spawn_local(async move {
             let v = invoke("get_settings", JsValue::UNDEFINED).await;
             if let Ok(cfg) = serde_wasm_bindgen::from_value::<Settings>(v) {
@@ -3123,7 +3140,7 @@ fn App() -> impl IntoView {
                             on:click=move |_| settings_section.set("general")>
                             {move || t(locale.get(), "settings.nav.general")}</button>
                         <button class:active=move || settings_section.get()=="skills"
-                            on:click=move |_| settings_section.set("skills")>
+                            on:click=move |_| { settings_section.set("skills"); refresh_skills(); }>
                             {move || t(locale.get(), "settings.nav.skills")}</button>
                         <button class:active=move || settings_section.get()=="connections"
                             on:click=move |_| settings_section.set("connections")>
@@ -3197,7 +3214,69 @@ fn App() -> impl IntoView {
                             </div>
                         }.into_view())}
                         {move || (settings_section.get() == "skills").then(|| view! {
-                            <div class="settings-pane"></div>
+                            <div class="settings-pane">
+                                <div class="pane-head">
+                                    <span class="hint">{move || t(locale.get(), "settings.applies_new_session")}</span>
+                                    <div class="row">
+                                        <button on:click=move |_| {
+                                            spawn_local(async move {
+                                                let picked = invoke("pick_skill_source", JsValue::UNDEFINED).await;
+                                                if let Some(path) = picked.as_string() {
+                                                    let arg = to_value(&serde_json::json!({ "srcPath": path })).unwrap();
+                                                    let _ = invoke_checked("install_skill", arg).await;
+                                                    refresh_skills();
+                                                }
+                                            });
+                                        }>{move || t(locale.get(), "skills.add_file")}</button>
+                                        <button on:click=move |_| {
+                                            spawn_local(async move {
+                                                let picked = invoke("pick_directory", JsValue::UNDEFINED).await;
+                                                if let Some(path) = picked.as_string() {
+                                                    let arg = to_value(&serde_json::json!({ "srcPath": path })).unwrap();
+                                                    let _ = invoke_checked("install_skill", arg).await;
+                                                    refresh_skills();
+                                                }
+                                            });
+                                        }>{move || t(locale.get(), "skills.add_folder")}</button>
+                                    </div>
+                                </div>
+                                <div class="list">
+                                    <For each=move || skills_list.get() key=|s| s.name.clone() let:s>
+                                        {
+                                            let name_toggle = s.name.clone();
+                                            let name_remove = s.name.clone();
+                                            let enabled = s.enabled;
+                                            let builtin = s.builtin;
+                                            view! {
+                                                <div class="list-row">
+                                                    <div class="list-row-main">
+                                                        <div class="list-row-title">{s.name.clone()}</div>
+                                                        <div class="list-row-sub">{s.description.clone()}</div>
+                                                    </div>
+                                                    {(!builtin).then(|| { let n = name_remove.clone(); view! {
+                                                        <button class="icon-btn" title="remove" on:click=move |_| {
+                                                            let n = n.clone();
+                                                            spawn_local(async move {
+                                                                let arg = to_value(&serde_json::json!({ "name": n })).unwrap();
+                                                                let _ = invoke_checked("remove_skill", arg).await;
+                                                                refresh_skills();
+                                                            });
+                                                        }>"🗑"</button>
+                                                    }})}
+                                                    <input type="checkbox" prop:checked=enabled on:change=move |ev| {
+                                                        let n = name_toggle.clone();
+                                                        let on = event_target_checked(&ev);
+                                                        spawn_local(async move {
+                                                            let arg = to_value(&serde_json::json!({ "name": n, "enabled": on })).unwrap();
+                                                            let _ = invoke_checked("set_skill_enabled", arg).await;
+                                                        });
+                                                    } />
+                                                </div>
+                                            }
+                                        }
+                                    </For>
+                                </div>
+                            </div>
                         }.into_view())}
                         {move || (settings_section.get() == "connections").then(|| view! {
                             <div class="settings-pane"></div>
