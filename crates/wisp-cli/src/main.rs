@@ -139,6 +139,14 @@ fn skill_paths(root: &std::path::Path) -> Vec<PathBuf> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // `cargo run dev` passes "dev" as argv[1]; forward to the desktop shell.
+    if std::env::args().nth(1).as_deref() == Some("dev") {
+        let status = std::process::Command::new("cargo")
+            .args(["tauri", "dev"])
+            .status()?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("wisp=info".parse()?)).init();
 
     let root = std::env::current_dir()?;

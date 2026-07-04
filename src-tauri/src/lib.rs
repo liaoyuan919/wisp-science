@@ -881,10 +881,10 @@ async fn rename_session(state: State<'_, AppState>, id: String, title: String) -
     Ok(())
 }
 
-#[tauri::command]
 /// How many sessions appear on the Projects landing "Recent sessions" column.
 const RECENT_SESSIONS_LIMIT: i64 = 5;
 
+#[tauri::command]
 async fn list_recent_sessions(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
     let running = state.running_turns.lock().await.clone();
     let rows = state.store.list_recent_sessions_detail(RECENT_SESSIONS_LIMIT).await.map_err(|e| format!("{e}"))?;
