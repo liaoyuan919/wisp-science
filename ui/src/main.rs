@@ -3463,19 +3463,6 @@ fn App() -> impl IntoView {
                 on:mouseup=move |_| dragging.set(false)></div>
         })}
 
-        {move || confirm_state.get().map(|(fid, msg)| view! {
-            <div class="overlay" key=fid>
-                <div class="modal">
-                    <h2>{move || t(locale.get(), "confirm.title")}</h2>
-                    <div class="hint">{msg}</div>
-                    <div class="row">
-                        <button on:click=approve(false)>{move || t(locale.get(), "confirm.deny")}</button>
-                        <button class="primary" on:click=approve(true)>{move || t(locale.get(), "confirm.approve")}</button>
-                    </div>
-                </div>
-            </div>
-        }.into_view())}
-
         {move || rename_session_target.get().map(|(id, _)| {
             let id_key = id.clone();
             let id_btn = id.clone();
@@ -3865,6 +3852,22 @@ fn App() -> impl IntoView {
         })}
         <ContextMenuPortal menu=ctx_menu.read_only() set_menu=ctx_menu.write_only() on_pick=on_ctx_pick />
         </div>
+
+        // The confirm/permission prompt lives OUTSIDE `.app` so `app-hidden`
+        // (Projects landing screen) can't swallow it: a background turn that
+        // hits a destructive command must still surface its approval card.
+        {move || confirm_state.get().map(|(fid, msg)| view! {
+            <div class="overlay" key=fid>
+                <div class="modal">
+                    <h2>{move || t(locale.get(), "confirm.title")}</h2>
+                    <div class="hint">{msg}</div>
+                    <div class="row">
+                        <button on:click=approve(false)>{move || t(locale.get(), "confirm.deny")}</button>
+                        <button class="primary" on:click=approve(true)>{move || t(locale.get(), "confirm.approve")}</button>
+                    </div>
+                </div>
+            </div>
+        }.into_view())}
     }
 }
 
