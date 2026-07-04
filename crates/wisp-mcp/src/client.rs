@@ -140,9 +140,17 @@ impl McpClient {
     /// caller-supplied auth headers (e.g. `Authorization`) injected on every
     /// request.
     pub async fn connect_http(url: &str, headers: &[(String, String)]) -> Result<Self> {
+        let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            // ponytail: 120s request ceiling so a connected-but-hung host eventually
+            // errors instead of blocking a turn forever; raise if a legit HTTP MCP
+            // tool call needs longer than this.
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         let client = Self {
             transport: Transport::Http(HttpTransport {
-                client: reqwest::Client::new(),
+                client: http,
                 url: url.to_string(),
                 headers: headers.to_vec(),
                 session_id: tokio::sync::Mutex::new(None),
