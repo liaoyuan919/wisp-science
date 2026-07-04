@@ -143,6 +143,14 @@ pub(crate) struct SessionInfo {
     pub(crate) title: String,
     #[allow(dead_code)]
     pub(crate) ts: i64,
+    #[serde(default)]
+    pub(crate) folder_id: Option<String>,
+}
+
+#[derive(Deserialize, Clone)]
+pub(crate) struct FolderInfo {
+    pub(crate) id: String,
+    pub(crate) name: String,
 }
 
 /// A transcript row returned by `load_session`.

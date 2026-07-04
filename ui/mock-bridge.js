@@ -8,10 +8,11 @@
   };
 
   const sessions = [
-    { id: "s1", title: "查找文献, FX-cell", ts: 1719900000 },
+    { id: "s1", title: "查找文献, FX-cell", ts: 1719900000, folder_id: "d1" },
     { id: "s2", title: "我确认下你你有什么skill", ts: 1719890000 },
     { id: "s3", title: "你能做啥", ts: 1719880000 },
   ];
+  const folders = [{ id: "d1", name: "Research" }];
 
   const project = {
     name: "wisp-science",
@@ -43,6 +44,30 @@
         switch (cmd) {
           case "list_sessions":
             return sessions;
+          case "list_folders":
+            return folders;
+          case "create_folder": {
+            const id = "d" + (folders.length + 1);
+            const row = { id, name: args?.name ?? "Folder" };
+            folders.push(row);
+            return row;
+          }
+          case "rename_folder": {
+            const f = folders.find((x) => x.id === args?.id);
+            if (f) f.name = args?.name ?? f.name;
+            return null;
+          }
+          case "delete_folder": {
+            const idx = folders.findIndex((x) => x.id === args?.id);
+            if (idx >= 0) folders.splice(idx, 1);
+            sessions.forEach((s) => { if (s.folder_id === args?.id) s.folder_id = null; });
+            return null;
+          }
+          case "move_session": {
+            const s = sessions.find((x) => x.id === args?.id);
+            if (s) s.folder_id = args?.folderId ?? args?.folder_id ?? null;
+            return null;
+          }
           case "list_projects":
             return [{ id: "default", name: project.name, workspace_dir: project.root, session_count: sessions.length, updated_at: 1 }];
           case "list_recent_sessions":

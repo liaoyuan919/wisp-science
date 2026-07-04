@@ -91,6 +91,18 @@ impl Store {
                 .execute(pool)
                 .await?;
         }
+        let has_folder_id: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM pragma_table_info('frames') WHERE name='folder_id'")
+                .fetch_one(pool)
+                .await?;
+        if has_folder_id.0 == 0 {
+            sqlx::query("ALTER TABLE frames ADD COLUMN folder_id TEXT")
+                .execute(pool)
+                .await?;
+        }
+        sqlx::query("CREATE INDEX IF NOT EXISTS ix_frames_folder ON frames(folder_id)")
+            .execute(pool)
+            .await?;
         Ok(())
     }
 
@@ -199,6 +211,10 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM frames WHERE project_id=?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM folders WHERE project_id=?")
             .bind(id)
             .execute(&mut *tx)
             .await?;
@@ -377,10 +393,13 @@ impl Store {
 
     /// Root frames that have at least one user turn, newest first, each with a
     /// title derived from its first user message. Used to populate the UI's
-    /// session-history sidebar. Returns `(frame_id, title, created_at)`.
-    pub async fn list_sessions(&self, project_id: &str) -> Result<Vec<(String, String, i64)>> {
+    /// session-history sidebar. Returns `(frame_id, title, created_at, folder_id)`.
+    pub async fn list_sessions(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<(String, String, i64, Option<String>)>> {
         let rows = sqlx::query(
-            "SELECT f.id AS id, f.created_at AS created_at, f.title AS custom_title, \
+            "SELECT f.id AS id, f.created_at AS created_at, f.title AS custom_title, f.folder_id AS folder_id, \
                 (SELECT content FROM messages m WHERE m.frame_id = f.id AND m.role = 'user' ORDER BY m.seq ASC LIMIT 1) AS first_user \
              FROM frames f \
              WHERE f.project_id = ? AND f.parent_frame_id = f.id \
@@ -394,10 +413,11 @@ impl Store {
         for row in rows {
             let id: String = row.try_get("id")?;
             let created: i64 = row.try_get("created_at")?;
+            let folder_id: Option<String> = row.try_get("folder_id")?;
             let custom_title: Option<String> = row.try_get("custom_title")?;
             let first_user: Option<String> = row.try_get("first_user")?;
             let title = session_display_title(custom_title, first_user);
-            out.push((id, title, created));
+            out.push((id, title, created, folder_id));
         }
         Ok(out)
     }
@@ -449,6 +469,109 @@ impl Store {
             "UPDATE frames SET title=?, updated_at=? WHERE id=? AND project_id=? AND parent_frame_id=id",
         )
         .bind(title)
+        .bind(now)
+        .bind(frame_id)
+        .bind(project_id)
+        .execute(&self.pool)
+        .await?;
+        if n.rows_affected() == 0 {
+            anyhow::bail!("Session not found");
+        }
+        Ok(())
+    }
+
+    pub async fn list_folders(&self, project_id: &str) -> Result<Vec<(String, String, i64)>> {
+        let rows = sqlx::query(
+            "SELECT id, name, created_at FROM folders WHERE project_id=? ORDER BY created_at ASC",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| Ok((r.try_get("id")?, r.try_get("name")?, r.try_get("created_at")?)))
+            .collect()
+    }
+
+    pub async fn create_folder(&self, id: &str, project_id: &str, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            anyhow::bail!("Folder name cannot be empty");
+        }
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query(
+            "INSERT INTO folders(id, project_id, name, created_at, updated_at) VALUES(?,?,?,?,?)",
+        )
+        .bind(id)
+        .bind(project_id)
+        .bind(name)
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn rename_folder(&self, id: &str, project_id: &str, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            anyhow::bail!("Folder name cannot be empty");
+        }
+        let now = chrono::Utc::now().timestamp();
+        let n = sqlx::query("UPDATE folders SET name=?, updated_at=? WHERE id=? AND project_id=?")
+            .bind(name)
+            .bind(now)
+            .bind(id)
+            .bind(project_id)
+            .execute(&self.pool)
+            .await?;
+        if n.rows_affected() == 0 {
+            anyhow::bail!("Folder not found");
+        }
+        Ok(())
+    }
+
+    /// Delete a folder; sessions inside are kept (folder_id cleared).
+    pub async fn delete_folder(&self, id: &str, project_id: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE frames SET folder_id=NULL WHERE folder_id=? AND project_id=?")
+            .bind(id)
+            .bind(project_id)
+            .execute(&mut *tx)
+            .await?;
+        let n = sqlx::query("DELETE FROM folders WHERE id=? AND project_id=?")
+            .bind(id)
+            .bind(project_id)
+            .execute(&mut *tx)
+            .await?;
+        if n.rows_affected() == 0 {
+            anyhow::bail!("Folder not found");
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn move_session_to_folder(
+        &self,
+        frame_id: &str,
+        project_id: &str,
+        folder_id: Option<&str>,
+    ) -> Result<()> {
+        if let Some(fid) = folder_id {
+            let exists: Option<(String,)> =
+                sqlx::query_as("SELECT id FROM folders WHERE id=? AND project_id=?")
+                    .bind(fid)
+                    .bind(project_id)
+                    .fetch_optional(&self.pool)
+                    .await?;
+            if exists.is_none() {
+                anyhow::bail!("Folder not found");
+            }
+        }
+        let now = chrono::Utc::now().timestamp();
+        let n = sqlx::query(
+            "UPDATE frames SET folder_id=?, updated_at=? WHERE id=? AND project_id=? AND parent_frame_id=id",
+        )
+        .bind(folder_id)
         .bind(now)
         .bind(frame_id)
         .bind(project_id)
@@ -802,6 +925,122 @@ mod tests {
         }
         let recent = store.list_recent_sessions_detail(5).await.unwrap();
         assert_eq!(recent.len(), 5);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[tokio::test]
+    async fn migrate_adds_folder_id_on_legacy_db() {
+        let tmp = std::env::temp_dir().join(format!(
+            "wisp_store_legacy_{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", tmp.display()))
+                .unwrap()
+                .create_if_missing(true);
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(opts)
+                .await
+                .unwrap();
+            // Pre-folder schema: frames without folder_id, no folders table.
+            sqlx::query(
+                "CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT, description TEXT, \
+                 workspace_dir TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "CREATE TABLE frames (id TEXT PRIMARY KEY, parent_frame_id TEXT, root_frame_id TEXT, \
+                 agent_name TEXT NOT NULL, status TEXT NOT NULL, project_id TEXT, model TEXT, \
+                 input_tokens INTEGER, output_tokens INTEGER, created_at INTEGER NOT NULL, \
+                 updated_at INTEGER NOT NULL, completed_at INTEGER, title TEXT)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "CREATE TABLE messages (id TEXT PRIMARY KEY, frame_id TEXT NOT NULL, seq INTEGER NOT NULL, \
+                 role TEXT NOT NULL, content TEXT, tool_calls TEXT, tool_call_id TEXT, tool_name TEXT, \
+                 reasoning TEXT, ts INTEGER NOT NULL, model_name TEXT, UNIQUE(frame_id, seq))",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                .execute(&pool)
+                .await
+                .unwrap();
+            pool.close().await;
+        }
+        let store = Store::open(&tmp).await.unwrap();
+        store.create_project("p", "proj", "").await.unwrap();
+        store.create_frame("f1", "p", "OPERON", "m").await.unwrap();
+        store
+            .append_message("f1", 1, &Message::user("legacy"))
+            .await
+            .unwrap();
+        let sessions = store.list_sessions("p").await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].3.is_none());
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[tokio::test]
+    async fn folder_crud_and_move() {
+        let tmp = std::env::temp_dir().join(format!(
+            "wisp_store_folder_{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Store::open(&tmp).await.unwrap();
+        store.create_project("p", "proj", "").await.unwrap();
+        store.create_frame("f1", "p", "OPERON", "m").await.unwrap();
+        store
+            .append_message("f1", 1, &Message::user("in folder"))
+            .await
+            .unwrap();
+        store.create_frame("f2", "p", "OPERON", "m").await.unwrap();
+        store
+            .append_message("f2", 1, &Message::user("ungrouped"))
+            .await
+            .unwrap();
+
+        store
+            .create_folder("d1", "p", "Research")
+            .await
+            .unwrap();
+        let folders = store.list_folders("p").await.unwrap();
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].1, "Research");
+
+        store
+            .move_session_to_folder("f1", "p", Some("d1"))
+            .await
+            .unwrap();
+        let sessions = store.list_sessions("p").await.unwrap();
+        let f1 = sessions.iter().find(|s| s.0 == "f1").unwrap();
+        assert_eq!(f1.3.as_deref(), Some("d1"));
+        let f2 = sessions.iter().find(|s| s.0 == "f2").unwrap();
+        assert!(f2.3.is_none());
+
+        store
+            .rename_folder("d1", "p", "Analysis")
+            .await
+            .unwrap();
+        let folders = store.list_folders("p").await.unwrap();
+        assert_eq!(folders[0].1, "Analysis");
+
+        store.delete_folder("d1", "p").await.unwrap();
+        assert!(store.list_folders("p").await.unwrap().is_empty());
+        let sessions = store.list_sessions("p").await.unwrap();
+        let f1 = sessions.iter().find(|s| s.0 == "f1").unwrap();
+        assert!(f1.3.is_none(), "session kept after folder delete");
+
+        store
+            .move_session_to_folder("f1", "p", None)
+            .await
+            .unwrap();
         let _ = std::fs::remove_file(&tmp);
     }
 }
