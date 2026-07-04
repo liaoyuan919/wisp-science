@@ -2,7 +2,7 @@
 //! events to the webview, plus a settings/confirm surface.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -395,6 +395,25 @@ async fn load_settings(store: &Store) -> (String, String, String, String) {
     (provider, api_url, model, api_key)
 }
 
+fn parse_disabled_skills(raw: Option<&str>) -> HashSet<String> {
+    raw.and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .map(|v| v.into_iter().collect())
+        .unwrap_or_default()
+}
+
+async fn load_disabled_skills(store: &Store) -> HashSet<String> {
+    let raw = store.get_setting("disabled_skills").await.ok().flatten();
+    parse_disabled_skills(raw.as_deref())
+}
+
+#[allow(dead_code)]
+async fn save_disabled_skills(store: &Store, set: &HashSet<String>) -> Result<(), String> {
+    let mut v: Vec<&String> = set.iter().collect();
+    v.sort();
+    let json = serde_json::to_string(&v).map_err(|e| format!("{e}"))?;
+    store.set_setting("disabled_skills", &json).await.map_err(|e| format!("{e}"))
+}
+
 fn default_api_url(provider: &str) -> &'static str {
     match provider {
         "anthropic" => "https://api.anthropic.com",
@@ -570,7 +589,9 @@ async fn send_message(state: State<'_, AppState>, app: AppHandle, session_id: Op
 
     let mut guard = rt.agent.lock().await;
     if guard.is_none() {
-        let mut agent = Agent::new(cfg.clone(), ap.skills.clone(), ap.memory.clone(), ap.root.clone(), max_context, max_iter);
+        let disabled = load_disabled_skills(&state.store).await;
+        let skills = Arc::new(ap.skills.filtered(&disabled));
+        let mut agent = Agent::new(cfg.clone(), skills.clone(), ap.memory.clone(), ap.root.clone(), max_context, max_iter);
         match state.store.load_messages(&frame_id).await {
             Ok(msgs) => agent.ctx.messages = msgs,
             Err(e) => tracing::warn!("load session from sqlite failed: {e}"),
@@ -578,7 +599,7 @@ async fn send_message(state: State<'_, AppState>, app: AppHandle, session_id: Op
         rt.set_last_seq(agent.ctx.messages.len() as i64);
         if agent.ctx.is_empty() {
             let hosts = ssh_hosts::stored_hosts(&state.store).await;
-            agent.seed_system_prompt(&ap.skills, ssh_hosts::render_hosts_section(&hosts));
+            agent.seed_system_prompt(&skills, ssh_hosts::render_hosts_section(&hosts));
         }
         let wire_errors = wire_python_and_mcp(&mut agent, &state.app_data).await;
         if !wire_errors.is_empty() {
@@ -1474,8 +1495,17 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use super::parse_disabled_skills;
     use super::resolve_workspace;
     use std::path::PathBuf;
+
+    #[test]
+    fn parse_disabled_skills_handles_missing_and_valid() {
+        assert!(parse_disabled_skills(None).is_empty());
+        assert!(parse_disabled_skills(Some("not json")).is_empty());
+        let s = parse_disabled_skills(Some(r#"["alphafold2","boltz"]"#));
+        assert!(s.contains("alphafold2") && s.contains("boltz") && s.len() == 2);
+    }
 
     #[test]
     fn resolve_workspace_prefers_env_then_setting_then_default() {
