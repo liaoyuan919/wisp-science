@@ -310,7 +310,14 @@ pub(crate) struct SkillInfo {
 }
 
 #[derive(Clone, serde::Deserialize)]
-pub(crate) struct SkillRow { pub(crate) name: String, pub(crate) description: String, pub(crate) enabled: bool, pub(crate) builtin: bool, #[allow(dead_code)] pub(crate) dir: String }
+pub(crate) struct SkillRow {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    #[serde(default)] pub(crate) tags: Vec<String>,
+    pub(crate) enabled: bool,
+    pub(crate) builtin: bool,
+    #[allow(dead_code)] pub(crate) dir: String,
+}
 
 #[derive(Clone, serde::Deserialize)]
 pub(crate) struct ConnRow { pub(crate) id: String, pub(crate) name: String, pub(crate) enabled: bool, pub(crate) transport: ConnTransport }

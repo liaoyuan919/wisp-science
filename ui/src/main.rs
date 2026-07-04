@@ -13,7 +13,7 @@ use context_menu::{ContextMenuPortal, CtxMenu};
 use dto::*;
 use i18n::{localize_backend, set_document_lang, tab_count, tf, t, use_locale, Locale};
 use leptos::{ev, window_event_listener, *};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use text::{
     dom_value, event_target_checked, event_target_input, event_target_value, extract_href_from_tag,
     fasta_seq_count, file_kind, format_bytes, html_escape, is_external_href, is_separator,
@@ -292,6 +292,33 @@ mod tauri_args_tests {
         assert_eq!(normalize_path("results/fig.png"), "results/fig.png");
         assert_eq!(normalize_path("  /a/b.txt  "), "/a/b.txt");
     }
+}
+
+fn split_tags(raw: &str) -> Vec<String> {
+    raw.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect::<BTreeSet<_>>().into_iter().collect()
+}
+
+fn join_tags(tags: &[String]) -> String {
+    tags.join(", ")
+}
+
+fn skill_matches_filter(skill: &SkillRow, tag: &str, query: &str) -> bool {
+    let tag_match = match tag {
+        "" => true,
+        "__untagged" => skill.tags.is_empty(),
+        t => skill.tags.iter().any(|s| s == t),
+    };
+    let q = query.trim().to_ascii_lowercase();
+    tag_match && (q.is_empty() || skill.name.to_ascii_lowercase().contains(&q) || skill.description.to_ascii_lowercase().contains(&q))
+}
+
+fn refresh_capabilities(caps: RwSignal<Option<Capabilities>>) {
+    spawn_local(async move {
+        let v = invoke("get_capabilities", JsValue::UNDEFINED).await;
+        if let Ok(data) = serde_wasm_bindgen::from_value::<Capabilities>(v) {
+            caps.set(Some(data));
+        }
+    });
 }
 
 fn format_relative_time(ts: i64, locale: Locale) -> String {
@@ -1491,6 +1518,7 @@ fn App() -> impl IntoView {
     let open_file = create_rw_signal::<Option<(String, String)>>(None);
     let project_info = create_rw_signal::<Option<ProjectInfo>>(None);
     let show_capabilities = create_rw_signal(false);
+    let skill_filter_tag = create_rw_signal(String::new());
     let caps = create_rw_signal::<Option<Capabilities>>(None);
     let bootstrap = create_rw_signal::<Option<BootstrapStatus>>(None);
     let show_onboarding = create_rw_signal(false);
@@ -2250,14 +2278,40 @@ fn App() -> impl IntoView {
 
     let open_capabilities = move |_| {
         show_capabilities.set(true);
-        let c = caps;
+        refresh_capabilities(caps);
+    };
+
+    let save_skill_tags = Callback::new(move |(name, raw): (String, String)| {
+        let tags = split_tags(&raw);
         spawn_local(async move {
-            let v = invoke("get_capabilities", JsValue::UNDEFINED).await;
-            if let Ok(data) = serde_wasm_bindgen::from_value::<Capabilities>(v) {
-                c.set(Some(data));
+            let _ = invoke_checked("set_skill_tags", to_value(&serde_json::json!({ "name": name, "tags": tags })).unwrap()).await;
+            refresh_skills();
+        });
+    });
+
+    let set_visible_skills_enabled = Callback::new(move |enabled: bool| {
+        let tag = skill_filter_tag.get();
+        let query = skills_search.get();
+        let names = skills_list.get().into_iter()
+            .filter(|s| skill_matches_filter(s, &tag, &query))
+            .map(|s| s.name)
+            .collect::<Vec<_>>();
+        if names.is_empty() {
+            return;
+        }
+        let names_for_update = names.clone();
+        skills_list.update(|list| {
+            for skill in list {
+                if names_for_update.contains(&skill.name) {
+                    skill.enabled = enabled;
+                }
             }
         });
-    };
+        spawn_local(async move {
+            let _ = invoke_checked("set_skills_enabled", to_value(&serde_json::json!({ "names": names, "enabled": enabled })).unwrap()).await;
+            refresh_skills();
+        });
+    });
 
     let dismiss_onboarding = Callback::new(move |_| {
         show_onboarding.set(false);
@@ -2832,6 +2886,18 @@ fn App() -> impl IntoView {
                                             <span class="compose-item-text">
                                                 <span class="compose-item-label">{move || t(locale.get(), "composer.save_skill")}</span>
                                                 <span class="compose-item-sub">{move || t(locale.get(), "composer.save_skill_sub")}</span>
+                                            </span>
+                                            <span class="compose-item-chevron">{compose_icon("chevron")}</span>
+                                        </button>
+                                        <button type="button" class="compose-item"
+                                            on:click=move |_| {
+                                                compose_menu_open.set(false);
+                                                open_settings_fn(Some("skills".into()));
+                                            }>
+                                            <span class="compose-item-icon">{compose_icon("skill")}</span>
+                                            <span class="compose-item-text">
+                                                <span class="compose-item-label">{move || t(locale.get(), "skills.manage")}</span>
+                                                <span class="compose-item-sub">{move || t(locale.get(), "skills.manage_sub")}</span>
                                             </span>
                                             <span class="compose-item-chevron">{compose_icon("chevron")}</span>
                                         </button>
@@ -3706,10 +3772,9 @@ fn App() -> impl IntoView {
                                 <div class="settings-toolbar">
                                     <span class="settings-filter">{move || {
                                         let q = skills_search.get().trim().to_lowercase();
+                                        let tag = skill_filter_tag.get();
                                         let n = skills_list.get().iter().filter(|s| {
-                                            q.is_empty()
-                                                || s.name.to_lowercase().contains(&q)
-                                                || s.description.to_lowercase().contains(&q)
+                                            skill_matches_filter(s, &tag, &q)
                                         }).count();
                                         format!("{} ({n})", t(locale.get(), "skills.all"))
                                     }}</span>
@@ -3717,6 +3782,12 @@ fn App() -> impl IntoView {
                                         placeholder=move || t(locale.get(), "skills.search_ph")
                                         prop:value=move || skills_search.get()
                                         on:input=move |ev| skills_search.set(event_target_input(&ev).value()) />
+                                    <button type="button" on:click=move |_| set_visible_skills_enabled.call(true)>
+                                        {move || t(locale.get(), "skills.enable_visible")}
+                                    </button>
+                                    <button type="button" on:click=move |_| set_visible_skills_enabled.call(false)>
+                                        {move || t(locale.get(), "skills.disable_visible")}
+                                    </button>
                                     <details class="settings-add-menu">
                                         <summary>{move || t(locale.get(), "skills.add")}</summary>
                                         <button type="button" on:click=move |_| {
@@ -3741,25 +3812,59 @@ fn App() -> impl IntoView {
                                         }>{move || t(locale.get(), "skills.add_folder")}</button>
                                     </details>
                                 </div>
+                                <div class="skill-tags-filter">
+                                    <button class:active=move || skill_filter_tag.get().is_empty()
+                                        on:click=move |_| skill_filter_tag.set(String::new())>
+                                        {move || t(locale.get(), "skills.all")}
+                                    </button>
+                                    <button class:active=move || skill_filter_tag.get() == "__untagged"
+                                        on:click=move |_| skill_filter_tag.set("__untagged".into())>
+                                        {move || t(locale.get(), "skills.untagged")}
+                                    </button>
+                                    {move || {
+                                        let tags = skills_list.get().iter()
+                                            .flat_map(|s| s.tags.iter().cloned())
+                                            .collect::<BTreeSet<_>>()
+                                            .into_iter()
+                                            .collect::<Vec<_>>();
+                                        tags.into_iter().map(|tag| {
+                                            let active_tag = tag.clone();
+                                            let set_tag = tag.clone();
+                                            view! {
+                                                <button class:active=move || skill_filter_tag.get() == active_tag
+                                                    on:click=move |_| skill_filter_tag.set(set_tag.clone())>
+                                                    {tag}
+                                                </button>
+                                            }
+                                        }).collect_view()
+                                    }}
+                                </div>
                                 <p class="settings-note">{move || t(locale.get(), "settings.applies_new_session")}</p>
                                 <div class="settings-list">
                                     <For each=move || {
                                         let q = skills_search.get().trim().to_lowercase();
+                                        let tag = skill_filter_tag.get();
                                         skills_list.get().into_iter().filter(|s| {
-                                            q.is_empty()
-                                                || s.name.to_lowercase().contains(&q)
-                                                || s.description.to_lowercase().contains(&q)
+                                            skill_matches_filter(s, &tag, &q)
                                         }).collect::<Vec<_>>()
-                                    } key=|s| s.name.clone() let:s>
+                                    } key=|s| format!("{}:{}:{}", s.name, s.enabled, join_tags(&s.tags)) let:s>
                                         {
                                             let name_toggle = s.name.clone();
                                             let name_remove = s.name.clone();
+                                            let name_tags = s.name.clone();
                                             let enabled = s.enabled;
                                             let builtin = s.builtin;
+                                            let tags_text = join_tags(&s.tags);
+                                            let tags_cb = save_skill_tags.clone();
                                             view! {
-                                                <div class="settings-list-row">
+                                                <div class="settings-list-row" data-skill-name=s.name.clone()>
                                                     <div class="settings-list-main">
                                                         <span class="settings-list-title">{s.name.clone()}</span>
+                                                        <span class="settings-list-sub">{s.description.clone()}</span>
+                                                        <input class="skill-tags-input"
+                                                            prop:value=tags_text
+                                                            prop:placeholder=move || t(locale.get(), "skills.tags_placeholder")
+                                                            on:change=move |ev| tags_cb.call((name_tags.clone(), event_target_value(&ev))) />
                                                     </div>
                                                     <div class="settings-list-actions">
                                                         {(!builtin).then(|| { let n = name_remove.clone(); view! {
@@ -3779,6 +3884,7 @@ fn App() -> impl IntoView {
                                                                 spawn_local(async move {
                                                                     let arg = to_value(&serde_json::json!({ "name": n, "enabled": on })).unwrap();
                                                                     let _ = invoke_checked("set_skill_enabled", arg).await;
+                                                                    refresh_skills();
                                                                 });
                                                             } />
                                                             <span class="toggle-track" aria-hidden="true"></span>

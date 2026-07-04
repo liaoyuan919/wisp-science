@@ -5,6 +5,7 @@
 //! alongside `scripts/` and `references/` directories. This mirrors the
 //! convention used by mangopi-cli and the wisp-science `skills/` catalog.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Path to the skills catalog bundled with the app (`skills/`).
@@ -47,6 +48,13 @@ impl SkillIndex {
 
     pub fn all(&self) -> &[Skill] { &self.skills }
     pub fn is_empty(&self) -> bool { self.skills.is_empty() }
+
+    pub fn filtered_by_names(&self, enabled: Option<&HashSet<String>>) -> Self {
+        match enabled {
+            Some(names) => Self { skills: self.skills.iter().filter(|s| names.contains(&s.name)).cloned().collect() },
+            None => Self { skills: self.skills.clone() },
+        }
+    }
 
     /// One `- name: description` line per skill, for the system prompt.
     pub fn descriptions(&self) -> String {
@@ -146,6 +154,17 @@ mod tests {
         let idx = SkillIndex { skills: vec![skill("a"), skill("b"), skill("c")] };
         let disabled: HashSet<String> = ["b".to_string()].into_iter().collect();
         let out = idx.filtered(&disabled);
+        let names: Vec<_> = out.all().iter().map(|s| s.name.clone()).collect();
+        assert_eq!(names, vec!["a", "c"]);
+        assert!(out.get("b").is_none());
+        assert!(out.get("a").is_some());
+    }
+
+    #[test]
+    fn filters_skills_by_enabled_names() {
+        let idx = SkillIndex { skills: vec![skill("a"), skill("b"), skill("c")] };
+        let enabled: HashSet<String> = ["a".to_string(), "c".to_string()].into_iter().collect();
+        let out = idx.filtered_by_names(Some(&enabled));
         let names: Vec<_> = out.all().iter().map(|s| s.name.clone()).collect();
         assert_eq!(names, vec!["a", "c"]);
         assert!(out.get("b").is_none());

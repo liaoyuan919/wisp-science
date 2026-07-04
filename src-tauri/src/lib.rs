@@ -2,7 +2,7 @@
 //! events to the webview, plus a settings/confirm surface.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -46,6 +46,7 @@ struct ConfirmRequest {
 struct SkillInfo {
     name: String,
     description: String,
+    tags: Vec<String>,
     enabled: bool,
     builtin: bool,
     dir: String,
@@ -523,11 +524,86 @@ async fn load_disabled_skills(store: &Store) -> HashSet<String> {
     parse_disabled_skills(raw.as_deref())
 }
 
-async fn save_disabled_skills(store: &Store, set: &HashSet<String>) -> Result<(), String> {
-    let mut v: Vec<&String> = set.iter().collect();
-    v.sort();
-    let json = serde_json::to_string(&v).map_err(|e| format!("{e}"))?;
-    store.set_setting("disabled_skills", &json).await.map_err(|e| format!("{e}"))
+fn normalize_tags(tags: Vec<String>) -> Vec<String> {
+    tags.into_iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect::<BTreeSet<_>>().into_iter().collect()
+}
+
+fn parse_skill_tags(raw: Option<String>) -> BTreeMap<String, Vec<String>> {
+    let Some(raw) = raw else { return BTreeMap::new(); };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else { return BTreeMap::new(); };
+    let Some(obj) = value.as_object() else { return BTreeMap::new(); };
+    obj.iter()
+        .filter_map(|(name, tags)| {
+            let tags = tags.as_array()?
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>();
+            let tags = normalize_tags(tags);
+            if tags.is_empty() { None } else { Some((name.clone(), tags)) }
+        })
+        .collect()
+}
+
+fn parse_enabled_skill_names(raw: Option<String>) -> Option<HashSet<String>> {
+    let raw = raw?;
+    serde_json::from_str::<Vec<String>>(&raw).ok()
+        .map(|names| names.into_iter().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect())
+        .or_else(|| Some(HashSet::new()))
+}
+
+fn enabled_skill_names_key(project_id: &str) -> String {
+    format!("project_enabled_skills:{project_id}")
+}
+
+async fn load_skill_tags(store: &Store) -> BTreeMap<String, Vec<String>> {
+    parse_skill_tags(store.get_setting("skill_tags").await.ok().flatten())
+}
+
+async fn save_skill_tags(store: &Store, tags: &BTreeMap<String, Vec<String>>) -> Result<(), String> {
+    store.set_setting("skill_tags", &serde_json::to_string(tags).map_err(|e| format!("{e}"))?).await.map_err(|e| format!("{e}"))
+}
+
+async fn load_enabled_skill_names(store: &Store, project_id: &str) -> Option<HashSet<String>> {
+    parse_enabled_skill_names(store.get_setting(&enabled_skill_names_key(project_id)).await.ok().flatten())
+}
+
+async fn save_enabled_skill_names(store: &Store, project_id: &str, names: &HashSet<String>) -> Result<(), String> {
+    let mut names = names.iter().cloned().collect::<Vec<_>>();
+    names.sort();
+    store.set_setting(&enabled_skill_names_key(project_id), &serde_json::to_string(&names).map_err(|e| format!("{e}"))?).await.map_err(|e| format!("{e}"))
+}
+
+async fn effective_enabled_skill_names(store: &Store, ap: &ActiveProject) -> Option<HashSet<String>> {
+    if let Some(enabled) = load_enabled_skill_names(store, &ap.id).await {
+        return Some(enabled);
+    }
+    let disabled = load_disabled_skills(store).await;
+    if disabled.is_empty() {
+        None
+    } else {
+        Some(ap.skills.all().iter().filter(|s| !disabled.contains(&s.name)).map(|s| s.name.clone()).collect())
+    }
+}
+
+fn skill_infos(skills: &SkillIndex, tags: &BTreeMap<String, Vec<String>>, enabled: Option<&HashSet<String>>) -> Vec<SkillInfo> {
+    let bundled = wisp_skills::bundled_dir();
+    skills.all().iter()
+        .map(|s| {
+            let builtin = bundled.as_ref().map(|b| s.dir.starts_with(b)).unwrap_or(false);
+            SkillInfo {
+                name: s.name.clone(),
+                description: s.description.clone(),
+                tags: tags.get(&s.name).cloned().unwrap_or_default(),
+                enabled: enabled.is_none_or(|names| names.contains(&s.name)),
+                builtin,
+                dir: s.dir.to_string_lossy().to_string(),
+            }
+        })
+        .collect()
+}
+
+async fn active_skill_index(store: &Store, ap: &ActiveProject) -> Arc<SkillIndex> {
+    Arc::new(ap.skills.filtered_by_names(effective_enabled_skill_names(store, ap).await.as_ref()))
 }
 
 async fn load_mcp_connections(store: &Store) -> Vec<McpConnection> {
@@ -790,8 +866,7 @@ async fn send_message(state: State<'_, AppState>, app: AppHandle, session_id: Op
 
     let mut guard = rt.agent.lock().await;
     if guard.is_none() {
-        let disabled = load_disabled_skills(&state.store).await;
-        let skills = Arc::new(ap.skills.filtered(&disabled));
+        let skills = active_skill_index(&state.store, &ap).await;
         let mut agent = Agent::new(cfg.clone(), skills.clone(), ap.memory.clone(), ap.root.clone(), max_context, max_iter, load_memory_enabled(&state.store).await);
         match state.store.load_messages(&frame_id).await {
             Ok(msgs) => agent.ctx.messages = msgs,
@@ -1183,27 +1258,48 @@ async fn load_session(state: State<'_, AppState>, id: String) -> Result<Vec<UiIt
 #[tauri::command]
 async fn list_skills(state: State<'_, AppState>) -> Result<Vec<SkillInfo>, String> {
     let ap = state.active();
-    let disabled = load_disabled_skills(&state.store).await;
-    let bundled = wisp_skills::bundled_dir();
-    Ok(ap.skills.all().iter().map(|s| {
-        let builtin = bundled.as_ref().map(|b| s.dir.starts_with(b)).unwrap_or(false);
-        SkillInfo {
-            name: s.name.clone(),
-            description: s.description.clone(),
-            enabled: !disabled.contains(&s.name),
-            builtin,
-            dir: s.dir.to_string_lossy().to_string(),
+    let tags = load_skill_tags(&state.store).await;
+    let enabled = effective_enabled_skill_names(&state.store, &ap).await;
+    Ok(skill_infos(&ap.skills, &tags, enabled.as_ref()))
+}
+
+#[tauri::command]
+async fn set_skill_tags(state: State<'_, AppState>, name: String, tags: Vec<String>) -> Result<(), String> {
+    let mut all_tags = load_skill_tags(&state.store).await;
+    let tags = normalize_tags(tags);
+    if tags.is_empty() {
+        all_tags.remove(&name);
+    } else {
+        all_tags.insert(name, tags);
+    }
+    save_skill_tags(&state.store, &all_tags).await
+}
+
+async fn update_skills_enabled(state: &AppState, names: Vec<String>, enabled: bool) -> Result<(), String> {
+    let ap = state.active();
+    let mut current = effective_enabled_skill_names(&state.store, &ap).await
+        .unwrap_or_else(|| ap.skills.all().iter().map(|s| s.name.clone()).collect());
+    let known = ap.skills.all().iter().map(|s| s.name.as_str()).collect::<HashSet<_>>();
+    for name in names.into_iter().map(|n| n.trim().to_string()).filter(|n| !n.is_empty() && known.contains(n.as_str())) {
+        if enabled {
+            current.insert(name);
+        } else {
+            current.remove(&name);
         }
-    }).collect())
+    }
+    save_enabled_skill_names(&state.store, &ap.id, &current).await?;
+    clear_idle_agents(state).await;
+    Ok(())
 }
 
 #[tauri::command]
 async fn set_skill_enabled(state: State<'_, AppState>, name: String, enabled: bool) -> Result<(), String> {
-    let mut set = load_disabled_skills(&state.store).await;
-    if enabled { set.remove(&name); } else { set.insert(name); }
-    save_disabled_skills(&state.store, &set).await?;
-    clear_idle_agents(&state).await;
-    Ok(())
+    update_skills_enabled(&state, vec![name], enabled).await
+}
+
+#[tauri::command]
+async fn set_skills_enabled(state: State<'_, AppState>, names: Vec<String>, enabled: bool) -> Result<(), String> {
+    update_skills_enabled(&state, names, enabled).await
 }
 
 #[derive(Serialize, Clone)]
@@ -1331,6 +1427,11 @@ async fn install_skill(state: State<'_, AppState>, src_path: String) -> Result<S
     std::fs::create_dir_all(dest.parent().unwrap()).map_err(|e| format!("{e}"))?;
     copy_dir_recursive(&skill_dir, &dest).map_err(|e| format!("{e}"))?;
     reload_skills(&state);
+    let ap = state.active();
+    if let Some(mut enabled) = load_enabled_skill_names(&state.store, &ap.id).await {
+        enabled.insert(skill.name.clone());
+        save_enabled_skill_names(&state.store, &ap.id, &enabled).await?;
+    }
     clear_idle_agents(&state).await;
     Ok(skill.name)
 }
@@ -1341,10 +1442,14 @@ async fn remove_skill(state: State<'_, AppState>, name: String) -> Result<(), St
     let dir = user_skills_dir()?.join(&name);
     if !dir.is_dir() { return Err("only user-added skills can be removed".into()); }
     std::fs::remove_dir_all(&dir).map_err(|e| format!("{e}"))?;
-    // Also drop it from the disabled set so a re-add starts clean.
-    let mut set = load_disabled_skills(&state.store).await;
-    set.remove(&name);
-    let _ = save_disabled_skills(&state.store, &set).await;
+    let ap = state.active();
+    if let Some(mut enabled) = load_enabled_skill_names(&state.store, &ap.id).await {
+        enabled.remove(&name);
+        let _ = save_enabled_skill_names(&state.store, &ap.id, &enabled).await;
+    }
+    let mut tags = load_skill_tags(&state.store).await;
+    tags.remove(&name);
+    let _ = save_skill_tags(&state.store, &tags).await;
     reload_skills(&state);
     clear_idle_agents(&state).await;
     Ok(())
@@ -1687,18 +1792,9 @@ async fn get_project_info(state: State<'_, AppState>) -> Result<ProjectInfo, Str
 async fn get_capabilities(state: State<'_, AppState>) -> Result<Capabilities, String> {
     let ap = state.active();
     let project = build_project_info(&state).await;
-    let disabled = load_disabled_skills(&state.store).await;
-    let bundled = wisp_skills::bundled_dir();
-    let skills = ap.skills.all().iter().map(|s| {
-        let builtin = bundled.as_ref().map(|b| s.dir.starts_with(b)).unwrap_or(false);
-        SkillInfo {
-            name: s.name.clone(),
-            description: s.description.clone(),
-            enabled: !disabled.contains(&s.name),
-            builtin,
-            dir: s.dir.to_string_lossy().to_string(),
-        }
-    }).collect();
+    let tags = load_skill_tags(&state.store).await;
+    let enabled = effective_enabled_skill_names(&state.store, &ap).await;
+    let skills = skill_infos(&ap.skills, &tags, enabled.as_ref());
     Ok(Capabilities {
         skills,
         mcp_servers: list_mcp_servers(&ap.root),
@@ -2046,6 +2142,8 @@ pub fn run() {
             load_session,
             rewind_session,
             list_skills,
+            set_skill_tags,
+            set_skills_enabled,
             set_skill_enabled,
             pick_skill_source,
             install_skill,
@@ -2096,8 +2194,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        copy_dir_recursive, parse_disabled_skills, resolve_workspace, session_runtime_status,
-        McpConnection, McpTransport,
+        copy_dir_recursive, parse_disabled_skills, parse_enabled_skill_names, parse_skill_tags,
+        resolve_workspace, session_runtime_status, McpConnection, McpTransport,
     };
     use std::collections::HashSet;
     use std::path::PathBuf;
@@ -2177,6 +2275,31 @@ mod tests {
             set_dir
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn parse_skill_tags_normalizes_global_tag_json() {
+        let tags = parse_skill_tags(Some(serde_json::json!({
+            "alpha": [" compute ", "protein", "compute", ""],
+            "beta": [],
+            "gamma": "bad"
+        }).to_string()));
+
+        assert_eq!(tags.get("alpha").unwrap(), &vec!["compute".to_string(), "protein".to_string()]);
+        assert!(!tags.contains_key("beta"));
+        assert!(!tags.contains_key("gamma"));
+    }
+
+    #[test]
+    fn parse_enabled_skill_names_uses_none_as_all_enabled() {
+        assert!(parse_enabled_skill_names(None).is_none());
+
+        let enabled = parse_enabled_skill_names(Some(r#"["alpha", " beta ", "", "alpha"]"#.into())).unwrap();
+        assert!(enabled.contains("alpha"));
+        assert!(enabled.contains("beta"));
+        assert_eq!(enabled.len(), 2);
+
+        assert!(parse_enabled_skill_names(Some("not json".into())).unwrap().is_empty());
     }
 
     #[test]
