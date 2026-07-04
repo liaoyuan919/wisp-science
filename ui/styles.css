@@ -119,9 +119,7 @@ html, body {
 .side-item .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); flex: 0 0 auto; }
 .side-item .dot.ok { background: var(--ok); }
 button.side-item { width: 100%; text-align: left; background: transparent; border: 1px solid transparent; font: inherit; font-size: 13px; cursor: pointer; }
-div.side-item.ses {
-  width: 100%; background: transparent; border: 1px solid transparent; cursor: default; user-select: none;
-}
+button.side-item.ses { cursor: default; user-select: none; }
 .side-item.active { background: var(--bg-elev); color: var(--text); box-shadow: var(--shadow-sm); }
 .side-item.active .dot { background: var(--clay); }
 .side-item.ses.running .dot { background: var(--clay); animation: tool-pulse 1s ease-in-out infinite; }

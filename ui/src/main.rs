@@ -65,21 +65,6 @@ fn start_session_drag(ev: &web_sys::DragEvent, id: &str) {
     }
 }
 
-fn session_drop_target_at(client_x: i32, client_y: i32) -> Option<Option<String>> {
-    let doc = web_sys::window()?.document()?;
-    let el = doc.element_from_point(client_x as f32, client_y as f32)?;
-    if let Some(folder) = el.closest("[data-folder-id]").ok().flatten() {
-        let id = folder.get_attribute("data-folder-id")?;
-        if !id.is_empty() {
-            return Some(Some(id));
-        }
-    }
-    if el.closest(".side-ungrouped").ok().flatten().is_some() {
-        return Some(None);
-    }
-    None
-}
-
 fn composer_attachment_key(name: &str, idx: usize) -> String {
     format!("att-{idx}-{name}")
 }
@@ -1652,8 +1637,6 @@ fn App() -> impl IntoView {
     let collapsed_folders = create_rw_signal::<HashSet<String>>(HashSet::new());
     let drag_session = create_rw_signal::<Option<String>>(None);
     let drop_target = create_rw_signal::<Option<String>>(None);
-    let mouse_drag_start = create_rw_signal::<Option<(String, i32, i32)>>(None);
-    let suppress_session_click = create_rw_signal(false);
     let active_session = create_rw_signal::<Option<String>>(None);
     refresh_sessions(sessions);
     refresh_folders(folders);
@@ -2738,49 +2721,6 @@ fn App() -> impl IntoView {
         })
     };
 
-    {
-        let move_session_to = move_session_to.clone();
-        window_event_listener(ev::mousemove, move |ev| {
-            let Some(ev) = ev.dyn_ref::<web_sys::MouseEvent>() else { return };
-            let Some((id, start_x, start_y)) = mouse_drag_start.get() else { return };
-            let dx = ev.client_x() - start_x;
-            let dy = ev.client_y() - start_y;
-            let moved = dx.abs() + dy.abs() > 6;
-            if !moved && drag_session.get().is_none() {
-                return;
-            }
-            ev.prevent_default();
-            suppress_session_click.set(true);
-            if drag_session.get().is_none() {
-                drag_session.set(Some(id));
-            }
-            let next = session_drop_target_at(ev.client_x(), ev.client_y()).map(|target| match target {
-                Some(folder_id) => format!("folder:{folder_id}"),
-                None => "ungrouped".to_string(),
-            });
-            if drop_target.get() != next {
-                drop_target.set(next);
-            }
-        });
-
-        window_event_listener(ev::mouseup, move |ev| {
-            let Some(ev) = ev.dyn_ref::<web_sys::MouseEvent>() else { return };
-            let Some((id, _, _)) = mouse_drag_start.get() else { return };
-            mouse_drag_start.set(None);
-            let was_dragging = drag_session.get().is_some();
-            drag_session.set(None);
-            drop_target.set(None);
-            if !was_dragging {
-                return;
-            }
-            ev.prevent_default();
-            suppress_session_click.set(true);
-            if let Some(target) = session_drop_target_at(ev.client_x(), ev.client_y()) {
-                move_session_to.call((id, target));
-            }
-        });
-    }
-
     let new_folder = move |_| {
         folder_modal_input.set(String::new());
         folder_modal.set(Some(FolderModal::Create));
@@ -2944,31 +2884,17 @@ fn App() -> impl IntoView {
                         let is_dragging = dragging_for_make.as_deref() == Some(id_drag.as_str());
                         let id_click = id.clone();
                         let id_key = id.clone();
-                        let id_mouse = id.clone();
                         let id_rename = id.clone();
                         let title_rename = title.clone();
                         view! {
-                            <div class="side-item ses"
+                            <button type="button" class="side-item ses"
                                 class:active=move || active_session.get().as_deref() == Some(id_active.as_str())
                                 class:running=move || running.get().contains(&id_running)
                                 class:dragging=is_dragging
-                                role="button"
-                                tabindex="0"
                                 attr:draggable="true"
                                 data-session-id=id_attr
                                 data-session-title=title_attr
-                                on:mousedown=move |ev: web_sys::MouseEvent| {
-                                    if ev.button() == 0 {
-                                        mouse_drag_start.set(Some((id_mouse.clone(), ev.client_x(), ev.client_y())));
-                                    }
-                                }
-                                on:click=move |ev: web_sys::MouseEvent| {
-                                    if suppress_session_click.get() {
-                                        ev.prevent_default();
-                                        ev.stop_propagation();
-                                        suppress_session_click.set(false);
-                                        return;
-                                    }
+                                on:click=move |_| {
                                     open.call(id_click.clone());
                                 }
                                 on:dblclick=move |ev: web_sys::MouseEvent| {
@@ -2993,7 +2919,7 @@ fn App() -> impl IntoView {
                                 }>
                                 <span class="dot"></span>
                                 <span class="ses-title">{title}</span>
-                            </div>
+                            </button>
                         }.into_view()
                     };
                     let ungrouped: Vec<SessionInfo> = list.iter()
