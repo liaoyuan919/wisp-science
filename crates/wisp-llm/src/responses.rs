@@ -44,7 +44,7 @@ impl OpenAiResponsesProvider {
     }
 
     fn build_body(&self, messages: &[Message], tools: &[ToolSchema]) -> Value {
-        let input: Vec<Value> = messages.iter().map(message_to_input).collect();
+        let input: Vec<Value> = messages.iter().flat_map(message_to_input).collect();
         let mut body = json!({
             "model": self.cfg.model,
             "input": input,
@@ -71,16 +71,35 @@ impl OpenAiResponsesProvider {
     }
 }
 
-fn message_to_input(m: &Message) -> Value {
+fn message_to_input(m: &Message) -> Vec<Value> {
     match m.role {
-        Role::System => json!({ "role": "system", "content": m.content.as_text() }),
-        Role::User => json!({ "role": "user", "content": content_to_responses(&m.content) }),
-        Role::Assistant => json!({ "role": "assistant", "content": m.content.as_text() }),
-        Role::Tool => json!({
+        Role::System => vec![json!({ "role": "system", "content": m.content.as_text() })],
+        Role::User => vec![json!({ "role": "user", "content": content_to_responses(&m.content) })],
+        Role::Assistant => {
+            // The Responses API is stateless over `input`: an assistant turn that
+            // issued tool calls must be replayed as `function_call` items so the
+            // later `function_call_output` finds its matching call_id. Otherwise
+            // the API rejects with "No tool call found for function call output".
+            let mut items = vec![];
+            let text = m.content.as_text();
+            if !text.is_empty() {
+                items.push(json!({ "role": "assistant", "content": text }));
+            }
+            for tc in &m.tool_calls {
+                items.push(json!({
+                    "type": "function_call",
+                    "call_id": tc.id,
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                }));
+            }
+            items
+        }
+        Role::Tool => vec![json!({
             "type": "function_call_output",
             "call_id": m.tool_call_id.clone().unwrap_or_default(),
             "output": m.content.as_text(),
-        }),
+        })],
     }
 }
 
