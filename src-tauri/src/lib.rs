@@ -826,6 +826,27 @@ async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionInfo>, S
 }
 
 #[tauri::command]
+async fn delete_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let ap = state.active();
+    if let Some(rt) = state.sessions.lock().await.get(&id) {
+        rt.cancel.store(true, Ordering::Relaxed);
+    }
+    state.sessions.lock().await.remove(&id);
+    if state.active_frame.read().unwrap().as_deref() == Some(id.as_str()) {
+        *state.active_frame.write().unwrap() = None;
+    }
+    state.store.delete_session(&id, &ap.id).await.map_err(|e| format!("{e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn rename_session(state: State<'_, AppState>, id: String, title: String) -> Result<(), String> {
+    let ap = state.active();
+    state.store.rename_session(&id, &ap.id, &title).await.map_err(|e| format!("{e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn list_recent_sessions(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
     let rows = state.store.list_recent_sessions(12).await.map_err(|e| format!("{e}"))?;
     Ok(rows.into_iter().map(|(id, pid, title, ts)| serde_json::json!({
@@ -1522,6 +1543,8 @@ pub fn run() {
             ssh_hosts::list_ssh_config_aliases,
             new_session,
             list_sessions,
+            delete_session,
+            rename_session,
             list_recent_sessions,
             list_projects,
             pick_directory,

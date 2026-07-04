@@ -87,6 +87,19 @@
           case "set_api_key":
           case "new_session":
             return `s-${Math.random().toString(36).slice(2)}`;
+          case "delete_session": {
+            const id = args?.id;
+            const i = sessions.findIndex((s) => s.id === id);
+            if (i >= 0) sessions.splice(i, 1);
+            return null;
+          }
+          case "rename_session": {
+            const id = args?.id;
+            const title = (args?.title ?? "").trim();
+            const s = sessions.find((x) => x.id === id);
+            if (s && title) s.title = title;
+            return null;
+          }
           case "rewind_session":
           case "confirm_response":
           case "dismiss_onboarding":

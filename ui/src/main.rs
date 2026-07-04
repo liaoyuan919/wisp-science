@@ -2498,6 +2498,8 @@ fn App() -> impl IntoView {
     let dismiss_onboard = move |_| dismiss_onboarding.call(());
 
     let ctx_menu = create_rw_signal::<Option<CtxMenu>>(None);
+    let rename_session_target = create_rw_signal::<Option<(String, String)>>(None);
+    let rename_session_input = create_rw_signal(String::new());
     let compose_menu_open = create_rw_signal(false);
     let compute_menu_open = create_rw_signal(false);
     let ssh_hosts = create_rw_signal::<Vec<SshHost>>(vec![]);
@@ -2520,12 +2522,55 @@ fn App() -> impl IntoView {
         });
     }
     let open_session = load_session.clone();
-    let on_ctx_pick = Callback::new(move |(action, payload): (String, String)| {
-        if let Some(id) = context_menu::session_action(&action, &payload) {
-            open_session.call(id);
-        }
-        context_menu::run_action(&action, &payload, copy_text);
-    });
+    let on_ctx_pick = {
+        let open_session = open_session.clone();
+        let locale = locale;
+        let sessions = sessions;
+        let active_session = active_session;
+        let items = items;
+        let transcripts = transcripts;
+        let running = running;
+        let rename_session_target = rename_session_target;
+        let rename_session_input = rename_session_input;
+        Callback::new(move |(action, payload): (String, String)| {
+            if let Some(act) = context_menu::session_action(&action, &payload) {
+                match act {
+                    context_menu::SessionAction::Open(id) => open_session.call(id),
+                    context_menu::SessionAction::Rename { id, title } => {
+                        rename_session_input.set(title.clone());
+                        rename_session_target.set(Some((id, title)));
+                    }
+                    context_menu::SessionAction::Delete(id) => {
+                        let loc = locale.get();
+                        let ok = web_sys::window()
+                            .and_then(|w| w.confirm_with_message(&t(loc, "session.delete_confirm")).ok())
+                            .unwrap_or(false);
+                        if !ok {
+                            return;
+                        }
+                        let sessions = sessions;
+                        let active_session = active_session;
+                        let items = items;
+                        let transcripts = transcripts;
+                        let running = running;
+                        spawn_local(async move {
+                            let arg = to_value(&serde_json::json!({ "id": id.clone() })).unwrap();
+                            if invoke_checked("delete_session", arg).await.is_ok() {
+                                transcripts.update(|m| { m.remove(&id); });
+                                running.update(|r| { r.remove(&id); });
+                                if active_session.get().as_deref() == Some(id.as_str()) {
+                                    active_session.set(None);
+                                    items.set(vec![]);
+                                }
+                                refresh_sessions(sessions);
+                            }
+                        });
+                    }
+                }
+            }
+            context_menu::run_action(&action, &payload, copy_text);
+        })
+    };
     let on_context_menu = move |ev: web_sys::MouseEvent| {
         if context_menu::dev_mode() {
             return;
@@ -2551,6 +2596,11 @@ fn App() -> impl IntoView {
         if ctx_menu.get().is_some() {
             ev.prevent_default();
             ctx_menu.set(None);
+            return;
+        }
+        if rename_session_target.get().is_some() {
+            ev.prevent_default();
+            rename_session_target.set(None);
             return;
         }
         if show_onboarding.get() {
@@ -3328,6 +3378,57 @@ fn App() -> impl IntoView {
                 </div>
             </div>
         }.into_view())}
+
+        {move || rename_session_target.get().map(|(id, _)| {
+            let id_key = id.clone();
+            let id_btn = id.clone();
+            view! {
+            <div class="overlay">
+                <div class="modal">
+                    <h2>{move || t(locale.get(), "session.rename_title")}</h2>
+                    <label>
+                        <input
+                            type="text"
+                            prop:value=move || rename_session_input.get()
+                            on:input=move |ev| rename_session_input.set(dom_value(&ev))
+                            on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                if ev.key() == "Enter" {
+                                    ev.prevent_default();
+                                    let title = rename_session_input.get().trim().to_string();
+                                    if title.is_empty() { return; }
+                                    let id = id_key.clone();
+                                    let sessions = sessions;
+                                    rename_session_target.set(None);
+                                    spawn_local(async move {
+                                        let arg = to_value(&serde_json::json!({ "id": id, "title": title })).unwrap();
+                                        if invoke_checked("rename_session", arg).await.is_ok() {
+                                            refresh_sessions(sessions);
+                                        }
+                                    });
+                                }
+                            }
+                        />
+                    </label>
+                    <div class="row">
+                        <button on:click=move |_| rename_session_target.set(None)>{move || t(locale.get(), "settings.cancel")}</button>
+                        <button class="primary" on:click=move |_| {
+                            let title = rename_session_input.get().trim().to_string();
+                            if title.is_empty() { return; }
+                            let id = id_btn.clone();
+                            let sessions = sessions;
+                            rename_session_target.set(None);
+                            spawn_local(async move {
+                                let arg = to_value(&serde_json::json!({ "id": id, "title": title })).unwrap();
+                                if invoke_checked("rename_session", arg).await.is_ok() {
+                                    refresh_sessions(sessions);
+                                }
+                            });
+                        }>{move || t(locale.get(), "settings.save")}</button>
+                    </div>
+                </div>
+            </div>
+        }.into_view()
+        })}
 
         {move || show_settings.get().then(|| view! {
             <div class="overlay">

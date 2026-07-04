@@ -205,3 +205,81 @@ impl Provider for OpenAiResponsesProvider {
         Ok(comp)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assistant_with_call(text: &str, call_id: &str, name: &str, args: &str) -> Message {
+        let mut m = Message::assistant(text);
+        m.tool_calls = vec![ToolCall {
+            id: call_id.into(),
+            kind: "function".into(),
+            function: FunctionCall { name: name.into(), arguments: args.into() },
+        }];
+        m
+    }
+
+    /// Regression: a tool-call turn must be replayed as a `function_call` item so
+    /// the following `function_call_output` has a matching `call_id`. Without it
+    /// the Responses API rejects with "No tool call found for function call output".
+    #[test]
+    fn tool_call_turn_emits_matching_function_call() {
+        let messages = vec![
+            Message::user("run the skill"),
+            assistant_with_call("", "call_abc", "openalex", "{\"q\":\"x\"}"),
+            Message::tool("call_abc", "openalex", "result body"),
+        ];
+
+        let input: Vec<Value> = messages.iter().flat_map(message_to_input).collect();
+
+        let call = input
+            .iter()
+            .find(|v| v.get("type").and_then(|t| t.as_str()) == Some("function_call"))
+            .expect("function_call item present");
+        assert_eq!(call["call_id"], "call_abc");
+        assert_eq!(call["name"], "openalex");
+        assert_eq!(call["arguments"], "{\"q\":\"x\"}");
+
+        let output = input
+            .iter()
+            .find(|v| v.get("type").and_then(|t| t.as_str()) == Some("function_call_output"))
+            .expect("function_call_output item present");
+        assert_eq!(output["call_id"], "call_abc", "output must match the emitted call_id");
+    }
+
+    /// An empty-text tool-call turn must not emit a stray empty assistant message.
+    #[test]
+    fn empty_assistant_text_emits_only_call() {
+        let items = message_to_input(&assistant_with_call("", "c1", "f", "{}"));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], "function_call");
+    }
+
+    /// Assistant text alongside a tool call yields both a message and the call.
+    #[test]
+    fn assistant_text_and_call_emit_both() {
+        let items = message_to_input(&assistant_with_call("thinking", "c1", "f", "{}"));
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["role"], "assistant");
+        assert_eq!(items[0]["content"], "thinking");
+        assert_eq!(items[1]["type"], "function_call");
+    }
+
+    #[test]
+    fn parse_completion_reads_function_call() {
+        let val = json!({
+            "output": [
+                { "type": "function_call", "call_id": "call_9", "name": "openalex", "arguments": "{\"q\":\"y\"}" }
+            ],
+            "status": "completed",
+            "usage": { "input_tokens": 3, "output_tokens": 5 }
+        });
+        let comp = parse_completion(&val);
+        assert_eq!(comp.tool_calls.len(), 1);
+        assert_eq!(comp.tool_calls[0].id, "call_9");
+        assert_eq!(comp.tool_calls[0].function.name, "openalex");
+        assert_eq!(comp.usage.input_tokens, 3);
+        assert_eq!(comp.usage.output_tokens, 5);
+    }
+}
