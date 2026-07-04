@@ -1394,6 +1394,9 @@ fn App() -> impl IntoView {
     let running = create_rw_signal::<HashSet<String>>(HashSet::new());
     let transcripts = create_rw_signal::<HashMap<String, Vec<ChatItem>>>(HashMap::new());
     let busy = create_rw_signal(false);
+    // Interrupting a running turn (esp. the python kernel) is not instant, so
+    // keep track of the session whose Stop click is waiting for the backend.
+    let stopping_session = create_rw_signal::<Option<String>>(None);
     let show_settings = create_rw_signal(false);
     let settings_section = create_rw_signal(String::from("general"));
     let skills_list = create_rw_signal(Vec::<SkillRow>::new());
@@ -1617,13 +1620,22 @@ fn App() -> impl IntoView {
                 Some(ChatItem::Tool { output, .. }) => output.push_str(&chunk),
                 _ => v.push(ChatItem::Tool { name: "stdout".into(), ok: None, input: String::new(), output: chunk }),
             }),
-            AgentEvent::Done { frame_id } => { running_cb.update(|r| { r.remove(&frame_id); }); refresh_sessions(sessions); }
+            AgentEvent::Done { frame_id } => {
+                running_cb.update(|r| { r.remove(&frame_id); });
+                if stopping_session.get().as_deref() == Some(&frame_id) {
+                    stopping_session.set(None);
+                }
+                refresh_sessions(sessions);
+            }
             AgentEvent::Error { frame_id, message } => {
                 let model = active_model_label(&models_cb.get());
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
                     v.push(ChatItem::Assistant { text: format!("Error: {message}"), model });
                 });
                 running_cb.update(|r| { r.remove(&frame_id); });
+                if stopping_session.get().as_deref() == Some(&frame_id) {
+                    stopping_session.set(None);
+                }
             }
             AgentEvent::Review { frame_id, markdown } => {
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| v.push(ChatItem::Review(markdown)));
@@ -1656,8 +1668,10 @@ fn App() -> impl IntoView {
     spawn_local(async move { let _ = listen("confirm-request", &confirm_js).await; });
 
     let stop = move |_| {
+        if stopping_session.get().is_some() { return; }
         // Stop only the active session's turn; background conversations keep running.
         let sid = active_session.get();
+        stopping_session.set(sid.clone());
         spawn_local(async move {
             let arg = to_value(&tauri_args::stop_agent(&sid)).unwrap();
             let _ = invoke("stop_agent", arg).await;
@@ -1690,6 +1704,7 @@ fn App() -> impl IntoView {
         let items = items;
         let transcripts = transcripts;
         let sessions = sessions;
+        let stopping_session = stopping_session;
         spawn_local(async move {
             // Resolve the target session: use the active one, or create a fresh
             // frame up front so streamed events can be routed before the first delta.
@@ -1720,6 +1735,9 @@ fn App() -> impl IntoView {
                     // dropped broadcast used to pin the session on "运行中" until an
                     // app restart (#34).
                     running.update(|r| { r.remove(&id); });
+                    if stopping_session.get().as_deref() == Some(&id) {
+                        stopping_session.set(None);
+                    }
                     // If the live view desynced (a tool row left unresolved by a
                     // missed event), reconcile it from the authoritative DB so the
                     // completed result shows without a restart. Healthy turns keep
@@ -1749,6 +1767,9 @@ fn App() -> impl IntoView {
                     if raw.contains(NO_API_KEY_MARK) { needs_api_key.set(true); }
                     status.set(tf(loc, "status.send_failed", &[("msg", &localize_backend(loc, &raw))]));
                     running.update(|r| { r.remove(&id); });
+                    if stopping_session.get().as_deref() == Some(&id) {
+                        stopping_session.set(None);
+                    }
                 }
             }
         });
@@ -2935,7 +2956,11 @@ fn App() -> impl IntoView {
                                 </div>
                             })}
                             {move || busy.get().then(|| view! {
-                                <button type="button" class="stop" on:click=stop>{move || t(locale.get(), "composer.stop")}</button>
+                                <button type="button" class="stop"
+                                    disabled=move || active_session.get() == stopping_session.get()
+                                    on:click=stop>
+                                    {move || t(locale.get(), if active_session.get() == stopping_session.get() { "composer.stopping" } else { "composer.stop" })}
+                                </button>
                             })}
                             <button class="send" disabled=composer_blocked on:click=move |_| send()>{move || t(locale.get(), "composer.send")}</button>
                         </div>
@@ -3932,6 +3957,16 @@ fn App() -> impl IntoView {
                 </div>
             </div>
         }.into_view())}
+
+        {move || stopping_session.get().is_some().then(|| view! {
+            <div class="stopping-toast">
+                <span class="stopping-spinner"></span>
+                <div class="stopping-text">
+                    <strong>{move || t(locale.get(), "composer.stopping")}</strong>
+                    <span>{move || t(locale.get(), "composer.stopping_hint")}</span>
+                </div>
+            </div>
+        })}
 
         {move || show_add_host.get().then(|| view! {
             <div class="overlay">
