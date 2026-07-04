@@ -35,6 +35,12 @@ enum FolderModal {
     Rename(String),
 }
 
+#[derive(Clone)]
+enum UiConfirm {
+    DeleteFolder(String),
+    DeleteSession(String),
+}
+
 fn allow_drop(ev: &web_sys::DragEvent) {
     ev.prevent_default();
     ev.stop_propagation();
@@ -2514,6 +2520,7 @@ fn App() -> impl IntoView {
     let rename_session_input = create_rw_signal(String::new());
     let folder_modal = create_rw_signal::<Option<FolderModal>>(None);
     let folder_modal_input = create_rw_signal(String::new());
+    let ui_confirm = create_rw_signal::<Option<UiConfirm>>(None);
     let compose_menu_open = create_rw_signal(false);
     let compute_menu_open = create_rw_signal(false);
     let ssh_hosts = create_rw_signal::<Vec<SshHost>>(vec![]);
@@ -2538,18 +2545,12 @@ fn App() -> impl IntoView {
     let open_session = load_session.clone();
     let on_ctx_pick = {
         let open_session = open_session.clone();
-        let locale = locale;
         let sessions = sessions;
-        let active_session = active_session;
-        let items = items;
-        let transcripts = transcripts;
-        let running = running;
-        let pending_turns = pending_turns;
         let rename_session_target = rename_session_target;
         let rename_session_input = rename_session_input;
         let folder_modal = folder_modal;
         let folder_modal_input = folder_modal_input;
-        let folders = folders;
+        let ui_confirm = ui_confirm;
         Callback::new(move |(action, payload): (String, String)| {
             if let Some(act) = context_menu::folder_action(&action, &payload) {
                 match act {
@@ -2558,22 +2559,7 @@ fn App() -> impl IntoView {
                         folder_modal.set(Some(FolderModal::Rename(id)));
                     }
                     context_menu::FolderAction::Delete(id) => {
-                        let loc = locale.get();
-                        let ok = web_sys::window()
-                            .and_then(|w| w.confirm_with_message(&t(loc, "folder.delete_confirm")).ok())
-                            .unwrap_or(false);
-                        if !ok {
-                            return;
-                        }
-                        let folders = folders;
-                        let sessions = sessions;
-                        spawn_local(async move {
-                            let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
-                            if invoke_checked("delete_folder", arg).await.is_ok() {
-                                refresh_folders(folders);
-                                refresh_sessions(sessions);
-                            }
-                        });
+                        ui_confirm.set(Some(UiConfirm::DeleteFolder(id)));
                     }
                 }
                 return;
@@ -2595,32 +2581,7 @@ fn App() -> impl IntoView {
                         });
                     }
                     context_menu::SessionAction::Delete(id) => {
-                        let loc = locale.get();
-                        let ok = web_sys::window()
-                            .and_then(|w| w.confirm_with_message(&t(loc, "session.delete_confirm")).ok())
-                            .unwrap_or(false);
-                        if !ok {
-                            return;
-                        }
-                        let sessions = sessions;
-                        let active_session = active_session;
-                        let items = items;
-                        let transcripts = transcripts;
-                        let running = running;
-                        let pending_turns = pending_turns;
-                        spawn_local(async move {
-                            let arg = to_value(&serde_json::json!({ "id": id.clone() })).unwrap();
-                            if invoke_checked("delete_session", arg).await.is_ok() {
-                                transcripts.update(|m| { m.remove(&id); });
-                                running.update(|r| { r.remove(&id); });
-                                pending_turns.update(|m| { m.remove(&id); });
-                                if active_session.get().as_deref() == Some(id.as_str()) {
-                                    active_session.set(None);
-                                    items.set(vec![]);
-                                }
-                                refresh_sessions(sessions);
-                            }
-                        });
+                        ui_confirm.set(Some(UiConfirm::DeleteSession(id)));
                     }
                 }
             }
@@ -2666,6 +2627,11 @@ fn App() -> impl IntoView {
         if folder_modal.get().is_some() {
             ev.prevent_default();
             folder_modal.set(None);
+            return;
+        }
+        if ui_confirm.get().is_some() {
+            ev.prevent_default();
+            ui_confirm.set(None);
             return;
         }
         if show_onboarding.get() {
@@ -3845,6 +3811,62 @@ fn App() -> impl IntoView {
                     <div class="row">
                         <button on:click=move |_| folder_modal.set(None)>{move || t(locale.get(), "settings.cancel")}</button>
                         <button class="primary" on:click=move |_| save_folder_modal(mode_save.clone())>{move || t(locale.get(), "settings.save")}</button>
+                    </div>
+                </div>
+            </div>
+        }.into_view()
+        })}
+
+        {move || ui_confirm.get().map(|action| {
+            let action_ok = action.clone();
+            let msg_key = match &action {
+                UiConfirm::DeleteFolder(_) => "folder.delete_confirm",
+                UiConfirm::DeleteSession(_) => "session.delete_confirm",
+            };
+            view! {
+            <div class="overlay">
+                <div class="modal confirm-modal">
+                    <h2>{move || t(locale.get(), "confirm.title")}</h2>
+                    <div class="hint">{move || t(locale.get(), msg_key)}</div>
+                    <div class="row">
+                        <button on:click=move |_| ui_confirm.set(None)>{move || t(locale.get(), "settings.cancel")}</button>
+                        <button class="primary" on:click=move |_| {
+                            ui_confirm.set(None);
+                            match action_ok.clone() {
+                                UiConfirm::DeleteFolder(id) => {
+                                    let folders = folders;
+                                    let sessions = sessions;
+                                    spawn_local(async move {
+                                        let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
+                                        if invoke_checked("delete_folder", arg).await.is_ok() {
+                                            refresh_folders(folders);
+                                            refresh_sessions(sessions);
+                                        }
+                                    });
+                                }
+                                UiConfirm::DeleteSession(id) => {
+                                    let sessions = sessions;
+                                    let active_session = active_session;
+                                    let items = items;
+                                    let transcripts = transcripts;
+                                    let running = running;
+                                    let pending_turns = pending_turns;
+                                    spawn_local(async move {
+                                        let arg = to_value(&serde_json::json!({ "id": id.clone() })).unwrap();
+                                        if invoke_checked("delete_session", arg).await.is_ok() {
+                                            transcripts.update(|m| { m.remove(&id); });
+                                            running.update(|r| { r.remove(&id); });
+                                            pending_turns.update(|m| { m.remove(&id); });
+                                            if active_session.get().as_deref() == Some(id.as_str()) {
+                                                active_session.set(None);
+                                                items.set(vec![]);
+                                            }
+                                            refresh_sessions(sessions);
+                                        }
+                                    });
+                                }
+                            }
+                        }>{move || t(locale.get(), "confirm.approve")}</button>
                     </div>
                 </div>
             </div>
