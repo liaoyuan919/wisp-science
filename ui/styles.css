@@ -120,9 +120,8 @@ html, body {
 .side-item .dot.ok { background: var(--ok); }
 button.side-item { width: 100%; text-align: left; background: transparent; border: 1px solid transparent; font: inherit; font-size: 13px; cursor: pointer; }
 div.side-item.ses {
-  width: 100%; background: transparent; border: 1px solid transparent; cursor: grab; user-select: none;
+  width: 100%; background: transparent; border: 1px solid transparent; cursor: default; user-select: none;
 }
-div.side-item.ses:active { cursor: grabbing; }
 .side-item.active { background: var(--bg-elev); color: var(--text); box-shadow: var(--shadow-sm); }
 .side-item.active .dot { background: var(--clay); }
 .side-item.ses.running .dot { background: var(--clay); animation: tool-pulse 1s ease-in-out infinite; }
@@ -1565,7 +1564,7 @@ textarea.host-input { min-height:64px; resize:vertical; }
 .side-folder-sessions .side-item { padding-left: 18px; }
 .side-ungrouped { display: flex; flex-direction: column; gap: 1px; min-height: 24px; border-radius: 8px; border: 1px solid transparent; }
 .side-ungrouped.drop-target { background: var(--clay-soft); border-color: var(--clay); }
-.side-item.ses.dragging { opacity: .45; }
+.side-item.ses.dragging { opacity: .45; cursor: grabbing; }
 
 /* --- Right-pane code viewer (line gutter + inputs + download) --- */
 .rp-view-head .rp-actions { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; }

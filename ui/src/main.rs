@@ -2979,6 +2979,8 @@ fn App() -> impl IntoView {
                         let id_click = id.clone();
                         let id_key = id.clone();
                         let id_mouse = id.clone();
+                        let id_rename = id.clone();
+                        let title_rename = title.clone();
                         view! {
                             <div class="side-item ses"
                                 class:active=move || active_session.get().as_deref() == Some(id_active.as_str())
@@ -3002,6 +3004,12 @@ fn App() -> impl IntoView {
                                         return;
                                     }
                                     open.call(id_click.clone());
+                                }
+                                on:dblclick=move |ev: web_sys::MouseEvent| {
+                                    ev.prevent_default();
+                                    ev.stop_propagation();
+                                    rename_session_input.set(title_rename.clone());
+                                    rename_session_target.set(Some((id_rename.clone(), title_rename.clone())));
                                 }
                                 on:keydown=move |ev: web_sys::KeyboardEvent| {
                                     if ev.key() == "Enter" || ev.key() == " " {
@@ -3048,6 +3056,8 @@ fn App() -> impl IntoView {
                             .collect();
                         let is_target = target.as_deref() == Some(fid_target.as_str());
                         let fid_target_over_enter = fid_target_over.clone();
+                        let fid_rename = fid.clone();
+                        let fname_rename = fname.clone();
                         view! {
                             <div class="side-folder-wrap"
                                 class:drop-target=is_target
@@ -3082,6 +3092,12 @@ fn App() -> impl IntoView {
                                             if set.contains(&fid_toggle) { set.remove(&fid_toggle); }
                                             else { set.insert(fid_toggle.clone()); }
                                         });
+                                    }
+                                    on:dblclick=move |ev: web_sys::MouseEvent| {
+                                        ev.prevent_default();
+                                        ev.stop_propagation();
+                                        folder_modal_input.set(fname_rename.clone());
+                                        folder_modal.set(Some(FolderModal::Rename(fid_rename.clone())));
                                     }>
                                     <span class="side-folder-caret" class:collapsed=collapsed>"▾"</span>
                                     <span class="gi folder"></span>
