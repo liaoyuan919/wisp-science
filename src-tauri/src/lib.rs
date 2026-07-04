@@ -107,7 +107,7 @@ enum McpTransport {
     },
 }
 
-/// A user-configured MCP server connection. Not yet wired into the agent (see C2).
+/// A user-configured MCP server connection.
 #[derive(Serialize, Deserialize, Clone)]
 struct McpConnection {
     id: String,
@@ -440,33 +440,42 @@ async fn save_disabled_skills(store: &Store, set: &HashSet<String>) -> Result<()
     store.set_setting("disabled_skills", &json).await.map_err(|e| format!("{e}"))
 }
 
-// ponytail: not called yet — C2 wires these into the agent/MCP flow.
-#[allow(dead_code)]
 async fn load_mcp_connections(store: &Store) -> Vec<McpConnection> {
     store.get_setting("mcp_connections").await.ok().flatten()
         .and_then(|s| serde_json::from_str::<Vec<McpConnection>>(&s).ok())
         .unwrap_or_default()
 }
 
-// ponytail: not called yet — C2 wires these into the agent/MCP flow.
-#[allow(dead_code)]
 async fn save_mcp_connections(store: &Store, conns: &[McpConnection]) -> Result<(), String> {
     let json = serde_json::to_string(conns).map_err(|e| format!("{e}"))?;
     store.set_setting("mcp_connections", &json).await.map_err(|e| format!("{e}"))
 }
 
-// ponytail: not called yet — C2 wires these into the agent/MCP flow.
-#[allow(dead_code)]
 async fn load_bio_tools_enabled(store: &Store) -> bool {
     store.get_setting("bio_tools_enabled").await.ok().flatten()
         .and_then(|s| serde_json::from_str::<bool>(&s).ok())
         .unwrap_or(true)
 }
 
-// ponytail: not called yet — C2 wires these into the agent/MCP flow.
-#[allow(dead_code)]
 async fn save_bio_tools_enabled(store: &Store, on: bool) -> Result<(), String> {
     store.set_setting("bio_tools_enabled", &on.to_string()).await.map_err(|e| format!("{e}"))
+}
+
+/// Build an `McpClient` from a user-configured connection. Stdio connections
+/// carry their own command/env/cwd (unrelated to the bundled Python venv).
+async fn connect_mcp(conn: &McpConnection) -> anyhow::Result<wisp_mcp::McpClient> {
+    match &conn.transport {
+        McpTransport::Stdio { command, args, env, cwd } => {
+            let mut cmd = tokio::process::Command::new(command);
+            cmd.args(args);
+            for (k, v) in env { cmd.env(k, v); }
+            if let Some(dir) = cwd { if !dir.is_empty() { cmd.current_dir(dir); } }
+            wisp_mcp::McpClient::launch_with_command(cmd).await
+        }
+        McpTransport::Http { url, headers } => {
+            wisp_mcp::McpClient::connect_http(url, headers).await
+        }
+    }
 }
 
 fn default_api_url(provider: &str) -> &'static str {
@@ -527,8 +536,9 @@ fn skill_paths(root: &std::path::Path) -> Vec<PathBuf> {
     paths
 }
 
-/// Wire Python REPL and bundled bio-tools MCP into a freshly built agent.
-async fn wire_python_and_mcp(agent: &mut wisp_core::Agent, app_data: &std::path::Path) -> Vec<String> {
+/// Wire Python REPL, bundled bio-tools MCP, and user-configured MCP
+/// connections into a freshly built agent.
+async fn wire_python_and_mcp(agent: &mut wisp_core::Agent, app_data: &std::path::Path, store: &Store) -> Vec<String> {
     let mut errors = vec![];
     let py_env = match wisp_python::PythonEnv::ensure(app_data) {
         Ok(env) => Some(env),
@@ -554,29 +564,39 @@ async fn wire_python_and_mcp(agent: &mut wisp_core::Agent, app_data: &std::path:
         errors.push(format!("Kernel worker not found at {}", worker_path.display()));
     }
 
-    if let Ok(cmdline) = std::env::var("WISP_MCP_COMMAND") {
-        let parts: Vec<String> = cmdline
-            .split_whitespace()
-            .map(|s| {
-                if s.ends_with(".py") {
-                    wisp_python::resolve_bundled_script(s).to_string_lossy().to_string()
-                } else {
-                    s.to_string()
+    if load_bio_tools_enabled(store).await {
+        if let Ok(cmdline) = std::env::var("WISP_MCP_COMMAND") {
+            let parts: Vec<String> = cmdline
+                .split_whitespace()
+                .map(|s| {
+                    if s.ends_with(".py") {
+                        wisp_python::resolve_bundled_script(s).to_string_lossy().to_string()
+                    } else {
+                        s.to_string()
+                    }
+                })
+                .collect();
+            if parts.len() >= 2 {
+                let args: Vec<String> = parts[1..].to_vec();
+                match wisp_mcp::McpClient::launch(&parts[0], &args).await {
+                    Ok(client) => register_mcp(agent, std::sync::Arc::new(client)).await,
+                    Err(e) => errors.push(format!("MCP command: {e}")),
                 }
-            })
-            .collect();
-        if parts.len() >= 2 {
-            let args: Vec<String> = parts[1..].to_vec();
-            match wisp_mcp::McpClient::launch(&parts[0], &args).await {
+            }
+        } else if let Some(env) = &py_env {
+            let pkg = std::env::var("WISP_MCP_PKG").unwrap_or_else(|_| "mcp_bio".into());
+            match wisp_mcp::McpClient::launch_bio_tools(&env.python(), &pkg).await {
                 Ok(client) => register_mcp(agent, std::sync::Arc::new(client)).await,
-                Err(e) => errors.push(format!("MCP command: {e}")),
+                Err(e) => errors.push(format!("MCP {pkg}: {e}")),
             }
         }
-    } else if let Some(env) = &py_env {
-        let pkg = std::env::var("WISP_MCP_PKG").unwrap_or_else(|_| "mcp_bio".into());
-        match wisp_mcp::McpClient::launch_bio_tools(&env.python(), &pkg).await {
+    }
+
+    // User-configured connections.
+    for conn in load_mcp_connections(store).await.into_iter().filter(|c| c.enabled) {
+        match connect_mcp(&conn).await {
             Ok(client) => register_mcp(agent, std::sync::Arc::new(client)).await,
-            Err(e) => errors.push(format!("MCP {pkg}: {e}")),
+            Err(e) => errors.push(format!("MCP '{}': {e}", conn.name)),
         }
     }
     errors
@@ -656,7 +676,7 @@ async fn send_message(state: State<'_, AppState>, app: AppHandle, session_id: Op
             let hosts = ssh_hosts::stored_hosts(&state.store).await;
             agent.seed_system_prompt(&skills, ssh_hosts::render_hosts_section(&hosts));
         }
-        let wire_errors = wire_python_and_mcp(&mut agent, &state.app_data).await;
+        let wire_errors = wire_python_and_mcp(&mut agent, &state.app_data, &state.store).await;
         if !wire_errors.is_empty() {
             state.bootstrap.lock().unwrap().errors.extend(wire_errors);
         }
@@ -983,6 +1003,73 @@ async fn reset_idle_agents(state: &AppState) {
     for rt in runtimes {
         if let Ok(mut guard) = rt.agent.try_lock() { *guard = None; }
     }
+}
+
+#[derive(Serialize, Clone)]
+struct McpConnectionsView {
+    bio_tools_enabled: bool,
+    connections: Vec<McpConnection>,
+}
+
+#[tauri::command]
+async fn list_mcp_connections(state: State<'_, AppState>) -> Result<McpConnectionsView, String> {
+    Ok(McpConnectionsView {
+        bio_tools_enabled: load_bio_tools_enabled(&state.store).await,
+        connections: load_mcp_connections(&state.store).await,
+    })
+}
+
+#[tauri::command]
+async fn add_mcp_connection(state: State<'_, AppState>, conn: McpConnection) -> Result<(), String> {
+    let mut conns = load_mcp_connections(&state.store).await;
+    conns.push(conn);
+    save_mcp_connections(&state.store, &conns).await?;
+    reset_idle_agents(&state).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_mcp_connection(state: State<'_, AppState>, conn: McpConnection) -> Result<(), String> {
+    let mut conns = load_mcp_connections(&state.store).await;
+    match conns.iter_mut().find(|c| c.id == conn.id) {
+        Some(slot) => *slot = conn,
+        None => return Err("connection not found".into()),
+    }
+    save_mcp_connections(&state.store, &conns).await?;
+    reset_idle_agents(&state).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_mcp_connection(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let mut conns = load_mcp_connections(&state.store).await;
+    conns.retain(|c| c.id != id);
+    save_mcp_connections(&state.store, &conns).await?;
+    reset_idle_agents(&state).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_mcp_connection_enabled(state: State<'_, AppState>, id: String, enabled: bool) -> Result<(), String> {
+    let mut conns = load_mcp_connections(&state.store).await;
+    if let Some(c) = conns.iter_mut().find(|c| c.id == id) { c.enabled = enabled; }
+    save_mcp_connections(&state.store, &conns).await?;
+    reset_idle_agents(&state).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_bio_tools_enabled(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    save_bio_tools_enabled(&state.store, enabled).await?;
+    reset_idle_agents(&state).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn test_mcp_connection(_state: State<'_, AppState>, conn: McpConnection) -> Result<usize, String> {
+    let client = connect_mcp(&conn).await.map_err(|e| format!("{e}"))?;
+    let tools = client.tools_list().await.map_err(|e| format!("{e}"))?;
+    Ok(tools.len())
 }
 
 #[tauri::command]
@@ -1679,6 +1766,13 @@ pub fn run() {
             dismiss_onboarding,
             get_bootstrap_status,
             check_for_updates,
+            list_mcp_connections,
+            add_mcp_connection,
+            update_mcp_connection,
+            delete_mcp_connection,
+            set_mcp_connection_enabled,
+            set_bio_tools_enabled,
+            test_mcp_connection,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Wisp");

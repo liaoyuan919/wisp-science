@@ -95,11 +95,18 @@ impl McpClient {
     pub async fn launch(command: &str, args: &[String]) -> Result<Self> {
         let mut cmd = tokio::process::Command::new(command);
         cmd.args(args);
+        Self::launch_with_command(cmd).await
+    }
+
+    /// Spawn a caller-built `Command` (already carrying env/cwd/args) and
+    /// perform the MCP initialize handshake. Lets callers configure the
+    /// child process beyond what `launch(command, args)` exposes.
+    pub async fn launch_with_command(mut cmd: tokio::process::Command) -> Result<Self> {
         cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
         wisp_tools::process::hide_console_async(&mut cmd);
-        let mut child = cmd.spawn().map_err(|e| anyhow!("spawn MCP server '{command}': {e}"))?;
+        let mut child = cmd.spawn().map_err(|e| anyhow!("spawn MCP server: {e}"))?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
         // The server is long-lived for the session; leak the child so dropping
