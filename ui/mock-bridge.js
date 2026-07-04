@@ -62,13 +62,13 @@
               thinking: "Planning kinome coverage.",
             };
           case "get_settings":
-            return { provider: "openai", api_url: "https://api.deepseek.com", model: "deepseek-v4-pro", has_api_key: true, locale: "en" };
+            return { provider: "openai", api_url: "https://api.deepseek.com", model: "deepseek-v4-pro", label: "deepseek-v4-pro", has_api_key: true, locale: "en" };
           case "get_project_info":
             return project;
           case "get_onboarding_state":
             return { show: false, has_api_key: true };
           case "get_bootstrap_status":
-            return { skills_loaded: 58, python_ok: true, mcp_catalog: 24, uv_ok: true, app_version: "0.2.0-mock", workspace: project.root, errors: [] };
+            return { skills_loaded: 58, python_ok: true, mcp_catalog: 24, uv_ok: true, app_version: "0.3.0-mock", workspace: project.root, errors: [] };
           case "get_capabilities":
             return {
               skills: [{ name: "bear-support", description: "Find papers supporting a claim." }],
@@ -87,6 +87,19 @@
           case "set_api_key":
           case "new_session":
             return `s-${Math.random().toString(36).slice(2)}`;
+          case "delete_session": {
+            const id = args?.id;
+            const i = sessions.findIndex((s) => s.id === id);
+            if (i >= 0) sessions.splice(i, 1);
+            return null;
+          }
+          case "rename_session": {
+            const id = args?.id;
+            const title = (args?.title ?? "").trim();
+            const s = sessions.find((x) => x.id === id);
+            if (s && title) s.title = title;
+            return null;
+          }
           case "rewind_session":
           case "confirm_response":
           case "dismiss_onboarding":

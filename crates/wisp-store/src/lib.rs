@@ -60,6 +60,26 @@ impl Store {
                 .execute(pool)
                 .await?;
         }
+        let has_model_name: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='model_name'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if has_model_name.0 == 0 {
+            sqlx::query("ALTER TABLE messages ADD COLUMN model_name TEXT")
+                .execute(pool)
+                .await?;
+        }
+        let has_frame_title: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM pragma_table_info('frames') WHERE name='title'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if has_frame_title.0 == 0 {
+            sqlx::query("ALTER TABLE frames ADD COLUMN title TEXT")
+                .execute(pool)
+                .await?;
+        }
         Ok(())
     }
 
@@ -133,7 +153,7 @@ impl Store {
     /// Newest sessions across ALL projects, for the landing "Recent sessions" list.
     pub async fn list_recent_sessions(&self, limit: i64) -> Result<Vec<(String, String, String, i64)>> {
         let rows = sqlx::query(
-            "SELECT f.id AS id, f.project_id AS pid, f.created_at AS created_at, \
+            "SELECT f.id AS id, f.project_id AS pid, f.created_at AS created_at, f.title AS custom_title, \
                 (SELECT content FROM messages m WHERE m.frame_id = f.id AND m.role='user' ORDER BY m.seq ASC LIMIT 1) AS first_user \
              FROM frames f \
              WHERE f.parent_frame_id = f.id \
@@ -147,11 +167,9 @@ impl Store {
             let id: String = row.try_get("id")?;
             let pid: String = row.try_get("pid")?;
             let created: i64 = row.try_get("created_at")?;
+            let custom_title: Option<String> = row.try_get("custom_title")?;
             let first_user: Option<String> = row.try_get("first_user")?;
-            let title = first_user
-                .and_then(|c| serde_json::from_str::<wisp_llm::Content>(&c).ok())
-                .map(|c| c.as_text().chars().take(80).collect::<String>())
-                .unwrap_or_default();
+            let title = session_display_title(custom_title, first_user);
             out.push((id, pid, title, created));
         }
         Ok(out)
@@ -172,13 +190,14 @@ impl Store {
         let role = format!("{:?}", msg.role).to_ascii_lowercase();
         let content = serde_json::to_string(&msg.content)?;
         let tool_calls = if msg.tool_calls.is_empty() { None } else { Some(serde_json::to_string(&msg.tool_calls)?) };
-        sqlx::query("INSERT INTO messages(id,frame_id,seq,role,content,tool_calls,tool_call_id,tool_name,reasoning,ts) VALUES(?,?,?,?,?,?,?,?,?,?)")
+        sqlx::query("INSERT INTO messages(id,frame_id,seq,role,content,tool_calls,tool_call_id,tool_name,reasoning,ts,model_name) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
             .bind(id).bind(frame_id).bind(seq).bind(role).bind(content)
             .bind(tool_calls)
             .bind(msg.tool_call_id.as_deref())
             .bind(msg.tool_name.as_deref())
             .bind(msg.reasoning.as_deref())
             .bind(msg.ts)
+            .bind(msg.model_name.as_deref())
             .execute(&self.pool).await?;
         Ok(())
     }
@@ -195,7 +214,7 @@ impl Store {
 
     /// Load all messages for a frame, ordered by sequence.
     pub async fn load_messages(&self, frame_id: &str) -> Result<Vec<Message>> {
-        let rows = sqlx::query("SELECT role,content,tool_calls,tool_call_id,tool_name,reasoning,ts FROM messages WHERE frame_id=? ORDER BY seq ASC")
+        let rows = sqlx::query("SELECT role,content,tool_calls,tool_call_id,tool_name,reasoning,ts,model_name FROM messages WHERE frame_id=? ORDER BY seq ASC")
             .bind(frame_id)
             .fetch_all(&self.pool).await?;
         let mut out = vec![];
@@ -211,8 +230,9 @@ impl Store {
             let tool_name: Option<String> = row.try_get("tool_name")?;
             let reasoning: Option<String> = row.try_get("reasoning")?;
             let ts: i64 = row.try_get("ts")?;
+            let model_name: Option<String> = row.try_get("model_name")?;
             let role = parse_role(&role);
-            out.push(Message { role, content, tool_calls, tool_call_id, tool_name, reasoning, ts });
+            out.push(Message { role, content, tool_calls, tool_call_id, tool_name, reasoning, ts, model_name });
         }
         Ok(out)
     }
@@ -222,7 +242,7 @@ impl Store {
     /// session-history sidebar. Returns `(frame_id, title, created_at)`.
     pub async fn list_sessions(&self, project_id: &str) -> Result<Vec<(String, String, i64)>> {
         let rows = sqlx::query(
-            "SELECT f.id AS id, f.created_at AS created_at, \
+            "SELECT f.id AS id, f.created_at AS created_at, f.title AS custom_title, \
                 (SELECT content FROM messages m WHERE m.frame_id = f.id AND m.role = 'user' ORDER BY m.seq ASC LIMIT 1) AS first_user \
              FROM frames f \
              WHERE f.project_id = ? AND f.parent_frame_id = f.id \
@@ -236,14 +256,63 @@ impl Store {
         for row in rows {
             let id: String = row.try_get("id")?;
             let created: i64 = row.try_get("created_at")?;
+            let custom_title: Option<String> = row.try_get("custom_title")?;
             let first_user: Option<String> = row.try_get("first_user")?;
-            let title = first_user
-                .and_then(|c| serde_json::from_str::<wisp_llm::Content>(&c).ok())
-                .map(|c| c.as_text().chars().take(80).collect::<String>())
-                .unwrap_or_default();
+            let title = session_display_title(custom_title, first_user);
             out.push((id, title, created));
         }
         Ok(out)
+    }
+
+    /// Delete a saved conversation (root frame) and all of its messages/artifacts.
+    pub async fn delete_session(&self, frame_id: &str, project_id: &str) -> Result<()> {
+        let exists: Option<(String,)> = sqlx::query_as(
+            "SELECT id FROM frames WHERE id=? AND project_id=? AND parent_frame_id=id",
+        )
+        .bind(frame_id)
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if exists.is_none() {
+            anyhow::bail!("Session not found");
+        }
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM messages WHERE frame_id IN (SELECT id FROM frames WHERE root_frame_id=?)")
+            .bind(frame_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM artifacts WHERE root_frame_id=?")
+            .bind(frame_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM frames WHERE root_frame_id=?")
+            .bind(frame_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Set a custom sidebar title for a saved conversation.
+    pub async fn rename_session(&self, frame_id: &str, project_id: &str, title: &str) -> Result<()> {
+        let title = title.trim();
+        if title.is_empty() {
+            anyhow::bail!("Title cannot be empty");
+        }
+        let now = chrono::Utc::now().timestamp();
+        let n = sqlx::query(
+            "UPDATE frames SET title=?, updated_at=? WHERE id=? AND project_id=? AND parent_frame_id=id",
+        )
+        .bind(title)
+        .bind(now)
+        .bind(frame_id)
+        .bind(project_id)
+        .execute(&self.pool)
+        .await?;
+        if n.rows_affected() == 0 {
+            anyhow::bail!("Session not found");
+        }
+        Ok(())
     }
 
     pub async fn list_root_frames(&self, project_id: &str) -> Result<Vec<(String, String, i64)>> {
@@ -323,6 +392,19 @@ impl Store {
     }
 }
 
+fn session_display_title(custom_title: Option<String>, first_user: Option<String>) -> String {
+    if let Some(t) = custom_title {
+        let t = t.trim();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    first_user
+        .and_then(|c| serde_json::from_str::<wisp_llm::Content>(&c).ok())
+        .map(|c| c.as_text().chars().take(80).collect::<String>())
+        .unwrap_or_default()
+}
+
 fn parse_role(s: &str) -> wisp_llm::Role {
     match s {
         "system" => wisp_llm::Role::System,
@@ -358,6 +440,11 @@ mod tests {
         assert_eq!(sessions.len(), 1, "f2 has no user turn, must be excluded");
         assert_eq!(sessions[0].0, "f1");
         assert_eq!(sessions[0].1, "hello");
+        store.rename_session("f1", "p1", "Renamed chat").await.unwrap();
+        let sessions = store.list_sessions("p1").await.unwrap();
+        assert_eq!(sessions[0].1, "Renamed chat");
+        store.delete_session("f1", "p1").await.unwrap();
+        assert!(store.list_sessions("p1").await.unwrap().is_empty());
         let _ = std::fs::remove_file(&tmp);
     }
 

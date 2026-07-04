@@ -148,7 +148,7 @@ export function parallelMock(): void {
           case "create_project":
             return { id: "default", name: project.name, workspace_dir: project.root, session_count: 0, updated_at: 1 };
           case "delete_project": return null;
-          case "get_settings": return { provider: "openai", api_url: "https://api.deepseek.com", model: "deepseek-v4-pro", has_api_key: true, locale: "en" };
+          case "get_settings": return { provider: "openai", api_url: "https://api.deepseek.com", model: "deepseek-v4-pro", label: "deepseek-v4-pro", has_api_key: true, locale: "en" };
           case "get_project_info": return project;
           case "get_onboarding_state": return { show: false, has_api_key: true };
           case "get_capabilities": return { skills: [], mcp_servers: [], memory_files: [], project };

@@ -16,6 +16,7 @@ use wisp_store::Store;
 mod review;
 mod ssh_hosts;
 mod seed;
+mod models;
 
 /// One streamed agent event, tagged for the frontend to match on.
 #[derive(Serialize, Clone)]
@@ -163,6 +164,8 @@ struct UiItem {
     text: String,
     tool_name: Option<String>,
     ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_name: Option<String>,
 }
 
 /// Index in `msgs` where the `user_index`‑th user turn starts (0-based user count).
@@ -188,28 +191,34 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
             wisp_llm::Role::User => {
                 let t = m.content.as_text();
                 if !t.trim().is_empty() {
-                    out.push(UiItem { role: "user".into(), text: t, tool_name: None, ok: None });
+                    out.push(UiItem { role: "user".into(), text: t, tool_name: None, ok: None, model_name: None });
                 }
             }
             wisp_llm::Role::Assistant => {
                 if let Some(r) = &m.reasoning {
                     if !r.trim().is_empty() {
-                        out.push(UiItem { role: "reasoning".into(), text: r.clone(), tool_name: None, ok: None });
+                        out.push(UiItem { role: "reasoning".into(), text: r.clone(), tool_name: None, ok: None, model_name: None });
                     }
                 }
                 let t = m.content.as_text();
                 if !t.trim().is_empty() {
-                    out.push(UiItem { role: "assistant".into(), text: t, tool_name: None, ok: None });
+                    out.push(UiItem {
+                        role: "assistant".into(),
+                        text: t,
+                        tool_name: None,
+                        ok: None,
+                        model_name: m.model_name.clone(),
+                    });
                 }
             }
             wisp_llm::Role::Tool => {
                 let text = m.content.as_text();
                 if m.tool_name.as_deref() == Some("attempt_completion") {
                     if !text.trim().is_empty() {
-                        out.push(UiItem { role: "assistant".into(), text, tool_name: None, ok: None });
+                        out.push(UiItem { role: "assistant".into(), text, tool_name: None, ok: None, model_name: m.model_name.clone() });
                     }
                 } else {
-                    out.push(UiItem { role: "tool".into(), text, tool_name: m.tool_name.clone(), ok: Some(true) });
+                    out.push(UiItem { role: "tool".into(), text, tool_name: m.tool_name.clone(), ok: Some(true), model_name: None });
                 }
             }
             wisp_llm::Role::System => {}
@@ -223,6 +232,9 @@ struct Settings {
     provider: String,
     api_url: String,
     model: String,
+    /// User-facing alias for the active model profile (composer picker label).
+    #[serde(default)]
+    label: String,
     has_api_key: bool,
     #[serde(default = "default_locale")]
     locale: String,
@@ -230,6 +242,22 @@ struct Settings {
     /// (Documents/wisp-science). Applied on next launch (#6, #13).
     #[serde(default)]
     workspace_dir: String,
+    /// Max output tokens per LLM turn. 0 = provider default.
+    #[serde(default)]
+    max_tokens: u64,
+    /// OpenAI reasoning effort (none/minimal/low/medium/high/xhigh). Empty = provider default.
+    #[serde(default)]
+    reasoning_effort: String,
+}
+
+/// Drop cached per-session agents so the next turn picks up new model settings.
+async fn clear_idle_agents(state: &AppState) {
+    let runtimes = state.sessions.lock().await.values().cloned().collect::<Vec<_>>();
+    for rt in runtimes {
+        if let Ok(mut guard) = rt.agent.try_lock() {
+            *guard = None;
+        }
+    }
 }
 
 fn default_locale() -> String {
@@ -411,14 +439,49 @@ async fn load_locale(store: &Store) -> String {
     }
 }
 
+async fn load_llm_advanced(store: &Store) -> (u64, String) {
+    let max_tokens = store
+        .get_setting("max_tokens")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let reasoning_effort = store.get_setting("reasoning_effort").await.ok().flatten().unwrap_or_default();
+    (max_tokens, reasoning_effort)
+}
+
+fn default_max_tokens(provider: &str) -> u64 {
+    match normalized_provider(provider).as_str() {
+        "anthropic" => 8192,
+        _ => 4096,
+    }
+}
+
+fn effective_max_tokens(configured: u64, provider: &str) -> u64 {
+    let v = if configured >= 16 { configured } else { default_max_tokens(provider) };
+    v.max(16)
+}
+
+fn effective_reasoning_effort(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() || s == "default" { None } else { Some(s.to_string()) }
+}
+
+fn apply_llm_advanced(cfg: &mut ProviderConfig, max_tokens: u64, reasoning_effort: &str, provider: &str) {
+    cfg.max_tokens = effective_max_tokens(max_tokens, provider);
+    cfg.reasoning_effort = effective_reasoning_effort(reasoning_effort);
+}
+
 async fn load_settings(store: &Store) -> (String, String, String, String) {
-    let provider = normalized_provider(&non_empty_setting(
-        store.get_setting("provider").await.ok().flatten(),
-        || env_or("WISP_PROVIDER", "openai"),
-    ));
-    let api_url = non_empty_setting(store.get_setting("api_url").await.ok().flatten(), || env_or("WISP_API_URL", default_api_url(&provider)));
-    let model = non_empty_setting(store.get_setting("model").await.ok().flatten(), || env_or("WISP_MODEL", default_model(&provider)));
-    let api_key = wisp_store::secrets::Secret::get("api_key").ok().unwrap_or_else(|| env_or("WISP_API_KEY", ""));
+    // Resolve through the active model profile (migrates legacy single-model
+    // installs on first read), then apply env/default fallbacks so a blank
+    // field still produces a usable config.
+    let (provider, api_url, model, api_key) = models::active_config(store).await;
+    let provider = normalized_provider(&non_empty_setting(Some(provider), || env_or("WISP_PROVIDER", "openai")));
+    let api_url = non_empty_setting(Some(api_url), || env_or("WISP_API_URL", default_api_url(&provider)));
+    let model = non_empty_setting(Some(model), || env_or("WISP_MODEL", default_model(&provider)));
+    let api_key = if api_key.trim().is_empty() { env_or("WISP_API_KEY", "") } else { api_key };
     (provider, api_url, model, api_key)
 }
 
@@ -494,7 +557,14 @@ fn default_model(provider: &str) -> &'static str {
     }
 }
 
-fn build_provider_config(provider: &str, api_url: &str, api_key: &str, model: &str) -> Result<ProviderConfig, String> {
+fn build_provider_config(
+    provider: &str,
+    api_url: &str,
+    api_key: &str,
+    model: &str,
+    max_tokens: u64,
+    reasoning_effort: &str,
+) -> Result<ProviderConfig, String> {
     let provider = normalized_provider(provider);
     let api_url = api_url.trim();
     let api_key = api_key.trim();
@@ -508,12 +578,14 @@ fn build_provider_config(provider: &str, api_url: &str, api_key: &str, model: &s
     if api_key.is_empty() {
         return Err("No API key set. Open Settings and paste your provider API key.".into());
     }
-    Ok(match provider.as_str() {
+    let mut cfg = match provider.as_str() {
         "anthropic" => ProviderConfig::anthropic(api_url, api_key, model),
         "openai_responses" => ProviderConfig::openai_responses(api_url, api_key, model),
         "openai" => ProviderConfig::openai(api_url, api_key, model),
         _ => return Err(format!("Unsupported provider: {provider}")),
-    })
+    };
+    apply_llm_advanced(&mut cfg, max_tokens, reasoning_effort, &provider);
+    Ok(cfg)
 }
 
 fn effective_api_key(new_key: Option<String>, stored_key: String) -> String {
@@ -638,7 +710,9 @@ async fn ensure_active_frame(state: &AppState, ap: &ActiveProject) -> Result<Str
 #[tauri::command]
 async fn send_message(state: State<'_, AppState>, app: AppHandle, session_id: Option<String>, message: String) -> Result<String, String> {
     let (provider, api_url, model, api_key) = load_settings(&state.store).await;
-    let cfg = build_provider_config(&provider, &api_url, &api_key, &model)?;
+    let (max_tokens, reasoning_effort) = load_llm_advanced(&state.store).await;
+    let model_label = models::active_label(&state.store).await;
+    let cfg = build_provider_config(&provider, &api_url, &api_key, &model, max_tokens, &reasoning_effort)?;
 
     let max_context = state.store.get_setting("max_context").await.ok().flatten().and_then(|s| s.parse::<usize>().ok()).unwrap_or(1_000_000);
     let max_iter = state.store.get_setting("max_iter").await.ok().flatten().and_then(|s| s.parse::<usize>().ok()).unwrap_or(100);
@@ -710,9 +784,13 @@ async fn send_message(state: State<'_, AppState>, app: AppHandle, session_id: Op
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
         let store = state.store.clone();
         let fid = frame_id.clone();
+        let stamp = model_label.clone();
         let mut seq = start_seq;
         let handle = tokio::spawn(async move {
-            while let Some(msg) = rx.recv().await {
+            while let Some(mut msg) = rx.recv().await {
+                if msg.role == wisp_llm::Role::Assistant && msg.model_name.is_none() {
+                    msg.model_name = Some(stamp.clone());
+                }
                 seq += 1;
                 if let Err(e) = store.append_message(&fid, seq, &msg).await {
                     tracing::warn!("incremental persist seq {seq} failed: {e}");
@@ -798,7 +876,8 @@ async fn review_session(state: State<'_, AppState>, app: AppHandle, session_id: 
         let transcript = review::serialize_transcript(&msgs);
 
         let (provider, api_url, model, api_key) = load_settings(&state.store).await;
-        let cfg = build_provider_config(&provider, &api_url, &api_key, &model)?;
+        let (max_tokens, reasoning_effort) = load_llm_advanced(&state.store).await;
+        let cfg = build_provider_config(&provider, &api_url, &api_key, &model, max_tokens, &reasoning_effort)?;
         let llm = wisp_llm::build(cfg);
 
         let review_msgs = vec![
@@ -840,6 +919,27 @@ async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionInfo>, S
     let ap = state.active();
     let rows = state.store.list_sessions(&ap.id).await.map_err(|e| format!("{e}"))?;
     Ok(rows.into_iter().map(|(id, title, ts)| SessionInfo { id, title, ts }).collect())
+}
+
+#[tauri::command]
+async fn delete_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let ap = state.active();
+    if let Some(rt) = state.sessions.lock().await.get(&id) {
+        rt.cancel.store(true, Ordering::Relaxed);
+    }
+    state.sessions.lock().await.remove(&id);
+    if state.active_frame.read().unwrap().as_deref() == Some(id.as_str()) {
+        *state.active_frame.write().unwrap() = None;
+    }
+    state.store.delete_session(&id, &ap.id).await.map_err(|e| format!("{e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn rename_session(state: State<'_, AppState>, id: String, title: String) -> Result<(), String> {
+    let ap = state.active();
+    state.store.rename_session(&id, &ap.id, &title).await.map_err(|e| format!("{e}"))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -992,17 +1092,8 @@ async fn set_skill_enabled(state: State<'_, AppState>, name: String, enabled: bo
     let mut set = load_disabled_skills(&state.store).await;
     if enabled { set.remove(&name); } else { set.insert(name); }
     save_disabled_skills(&state.store, &set).await?;
-    reset_idle_agents(&state).await;
+    clear_idle_agents(&state).await;
     Ok(())
-}
-
-/// Drop idle cached agents so the next turn rebuilds with fresh config.
-/// A running turn holds its agent mutex and keeps the old config until it ends.
-async fn reset_idle_agents(state: &AppState) {
-    let runtimes = state.sessions.lock().await.values().cloned().collect::<Vec<_>>();
-    for rt in runtimes {
-        if let Ok(mut guard) = rt.agent.try_lock() { *guard = None; }
-    }
 }
 
 #[derive(Serialize, Clone)]
@@ -1024,7 +1115,7 @@ async fn add_mcp_connection(state: State<'_, AppState>, conn: McpConnection) -> 
     let mut conns = load_mcp_connections(&state.store).await;
     conns.push(conn);
     save_mcp_connections(&state.store, &conns).await?;
-    reset_idle_agents(&state).await;
+    clear_idle_agents(&state).await;
     Ok(())
 }
 
@@ -1036,7 +1127,7 @@ async fn update_mcp_connection(state: State<'_, AppState>, conn: McpConnection) 
         None => return Err("connection not found".into()),
     }
     save_mcp_connections(&state.store, &conns).await?;
-    reset_idle_agents(&state).await;
+    clear_idle_agents(&state).await;
     Ok(())
 }
 
@@ -1045,7 +1136,7 @@ async fn delete_mcp_connection(state: State<'_, AppState>, id: String) -> Result
     let mut conns = load_mcp_connections(&state.store).await;
     conns.retain(|c| c.id != id);
     save_mcp_connections(&state.store, &conns).await?;
-    reset_idle_agents(&state).await;
+    clear_idle_agents(&state).await;
     Ok(())
 }
 
@@ -1054,14 +1145,14 @@ async fn set_mcp_connection_enabled(state: State<'_, AppState>, id: String, enab
     let mut conns = load_mcp_connections(&state.store).await;
     if let Some(c) = conns.iter_mut().find(|c| c.id == id) { c.enabled = enabled; }
     save_mcp_connections(&state.store, &conns).await?;
-    reset_idle_agents(&state).await;
+    clear_idle_agents(&state).await;
     Ok(())
 }
 
 #[tauri::command]
 async fn set_bio_tools_enabled(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
     save_bio_tools_enabled(&state.store, enabled).await?;
-    reset_idle_agents(&state).await;
+    clear_idle_agents(&state).await;
     Ok(())
 }
 
@@ -1130,7 +1221,7 @@ async fn install_skill(state: State<'_, AppState>, src_path: String) -> Result<S
     std::fs::create_dir_all(dest.parent().unwrap()).map_err(|e| format!("{e}"))?;
     copy_dir_recursive(&skill_dir, &dest).map_err(|e| format!("{e}"))?;
     reload_skills(&state);
-    reset_idle_agents(&state).await;
+    clear_idle_agents(&state).await;
     Ok(skill.name)
 }
 
@@ -1145,7 +1236,7 @@ async fn remove_skill(state: State<'_, AppState>, name: String) -> Result<(), St
     set.remove(&name);
     let _ = save_disabled_skills(&state.store, &set).await;
     reload_skills(&state);
-    reset_idle_agents(&state).await;
+    clear_idle_agents(&state).await;
     Ok(())
 }
 
@@ -1193,10 +1284,13 @@ fn confirm_response(state: State<'_, AppState>, session_id: String, approved: bo
 
 #[tauri::command]
 async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
-    let (provider, api_url, model, api_key) = load_settings(&state.store).await;
+    let (provider, api_url, model, _api_key) = load_settings(&state.store).await;
     let locale = load_locale(&state.store).await;
     let workspace_dir = state.store.get_setting("workspace_dir").await.ok().flatten().unwrap_or_default();
-    Ok(Settings { provider, api_url, model, has_api_key: !api_key.is_empty(), locale, workspace_dir })
+    let (max_tokens, reasoning_effort) = load_llm_advanced(&state.store).await;
+    let has_api_key = models::active_has_key(&state.store).await;
+    let label = models::active_label(&state.store).await;
+    Ok(Settings { provider, api_url, model, label, has_api_key, locale, workspace_dir, max_tokens, reasoning_effort })
 }
 
 #[tauri::command]
@@ -1217,9 +1311,9 @@ async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Result<
         model = %model,
         "saving settings"
     );
-    state.store.set_setting("provider", &provider).await.map_err(|e| format!("{e}"))?;
-    state.store.set_setting("api_url", api_url).await.map_err(|e| format!("{e}"))?;
-    state.store.set_setting("model", model).await.map_err(|e| format!("{e}"))?;
+    // provider/api_url/model belong to the *active* model profile now, not a
+    // single global config — the classic form edits whichever model is active.
+    models::set_active_fields(&state.store, &provider, api_url, model, settings.label.trim()).await?;
     let locale = match settings.locale.trim() {
         "zh" | "zh-CN" | "zh-TW" => "zh",
         other if !other.is_empty() => other,
@@ -1246,21 +1340,21 @@ async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Result<
         state.store.set_setting("workspace_dir", workspace_dir).await.map_err(|e| format!("{e}"))?;
     }
 
-    // Reset cached agents so the next turn picks up the new provider. A turn
-    // currently running holds its agent mutex and keeps the old config; only
-    // idle runtimes are rebuilt.
-    reset_idle_agents(&state).await;
+    let max_tokens = settings.max_tokens;
+    state.store.set_setting("max_tokens", &max_tokens.to_string()).await.map_err(|e| format!("{e}"))?;
+    let reasoning_effort = settings.reasoning_effort.trim();
+    state.store.set_setting("reasoning_effort", reasoning_effort).await.map_err(|e| format!("{e}"))?;
+
+    // Reset cached agents so the next turn picks up the new provider.
+    clear_idle_agents(&state).await;
     Ok(())
 }
 
 #[tauri::command]
-fn set_api_key(_state: State<'_, AppState>, key: String) -> Result<(), String> {
+async fn set_api_key(state: State<'_, AppState>, key: String) -> Result<(), String> {
     tracing::info!(target: "wisp", has_api_key = !key.is_empty(), "saving api key");
-    if key.is_empty() {
-        wisp_store::secrets::Secret::delete("api_key").map_err(|e| format!("{e}"))
-    } else {
-        wisp_store::secrets::Secret::set("api_key", &key).map_err(|e| format!("{e}"))
-    }
+    // The key belongs to the active model profile.
+    models::set_active_key(&state.store, &key).await
 }
 
 #[tauri::command]
@@ -1268,8 +1362,16 @@ async fn validate_settings(state: State<'_, AppState>, settings: Settings, key: 
     let (_, _, _, stored_key) = load_settings(&state.store).await;
     let api_key = effective_api_key(key, stored_key);
     let provider_name = normalized_provider(&settings.provider);
-    let mut cfg = build_provider_config(&settings.provider, &settings.api_url, &api_key, &settings.model)?;
-    cfg.max_tokens = 1;
+    let mut cfg = build_provider_config(
+        &settings.provider,
+        &settings.api_url,
+        &api_key,
+        &settings.model,
+        settings.max_tokens,
+        &settings.reasoning_effort,
+    )?;
+    // Keep the ping cheap but respect API minimum (Responses API needs >= 16).
+    cfg.max_tokens = cfg.max_tokens.min(64).max(16);
 
     tracing::info!(
         target: "wisp",
@@ -1732,6 +1834,8 @@ pub fn run() {
             ssh_hosts::list_ssh_config_aliases,
             new_session,
             list_sessions,
+            delete_session,
+            rename_session,
             list_recent_sessions,
             list_projects,
             pick_directory,
@@ -1751,6 +1855,10 @@ pub fn run() {
             get_settings,
             set_settings,
             set_api_key,
+            models::list_models,
+            models::save_model,
+            models::remove_model,
+            models::set_active_model,
             validate_settings,
             list_dir,
             read_file,
