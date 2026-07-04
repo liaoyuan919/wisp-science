@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 #[allow(dead_code)]
 #[serde(tag = "kind")]
 pub(crate) enum AgentEvent {
+    User { frame_id: String, text: String },
     Text { frame_id: String, delta: String },
     Reasoning { frame_id: String, delta: String },
     ToolCall { frame_id: String, name: String, preview: String },
@@ -30,6 +31,7 @@ pub(crate) enum AgentEvent {
 #[derive(Clone)]
 pub(crate) enum ChatItem {
     User(String),
+    QueuedUser(String),
     Assistant { text: String, model: Option<String> },
     Reasoning(String),
     Tool { name: String, ok: Option<bool>, input: String, output: String },
