@@ -46,6 +46,9 @@ struct ConfirmRequest {
 struct SkillInfo {
     name: String,
     description: String,
+    enabled: bool,
+    builtin: bool,
+    dir: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -88,6 +91,30 @@ struct MemoryFile {
     name: String,
     preview: String,
     bytes: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum McpTransport {
+    Stdio {
+        command: String,
+        #[serde(default)] args: Vec<String>,
+        #[serde(default)] env: Vec<(String, String)>,
+        #[serde(default)] cwd: Option<String>,
+    },
+    Http {
+        url: String,
+        #[serde(default)] headers: Vec<(String, String)>,
+    },
+}
+
+/// A user-configured MCP server connection.
+#[derive(Serialize, Deserialize, Clone)]
+struct McpConnection {
+    id: String,
+    name: String,
+    enabled: bool,
+    transport: McpTransport,
 }
 
 #[derive(Serialize, Clone)]
@@ -491,6 +518,62 @@ async fn load_settings(store: &Store) -> (String, String, String, String) {
     (provider, api_url, model, api_key)
 }
 
+fn parse_disabled_skills(raw: Option<&str>) -> HashSet<String> {
+    raw.and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .map(|v| v.into_iter().collect())
+        .unwrap_or_default()
+}
+
+async fn load_disabled_skills(store: &Store) -> HashSet<String> {
+    let raw = store.get_setting("disabled_skills").await.ok().flatten();
+    parse_disabled_skills(raw.as_deref())
+}
+
+async fn save_disabled_skills(store: &Store, set: &HashSet<String>) -> Result<(), String> {
+    let mut v: Vec<&String> = set.iter().collect();
+    v.sort();
+    let json = serde_json::to_string(&v).map_err(|e| format!("{e}"))?;
+    store.set_setting("disabled_skills", &json).await.map_err(|e| format!("{e}"))
+}
+
+async fn load_mcp_connections(store: &Store) -> Vec<McpConnection> {
+    store.get_setting("mcp_connections").await.ok().flatten()
+        .and_then(|s| serde_json::from_str::<Vec<McpConnection>>(&s).ok())
+        .unwrap_or_default()
+}
+
+async fn save_mcp_connections(store: &Store, conns: &[McpConnection]) -> Result<(), String> {
+    let json = serde_json::to_string(conns).map_err(|e| format!("{e}"))?;
+    store.set_setting("mcp_connections", &json).await.map_err(|e| format!("{e}"))
+}
+
+async fn load_bio_tools_enabled(store: &Store) -> bool {
+    store.get_setting("bio_tools_enabled").await.ok().flatten()
+        .and_then(|s| serde_json::from_str::<bool>(&s).ok())
+        .unwrap_or(true)
+}
+
+async fn save_bio_tools_enabled(store: &Store, on: bool) -> Result<(), String> {
+    store.set_setting("bio_tools_enabled", &on.to_string()).await.map_err(|e| format!("{e}"))
+}
+
+/// Build an `McpClient` from a user-configured connection. Stdio connections
+/// carry their own command/env/cwd (unrelated to the bundled Python venv).
+async fn connect_mcp(conn: &McpConnection) -> anyhow::Result<wisp_mcp::McpClient> {
+    match &conn.transport {
+        McpTransport::Stdio { command, args, env, cwd } => {
+            let mut cmd = tokio::process::Command::new(command);
+            cmd.args(args);
+            for (k, v) in env { cmd.env(k, v); }
+            if let Some(dir) = cwd { if !dir.is_empty() { cmd.current_dir(dir); } }
+            wisp_mcp::McpClient::launch_with_command(cmd).await
+        }
+        McpTransport::Http { url, headers } => {
+            wisp_mcp::McpClient::connect_http(url, headers).await
+        }
+    }
+}
+
 fn default_api_url(provider: &str) -> &'static str {
     match provider {
         "anthropic" => "https://api.anthropic.com",
@@ -558,8 +641,9 @@ fn skill_paths(root: &std::path::Path) -> Vec<PathBuf> {
     paths
 }
 
-/// Wire Python REPL and bundled bio-tools MCP into a freshly built agent.
-async fn wire_python_and_mcp(agent: &mut wisp_core::Agent, app_data: &std::path::Path) -> Vec<String> {
+/// Wire Python REPL, bundled bio-tools MCP, and user-configured MCP
+/// connections into a freshly built agent.
+async fn wire_python_and_mcp(agent: &mut wisp_core::Agent, app_data: &std::path::Path, store: &Store) -> Vec<String> {
     let mut errors = vec![];
     let py_env = match wisp_python::PythonEnv::ensure(app_data) {
         Ok(env) => Some(env),
@@ -585,29 +669,39 @@ async fn wire_python_and_mcp(agent: &mut wisp_core::Agent, app_data: &std::path:
         errors.push(format!("Kernel worker not found at {}", worker_path.display()));
     }
 
-    if let Ok(cmdline) = std::env::var("WISP_MCP_COMMAND") {
-        let parts: Vec<String> = cmdline
-            .split_whitespace()
-            .map(|s| {
-                if s.ends_with(".py") {
-                    wisp_python::resolve_bundled_script(s).to_string_lossy().to_string()
-                } else {
-                    s.to_string()
+    if load_bio_tools_enabled(store).await {
+        if let Ok(cmdline) = std::env::var("WISP_MCP_COMMAND") {
+            let parts: Vec<String> = cmdline
+                .split_whitespace()
+                .map(|s| {
+                    if s.ends_with(".py") {
+                        wisp_python::resolve_bundled_script(s).to_string_lossy().to_string()
+                    } else {
+                        s.to_string()
+                    }
+                })
+                .collect();
+            if parts.len() >= 2 {
+                let args: Vec<String> = parts[1..].to_vec();
+                match wisp_mcp::McpClient::launch(&parts[0], &args).await {
+                    Ok(client) => register_mcp(agent, std::sync::Arc::new(client)).await,
+                    Err(e) => errors.push(format!("MCP command: {e}")),
                 }
-            })
-            .collect();
-        if parts.len() >= 2 {
-            let args: Vec<String> = parts[1..].to_vec();
-            match wisp_mcp::McpClient::launch(&parts[0], &args).await {
+            }
+        } else if let Some(env) = &py_env {
+            let pkg = std::env::var("WISP_MCP_PKG").unwrap_or_else(|_| "mcp_bio".into());
+            match wisp_mcp::McpClient::launch_bio_tools(&env.python(), &pkg).await {
                 Ok(client) => register_mcp(agent, std::sync::Arc::new(client)).await,
-                Err(e) => errors.push(format!("MCP command: {e}")),
+                Err(e) => errors.push(format!("MCP {pkg}: {e}")),
             }
         }
-    } else if let Some(env) = &py_env {
-        let pkg = std::env::var("WISP_MCP_PKG").unwrap_or_else(|_| "mcp_bio".into());
-        match wisp_mcp::McpClient::launch_bio_tools(&env.python(), &pkg).await {
+    }
+
+    // User-configured connections.
+    for conn in load_mcp_connections(store).await.into_iter().filter(|c| c.enabled) {
+        match connect_mcp(&conn).await {
             Ok(client) => register_mcp(agent, std::sync::Arc::new(client)).await,
-            Err(e) => errors.push(format!("MCP {pkg}: {e}")),
+            Err(e) => errors.push(format!("MCP '{}': {e}", conn.name)),
         }
     }
     errors
@@ -677,7 +771,9 @@ async fn send_message(state: State<'_, AppState>, app: AppHandle, session_id: Op
 
     let mut guard = rt.agent.lock().await;
     if guard.is_none() {
-        let mut agent = Agent::new(cfg.clone(), ap.skills.clone(), ap.memory.clone(), ap.root.clone(), max_context, max_iter);
+        let disabled = load_disabled_skills(&state.store).await;
+        let skills = Arc::new(ap.skills.filtered(&disabled));
+        let mut agent = Agent::new(cfg.clone(), skills.clone(), ap.memory.clone(), ap.root.clone(), max_context, max_iter);
         match state.store.load_messages(&frame_id).await {
             Ok(msgs) => agent.ctx.messages = msgs,
             Err(e) => tracing::warn!("load session from sqlite failed: {e}"),
@@ -685,9 +781,9 @@ async fn send_message(state: State<'_, AppState>, app: AppHandle, session_id: Op
         rt.set_last_seq(agent.ctx.messages.len() as i64);
         if agent.ctx.is_empty() {
             let hosts = ssh_hosts::stored_hosts(&state.store).await;
-            agent.seed_system_prompt(&ap.skills, ssh_hosts::render_hosts_section(&hosts));
+            agent.seed_system_prompt(&skills, ssh_hosts::render_hosts_section(&hosts));
         }
-        let wire_errors = wire_python_and_mcp(&mut agent, &state.app_data).await;
+        let wire_errors = wire_python_and_mcp(&mut agent, &state.app_data, &state.store).await;
         if !wire_errors.is_empty() {
             state.bootstrap.lock().unwrap().errors.extend(wire_errors);
         }
@@ -1026,9 +1122,193 @@ async fn load_session(state: State<'_, AppState>, id: String) -> Result<Vec<UiIt
 }
 
 #[tauri::command]
-fn list_skills(state: State<'_, AppState>) -> Vec<SkillInfo> {
+async fn list_skills(state: State<'_, AppState>) -> Result<Vec<SkillInfo>, String> {
     let ap = state.active();
-    ap.skills.all().iter().map(|s| SkillInfo { name: s.name.clone(), description: s.description.clone() }).collect()
+    let disabled = load_disabled_skills(&state.store).await;
+    let bundled = wisp_skills::bundled_dir();
+    Ok(ap.skills.all().iter().map(|s| {
+        let builtin = bundled.as_ref().map(|b| s.dir.starts_with(b)).unwrap_or(false);
+        SkillInfo {
+            name: s.name.clone(),
+            description: s.description.clone(),
+            enabled: !disabled.contains(&s.name),
+            builtin,
+            dir: s.dir.to_string_lossy().to_string(),
+        }
+    }).collect())
+}
+
+#[tauri::command]
+async fn set_skill_enabled(state: State<'_, AppState>, name: String, enabled: bool) -> Result<(), String> {
+    let mut set = load_disabled_skills(&state.store).await;
+    if enabled { set.remove(&name); } else { set.insert(name); }
+    save_disabled_skills(&state.store, &set).await?;
+    clear_idle_agents(&state).await;
+    Ok(())
+}
+
+#[derive(Serialize, Clone)]
+struct McpConnectionsView {
+    bio_tools_enabled: bool,
+    connections: Vec<McpConnection>,
+}
+
+#[tauri::command]
+async fn list_mcp_connections(state: State<'_, AppState>) -> Result<McpConnectionsView, String> {
+    Ok(McpConnectionsView {
+        bio_tools_enabled: load_bio_tools_enabled(&state.store).await,
+        connections: load_mcp_connections(&state.store).await,
+    })
+}
+
+#[tauri::command]
+async fn add_mcp_connection(state: State<'_, AppState>, conn: McpConnection) -> Result<(), String> {
+    let mut conns = load_mcp_connections(&state.store).await;
+    conns.push(conn);
+    save_mcp_connections(&state.store, &conns).await?;
+    clear_idle_agents(&state).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_mcp_connection(state: State<'_, AppState>, conn: McpConnection) -> Result<(), String> {
+    let mut conns = load_mcp_connections(&state.store).await;
+    match conns.iter_mut().find(|c| c.id == conn.id) {
+        Some(slot) => *slot = conn,
+        None => return Err("connection not found".into()),
+    }
+    save_mcp_connections(&state.store, &conns).await?;
+    clear_idle_agents(&state).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_mcp_connection(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let mut conns = load_mcp_connections(&state.store).await;
+    conns.retain(|c| c.id != id);
+    save_mcp_connections(&state.store, &conns).await?;
+    clear_idle_agents(&state).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_mcp_connection_enabled(state: State<'_, AppState>, id: String, enabled: bool) -> Result<(), String> {
+    let mut conns = load_mcp_connections(&state.store).await;
+    if let Some(c) = conns.iter_mut().find(|c| c.id == id) { c.enabled = enabled; }
+    save_mcp_connections(&state.store, &conns).await?;
+    clear_idle_agents(&state).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_bio_tools_enabled(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    save_bio_tools_enabled(&state.store, enabled).await?;
+    clear_idle_agents(&state).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn test_mcp_connection(_state: State<'_, AppState>, conn: McpConnection) -> Result<usize, String> {
+    let client = connect_mcp(&conn).await.map_err(|e| format!("{e}"))?;
+    let tools = client.tools_list().await.map_err(|e| format!("{e}"))?;
+    Ok(tools.len())
+}
+
+#[tauri::command]
+async fn pick_skill_source(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    // Let the user pick a SKILL.md; folder picking is offered via a second button
+    // in the UI that calls pick_directory (existing command).
+    app.dialog().file().add_filter("SKILL.md", &["md"]).pick_file(move |p| { let _ = tx.send(p); });
+    let picked = rx.await.map_err(|e| format!("{e}"))?;
+    Ok(picked.map(|fp| fp.to_string()))
+}
+
+fn user_skills_dir() -> Result<PathBuf, String> {
+    dirs::home_dir().map(|h| h.join(".wisp").join("skills"))
+        .ok_or_else(|| "no home directory".to_string())
+}
+
+/// Reject skill names that could escape the skills directory. A valid name is a
+/// single path component: no separators, no `..`, non-empty.
+fn validate_skill_name(name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("skill name is empty".into());
+    }
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(format!("invalid skill name '{name}'"));
+    }
+    // Must be exactly one path component (defends against platform-specific tricks).
+    if std::path::Path::new(name).file_name().and_then(|n| n.to_str()) != Some(name) {
+        return Err(format!("invalid skill name '{name}'"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn install_skill(state: State<'_, AppState>, src_path: String) -> Result<String, String> {
+    let src = PathBuf::from(&src_path);
+    // Resolve the skill's source dir + the SKILL.md path.
+    let (skill_dir, skill_md) = if src.is_dir() {
+        let md = src.join("SKILL.md");
+        if !md.is_file() { return Err("selected folder has no SKILL.md".into()); }
+        (src.clone(), md)
+    } else if src.file_name().map(|n| n == "SKILL.md").unwrap_or(false) {
+        (src.parent().map(PathBuf::from).unwrap_or_default(), src.clone())
+    } else {
+        return Err("select a skill folder or a SKILL.md file".into());
+    };
+    // Parse name from frontmatter (fall back to dir name), validate description.
+    let skill = wisp_skills::parse_skill_file(&skill_md)
+        .ok_or_else(|| "could not parse SKILL.md frontmatter".to_string())?;
+    if skill.description.trim().is_empty() {
+        return Err("SKILL.md is missing a description".into());
+    }
+    validate_skill_name(&skill.name)?;
+    let dest = user_skills_dir()?.join(&skill.name);
+    if dest.exists() { return Err(format!("a skill named '{}' already exists", skill.name)); }
+    std::fs::create_dir_all(dest.parent().unwrap()).map_err(|e| format!("{e}"))?;
+    copy_dir_recursive(&skill_dir, &dest).map_err(|e| format!("{e}"))?;
+    reload_skills(&state);
+    clear_idle_agents(&state).await;
+    Ok(skill.name)
+}
+
+#[tauri::command]
+async fn remove_skill(state: State<'_, AppState>, name: String) -> Result<(), String> {
+    validate_skill_name(&name)?;
+    let dir = user_skills_dir()?.join(&name);
+    if !dir.is_dir() { return Err("only user-added skills can be removed".into()); }
+    std::fs::remove_dir_all(&dir).map_err(|e| format!("{e}"))?;
+    // Also drop it from the disabled set so a re-add starts clean.
+    let mut set = load_disabled_skills(&state.store).await;
+    set.remove(&name);
+    let _ = save_disabled_skills(&state.store, &set).await;
+    reload_skills(&state);
+    clear_idle_agents(&state).await;
+    Ok(())
+}
+
+fn reload_skills(state: &AppState) {
+    let root = state.active().root;
+    let skills = Arc::new(SkillIndex::load(&skill_paths(&root)));
+    state.active.write().unwrap().skills = skills;
+}
+
+fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest)?;
+        } else {
+            std::fs::copy(entry.path(), &dest)?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1347,7 +1627,18 @@ async fn get_project_info(state: State<'_, AppState>) -> Result<ProjectInfo, Str
 async fn get_capabilities(state: State<'_, AppState>) -> Result<Capabilities, String> {
     let ap = state.active();
     let project = build_project_info(&state).await;
-    let skills = ap.skills.all().iter().map(|s| SkillInfo { name: s.name.clone(), description: s.description.clone() }).collect();
+    let disabled = load_disabled_skills(&state.store).await;
+    let bundled = wisp_skills::bundled_dir();
+    let skills = ap.skills.all().iter().map(|s| {
+        let builtin = bundled.as_ref().map(|b| s.dir.starts_with(b)).unwrap_or(false);
+        SkillInfo {
+            name: s.name.clone(),
+            description: s.description.clone(),
+            enabled: !disabled.contains(&s.name),
+            builtin,
+            dir: s.dir.to_string_lossy().to_string(),
+        }
+    }).collect();
     Ok(Capabilities {
         skills,
         mcp_servers: list_mcp_servers(&ap.root),
@@ -1606,6 +1897,10 @@ pub fn run() {
             load_session,
             rewind_session,
             list_skills,
+            set_skill_enabled,
+            pick_skill_source,
+            install_skill,
+            remove_skill,
             list_demos,
             load_demo,
             confirm_response,
@@ -1631,6 +1926,13 @@ pub fn run() {
             dismiss_onboarding,
             get_bootstrap_status,
             check_for_updates,
+            list_mcp_connections,
+            add_mcp_connection,
+            update_mcp_connection,
+            delete_mcp_connection,
+            set_mcp_connection_enabled,
+            set_bio_tools_enabled,
+            test_mcp_connection,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Wisp");
@@ -1638,7 +1940,10 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_workspace, session_runtime_status};
+    use super::{
+        copy_dir_recursive, parse_disabled_skills, resolve_workspace, session_runtime_status,
+        McpConnection, McpTransport,
+    };
     use std::collections::HashSet;
     use std::path::PathBuf;
 
@@ -1649,6 +1954,43 @@ mod tests {
         assert_eq!(session_runtime_status("s1", Some("user"), &running), "running");
         assert_eq!(session_runtime_status("s2", Some("assistant"), &running), "needs_you");
         assert_eq!(session_runtime_status("s3", Some("user"), &running), "complete");
+    }
+
+    #[test]
+    fn copy_dir_recursive_copies_nested_files() {
+        let base = std::env::temp_dir().join(format!("wisp_copy_dir_test_{}_{}", std::process::id(), line!()));
+        let from = base.join("from");
+        let to = base.join("to");
+        std::fs::create_dir_all(from.join("scripts")).unwrap();
+        std::fs::write(from.join("SKILL.md"), "---\nname: x\n---\nbody").unwrap();
+        std::fs::write(from.join("scripts").join("run.py"), "print(1)").unwrap();
+
+        copy_dir_recursive(&from, &to).unwrap();
+
+        assert!(to.join("SKILL.md").is_file());
+        assert!(to.join("scripts").join("run.py").is_file());
+        assert_eq!(std::fs::read_to_string(to.join("SKILL.md")).unwrap(), "---\nname: x\n---\nbody");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn validate_skill_name_rejects_traversal() {
+        use super::validate_skill_name;
+        for bad in ["", "  ", "..", "../../etc", "/etc/passwd", "a/b", "..\\x", "foo/../bar"] {
+            assert!(validate_skill_name(bad).is_err(), "should reject {bad:?}");
+        }
+        for ok in ["alphafold2", "my-skill", "Skill_1"] {
+            assert!(validate_skill_name(ok).is_ok(), "should accept {ok:?}");
+        }
+    }
+
+    #[test]
+    fn parse_disabled_skills_handles_missing_and_valid() {
+        assert!(parse_disabled_skills(None).is_empty());
+        assert!(parse_disabled_skills(Some("not json")).is_empty());
+        let s = parse_disabled_skills(Some(r#"["alphafold2","boltz"]"#));
+        assert!(s.contains("alphafold2") && s.contains("boltz") && s.len() == 2);
     }
 
     #[test]
@@ -1680,5 +2022,25 @@ mod tests {
             set_dir
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn mcp_connection_serde_roundtrip() {
+        let stdio = McpConnection {
+            id: "1".into(), name: "local".into(), enabled: true,
+            transport: McpTransport::Stdio { command: "python".into(), args: vec!["s.py".into()], env: vec![("K".into(),"V".into())], cwd: None },
+        };
+        let http = McpConnection {
+            id: "2".into(), name: "remote".into(), enabled: false,
+            transport: McpTransport::Http { url: "https://x/mcp".into(), headers: vec![("Authorization".into(),"Bearer t".into())] },
+        };
+        for c in [stdio, http] {
+            let json = serde_json::to_string(&c).unwrap();
+            let back: McpConnection = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        }
+        // tag shape
+        let j = serde_json::to_value(&McpConnection { id:"3".into(), name:"n".into(), enabled:true, transport: McpTransport::Http{ url:"u".into(), headers: vec![] } }).unwrap();
+        assert_eq!(j["transport"]["kind"], "http");
     }
 }
