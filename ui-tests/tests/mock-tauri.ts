@@ -171,7 +171,9 @@ export function tauriMock(): void {
             return null;
           case "send_message": {
             const fid = (args && (args.sessionId ?? args.session_id)) || "t1";
+            const msg = (args && args.message) || "";
             setTimeout(() => {
+              emit("agent", { kind: "User", frame_id: fid, text: msg });
               emit("agent", { kind: "Text", frame_id: fid, delta: "Hello " });
               emit("agent", { kind: "Text", frame_id: fid, delta: "from mock wisp-science." });
               emit("agent", { kind: "ToolResult", frame_id: fid, name: "read", ok: true, content: "ok" });
@@ -205,12 +207,14 @@ export function parallelMock(): void {
     try { listeners[event]?.({ payload }); } catch { /* not registered yet */ }
   };
   const sessions: { id: string; title: string; ts: number }[] = [];
+  const queues: Record<string, Promise<void>> = {};
 
   const project = { name: "wisp-science", root: "/mock/root", skill_count: 12, mcp_server_count: 8, memory_file_count: 2, has_api_key: true };
 
   (window as any).__TAURI__ = {
     core: {
       invoke: async (cmd: string, args: any) => {
+        ((window as any).__sendInvokeLog ??= []).push({ cmd, args });
         switch (cmd) {
           case "list_demos": return [];
           case "load_demo": return { id: "x", title: "x", request: "x", response: "x" };
@@ -243,16 +247,19 @@ export function parallelMock(): void {
           case "send_message": {
             const fid = (args && (args.sessionId ?? args.session_id)) || "t1";
             const msg = (args && args.message) || "";
-            sessions.push({ id: fid, title: msg, ts: Date.now() });
-            // Stream the reply at once, but — like the real backend — keep the
-            // turn "running": send_message stays PENDING until Done, so the
-            // command's own resolution is the completion signal (the frontend
-            // relies on this and no longer trusts the Done broadcast alone).
-            // While A is pending here, a second conversation can start and A
-            // still shows as running.
-            emit("agent", { kind: "Text", frame_id: fid, delta: `echo:${msg}` });
-            await new Promise((resolve) => setTimeout(resolve, 5000));
-            emit("agent", { kind: "Done", frame_id: fid });
+            const run = async () => {
+              if (!sessions.some((s) => s.id === fid)) {
+                sessions.push({ id: fid, title: msg, ts: Date.now() });
+              }
+              emit("agent", { kind: "User", frame_id: fid, text: msg });
+              emit("agent", { kind: "Text", frame_id: fid, delta: `echo:${msg}` });
+              await new Promise((resolve) => setTimeout(resolve, 5000));
+              emit("agent", { kind: "Done", frame_id: fid });
+            };
+            const previous = queues[fid] ?? Promise.resolve();
+            const current = previous.then(run, run);
+            queues[fid] = current.catch(() => undefined);
+            await current;
             return fid;
           }
           default: return null;

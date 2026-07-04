@@ -321,6 +321,41 @@ fn refresh_capabilities(caps: RwSignal<Option<Capabilities>>) {
     });
 }
 
+fn begin_pending_turn(pending: RwSignal<HashMap<String, usize>>, running: RwSignal<HashSet<String>>, id: &str) {
+    pending.update(|m| {
+        *m.entry(id.to_string()).or_insert(0) += 1;
+    });
+    running.update(|r| {
+        r.insert(id.to_string());
+    });
+}
+
+fn finish_pending_turn(pending: RwSignal<HashMap<String, usize>>, running: RwSignal<HashSet<String>>, id: &str) {
+    let remaining = pending.with(|m| m.get(id).copied().unwrap_or(0));
+    if remaining > 1 {
+        pending.update(|m| {
+            if let Some(n) = m.get_mut(id) {
+                *n -= 1;
+            }
+        });
+        return;
+    }
+    pending.update(|m| {
+        m.remove(id);
+    });
+    running.update(|r| {
+        r.remove(id);
+    });
+}
+
+fn clear_running_if_idle(pending: RwSignal<HashMap<String, usize>>, running: RwSignal<HashSet<String>>, id: &str) {
+    if pending.with(|m| m.get(id).copied().unwrap_or(0)) == 0 {
+        running.update(|r| {
+            r.remove(id);
+        });
+    }
+}
+
 fn format_relative_time(ts: i64, locale: Locale) -> String {
     if ts <= 0 { return String::new(); }
     let now_ms = js_sys::Date::now();
@@ -1419,6 +1454,7 @@ fn App() -> impl IntoView {
     // in-flight turn; `transcripts` caches the live transcript of background
     // (non-active) sessions so switching to them shows streaming progress.
     let running = create_rw_signal::<HashSet<String>>(HashSet::new());
+    let pending_turns = create_rw_signal::<HashMap<String, usize>>(HashMap::new());
     let transcripts = create_rw_signal::<HashMap<String, Vec<ChatItem>>>(HashMap::new());
     let busy = create_rw_signal(false);
     // Interrupting a running turn (esp. the python kernel) is not instant, so
@@ -1582,6 +1618,7 @@ fn App() -> impl IntoView {
     let active_cb = active_session;
     let transcripts_cb = transcripts;
     let running_cb = running;
+    let pending_cb = pending_turns;
     let status_cb = status;
     let locale_cb = locale;
     let models_cb = models;
@@ -1594,6 +1631,11 @@ fn App() -> impl IntoView {
             }
         };
         match ev {
+            AgentEvent::User { frame_id, text } => route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
+                let model = active_model_label(&models_cb.get());
+                v.push(ChatItem::User(text));
+                v.push(ChatItem::Assistant { text: String::new(), model });
+            }),
             AgentEvent::Text { frame_id, delta } => route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
                 let fallback_model = active_model_label(&models_cb.get());
                 match v.last_mut() {
@@ -1649,7 +1691,7 @@ fn App() -> impl IntoView {
                 _ => v.push(ChatItem::Tool { name: "stdout".into(), ok: None, input: String::new(), output: chunk }),
             }),
             AgentEvent::Done { frame_id } => {
-                running_cb.update(|r| { r.remove(&frame_id); });
+                clear_running_if_idle(pending_cb, running_cb, &frame_id);
                 if stopping_session.get().as_deref() == Some(&frame_id) {
                     stopping_session.set(None);
                 }
@@ -1660,7 +1702,7 @@ fn App() -> impl IntoView {
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
                     v.push(ChatItem::Assistant { text: format!("Error: {message}"), model });
                 });
-                running_cb.update(|r| { r.remove(&frame_id); });
+                clear_running_if_idle(pending_cb, running_cb, &frame_id);
                 if stopping_session.get().as_deref() == Some(&frame_id) {
                     stopping_session.set(None);
                 }
@@ -1711,18 +1753,8 @@ fn App() -> impl IntoView {
         let paths = attachment_paths(&attachments.get());
         let message = message_with_attachments(&text, &paths);
         if message.trim().is_empty() || uploading.get() { return; }
-        // Block only if the *active* session is already streaming.
         let active = active_session.get();
-        if let Some(id) = &active {
-            if running.get().contains(id) { return; }
-        }
         needs_api_key.set(false);
-        let turn_model = active_model_label(&models.get());
-        items.update(|v| {
-            v.push(ChatItem::User(message.clone()));
-            v.push(ChatItem::Assistant { text: String::new(), model: turn_model });
-        });
-        force_chat_bottom();
         input.set(String::new());
         attachments.set(vec![]);
         let locale = locale;
@@ -1733,6 +1765,7 @@ fn App() -> impl IntoView {
         let transcripts = transcripts;
         let sessions = sessions;
         let stopping_session = stopping_session;
+        let pending_turns = pending_turns;
         spawn_local(async move {
             // Resolve the target session: use the active one, or create a fresh
             // frame up front so streamed events can be routed before the first delta.
@@ -1753,7 +1786,7 @@ fn App() -> impl IntoView {
                 }
             };
             active_session.set(Some(id.clone()));
-            running.update(|r| { r.insert(id.clone()); });
+            begin_pending_turn(pending_turns, running, &id);
             let arg = to_value(&SendMessageArgs { session_id: Some(id.clone()), message }).unwrap();
             match invoke_checked("send_message", arg).await {
                 Ok(_) => {
@@ -1762,7 +1795,7 @@ fn App() -> impl IntoView {
                     // here rather than trusting the separate `Done` broadcast — a
                     // dropped broadcast used to pin the session on "运行中" until an
                     // app restart (#34).
-                    running.update(|r| { r.remove(&id); });
+                    finish_pending_turn(pending_turns, running, &id);
                     if stopping_session.get().as_deref() == Some(&id) {
                         stopping_session.set(None);
                     }
@@ -1794,7 +1827,7 @@ fn App() -> impl IntoView {
                     let raw = js_error_text(err);
                     if raw.contains(NO_API_KEY_MARK) { needs_api_key.set(true); }
                     status.set(tf(loc, "status.send_failed", &[("msg", &localize_backend(loc, &raw))]));
-                    running.update(|r| { r.remove(&id); });
+                    finish_pending_turn(pending_turns, running, &id);
                     if stopping_session.get().as_deref() == Some(&id) {
                         stopping_session.set(None);
                     }
@@ -1830,7 +1863,7 @@ fn App() -> impl IntoView {
     };
 
     let pick_files = move |_| {
-        if busy.get() || uploading.get() {
+        if uploading.get() {
             return;
         }
         let Some(window) = web_sys::window() else { return; };
@@ -1840,7 +1873,7 @@ fn App() -> impl IntoView {
     };
 
     let on_files_selected = move |_ev: web_sys::Event| {
-        if busy.get() || uploading.get() {
+        if uploading.get() {
             return;
         }
         upload_from_input(attachments, uploading, "composer-file-input");
@@ -1848,7 +1881,7 @@ fn App() -> impl IntoView {
 
     let on_drag_over = move |ev: web_sys::DragEvent| {
         ev.prevent_default();
-        if !busy.get() && !uploading.get() {
+        if !uploading.get() {
             drag_over.set(true);
         }
     };
@@ -1861,7 +1894,7 @@ fn App() -> impl IntoView {
     let on_drop = move |ev: web_sys::DragEvent| {
         ev.prevent_default();
         drag_over.set(false);
-        if busy.get() || uploading.get() {
+        if uploading.get() {
             return;
         }
         if let Some(dt) = ev.data_transfer() {
@@ -1871,7 +1904,7 @@ fn App() -> impl IntoView {
         }
     };
 
-    let composer_blocked = move || busy.get() || uploading.get();
+    let composer_blocked = move || uploading.get();
 
     let check_updates = move |_| {
         if settings_busy.get() { return; }
@@ -2352,6 +2385,7 @@ fn App() -> impl IntoView {
         let items = items;
         let transcripts = transcripts;
         let running = running;
+        let pending_turns = pending_turns;
         let rename_session_target = rename_session_target;
         let rename_session_input = rename_session_input;
         Callback::new(move |(action, payload): (String, String)| {
@@ -2375,11 +2409,13 @@ fn App() -> impl IntoView {
                         let items = items;
                         let transcripts = transcripts;
                         let running = running;
+                        let pending_turns = pending_turns;
                         spawn_local(async move {
                             let arg = to_value(&serde_json::json!({ "id": id.clone() })).unwrap();
                             if invoke_checked("delete_session", arg).await.is_ok() {
                                 transcripts.update(|m| { m.remove(&id); });
                                 running.update(|r| { r.remove(&id); });
+                                pending_turns.update(|m| { m.remove(&id); });
                                 if active_session.get().as_deref() == Some(id.as_str()) {
                                     active_session.set(None);
                                     items.set(vec![]);
@@ -3028,7 +3064,9 @@ fn App() -> impl IntoView {
                                     {move || t(locale.get(), if active_session.get() == stopping_session.get() { "composer.stopping" } else { "composer.stop" })}
                                 </button>
                             })}
-                            <button class="send" disabled=composer_blocked on:click=move |_| send()>{move || t(locale.get(), "composer.send")}</button>
+                            <button class="send" disabled=composer_blocked on:click=move |_| send()>
+                                {move || t(locale.get(), if busy.get() { "composer.queue" } else { "composer.send" })}
+                            </button>
                         </div>
                     </div>
                     <div class="composer-hint">{move || t(locale.get(), "composer.hint")}</div>
