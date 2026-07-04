@@ -78,7 +78,7 @@ jobs:
           releaseName: wisp-science ${{ env.RELEASE_TAG }}
           releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
-          prerelease: true
+          prerelease: false
           uploadUpdaterJson: false
           uploadUpdaterSignatures: false
           args: --bundles msi,nsis
