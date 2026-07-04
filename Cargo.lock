@@ -5388,6 +5388,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tokio",
