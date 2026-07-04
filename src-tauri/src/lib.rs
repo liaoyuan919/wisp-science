@@ -45,6 +45,9 @@ struct ConfirmRequest {
 struct SkillInfo {
     name: String,
     description: String,
+    enabled: bool,
+    builtin: bool,
+    dir: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -406,7 +409,6 @@ async fn load_disabled_skills(store: &Store) -> HashSet<String> {
     parse_disabled_skills(raw.as_deref())
 }
 
-#[allow(dead_code)]
 async fn save_disabled_skills(store: &Store, set: &HashSet<String>) -> Result<(), String> {
     let mut v: Vec<&String> = set.iter().collect();
     v.sort();
@@ -896,9 +898,116 @@ async fn load_session(state: State<'_, AppState>, id: String) -> Result<Vec<UiIt
 }
 
 #[tauri::command]
-fn list_skills(state: State<'_, AppState>) -> Vec<SkillInfo> {
+async fn list_skills(state: State<'_, AppState>) -> Result<Vec<SkillInfo>, String> {
     let ap = state.active();
-    ap.skills.all().iter().map(|s| SkillInfo { name: s.name.clone(), description: s.description.clone() }).collect()
+    let disabled = load_disabled_skills(&state.store).await;
+    let bundled = wisp_skills::bundled_dir();
+    Ok(ap.skills.all().iter().map(|s| {
+        let builtin = bundled.as_ref().map(|b| s.dir.starts_with(b)).unwrap_or(false);
+        SkillInfo {
+            name: s.name.clone(),
+            description: s.description.clone(),
+            enabled: !disabled.contains(&s.name),
+            builtin,
+            dir: s.dir.to_string_lossy().to_string(),
+        }
+    }).collect())
+}
+
+#[tauri::command]
+async fn set_skill_enabled(state: State<'_, AppState>, name: String, enabled: bool) -> Result<(), String> {
+    let mut set = load_disabled_skills(&state.store).await;
+    if enabled { set.remove(&name); } else { set.insert(name); }
+    save_disabled_skills(&state.store, &set).await?;
+    reset_idle_agents(&state).await;
+    Ok(())
+}
+
+/// Drop idle cached agents so the next turn rebuilds with fresh config.
+/// A running turn holds its agent mutex and keeps the old config until it ends.
+async fn reset_idle_agents(state: &AppState) {
+    let runtimes = state.sessions.lock().await.values().cloned().collect::<Vec<_>>();
+    for rt in runtimes {
+        if let Ok(mut guard) = rt.agent.try_lock() { *guard = None; }
+    }
+}
+
+#[tauri::command]
+async fn pick_skill_source(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    // Let the user pick a SKILL.md; folder picking is offered via a second button
+    // in the UI that calls pick_directory (existing command).
+    app.dialog().file().add_filter("SKILL.md", &["md"]).pick_file(move |p| { let _ = tx.send(p); });
+    let picked = rx.await.map_err(|e| format!("{e}"))?;
+    Ok(picked.map(|fp| fp.to_string()))
+}
+
+fn user_skills_dir() -> Result<PathBuf, String> {
+    dirs::home_dir().map(|h| h.join(".wisp").join("skills"))
+        .ok_or_else(|| "no home directory".to_string())
+}
+
+#[tauri::command]
+async fn install_skill(state: State<'_, AppState>, src_path: String) -> Result<String, String> {
+    let src = PathBuf::from(&src_path);
+    // Resolve the skill's source dir + the SKILL.md path.
+    let (skill_dir, skill_md) = if src.is_dir() {
+        let md = src.join("SKILL.md");
+        if !md.is_file() { return Err("selected folder has no SKILL.md".into()); }
+        (src.clone(), md)
+    } else if src.file_name().map(|n| n == "SKILL.md").unwrap_or(false) {
+        (src.parent().map(PathBuf::from).unwrap_or_default(), src.clone())
+    } else {
+        return Err("select a skill folder or a SKILL.md file".into());
+    };
+    // Parse name from frontmatter (fall back to dir name), validate description.
+    let skill = wisp_skills::parse_skill_file(&skill_md)
+        .ok_or_else(|| "could not parse SKILL.md frontmatter".to_string())?;
+    if skill.description.trim().is_empty() {
+        return Err("SKILL.md is missing a description".into());
+    }
+    let dest = user_skills_dir()?.join(&skill.name);
+    if dest.exists() { return Err(format!("a skill named '{}' already exists", skill.name)); }
+    std::fs::create_dir_all(dest.parent().unwrap()).map_err(|e| format!("{e}"))?;
+    copy_dir_recursive(&skill_dir, &dest).map_err(|e| format!("{e}"))?;
+    reload_skills(&state);
+    reset_idle_agents(&state).await;
+    Ok(skill.name)
+}
+
+#[tauri::command]
+async fn remove_skill(state: State<'_, AppState>, name: String) -> Result<(), String> {
+    let dir = user_skills_dir()?.join(&name);
+    if !dir.is_dir() { return Err("only user-added skills can be removed".into()); }
+    std::fs::remove_dir_all(&dir).map_err(|e| format!("{e}"))?;
+    // Also drop it from the disabled set so a re-add starts clean.
+    let mut set = load_disabled_skills(&state.store).await;
+    set.remove(&name);
+    let _ = save_disabled_skills(&state.store, &set).await;
+    reload_skills(&state);
+    reset_idle_agents(&state).await;
+    Ok(())
+}
+
+fn reload_skills(state: &AppState) {
+    let root = state.active().root;
+    let skills = Arc::new(SkillIndex::load(&skill_paths(&root)));
+    state.active.write().unwrap().skills = skills;
+}
+
+fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest)?;
+        } else {
+            std::fs::copy(entry.path(), &dest)?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -981,12 +1090,7 @@ async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Result<
     // Reset cached agents so the next turn picks up the new provider. A turn
     // currently running holds its agent mutex and keeps the old config; only
     // idle runtimes are rebuilt.
-    let runtimes = state.sessions.lock().await.values().cloned().collect::<Vec<_>>();
-    for rt in runtimes {
-        if let Ok(mut guard) = rt.agent.try_lock() {
-            *guard = None;
-        }
-    }
+    reset_idle_agents(&state).await;
     Ok(())
 }
 
@@ -1211,7 +1315,18 @@ async fn get_project_info(state: State<'_, AppState>) -> Result<ProjectInfo, Str
 async fn get_capabilities(state: State<'_, AppState>) -> Result<Capabilities, String> {
     let ap = state.active();
     let project = build_project_info(&state).await;
-    let skills = ap.skills.all().iter().map(|s| SkillInfo { name: s.name.clone(), description: s.description.clone() }).collect();
+    let disabled = load_disabled_skills(&state.store).await;
+    let bundled = wisp_skills::bundled_dir();
+    let skills = ap.skills.all().iter().map(|s| {
+        let builtin = bundled.as_ref().map(|b| s.dir.starts_with(b)).unwrap_or(false);
+        SkillInfo {
+            name: s.name.clone(),
+            description: s.description.clone(),
+            enabled: !disabled.contains(&s.name),
+            builtin,
+            dir: s.dir.to_string_lossy().to_string(),
+        }
+    }).collect();
     Ok(Capabilities {
         skills,
         mcp_servers: list_mcp_servers(&ap.root),
@@ -1467,6 +1582,10 @@ pub fn run() {
             load_session,
             rewind_session,
             list_skills,
+            set_skill_enabled,
+            pick_skill_source,
+            install_skill,
+            remove_skill,
             list_demos,
             load_demo,
             confirm_response,
@@ -1495,9 +1614,28 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use super::copy_dir_recursive;
     use super::parse_disabled_skills;
     use super::resolve_workspace;
     use std::path::PathBuf;
+
+    #[test]
+    fn copy_dir_recursive_copies_nested_files() {
+        let base = std::env::temp_dir().join(format!("wisp_copy_dir_test_{}_{}", std::process::id(), line!()));
+        let from = base.join("from");
+        let to = base.join("to");
+        std::fs::create_dir_all(from.join("scripts")).unwrap();
+        std::fs::write(from.join("SKILL.md"), "---\nname: x\n---\nbody").unwrap();
+        std::fs::write(from.join("scripts").join("run.py"), "print(1)").unwrap();
+
+        copy_dir_recursive(&from, &to).unwrap();
+
+        assert!(to.join("SKILL.md").is_file());
+        assert!(to.join("scripts").join("run.py").is_file());
+        assert_eq!(std::fs::read_to_string(to.join("SKILL.md")).unwrap(), "---\nname: x\n---\nbody");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn parse_disabled_skills_handles_missing_and_valid() {

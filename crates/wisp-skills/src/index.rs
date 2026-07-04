@@ -77,6 +77,14 @@ impl SkillIndex {
     }
 }
 
+/// Parse a single `SKILL.md` file (its parent dir is the skill's `dir`).
+/// Public wrapper around `parse_skill` for callers outside this crate (e.g.
+/// the Tauri `install_skill` command validating a picked file/folder).
+pub fn parse_skill_file(md: &Path) -> Option<Skill> {
+    let dir = md.parent().map(PathBuf::from).unwrap_or_default();
+    parse_skill(md, dir)
+}
+
 fn parse_skill(path: &Path, dir: PathBuf) -> Option<Skill> {
     let text = std::fs::read_to_string(path).ok()?;
     let body_start = text.find("---")?;
