@@ -38,7 +38,6 @@ CREATE TABLE IF NOT EXISTS frames (
 );
 CREATE INDEX IF NOT EXISTS ix_frames_project_id ON frames(project_id);
 CREATE INDEX IF NOT EXISTS ix_frames_root ON frames(root_frame_id);
-CREATE INDEX IF NOT EXISTS ix_frames_folder ON frames(folder_id);
 
 CREATE TABLE IF NOT EXISTS messages (
     id          TEXT PRIMARY KEY,
