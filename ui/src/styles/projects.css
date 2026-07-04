@@ -1,0 +1,45 @@
+/* ---------- Projects landing screen ---------- */
+.app-hidden { display: none; }
+.projects-screen { position: absolute; inset: 0; z-index: 20; background: var(--bg-app);
+  overflow-y: auto; padding: 40px 48px; }
+.projects-head { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 32px; }
+.projects-title { font-family: var(--font-serif); font-size: 34px; line-height: 1.1; color: var(--text); }
+.projects-title .beta { font-size: 13px; color: var(--text-faint); display: block; margin-top: 2px; font-family: var(--font-ui); }
+.projects-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; max-width: 1200px; }
+.projects-col h2 { font-size: 18px; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; color: var(--text); }
+.proj-card { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 16px 18px; border-radius: var(--radius-sm); background: var(--bg-elev);
+  border: 1px solid var(--border); cursor: pointer; margin-bottom: 10px; box-shadow: var(--shadow-sm); }
+.proj-card:hover { border-color: var(--clay); }
+.pc-tag { margin-left: 8px; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600;
+  color: var(--text-muted); background: var(--bg-sunken); vertical-align: middle; }
+.proj-card .pc-name { font-weight: 600; color: var(--text); }
+.proj-card .pc-main { flex: 1 1 auto; min-width: 0; }
+.proj-card .pc-name-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.proj-card .pc-meta-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+.proj-card .pc-meta { color: var(--text-faint); font-size: 13px; }
+.proj-card .pc-when { color: var(--text-faint); font-size: 12px; font-variant-numeric: tabular-nums; margin-left: auto; }
+.proj-card .pc-hint { color: var(--text-muted); font-size: 13px; line-height: 1.45; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proj-card.proj-recent { align-items: center; }
+.proj-card.proj-recent .pc-name-row { margin-top: 0; }
+.pc-dot { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.pc-dot-mark { width: 7px; height: 7px; border-radius: 50%; background: var(--info); flex: 0 0 auto; }
+.pc-dot.running .pc-dot-mark { background: var(--clay); animation: tool-pulse 1s ease-in-out infinite; }
+.pc-dot.ready .pc-dot-mark { background: var(--ok); }
+.pc-dot-n { font-size: 11px; font-weight: 650; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.sess-status { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; letter-spacing: .01em; }
+.sess-status-running { color: var(--clay); background: color-mix(in srgb, var(--clay) 12%, transparent); }
+.sess-status-needs-you { color: var(--info); background: var(--info-soft); }
+.sess-status-complete { color: var(--text-faint); background: var(--bg-sunken); }
+.proj-card .pc-del { opacity: 0; color: var(--text-faint); background: none; border: 0; cursor: pointer; }
+.proj-card:hover .pc-del { opacity: 1; }
+.proj-new { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 16px 18px; margin-bottom: 10px; background: var(--bg-elev); }
+.proj-new input { width: 100%; padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 8px; background: var(--bg-input); color: var(--text); }
+.proj-new .pn-dir { display: flex; gap: 8px; align-items: center; }
+.proj-new .pn-dir .path { flex: 1; color: var(--text-faint); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn-primary { background: var(--clay); color: var(--on-clay); border: 0; border-radius: var(--radius-sm); padding: 9px 16px; cursor: pointer; }
+.btn-primary:hover:not(:disabled) { background: var(--clay-strong); }
+.btn-primary:disabled { opacity: .5; cursor: default; }
+.btn-ghost { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; cursor: pointer; color: var(--text); }
+.btn-ghost:hover { background: var(--bg-sunken); }
+

@@ -1,0 +1,25 @@
+/* ---------- Onboarding ---------- */
+.onboard-overlay { z-index: 60; }
+
+.ctx-backdrop { position: fixed; inset: 0; z-index: 70; }
+.ctx-menu {
+  position: fixed; z-index: 71; min-width: 168px; padding: 6px;
+  background: var(--bg-elev); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow);
+}
+.ctx-item {
+  display: block; width: 100%; text-align: left;
+  background: transparent; border: none; border-radius: 6px;
+  padding: 8px 10px; font: inherit; font-size: 13px; color: var(--text);
+  cursor: pointer;
+}
+.ctx-item:hover { background: var(--bg-input); }
+.ctx-item.danger { color: var(--err); }
+.ctx-item.danger:hover { background: color-mix(in srgb, var(--err) 10%, var(--bg-input)); }
+.onboard { max-width: 440px; text-align: center; }
+.onboard h2 { text-align: center; }
+.onboard .hint { text-align: center; font-size: 13.5px; line-height: 1.55; }
+.onboard-dots { display: flex; justify-content: center; gap: 8px; }
+.onboard-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border-strong); }
+.onboard-dot.active { background: var(--clay); }
+

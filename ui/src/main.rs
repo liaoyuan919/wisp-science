@@ -4344,7 +4344,10 @@ fn App() -> impl IntoView {
                                                 <div class="settings-list-row" data-skill-name=s.name.clone()>
                                                     <div class="settings-list-main">
                                                         <span class="settings-list-title">{s.name.clone()}</span>
-                                                        <span class="settings-list-sub">{s.description.clone()}</span>
+                                                        {(!s.description.is_empty() && s.description != ">").then(|| {
+                                                            let desc = s.description.clone();
+                                                            view! { <span class="settings-list-sub">{desc}</span> }
+                                                        })}
                                                         <input class="skill-tags-input"
                                                             prop:value=tags_text
                                                             prop:placeholder=move || t(locale.get(), "skills.tags_placeholder")
