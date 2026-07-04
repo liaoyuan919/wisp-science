@@ -1,128 +1,33 @@
+mod bindings;
 mod context_menu;
+mod dto;
 mod i18n;
+mod text;
 
+use bindings::{
+    attach_chat_autoscroll, force_chat_bottom, invoke, invoke_checked, invoke_timeout, listen,
+    mount_preview, schedule_chat_follow, schedule_highlight, upload_files, upload_input_files,
+    CHAT_SCROLLER_ID, CHAT_THREAD_ID,
+};
 use context_menu::{ContextMenuPortal, CtxMenu};
+use dto::*;
 use i18n::{localize_backend, set_document_lang, tab_count, tf, t, use_locale, Locale};
 use leptos::{ev, window_event_listener, *};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-static NEXT_DOM_ID: AtomicUsize = AtomicUsize::new(0);
-
-fn unique_dom_id(prefix: &str) -> String {
-    format!("{prefix}-{}", NEXT_DOM_ID.fetch_add(1, Ordering::Relaxed))
-}
-use serde::{Deserialize, Serialize};
+use text::{
+    dom_value, event_target_checked, event_target_input, event_target_value, extract_href_from_tag,
+    fasta_seq_count, file_kind, format_bytes, html_escape, is_external_href, is_separator,
+    is_table_row, join_path, md_inline_to_html, md_to_html, next_artifact_id, normalize_path,
+    parent_path, parse_csv_line, provider_defaults, provider_value, split_row, tool_lang,
+    unique_dom_id,
+};
 use serde_wasm_bindgen::to_value;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
-#[wasm_bindgen(module = "/src/highlight.js")]
-extern "C" {
-    async fn highlight_by_id(id: &str) -> JsValue;
-}
-
-#[wasm_bindgen(module = "/src/api.js")]
-extern "C" {
-    async fn invoke(cmd: &str, args: JsValue) -> JsValue;
-    #[wasm_bindgen(catch, js_name = invoke_strict)]
-    async fn invoke_checked(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
-    #[wasm_bindgen(catch, js_name = invoke_timeout)]
-    async fn invoke_timeout(cmd: &str, args: JsValue, timeout_ms: u32) -> Result<JsValue, JsValue>;
-    async fn listen(event: &str, cb: &js_sys::Function) -> JsValue;
-    async fn mount_preview(kind: &str, el_id: &str, payload: &str) -> JsValue;
-    async fn upload_files(files: JsValue) -> JsValue;
-    #[wasm_bindgen(js_name = upload_input_files)]
-    async fn upload_input_files(input_id: &str) -> JsValue;
-}
-
-#[wasm_bindgen(module = "/src/scroll.js")]
-extern "C" {
-    fn attach_chat_scroll(scroller_id: &str, content_id: &str);
-    fn notify_chat_scroll(scroller_id: &str);
-    fn force_chat_scroll_bottom(scroller_id: &str);
-}
-
-const CHAT_SCROLLER_ID: &str = "chat-scroller";
-const CHAT_THREAD_ID: &str = "chat-thread";
 /// Stable substring of the backend's missing-key error (`src-tauri` `send_message`),
 /// used to turn that failure into an actionable "open Settings" prompt.
 const NO_API_KEY_MARK: &str = "No API key set";
-
-fn schedule_chat_follow() {
-    notify_chat_scroll(CHAT_SCROLLER_ID);
-}
-
-fn force_chat_bottom() {
-    force_chat_scroll_bottom(CHAT_SCROLLER_ID);
-}
-
-#[derive(Deserialize, Clone)]
-#[allow(dead_code)]
-#[serde(tag = "kind")]
-enum AgentEvent {
-    Text { frame_id: String, delta: String },
-    Reasoning { frame_id: String, delta: String },
-    ToolCall { frame_id: String, name: String, preview: String },
-    ToolResult { frame_id: String, name: String, ok: bool, content: String },
-    Usage { frame_id: String, round: u64, input: u64, output: u64, ctx_tokens: usize, max_context: usize },
-    Compaction { frame_id: String, before: usize, after: usize, strategy: String },
-    Diff { frame_id: String, path: String },
-    Stdout { frame_id: String, chunk: String },
-    Done { frame_id: String },
-    Error { frame_id: String, message: String },
-    Review { frame_id: String, markdown: String },
-}
-
-#[derive(Clone)]
-enum ChatItem {
-    User(String),
-    Assistant { text: String, model: Option<String> },
-    Reasoning(String),
-    Tool { name: String, ok: Option<bool>, input: String, output: String },
-    Review(String),
-}
-
-fn active_model_label(models: &[ModelProfile]) -> Option<String> {
-    models.iter().find(|m| m.active).or_else(|| models.first()).map(|m| m.label.clone()).filter(|s| !s.is_empty())
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-struct ArtifactInfo {
-    id: String,
-    name: String,
-    kind: String,
-    path: String,
-    ts: i64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-struct SshHost {
-    alias: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    user: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    port: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    identity_file: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    notes: Option<String>,
-}
-
-#[derive(Clone)]
-enum ComposerAttachment {
-    Uploading { key: String, name: String },
-    Ready { key: String, name: String, path: String },
-    Error { key: String, name: String, error: String },
-}
-
-#[derive(Deserialize)]
-struct UploadFileResult {
-    ok: bool,
-    info: Option<ArtifactInfo>,
-    filename: Option<String>,
-    error: Option<String>,
-}
 
 fn composer_attachment_key(name: &str, idx: usize) -> String {
     format!("att-{idx}-{name}")
@@ -232,40 +137,6 @@ fn message_with_attachments(text: &str, paths: &[String]) -> String {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-struct Settings {
-    provider: String,
-    api_url: String,
-    model: String,
-    #[serde(default)]
-    label: String,
-    has_api_key: bool,
-    #[serde(default)]
-    locale: String,
-    #[serde(default)]
-    workspace_dir: String,
-    #[serde(default)]
-    max_tokens: u64,
-    #[serde(default)]
-    reasoning_effort: String,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            provider: "openai".into(),
-            api_url: "https://api.deepseek.com".into(),
-            model: "deepseek-v4-pro".into(),
-            label: "deepseek-v4-pro".into(),
-            has_api_key: false,
-            locale: Locale::En.code().into(),
-            workspace_dir: String::new(),
-            max_tokens: 4096,
-            reasoning_effort: String::new(),
-        }
-    }
-}
-
 fn js_error_text(err: JsValue) -> String {
     err.as_string()
         .or_else(|| js_sys::Reflect::get(&err, &JsValue::from_str("message")).ok().and_then(|v| v.as_string()))
@@ -281,29 +152,6 @@ fn copy_text(text: String) {
         let promise = window.navigator().clipboard().write_text(&text);
         let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
     });
-}
-
-fn dom_value(ev: &web_sys::Event) -> String {
-    ev.target()
-        .and_then(|target| js_sys::Reflect::get(&target, &JsValue::from_str("value")).ok())
-        .and_then(|value| value.as_string())
-        .unwrap_or_default()
-}
-
-fn provider_value(provider: &str) -> &'static str {
-    match provider.trim() {
-        "anthropic" => "anthropic",
-        "openai_responses" | "openai-responses" | "responses" => "openai_responses",
-        _ => "openai",
-    }
-}
-
-fn provider_defaults(provider: &str) -> (&'static str, &'static str) {
-    match provider_value(provider) {
-        "anthropic" => ("https://api.anthropic.com", "claude-sonnet-5"),
-        "openai_responses" => ("https://api.openai.com/v1", "gpt-5.5"),
-        _ => ("https://api.deepseek.com", "deepseek-v4-pro"),
-    }
 }
 
 fn normalize_settings_mut(cfg: &mut Settings) {
@@ -355,30 +203,6 @@ fn should_close_right_pane_on_escape(ev: &web_sys::KeyboardEvent) -> bool {
     }
     document.body().as_ref().is_some_and(|body| node.is_same_node(Some(body)))
         || document.document_element().as_ref().is_some_and(|html| node.is_same_node(Some(html)))
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-struct DemoInfo {
-    id: String,
-    title: String,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-struct Demo {
-    id: String,
-    title: String,
-    request: String,
-    response: String,
-    thinking: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SendMessageArgs {
-    // Tauri v2 maps JS camelCase keys to snake_case params; the JS side must
-    // send `sessionId` or the backend sees `None` and forks a new conversation.
-    session_id: Option<String>,
-    message: String,
 }
 
 /// Single source of truth for `invoke` argument payloads.
@@ -470,139 +294,6 @@ mod tauri_args_tests {
     }
 }
 
-#[derive(Deserialize, Clone)]
-struct SessionInfo {
-    id: String,
-    title: String,
-    #[allow(dead_code)]
-    ts: i64,
-}
-
-/// A transcript row returned by `load_session`.
-#[derive(Deserialize, Clone)]
-struct LoadedItem {
-    role: String,
-    text: String,
-    tool_name: Option<String>,
-    ok: Option<bool>,
-    #[serde(default)]
-    model_name: Option<String>,
-}
-
-impl LoadedItem {
-    fn into_chat(self) -> ChatItem {
-        match self.role.as_str() {
-            "user" => ChatItem::User(self.text),
-            "reasoning" => ChatItem::Reasoning(self.text),
-            "tool" => ChatItem::Tool {
-                name: self.tool_name.unwrap_or_else(|| "tool".into()),
-                ok: self.ok,
-                input: String::new(),
-                output: self.text,
-            },
-            _ => ChatItem::Assistant { text: self.text, model: self.model_name },
-        }
-    }
-}
-
-#[derive(Clone, PartialEq)]
-struct TableData {
-    headers: Vec<String>,
-    rows: Vec<Vec<String>>,
-}
-
-#[derive(Clone, PartialEq)]
-#[allow(dead_code)]
-enum PreviewData {
-    Table(TableData),
-    Text(String),
-    Markdown(String),
-    Code { lang: String, body: String },
-    Latex { tex: String, display: bool },
-    File { path: String, kind: String },
-    Smiles(String),
-    Fasta(String),
-}
-
-#[derive(Clone, PartialEq)]
-struct Artifact {
-    id: String,
-    name: String,
-    kind: &'static str,
-    data: PreviewData,
-}
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-struct FileContent {
-    path: String,
-    mime: String,
-    text: Option<String>,
-    base64: Option<String>,
-}
-
-#[derive(Deserialize, Clone)]
-struct DirEntry {
-    name: String,
-    is_dir: bool,
-    size: u64,
-}
-
-#[derive(Deserialize, Clone)]
-#[allow(dead_code)]
-struct ProjectInfo {
-    name: String,
-    root: String,
-    skill_count: usize,
-    mcp_server_count: usize,
-    memory_file_count: usize,
-    has_api_key: bool,
-}
-
-#[derive(Clone, Deserialize)]
-struct ProjectSummary {
-    id: String,
-    name: String,
-    #[allow(dead_code)] #[serde(default)] workspace_dir: String,
-    #[serde(default)] session_count: i64,
-    #[serde(default)] updated_at: i64,
-    #[serde(default)] running_count: i64,
-    #[serde(default)] needs_you_count: i64,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SessionStatusKind {
-    Running,
-    NeedsYou,
-    Complete,
-}
-
-impl SessionStatusKind {
-    fn from_str(s: &str) -> Self {
-        match s {
-            "running" => Self::Running,
-            "needs_you" => Self::NeedsYou,
-            _ => Self::Complete,
-        }
-    }
-
-    fn i18n_key(self) -> &'static str {
-        match self {
-            Self::Running => "sess_status.running",
-            Self::NeedsYou => "sess_status.needs_you",
-            Self::Complete => "sess_status.complete",
-        }
-    }
-
-    fn css(self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::NeedsYou => "needs-you",
-            Self::Complete => "complete",
-        }
-    }
-}
-
 fn format_relative_time(ts: i64, locale: Locale) -> String {
     if ts <= 0 { return String::new(); }
     let now_ms = js_sys::Date::now();
@@ -629,64 +320,6 @@ fn SessionStatusBadge(status: SessionStatusKind, locale: RwSignal<Locale>) -> im
             {move || t(locale.get(), key)}
         </span>
     }
-}
-
-/// One configured model profile (mirrors `models::ModelProfile` in src-tauri).
-#[derive(Clone, Deserialize)]
-struct ModelProfile {
-    id: String,
-    label: String,
-    #[serde(default)] provider: String,
-    #[serde(default)] api_url: String,
-    #[serde(default)] model: String,
-    #[allow(dead_code)] #[serde(default)] has_api_key: bool,
-    #[serde(default)] active: bool,
-    #[serde(default)] max_tokens: u64,
-    #[serde(default)] reasoning_effort: String,
-}
-
-#[derive(Clone, Deserialize)]
-struct RecentSession {
-    id: String,
-    project_id: String,
-    title: String,
-    #[allow(dead_code)] #[serde(default)] ts: i64,
-    #[serde(default)] status: String,
-}
-
-#[derive(Deserialize, Clone)]
-struct SkillInfo {
-    name: String,
-    description: String,
-}
-
-#[derive(Clone, serde::Deserialize)]
-struct SkillRow { name: String, description: String, enabled: bool, builtin: bool, #[allow(dead_code)] dir: String }
-
-#[derive(Clone, serde::Deserialize)]
-struct ConnRow { id: String, name: String, enabled: bool, transport: ConnTransport }
-#[derive(Clone, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-enum ConnTransport {
-    Stdio { command: String, #[serde(default)] args: Vec<String>, #[allow(dead_code)] #[serde(default)] env: Vec<(String,String)>, #[allow(dead_code)] #[serde(default)] cwd: Option<String> },
-    Http  { url: String, #[serde(default)] headers: Vec<(String,String)> },
-}
-#[derive(Clone, serde::Deserialize)]
-struct ConnView { bio_tools_enabled: bool, connections: Vec<ConnRow> }
-
-// Simple flat form state (kind + raw text fields; args/env/headers entered as text, parsed on save).
-#[derive(Clone, Default)]
-struct ConnForm { id: Option<String>, name: String, kind: String, command: String, args: String, url: String, headers: String, enabled: bool }
-
-#[derive(Clone, Default)]
-struct ModelForm {
-    id: Option<String>,
-    label: String,
-    provider: String,
-    api_url: String,
-    model: String,
-    max_tokens: u64,
-    reasoning_effort: String,
 }
 
 fn profile_to_form(m: &ModelProfile) -> ModelForm {
@@ -776,75 +409,6 @@ fn build_conn_json(f: &ConnForm, assign_id: bool) -> serde_json::Value {
     serde_json::json!({ "id": id, "name": f.name.trim(), "enabled": f.enabled, "transport": transport })
 }
 
-#[derive(Deserialize, Clone)]
-#[allow(dead_code)]
-struct MemoryFile {
-    name: String,
-    preview: String,
-    bytes: u64,
-}
-
-#[derive(Deserialize, Clone)]
-struct MemoryView {
-    enabled: bool,
-    today_file: String,
-    files: Vec<MemoryFile>,
-}
-
-#[derive(Deserialize, Clone)]
-struct BootstrapStatus {
-    skills_loaded: usize,
-    python_ok: bool,
-    mcp_catalog: usize,
-    uv_ok: bool,
-    node_ok: bool,
-    npm_ok: bool,
-    sci_ok: bool,
-    pixi_ok: bool,
-    app_version: String,
-    workspace: String,
-    errors: Vec<String>,
-}
-
-#[derive(Deserialize, Clone)]
-struct Capabilities {
-    skills: Vec<SkillInfo>,
-    mcp_servers: Vec<String>,
-    memory_files: Vec<MemoryFile>,
-    project: ProjectInfo,
-}
-
-#[derive(Deserialize, Clone)]
-#[allow(dead_code)]
-struct OnboardingState {
-    show: bool,
-    has_api_key: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RightTab { Artifacts, File, Provenance, Hosts }
-
-fn join_path(base: &str, name: &str) -> String {
-    if base == "." || base.is_empty() { name.to_string() }
-    else { format!("{}/{}", base.trim_end_matches(['/', '\\']), name) }
-}
-
-fn parent_path(path: &str) -> String {
-    if path == "." || path.is_empty() { return ".".into(); }
-    let p = path.replace('\\', "/");
-    match p.rsplit_once('/') {
-        None | Some(("", _)) => ".".into(),
-        Some((a, _)) if a.is_empty() => ".".into(),
-        Some((a, _)) => a.to_string(),
-    }
-}
-
-fn format_bytes(n: u64) -> String {
-    if n < 1024 { format!("{n} B") }
-    else if n < 1024 * 1024 { format!("{:.1} KB", n as f64 / 1024.0) }
-    else { format!("{:.1} MB", n as f64 / (1024.0 * 1024.0)) }
-}
-
 fn refresh_dir(cwd: RwSignal<String>, entries: RwSignal<Vec<DirEntry>>) {
     spawn_local(async move {
         let path = cwd.get();
@@ -853,62 +417,6 @@ fn refresh_dir(cwd: RwSignal<String>, entries: RwSignal<Vec<DirEntry>>) {
             entries.set(list);
         }
     });
-}
-
-fn event_target_value(ev: &web_sys::Event) -> String {
-    use wasm_bindgen::JsCast;
-    // Works for both <input> and <textarea>. Casting the wrong one used to
-    // panic in the event handler (input never registered) — see the project
-    // name field.
-    let target = ev.target().unwrap();
-    if let Some(i) = target.dyn_ref::<web_sys::HtmlInputElement>() { return i.value(); }
-    if let Some(a) = target.dyn_ref::<web_sys::HtmlTextAreaElement>() { return a.value(); }
-    String::new()
-}
-fn event_target_input(ev: &web_sys::Event) -> web_sys::HtmlInputElement {
-    use wasm_bindgen::JsCast;
-    ev.target().unwrap().dyn_into::<web_sys::HtmlInputElement>().unwrap()
-}
-fn event_target_checked(ev: &web_sys::Event) -> bool {
-    ev.target().and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok()).map(|i| i.checked()).unwrap_or(false)
-}
-
-/// Render agent/assistant Markdown to HTML for `inner_html`. GFM tables,
-/// strikethrough, task lists and footnotes are on; the source is trusted
-/// (local agent output rendered in the desktop WebView).
-fn md_to_html(src: &str) -> String {
-    use pulldown_cmark::{html, Options, Parser};
-    let mut opts = Options::empty();
-    opts.insert(Options::ENABLE_TABLES);
-    opts.insert(Options::ENABLE_STRIKETHROUGH);
-    opts.insert(Options::ENABLE_TASKLISTS);
-    opts.insert(Options::ENABLE_FOOTNOTES);
-    let parser = Parser::new_ext(src, opts);
-    let mut out = String::new();
-    html::push_html(&mut out, parser);
-    out
-}
-
-/// Inline Markdown for table cells (bold, code, links, etc.).
-fn md_inline_to_html(src: &str) -> String {
-    if src.is_empty() { return String::new(); }
-    let html = md_to_html(src);
-    let s = html.trim();
-    if let Some(inner) = s.strip_prefix("<p>").and_then(|rest| rest.strip_suffix("</p>")) {
-        if !inner.contains("<p>") { return inner.to_string(); }
-    }
-    html
-}
-
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-fn next_artifact_id(n: usize) -> String {
-    format!("{:08x}", n + 1)
 }
 
 fn art_label(a: &Artifact) -> String {
@@ -925,26 +433,6 @@ fn art_chip(idx: usize, a: &Artifact) -> String {
     format!(
         r#"<button type="button" class="art-ref" data-art-idx="{idx}" title="{title}">{label}</button>"#
     )
-}
-
-fn normalize_path(path: &str) -> String {
-    // Only strip redundant `./` prefixes. Do NOT strip a leading `/` — the agent
-    // is told to emit absolute paths (system_prompt.rs), and the backend resolves
-    // absolute-under-root correctly; stripping the slash turned an absolute path
-    // into a bad root-relative one and 404'd on click (#12).
-    path.trim()
-        .trim_start_matches("./")
-        .trim_start_matches(".\\")
-        .to_string()
-}
-
-fn is_external_href(href: &str) -> bool {
-    let h = href.trim();
-    h.starts_with("http://")
-        || h.starts_with("https://")
-        || h.starts_with("mailto:")
-        || h.starts_with('#')
-        || h.starts_with("javascript:")
 }
 
 fn artifact_file_paths(a: &Artifact) -> Vec<String> {
@@ -971,19 +459,6 @@ fn href_matches_artifact(href: &str, a: &Artifact) -> bool {
 fn artifact_index_for_href(arts: &[Artifact], href: &str) -> Option<usize> {
     arts.iter()
         .position(|a| href_matches_artifact(href, a))
-}
-
-fn extract_href_from_tag(tag: &str) -> Option<String> {
-    let lower = tag.to_ascii_lowercase();
-    let i = lower.find("href=")?;
-    let rest = &tag[i + 5..];
-    let quote = rest.chars().next()?;
-    if quote != '"' && quote != '\'' {
-        return None;
-    }
-    let rest = &rest[1..];
-    let end = rest.find(quote)?;
-    Some(rest[..end].to_string())
 }
 
 fn replace_file_links(html: String, arts: &[Artifact]) -> String {
@@ -1069,20 +544,6 @@ fn enrich_md_html(mut html: String, arts: &[Artifact]) -> String {
     html
 }
 
-fn tool_lang(name: &str) -> &'static str {
-    let n = name.trim().to_ascii_lowercase();
-    match n.as_str() {
-        "python" | "python3" => "python",
-        "bash" | "shell" | "sh" => "bash",
-        "javascript" | "js" => "javascript",
-        "json" => "json",
-        "sql" => "sql",
-        "rust" => "rust",
-        "r" => "r",
-        _ => "plaintext",
-    }
-}
-
 fn handle_md_click(
     ev: &web_sys::MouseEvent,
     arts: &[Artifact],
@@ -1120,12 +581,6 @@ fn handle_md_click(
     }
 }
 
-fn schedule_highlight(id: String) {
-    spawn_local(async move {
-        let _ = highlight_by_id(&id).await;
-    });
-}
-
 fn refresh_sessions(sessions: RwSignal<Vec<SessionInfo>>) {
     spawn_local(async move {
         let v = invoke("list_sessions", JsValue::UNDEFINED).await;
@@ -1136,22 +591,6 @@ fn refresh_sessions(sessions: RwSignal<Vec<SessionInfo>>) {
 }
 
 // --- Artifact detection (Markdown tables + fenced CSV) -----------------------
-
-fn split_row(line: &str) -> Vec<String> {
-    line.trim().trim_start_matches('|').trim_end_matches('|')
-        .split('|').map(|c| c.trim().to_string()).collect()
-}
-fn is_table_row(line: &str) -> bool {
-    let t = line.trim();
-    !t.is_empty() && t.contains('|')
-}
-fn is_separator(line: &str) -> bool {
-    let cells = split_row(line);
-    !cells.is_empty() && cells.iter().all(|c| {
-        let c = c.trim();
-        !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':') && c.contains('-')
-    })
-}
 
 /// Segment assistant text into plain-text and rendered Markdown-table chunks.
 enum Seg { Text, Table(TableData) }
@@ -1180,36 +619,6 @@ fn split_segments(text: &str) -> Vec<Seg> {
     }
     if !buf.is_empty() { segs.push(Seg::Text); }
     segs
-}
-
-fn parse_csv_line(line: &str) -> Vec<String> {
-    line.split(',').map(|c| c.trim().trim_matches('"').to_string()).collect()
-}
-
-fn file_kind(path: &str) -> Option<&'static str> {
-    let (_, ext) = path.rsplit_once('.')?;
-    if ext.is_empty() { return None; }
-    let ext = ext.to_ascii_lowercase();
-    Some(match ext.as_str() {
-        "csv" | "tsv" => "csv",
-        "pdf" => "pdf",
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" => "image",
-        "pdb" | "mol2" | "cif" => "structure",
-        "sdf" | "mol" => "molecule",
-        "smi" | "smiles" => "smiles",
-        // Alignment formats → interactive MSA viewer (web-dist Vae)
-        "aln" | "clustal" | "clustalw" | "sto" | "stockholm" | "stk" | "afa" | "mfa" => "msa",
-        // Plain FASTA → syntax-highlighted text (web-dist Hae → text preview)
-        "fasta" | "fa" | "fas" | "fna" | "faa" | "ffn" | "frn" => "fasta",
-        "md" => "markdown",
-        "nwk" | "newick" | "treefile" | "tre" => "text",
-        "txt" | "log" | "json" => "text",
-        _ => return None,
-    })
-}
-
-fn fasta_seq_count(text: &str) -> usize {
-    text.lines().filter(|l| l.trim_start().starts_with('>')).count()
 }
 
 fn push_file_artifact(out: &mut Vec<Artifact>, seen: &mut std::collections::HashSet<String>, path: &str) {
@@ -2121,7 +1530,7 @@ fn App() -> impl IntoView {
     });
 
     create_effect(move |_| {
-        attach_chat_scroll(CHAT_SCROLLER_ID, CHAT_THREAD_ID);
+        attach_chat_autoscroll();
     });
     create_effect(move |_| {
         let _ = items.get();
