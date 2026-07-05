@@ -3306,6 +3306,35 @@ struct PipPkg {
     version: String,
 }
 
+#[derive(serde::Serialize)]
+struct ProvInput {
+    path: String,
+    produced_here: bool,
+}
+
+#[derive(serde::Serialize)]
+struct ProvEnv {
+    name: Option<String>,
+    packages: Vec<PipPkg>,
+}
+
+#[derive(serde::Serialize)]
+struct ArtifactProvenance {
+    code: String,
+    language: String,
+    output: String,
+    exit_status: String,
+    inputs: Vec<ProvInput>,
+    env: Option<ProvEnv>,
+}
+
+/// Normalize a UI path (absolute or relative) to the workspace-relative form used
+/// in `execution_log.files_written`.
+fn to_workspace_rel(root: &std::path::Path, path: &str) -> String {
+    let p = std::path::Path::new(path);
+    p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/")
+}
+
 /// Parse `uv pip list --format=json` / `pip list --format=json` output.
 fn parse_pip_list(json: &str) -> Vec<PipPkg> {
     serde_json::from_str::<Vec<PipPkg>>(json).unwrap_or_default()
@@ -3405,6 +3434,55 @@ async fn register_artifact(
 ) -> Result<ArtifactInfo, String> {
     let ap = state.active();
     register_artifact_at(&state, &ap, path, content_type).await
+}
+
+/// Provenance for a produced artifact, addressed by workspace path. `None` when the
+/// path has no recorded producing cell (uploads, pre-feature figures) → empty modal.
+#[tauri::command]
+async fn get_artifact_provenance(
+    state: State<'_, AppState>,
+    session_id: Option<String>,
+    path: String,
+) -> Result<Option<ArtifactProvenance>, String> {
+    let frame_id = match session_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(id) => Some(id.to_string()),
+        None => state.active_frame.read().unwrap().clone(),
+    };
+    let Some(fid) = frame_id else { return Ok(None) };
+    let ap = state.active();
+    let rel = to_workspace_rel(&ap.root, &path);
+    let Some(e) = state
+        .store
+        .find_provenance_by_path(&fid, &rel)
+        .await
+        .map_err(|e| format!("{e}"))?
+    else {
+        return Ok(None);
+    };
+    let written = state.store.frame_written_paths(&fid).await.unwrap_or_default();
+    let inputs = e
+        .files_read
+        .iter()
+        .map(|p| ProvInput { path: p.clone(), produced_here: written.contains(p) })
+        .collect();
+    let env = match e.env_hash.as_deref() {
+        Some(h) => state
+            .store
+            .get_env_snapshot(h)
+            .await
+            .ok()
+            .flatten()
+            .map(|(name, pj)| ProvEnv { name, packages: parse_pip_list(&pj) }),
+        None => None,
+    };
+    Ok(Some(ArtifactProvenance {
+        code: e.source,
+        language: e.language,
+        output: e.stdout,
+        exit_status: e.exit_status,
+        inputs,
+        env,
+    }))
 }
 
 /// Tell the webview whether we're in dev (keep native context menu / DevTools).
@@ -3577,6 +3655,7 @@ pub fn run() {
             missing_files,
             upload_file,
             register_artifact,
+            get_artifact_provenance,
             get_project_info,
             get_capabilities,
             list_memory,
