@@ -43,9 +43,11 @@ Enabling facts that make capture cheap:
   a ggplot2 volcano), and `write`.
 - `ToolEnv` (`crates/wisp-tools/src/env.rs`) already exposes `project_root()`,
   `emit(ToolEvent)`, `is_cancelled()`.
-- src-tauri's `ToolEnv` impl (`EmitEnv`) holds the `AppHandle` (→ `AppState` → store)
-  and already forwards `AgentEvent`s to the frontend and messages to a persist
-  channel. It is the natural place to persist a new provenance event.
+- The `Output` trait (`crates/wisp-core/src/output.rs`) is the agent-loop's sink;
+  `ToolEnvAdapter` bridges it to `ToolEnv`. src-tauri's `TauriOutput` implements
+  `Output`, holds the `AppHandle` + a persist channel, and already persists messages
+  via `on_message` → an mpsc channel drained by a background task. Adding a
+  `provenance` method there (mirroring `on_message`) is the natural persist point.
 
 ## 3. Architecture
 
@@ -70,24 +72,26 @@ files_read    = { p in before : path-string of p appears literally in source }
   `node_modules`, `.wisp`, `uploads`, and any dir over a file-count cap.
   `// ponytail: recursive mtime scan, cap+skip heavy dirs; switch to fs-notify if this
   shows up in profiles.`
-- `source` = the tool's code: `args["code"]` for `python`, `args["command"]` for
+- `source` = the tool's code: `args["code"]` for `python`, `args["cmd"]` for
   `shell`. `language` is **tool-derived** — `"python"` for the kernel, `"bash"` for
   `shell` — we do not try to detect that a `shell` call runs R/Julia inside.
-- If `files_written` is empty, emit nothing — read-only or no-op calls never create
+- If `files_written` is empty, report nothing — read-only or no-op calls never create
   provenance rows, keeping the log lean and figure-relevant.
-- Otherwise assemble a record and emit a new event:
-  `ToolEvent::Provenance { tool, language, source, stdout, stderr, exit_status,
-  wall_s, files_written: Vec<String>, files_read: Vec<String> }`
-  (stdout/stderr/exit_status/wall_s come from `result`; paths are workspace-relative).
+- Otherwise assemble a `ProvenanceRecord { tool, language, source, output, success,
+  files_written: Vec<String>, files_read: Vec<String> }` (`output`/`success` from
+  `ToolResult`; paths workspace-relative) and call `output.provenance(&rec)`.
 
-`snapshot` + the diff live in a small new module `crates/wisp-core/src/provenance.rs`
-so `agent.rs` only gains a thin wrapper. `ToolEvent` gains the `Provenance` variant in
-`wisp-tools`.
+`snapshot` + the diff + `ProvenanceRecord` live in a small new module
+`crates/wisp-core/src/provenance.rs`; `agent.rs` gains a thin wrapper and the `Output`
+trait gains a `fn provenance(&self, _rec: &ProvenanceRecord) {}` default no-op. No
+`ToolEvent` change — the record flows through `Output`, not the UI event enum.
 
 ### 3.2 Environment snapshot — lazy, per session
 
-Environment capture stays **out of the hot wisp-core path**. When `EmitEnv` persists
-the **first** provenance record of a session, it shells out once:
+Environment capture stays **out of the hot wisp-core path**. `TauriOutput::provenance`
+just sends the record to an mpsc channel; a background drain task (mirroring the
+message-persist task) does the DB work. On the **first** provenance record of a
+session, the drain task shells out once:
 `uv pip list --format=json` using the session's kernel Python
 (`crates/wisp-python/src/env.rs::python()`); if a conda env is active, also
 `conda list --json`. The JSON is content-hashed; the hash + package list are stored in
@@ -124,16 +128,18 @@ CREATE TABLE env_snapshots (
   packages_json TEXT NOT NULL,          -- JSON array of {name, version}
   created_at    INTEGER NOT NULL
 );
-
--- artifacts gains a link to the row that produced it (nullable; uploads stay NULL)
-ALTER TABLE artifacts ADD COLUMN producing_exec_id TEXT DEFAULT NULL;
 ```
 
-On persisting a `Provenance` event, `EmitEnv`:
+**No `artifacts`-table coupling.** The UI addresses artifacts by workspace-relative
+**path**, not by a DB id (it detects them from markdown, not from `list_artifacts`).
+So provenance is looked up purely from `execution_log.files_written` by path — we do
+**not** add a `producing_exec_id` column or upsert produced files into `artifacts`.
+This keeps the feature decoupled from wisp's (currently upload-only, UI-unused)
+artifact table.
+
+On persisting a `Provenance` record, the host:
 1. Resolves/creates the session `env_hash` (§3.2).
-2. Inserts one `execution_log` row (`cell_index` = current count for the frame).
-3. For each path in `files_written`, upserts an `artifacts` row (so produced figures
-   finally land in the DB) with `producing_exec_id = <this row>`.
+2. Inserts one `execution_log` row (`cell_index` = current row count for the frame).
 
 ### 3.4 Query command + UI
 
@@ -142,16 +148,20 @@ On persisting a `Provenance` event, `EmitEnv`:
 get_artifact_provenance(session_id: Option<String>, path: String)
   -> Option<ArtifactProvenance>
 ```
-Resolves the frame (given or active), finds the `execution_log` row whose
+Resolves the frame (given or active), finds the most recent `execution_log` row whose
 `files_written` contains `path`, and returns:
 ```
 ArtifactProvenance {
   code: String, language: String,
-  stdout: String, stderr: String, exit_status: String, wall_s: Option<f64>,
-  inputs: Vec<{ path: String, artifact_id: Option<String> }>,  // files_read, linked when another artifact matches
+  output: String, exit_status: String,        // output = the tool's result text (ToolResult.content)
+  inputs: Vec<{ path: String, produced_here: bool }>,  // files_read; produced_here = another cell in this frame wrote it → UI links it
   env: Option<{ name: Option<String>, packages: Vec<{ name, version }> }>,
 }
 ```
+`ToolResult` (`crates/wisp-tools/src/env.rs`) exposes only `success: bool` +
+`content: String`, so the record stores `output = content`, `exit_status =
+ok|error`; the `stdout`/`stderr`/`wall_s` columns are kept for forward-compat and
+populated as `content`/`""`/`NULL` today.
 Returns `None` for paths with no record (uploads, pre-feature figures) → the modal
 shows an empty state.
 
@@ -170,20 +180,22 @@ shows an empty state.
 
 ```
 agent turn
-  └─ agent.rs: for a producing tool
+  └─ agent.rs: for a producing tool (python|shell)
        snapshot(before) → tools.run → snapshot(after) → diff
-       files_written non-empty ? emit ToolEvent::Provenance{...}
+       files_written non-empty ? output.provenance(&ProvenanceRecord{...})
             │
             ▼
-  EmitEnv.emit (src-tauri)
+  TauriOutput::provenance (src-tauri) → send to prov mpsc channel
+            │
+            ▼
+  drain task (background)
        ensure session env_snapshot (lazy `uv pip list`) → env_hash
        INSERT execution_log
-       upsert artifacts(producing_exec_id) for each written path
             │
    ... later, user clicks the figure ...
             ▼
   ui ArtifactModal → invoke get_artifact_provenance(session, path)
-       → execution_log row + linked inputs + env_snapshot
+       → execution_log row (by path) + inputs + env_snapshot
        → Code / Execution Log / Inputs / Environment panels
 ```
 
@@ -202,9 +214,9 @@ agent turn
 - **wisp-core unit:** `provenance::snapshot` + diff — create temp dir, write a file
   mid-"run", assert it appears in `files_written`; assert a skipped dir (`.git`) never
   appears; assert a literal path in source is detected as `files_read`.
-- **wisp-store unit:** insert an `execution_log` row + `env_snapshots` row, upsert an
-  artifact with `producing_exec_id`, read back via the provenance query; assert
-  `files_written` JSON round-trips.
+- **wisp-store unit:** insert an `execution_log` row + `env_snapshots` row, read back
+  via the by-path provenance query; assert `files_written` JSON round-trips and the
+  query matches the right row by path.
 - **ui e2e (Playwright, mocked bridge):** mock `get_artifact_provenance`; click a
   figure → modal opens with the image; Code/Inputs/Environment tabs render mocked
   data; an artifact with no provenance shows the empty state.
