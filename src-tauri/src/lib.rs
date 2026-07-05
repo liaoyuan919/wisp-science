@@ -3891,4 +3891,16 @@ mod provenance_tests {
         assert_eq!(pkgs[1].version, "2.2.0");
         assert!(parse_pip_list("not json").is_empty());
     }
+
+    #[test]
+    fn to_workspace_rel_normalizes_absolute_and_passes_relative() {
+        use std::path::Path;
+        let root = Path::new("/proj");
+        // absolute path under root → stripped to workspace-relative
+        assert_eq!(to_workspace_rel(root, "/proj/out/fig.png"), "out/fig.png");
+        // already-relative path → passed through unchanged
+        assert_eq!(to_workspace_rel(root, "out/fig.png"), "out/fig.png");
+        // path not under root → left as-is (strip_prefix fails, falls through)
+        assert_eq!(to_workspace_rel(root, "/other/x.png"), "/other/x.png");
+    }
 }

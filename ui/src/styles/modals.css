@@ -49,5 +49,3 @@ textarea.host-input { min-height:64px; resize:vertical; }
 .artifact-modal .am-env { width: 100%; border-collapse: collapse; font-size: 12px; font-family: var(--font-mono); }
 .artifact-modal .am-env td { padding: 3px 8px; border-bottom: 1px solid var(--border); }
 .artifact-modal .am-env td:last-child { color: var(--text-faint); text-align: right; }
-
-
