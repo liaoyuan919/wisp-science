@@ -358,7 +358,14 @@ Agent 通过 use_skill 工具按需加载 SKILL.md</pre>
               支持哪些平台？
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
             </button>
-            <div class="faq-a">Windows（MSI/NSIS + WebView2）与 macOS（Apple Silicon / Intel 通用 dmg）均提供安装包，随 GitHub Release 一同发布。macOS 包暂未签名，首次打开需右键 →「打开」。Linux 目前仅支持从源码构建 CLI / 桌面。</div>
+            <div class="faq-a">Windows（MSI/NSIS + WebView2）与 macOS（Apple Silicon / Intel 分架构 dmg）均提供安装包，随 GitHub Release 一同发布。macOS 包自 v0.5.0 起已经过 Apple 代码签名与公证，双击即可打开，无需右键放行；Windows 包暂未签名，可能触发 SmartScreen（选「仍要运行」）。Linux 目前仅支持从源码构建 CLI / 桌面。</div>
+          </div>
+          <div class="faq-item">
+            <button class="faq-q" type="button">
+              macOS 为什么反复弹出钥匙串密码框？
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </button>
+            <div class="faq-a">API Key 存放在 macOS 登录钥匙串，条目会绑定写入时应用的代码签名身份。若你先用过未签名的 v0.4.x 填过 Key，那个条目被绑到了旧身份；升级到已签名的 v0.5.0 后身份改变，系统便反复要求输入登录密码来重新授权。解决办法：打开「钥匙串访问」，搜索并删除名为 <code>wisp</code> 的条目，重开 wisp 重新填一次 API Key（点一次「始终允许」）即可，之后不再弹。签名身份从此稳定，后续升级不会再出现此问题。</div>
           </div>
           <div class="faq-item">
             <button class="faq-q" type="button">
