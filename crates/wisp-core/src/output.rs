@@ -105,10 +105,19 @@ impl<'a> wisp_tools::ToolEnv for ToolEnvAdapter<'a> {
 /// deltas only; usage/tool-call deltas are handled by the agent loop).
 pub struct StreamSinkAdapter<'a> {
     out: &'a dyn Output,
+    cancel: Option<&'a std::sync::atomic::AtomicBool>,
 }
 impl<'a> StreamSinkAdapter<'a> {
     pub fn new(out: &'a dyn Output) -> Self {
-        Self { out }
+        Self { out, cancel: None }
+    }
+    /// Like `new`, but the streaming loop can poll `is_cancelled()` to stop
+    /// token generation mid-stream when the user hits Stop.
+    pub fn with_cancel(out: &'a dyn Output, cancel: &'a std::sync::atomic::AtomicBool) -> Self {
+        Self {
+            out,
+            cancel: Some(cancel),
+        }
     }
 }
 impl<'a> wisp_llm::StreamSink for StreamSinkAdapter<'a> {
@@ -120,4 +129,30 @@ impl<'a> wisp_llm::StreamSink for StreamSinkAdapter<'a> {
     }
     fn on_tool_call(&mut self, _i: usize, _name: &str, _args: &str) {}
     fn on_usage(&mut self, _u: wisp_llm::Usage) {}
+    fn is_cancelled(&self) -> bool {
+        self.cancel
+            .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use wisp_llm::StreamSink;
+
+    // The streaming loops break on `sink.is_cancelled()`; this proves the Stop
+    // flag is actually threaded through the sink and read (the wiring that was
+    // missing in #58, leaving Stop dead during token streaming).
+    #[test]
+    fn stream_sink_adapter_polls_cancel_flag() {
+        let out = NullOutput;
+        let flag = AtomicBool::new(false);
+        let sink = StreamSinkAdapter::with_cancel(&out, &flag);
+        assert!(!sink.is_cancelled(), "not cancelled before Stop");
+        flag.store(true, Ordering::Relaxed);
+        assert!(sink.is_cancelled(), "reflects the flag once Stop is pressed");
+        // A sink built without a cancel flag never reports cancelled.
+        assert!(!StreamSinkAdapter::new(&out).is_cancelled());
+    }
 }

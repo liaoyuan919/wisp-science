@@ -38,10 +38,18 @@ pub async fn agent_loop(
         }
         iteration += 1;
         let messages = ctx.prepare_for_api(provider, output).await;
-        let mut sink = StreamSinkAdapter::new(output);
+        let mut sink = match cancel {
+            Some(c) => StreamSinkAdapter::with_cancel(output, c),
+            None => StreamSinkAdapter::new(output),
+        };
         let comp = provider
             .stream(&messages, &tools.schemas(), &mut sink)
             .await?;
+        // The streaming loop breaks on cancel and returns a partial completion;
+        // bail before processing it so Stop takes effect within one chunk.
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            anyhow::bail!("stopped by user");
+        }
 
         ctx.append_assistant(
             comp.content.clone(),
