@@ -434,3 +434,38 @@ pub(crate) struct OnboardingState {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RightTab { Artifacts, File, Provenance, Hosts }
+
+/// Provenance for a produced file — mirrors the `get_artifact_provenance`
+/// Tauri command output (src-tauri `ArtifactProvenance`). Deserialize only.
+#[derive(Clone, Deserialize, Default)]
+pub(crate) struct ArtifactProvenance {
+    pub(crate) code: String,
+    pub(crate) language: String,
+    pub(crate) output: String,
+    #[allow(dead_code)]
+    pub(crate) exit_status: String,
+    #[serde(default)]
+    pub(crate) inputs: Vec<ProvInput>,
+    pub(crate) env: Option<ProvEnv>,
+}
+
+#[derive(Clone, Deserialize)]
+pub(crate) struct ProvInput {
+    pub(crate) path: String,
+    pub(crate) produced_here: bool,
+}
+
+#[derive(Clone, Deserialize)]
+pub(crate) struct ProvEnv {
+    #[allow(dead_code)]
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) packages: Vec<ProvPkg>,
+}
+
+#[derive(Clone, Deserialize)]
+pub(crate) struct ProvPkg {
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) version: String,
+}

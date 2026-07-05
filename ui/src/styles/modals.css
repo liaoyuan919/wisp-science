@@ -30,4 +30,24 @@ textarea.host-input { min-height:64px; resize:vertical; }
 .settings-status.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, var(--border-strong)); background: color-mix(in srgb, var(--ok) 8%, var(--bg-input)); }
 .settings-status.fail { color: var(--err); border-color: color-mix(in srgb, var(--err) 35%, var(--border-strong)); background: color-mix(in srgb, var(--err) 8%, var(--bg-input)); }
 
+.artifact-modal { max-width: min(880px, 94vw); width: 100%; gap: 10px; }
+.artifact-modal .am-head { display: flex; align-items: center; gap: 8px; }
+.artifact-modal .am-head .spacer { flex: 1; }
+.artifact-modal .am-name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-modal .am-figure { max-height: 52vh; overflow: auto; display: flex; justify-content: center; background: var(--bg-sunken); border-radius: var(--radius-sm); padding: 8px; }
+.artifact-modal .am-figure img, .artifact-modal .am-figure canvas { max-width: 100%; height: auto; }
+.artifact-modal .am-tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border-strong); }
+.artifact-modal .am-tab { padding: 6px 10px; border: none; background: transparent; color: var(--text-faint); font: inherit; font-size: 12px; cursor: pointer; border-radius: 8px 8px 0 0; }
+.artifact-modal .am-tab.active { background: var(--bg-sunken); color: var(--text); }
+.artifact-modal .am-panel { max-height: 30vh; overflow: auto; }
+.artifact-modal .am-log { font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap; margin: 0; }
+.artifact-modal .am-empty { color: var(--text-faint); font-size: 12.5px; padding: 16px; }
+.artifact-modal .am-inputs { display: flex; flex-direction: column; gap: 4px; }
+.artifact-modal .am-input { text-align: left; background: var(--bg-sunken); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 9px; font: inherit; font-size: 12px; font-family: var(--font-mono); color: var(--text-muted); cursor: default; }
+.artifact-modal .am-input.linkable { color: var(--clay-strong); cursor: pointer; }
+.artifact-modal .am-input.linkable:hover { border-color: var(--clay); }
+.artifact-modal .am-env { width: 100%; border-collapse: collapse; font-size: 12px; font-family: var(--font-mono); }
+.artifact-modal .am-env td { padding: 3px 8px; border-bottom: 1px solid var(--border); }
+.artifact-modal .am-env td:last-child { color: var(--text-faint); text-align: right; }
+
 

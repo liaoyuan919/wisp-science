@@ -146,6 +146,15 @@ export function tauriMock(): void {
             ];
           case "read_file":
             return { path: arg("path") ?? "report.csv", mime: "text/csv", text: "a,b\n1,2", base64: null };
+          case "get_artifact_provenance":
+            return {
+              code: "import matplotlib\nplt.savefig('volcano.png')",
+              language: "python",
+              output: "saved volcano.png",
+              exit_status: "ok",
+              inputs: [{ path: "DE_results.csv", produced_here: false }],
+              env: { name: "kernel", packages: [{ name: "matplotlib", version: "3.8.0" }] },
+            };
           case "upload_file":
             return {
               id: "art-upload-1",

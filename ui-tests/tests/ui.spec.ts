@@ -67,6 +67,25 @@ test("uploaded file shows up in the artifacts panel after send", async ({ page }
   await expect(page.locator('.rp-tile[data-artifact-name="counts.csv"]')).toBeVisible();
 });
 
+test("clicking a figure opens the artifact modal with provenance", async ({ page }) => {
+  await enterApp(page);
+  // A file path in the user turn is collected as an artifact; a .png name maps
+  // to the "image" kind, which gets the expand affordance in the view head.
+  await page.getByPlaceholder(/Ask wisp-science/i).fill("make a volcano plot volcano.png");
+  await page.getByRole("button", { name: "Send" }).click();
+  await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.locator('.rp-tile[data-artifact-name="volcano.png"]').click();
+  // Expand the figure into the provenance modal.
+  await page.locator('.rp-view-head .icon-btn[title="View full size"]').click();
+  await expect(page.locator(".artifact-modal")).toBeVisible();
+  // Code tab renders the recorded source (from get_artifact_provenance).
+  await page.locator(".am-tab", { hasText: "Code" }).click();
+  await expect(page.locator(".artifact-modal")).toContainText("savefig");
+  // Environment tab renders the captured package list.
+  await page.locator(".am-tab", { hasText: "Environment" }).click();
+  await expect(page.locator(".am-env")).toContainText("matplotlib");
+});
+
 test("settings modal shows the saved provider", async ({ page }) => {
   await enterApp(page);
   await openModelsSettings(page);
