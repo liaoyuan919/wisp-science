@@ -102,6 +102,12 @@ pub trait StreamSink: Send {
     /// as argument fragments arrive so the UI can render an in-progress call.
     fn on_tool_call(&mut self, index: usize, name: &str, arguments_so_far: &str);
     fn on_usage(&mut self, usage: crate::Usage);
+    /// Whether the user requested cancellation. Streaming loops poll this each
+    /// chunk so a Stop interrupts token generation mid-stream, not only between
+    /// whole model turns. Default `false` for sinks that don't support cancel.
+    fn is_cancelled(&self) -> bool {
+        false
+    }
 }
 
 /// A no-op sink for callers that only want the final `Completion`.

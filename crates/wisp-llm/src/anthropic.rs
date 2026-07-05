@@ -285,6 +285,11 @@ impl Provider for AnthropicProvider {
         let mut usage = Usage::default();
 
         while let Some(chunk) = stream.next().await {
+            // Stop mid-generation: drop the stream and return the partial result
+            // so the agent loop can bail (#58 — Stop was dead during streaming).
+            if sink.is_cancelled() {
+                break;
+            }
             let bytes = chunk?;
             buf.push_str(std::str::from_utf8(&bytes).unwrap_or(""));
             while let Some(idx) = buf.find("\n\n") {
