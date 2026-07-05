@@ -1975,6 +1975,43 @@ async fn pick_directory(app: AppHandle) -> Result<Option<String>, String> {
     Ok(picked.map(|fp| fp.to_string()))
 }
 
+/// Copy a workspace file to a user-chosen location via the native save dialog.
+/// Returns the saved path, or `None` if the user cancelled.
+#[tauri::command]
+async fn download_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    // Resolve + validate against the active workspace root, same as read_file.
+    let real = {
+        let ap = state.active();
+        wisp_tools::safety::validate_file_path(&ap.root, &path)?
+    };
+    if !real.is_file() {
+        return Err(format!("file not found: {path}"));
+    }
+    let default_name = real
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("download")
+        .to_string();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(&default_name)
+        .save_file(move |p| {
+            let _ = tx.send(p);
+        });
+    let Some(dest) = rx.await.map_err(|e| format!("{e}"))? else {
+        return Ok(None); // user cancelled
+    };
+    let dest_path = std::path::PathBuf::from(dest.to_string());
+    std::fs::copy(&real, &dest_path).map_err(|e| format!("copy failed: {e}"))?;
+    Ok(Some(dest_path.to_string_lossy().into_owned()))
+}
+
 #[tauri::command]
 async fn create_project(
     state: State<'_, AppState>,
@@ -3628,6 +3665,7 @@ pub fn run() {
             list_recent_sessions,
             list_projects,
             pick_directory,
+            download_file,
             create_project,
             open_project,
             delete_project,

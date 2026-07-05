@@ -46,15 +46,50 @@
   background: var(--bg-sunken);
 }
 .rp-tile {
-  display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 10px;
+  position: relative;
+  display: flex; flex-direction: row; align-items: center; gap: 4px;
   background: var(--bg-elev); color: var(--text);
   border: 1px solid var(--border-strong); border-radius: 10px;
-  padding: 10px 12px; cursor: pointer; font: inherit; text-align: left;
   transition: border-color .12s ease, background .12s ease, box-shadow .12s ease;
   min-width: 0; box-shadow: var(--shadow-sm);
 }
 .rp-tile:hover { border-color: #c7c4bb; }
 .rp-tile.active { border-color: color-mix(in srgb, var(--clay) 40%, var(--border-strong)); background: #fff; box-shadow: 0 0 0 1px rgba(13, 148, 136, 0.18); }
+.rp-tile-main {
+  display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 10px;
+  flex: 1 1 auto; min-width: 0;
+  background: transparent; border: none; color: inherit; font: inherit; text-align: left;
+  padding: 10px 4px 10px 12px; cursor: pointer;
+}
+.rp-tile-tools { display: flex; align-items: center; gap: 1px; flex: 0 0 auto; padding-right: 6px; }
+.rp-tile-tool {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0; flex: 0 0 auto;
+  background: transparent; border: none; border-radius: 6px;
+  color: var(--text-faint); font-size: 15px; line-height: 1; cursor: pointer;
+  transition: background .12s ease, color .12s ease;
+}
+.rp-tile-tool:hover { background: var(--bg-sunken); color: var(--text); }
+.rp-tile-menu-backdrop { position: fixed; inset: 0; z-index: 60; }
+.rp-tile-menu {
+  position: fixed; z-index: 61; /* top/right set inline from the cursor so the .rp-tiles overflow can't clip it */
+  min-width: 190px; padding: 4px; display: flex; flex-direction: column;
+  background: var(--bg-elev); border: 1px solid var(--border-strong);
+  border-radius: 10px; box-shadow: var(--shadow);
+}
+.rp-tile-menu-item {
+  display: block; width: 100%; text-align: left; padding: 7px 10px;
+  background: transparent; border: none; border-radius: 6px;
+  font: inherit; font-size: 12.5px; color: var(--text); cursor: pointer;
+}
+.rp-tile-menu-item:hover { background: var(--bg-sunken); }
+.rp-open-viewer {
+  align-self: flex-start; margin-top: 4px;
+  padding: 8px 14px; border-radius: 9px; cursor: pointer;
+  font: inherit; font-size: 13px; font-weight: 600;
+  color: #fff; background: var(--clay); border: 1px solid var(--clay);
+}
+.rp-open-viewer:hover { filter: brightness(0.97); }
 .rp-tile-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
 .rp-tile-name { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rp-tile-meta { font-size: 11px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
