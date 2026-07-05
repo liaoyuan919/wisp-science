@@ -1360,11 +1360,25 @@ fn RpCodeView(lang: String, body: String) -> impl IntoView {
     }
 }
 
+/// File kinds that open in the full ArtifactModal viewer on click (image/pdf
+/// full-size, csv as a dataset table) rather than rendering inline in the pane.
+fn opens_in_modal(kind: &str) -> bool {
+    matches!(kind, "image" | "pdf" | "csv")
+}
+
+/// Fire the native save dialog to download a workspace file (backend copies it).
+fn download_artifact(path: String) {
+    spawn_local(async move {
+        let arg = to_value(&serde_json::json!({ "path": path })).unwrap();
+        let _ = invoke("download_file", arg).await;
+    });
+}
+
 /// Click-to-expand modal for a produced artifact: shows the full-size
-/// image/PDF plus tabbed provenance (Code/Log/Inputs/Environment) fetched
-/// from `get_artifact_provenance`. Provenance is best-effort — a `None`
-/// result (or any empty field within it) renders an empty state; the image
-/// itself never depends on provenance being present.
+/// image/PDF (or a CSV as a dataset table) plus tabbed provenance
+/// (Code/Log/Inputs/Environment) fetched from `get_artifact_provenance`.
+/// Provenance is best-effort — a `None` result (or any empty field within it)
+/// renders an empty state; the figure never depends on provenance being present.
 #[component]
 fn ArtifactModal(
     path: String,
@@ -1389,17 +1403,22 @@ fn ArtifactModal(
         });
     }
     let path_head = path.clone();
+    let path_dl = path.clone();
     view! {
         <div class="overlay" on:click=move |_| on_close.call(())>
             <div class="modal artifact-modal" on:click=|ev| ev.stop_propagation()>
                 <div class="am-head">
                     <span class="am-name">{name.clone()}</span>
                     <div class="spacer"></div>
+                    <button class="icon-btn" title=move || t(locale.get(), "artifact.download")
+                        on:click=move |_| download_artifact(path_dl.clone())>"↓"</button>
                     <button class="icon-btn" title=move || t(locale.get(), "right.close")
                         on:click=move |_| on_close.call(())>"×"</button>
                 </div>
                 <div class="am-figure">
-                    {if kind == "image" || kind == "pdf" {
+                    {if kind == "csv" {
+                        view! { <CsvFilePreview path=path_head.clone() /> }.into_view()
+                    } else if kind == "image" || kind == "pdf" {
                         view! { <FilePreview dom_id=dom_id path=path_head.clone() kind=kind.clone() /> }.into_view()
                     } else {
                         view! { <p class="rp-path hint">{path_head.clone()}</p> }.into_view()
@@ -2093,6 +2112,7 @@ fn App() -> impl IntoView {
     });
     let sel_artifact = create_rw_signal(0usize);
     let modal_artifact = create_rw_signal(None::<(String, String, String)>); // (path, name, kind)
+    let artifact_menu = create_rw_signal(None::<usize>); // which tile's ⋮ menu is open
     let right_tab = create_rw_signal(RightTab::Artifacts);
     let show_files = create_rw_signal(false);
     let file_query = create_rw_signal(String::new());
@@ -2110,11 +2130,17 @@ fn App() -> impl IntoView {
     let on_artifact_select = Callback::new(move |idx: usize| {
         let arts = artifacts.get();
         if let Some(a) = arts.get(idx) {
-            show_right.set(true);
             if let PreviewData::File { path, kind } = &a.data {
+                // Images, PDFs and CSVs open in the modal viewer, not the pane.
+                if opens_in_modal(kind) {
+                    modal_artifact.set(Some((path.clone(), a.name.clone(), kind.clone())));
+                    return;
+                }
+                show_right.set(true);
                 right_tab.set(RightTab::File);
                 open_file.set(Some((path.clone(), kind.clone())));
             } else {
+                show_right.set(true);
                 right_tab.set(RightTab::Artifacts);
                 sel_artifact.set(idx);
             }
@@ -4046,16 +4072,73 @@ fn App() -> impl IntoView {
                                     let name = a.name.clone();
                                     let kind = a.kind.to_string();
                                     let meta = artifact_meta(a, loc);
+                                    // File artifacts (images, csv, datasets) get download + ⋮ tools;
+                                    // inline artifacts (md tables/code) keep the plain tile.
+                                    let file = if let PreviewData::File { path, kind } = &a.data {
+                                        Some((path.clone(), kind.clone()))
+                                    } else {
+                                        None
+                                    };
+                                    let file_click = file.clone();
+                                    let name_click = name.clone();
+                                    let tools = file.map(|(path, fkind)| {
+                                        let (dl, vn) = (path.clone(), name.clone());
+                                        view! {
+                                            <div class="rp-tile-tools">
+                                                <button type="button" class="rp-tile-tool"
+                                                    title=move || t(locale.get(), "artifact.download")
+                                                    on:click=move |ev| { ev.stop_propagation(); download_artifact(dl.clone()); }>"↓"</button>
+                                                <button type="button" class="rp-tile-tool"
+                                                    title=move || t(locale.get(), "artifact.more")
+                                                    on:click=move |ev| { ev.stop_propagation(); artifact_menu.update(|m| *m = if *m == Some(i) { None } else { Some(i) }); }>"⋮"</button>
+                                            </div>
+                                            {move || (artifact_menu.get() == Some(i)).then(|| {
+                                                let (p, n, k) = (path.clone(), vn.clone(), fkind.clone());
+                                                let (mv, sp, dw) = (p.clone(), p.clone(), p.clone());
+                                                let (mvn, mvk) = (n.clone(), k.clone());
+                                                let spk = k.clone();
+                                                view! {
+                                                    <div class="rp-tile-menu-backdrop" on:click=move |_| artifact_menu.set(None)></div>
+                                                    <div class="rp-tile-menu">
+                                                        <button type="button" class="rp-tile-menu-item"
+                                                            on:click=move |_| { artifact_menu.set(None); modal_artifact.set(Some((mv.clone(), mvn.clone(), mvk.clone()))); }>
+                                                            {move || t(locale.get(), "artifact.open_viewer")}</button>
+                                                        <button type="button" class="rp-tile-menu-item"
+                                                            on:click=move |_| { artifact_menu.set(None); show_right.set(true); right_tab.set(RightTab::File); open_file.set(Some((sp.clone(), spk.clone()))); }>
+                                                            {move || t(locale.get(), "artifact.open_split")}</button>
+                                                        <button type="button" class="rp-tile-menu-item"
+                                                            on:click=move |_| { artifact_menu.set(None); show_right.set(true); right_tab.set(RightTab::Provenance); }>
+                                                            {move || t(locale.get(), "artifact.provenance")}</button>
+                                                        <button type="button" class="rp-tile-menu-item"
+                                                            on:click=move |_| { artifact_menu.set(None); download_artifact(dw.clone()); }>
+                                                            {move || t(locale.get(), "artifact.download")}</button>
+                                                    </div>
+                                                }
+                                            })}
+                                        }.into_view()
+                                    });
                                     view! {
-                                        <button class="rp-tile" class:active=move || sel_artifact.get() == i
-                                            data-artifact-name=name.clone()
-                                            on:click=move |_| sel_artifact.set(i)>
-                                            <span class="rp-tile-text">
-                                                <span class="rp-tile-name">{name}</span>
-                                                <span class="rp-tile-meta">{meta}</span>
-                                            </span>
-                                            <span class=format!("rp-badge {}", kind)>{kind.clone()}</span>
-                                        </button>
+                                        <div class="rp-tile" class:active=move || sel_artifact.get() == i
+                                            data-artifact-name=name.clone()>
+                                            <button type="button" class="rp-tile-main"
+                                                on:click=move |_| {
+                                                    artifact_menu.set(None);
+                                                    if let Some((path, kind)) = &file_click {
+                                                        if opens_in_modal(kind) {
+                                                            modal_artifact.set(Some((path.clone(), name_click.clone(), kind.clone())));
+                                                            return;
+                                                        }
+                                                    }
+                                                    sel_artifact.set(i);
+                                                }>
+                                                <span class="rp-tile-text">
+                                                    <span class="rp-tile-name">{name}</span>
+                                                    <span class="rp-tile-meta">{meta}</span>
+                                                </span>
+                                                <span class=format!("rp-badge {}", kind)>{kind.clone()}</span>
+                                            </button>
+                                            {tools}
+                                        </div>
                                     }.into_view()
                                 }).collect_view();
                                 let arts_for_view = arts.clone();
@@ -4067,23 +4150,27 @@ fn App() -> impl IntoView {
                                             let sel = sel_artifact.get().min(arts.len().saturating_sub(1));
                                             let cur = arts[sel].clone();
                                             let dom_id = format!("rp-{sel}");
+                                            // image/pdf/csv aren't rendered inline — offer the modal viewer.
+                                            let modal_file = if let PreviewData::File { path, kind } = &cur.data {
+                                                opens_in_modal(kind).then(|| (path.clone(), cur.name.clone(), kind.clone()))
+                                            } else {
+                                                None
+                                            };
                                             view! {
                                                 <div class="rp-view">
                                                     <div class="rp-view-head">
                                                         <span class=format!("rp-badge {}", cur.kind)>{cur.kind.to_string()}</span>
                                                         <span class="rp-view-name">{cur.name.clone()}</span>
-                                                        {matches!(&cur.data, PreviewData::File { kind, .. } if kind=="image"||kind=="pdf").then(|| {
-                                                            let (name, data) = (cur.name.clone(), cur.data.clone());
-                                                            view! {
-                                                                <div class="spacer"></div>
-                                                                <button class="icon-btn" title=move || t(locale.get(), "artifact.expand")
-                                                                    on:click=move |_| if let PreviewData::File { path, kind } = &data {
-                                                                        modal_artifact.set(Some((path.clone(), name.clone(), kind.clone())));
-                                                                    }>"⤢"</button>
-                                                            }
-                                                        })}
                                                     </div>
-                                                    {artifact_preview(&cur, dom_id, loc)}
+                                                    {match modal_file {
+                                                        Some((p, n, k)) => view! {
+                                                            <button class="rp-open-viewer" type="button"
+                                                                on:click=move |_| modal_artifact.set(Some((p.clone(), n.clone(), k.clone())))>
+                                                                {move || t(locale.get(), "artifact.open_viewer")}
+                                                            </button>
+                                                        }.into_view(),
+                                                        None => artifact_preview(&cur, dom_id, loc).into_view(),
+                                                    }}
                                                 </div>
                                             }
                                         }}
