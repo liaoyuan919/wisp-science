@@ -5,11 +5,12 @@
 use crate::context::{image_content, ContextManager};
 use crate::output::{StreamSinkAdapter, ToolEnvAdapter};
 use crate::Output;
+use crate::provenance;
 use anyhow::Result;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use wisp_llm::{Content, Provider};
-use wisp_tools::Registry;
+use wisp_tools::{Registry, ToolEnv};
 
 pub async fn agent_loop(
     ctx: &mut ContextManager,
@@ -73,7 +74,35 @@ pub async fn agent_loop(
         for tc in &comp.tool_calls {
             let name = tc.function.name.clone();
             let args = tc.args_value();
+            let producing = provenance::is_producing(&name);
+            let root = producing.then(|| env.project_root().to_path_buf());
+            let before = if let Some(root) = root.clone() {
+                tokio::task::spawn_blocking(move || provenance::snapshot(&root))
+                    .await
+                    .unwrap_or_default()
+            } else {
+                Default::default()
+            };
             let result = tools.run(&name, &args, &env).await;
+            if let Some(root) = &root {
+                let root2 = root.clone();
+                let after = tokio::task::spawn_blocking(move || provenance::snapshot(&root2))
+                    .await
+                    .unwrap_or_default();
+                let source = provenance::source_of(&name, &args);
+                let (written, read) = provenance::diff(&before, &after, root, &source);
+                if !written.is_empty() {
+                    output.provenance(&provenance::ProvenanceRecord {
+                        tool: name.clone(),
+                        language: provenance::language_of(&name),
+                        source,
+                        output: result.content.clone(),
+                        success: result.success,
+                        files_written: written,
+                        files_read: read,
+                    });
+                }
+            }
             let content = if let Some(img) = &result.image {
                 image_content(&img.label, &img.data_url)
             } else {

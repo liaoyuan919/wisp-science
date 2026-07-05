@@ -1324,6 +1324,107 @@ fn RpCodeView(lang: String, body: String) -> impl IntoView {
     }
 }
 
+/// Click-to-expand modal for a produced artifact: shows the full-size
+/// image/PDF plus tabbed provenance (Code/Log/Inputs/Environment) fetched
+/// from `get_artifact_provenance`. Provenance is best-effort — a `None`
+/// result (or any empty field within it) renders an empty state; the image
+/// itself never depends on provenance being present.
+#[component]
+fn ArtifactModal(
+    path: String,
+    name: String,
+    kind: String,
+    session: Option<String>,
+    on_close: Callback<()>,
+    on_open_path: Callback<(String, String)>, // open an input file (path, kind)
+) -> impl IntoView {
+    let locale = use_locale();
+    let prov = create_rw_signal(None::<ArtifactProvenance>);
+    let loaded = create_rw_signal(false);
+    let tab = create_rw_signal("code");
+    let dom_id = unique_dom_id("amodal");
+    {
+        let path = path.clone();
+        spawn_local(async move {
+            let arg = to_value(&serde_json::json!({ "sessionId": session, "path": path })).unwrap();
+            let v = invoke("get_artifact_provenance", arg).await;
+            prov.set(serde_wasm_bindgen::from_value::<Option<ArtifactProvenance>>(v).ok().flatten());
+            loaded.set(true);
+        });
+    }
+    let path_head = path.clone();
+    view! {
+        <div class="overlay" on:click=move |_| on_close.call(())>
+            <div class="modal artifact-modal" on:click=|ev| ev.stop_propagation()>
+                <div class="am-head">
+                    <span class="am-name">{name.clone()}</span>
+                    <div class="spacer"></div>
+                    <button class="icon-btn" title=move || t(locale.get(), "right.close")
+                        on:click=move |_| on_close.call(())>"×"</button>
+                </div>
+                <div class="am-figure">
+                    {if kind == "image" || kind == "pdf" {
+                        view! { <FilePreview dom_id=dom_id path=path_head.clone() kind=kind.clone() /> }.into_view()
+                    } else {
+                        view! { <p class="rp-path hint">{path_head.clone()}</p> }.into_view()
+                    }}
+                </div>
+                <div class="am-tabs">
+                    {["code","log","inputs","env"].iter().map(|k| {
+                        let k = *k;
+                        let label_key = format!("artifact.tab.{k}");
+                        view! {
+                            <button class="am-tab" class:active=move || tab.get()==k
+                                on:click=move |_| tab.set(k)>
+                                {move || t(locale.get(), &label_key)}</button>
+                        }
+                    }).collect_view()}
+                </div>
+                <div class="am-panel">
+                    {move || {
+                        let loc = locale.get();
+                        if !loaded.get() { return view! { <div class="rp-heavy">{t(loc,"loading")}</div> }.into_view(); }
+                        let Some(p) = prov.get() else {
+                            return view! { <div class="am-empty">{t(loc,"artifact.none")}</div> }.into_view();
+                        };
+                        match tab.get() {
+                            "code" => view! { <RpCodeView lang=p.language.clone() body=p.code.clone() /> }.into_view(),
+                            "log" => view! { <pre class="am-log">{p.output.clone()}</pre> }.into_view(),
+                            "inputs" => view! {
+                                <div class="am-inputs">
+                                    {p.inputs.iter().map(|i| {
+                                        let ip = i.path.clone();
+                                        let linkable = i.produced_here;
+                                        let open = on_open_path;
+                                        view! {
+                                            <button class="am-input" class:linkable=linkable
+                                                on:click=move |_| if linkable {
+                                                    let kind = file_kind(&ip).unwrap_or("text").to_string();
+                                                    open.call((ip.clone(), kind));
+                                                }>
+                                                {i.path.clone()}</button>
+                                        }
+                                    }).collect_view()}
+                                </div>
+                            }.into_view(),
+                            _ => match p.env.clone() {
+                                None => view! { <div class="am-empty">{t(loc,"artifact.env.none")}</div> }.into_view(),
+                                Some(env) => view! {
+                                    <table class="am-env">
+                                        {env.packages.iter().map(|pk| view! {
+                                            <tr><td>{pk.name.clone()}</td><td>{pk.version.clone()}</td></tr>
+                                        }).collect_view()}
+                                    </table>
+                                }.into_view(),
+                            },
+                        }
+                    }}
+                </div>
+            </div>
+        </div>
+    }
+}
+
 fn composer_text_from_user_message(text: &str) -> String {
     const SUFFIX: &str = "\n\nUploaded files: ";
     text.split_once(SUFFIX)
@@ -1917,6 +2018,7 @@ fn App() -> impl IntoView {
             .collect::<Vec<_>>()
     });
     let sel_artifact = create_rw_signal(0usize);
+    let modal_artifact = create_rw_signal(None::<(String, String, String)>); // (path, name, kind)
     let right_tab = create_rw_signal(RightTab::Artifacts);
     let show_files = create_rw_signal(false);
     let file_query = create_rw_signal(String::new());
@@ -3789,6 +3891,16 @@ fn App() -> impl IntoView {
                                                     <div class="rp-view-head">
                                                         <span class=format!("rp-badge {}", cur.kind)>{cur.kind.to_string()}</span>
                                                         <span class="rp-view-name">{cur.name.clone()}</span>
+                                                        {matches!(&cur.data, PreviewData::File { kind, .. } if kind=="image"||kind=="pdf").then(|| {
+                                                            let (name, data) = (cur.name.clone(), cur.data.clone());
+                                                            view! {
+                                                                <div class="spacer"></div>
+                                                                <button class="icon-btn" title=move || t(locale.get(), "artifact.expand")
+                                                                    on:click=move |_| if let PreviewData::File { path, kind } = &data {
+                                                                        modal_artifact.set(Some((path.clone(), name.clone(), kind.clone())));
+                                                                    }>"⤢"</button>
+                                                            }
+                                                        })}
                                                     </div>
                                                     {artifact_preview(&cur, dom_id, loc)}
                                                 </div>
@@ -4150,6 +4262,19 @@ fn App() -> impl IntoView {
                     </div>
                 </div>
             </div>
+        })}
+
+        {move || modal_artifact.get().map(|(path, name, kind)| {
+            let session = active_session.get();
+            view! {
+                <ArtifactModal path=path name=name kind=kind session=session
+                    on_close=Callback::new(move |_| modal_artifact.set(None))
+                    on_open_path=Callback::new(move |(p, k): (String, String)| {
+                        open_file.set(Some((p, k)));
+                        right_tab.set(RightTab::File);
+                        modal_artifact.set(None);
+                    }) />
+            }
         })}
         {move || show_settings.get().then(|| view! {
             <div class="overlay">

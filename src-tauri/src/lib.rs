@@ -676,6 +676,10 @@ struct TauriOutput {
     /// and written to SQLite by a background task, so a crash or mid-turn "new
     /// session" no longer discards the whole turn. `None` disables it.
     persist: Option<tokio::sync::mpsc::UnboundedSender<Message>>,
+    /// Provenance sink: each tool-execution record the turn produces is sent here
+    /// and persisted as an `execution_log` row by a background drain task.
+    /// `None` disables it.
+    prov: Option<tokio::sync::mpsc::UnboundedSender<wisp_core::ProvenanceRecord>>,
 }
 
 impl TauriOutput {
@@ -788,6 +792,11 @@ impl Output for TauriOutput {
         }
         if let Some(tx) = &self.persist {
             let _ = tx.send(msg.clone());
+        }
+    }
+    fn provenance(&self, rec: &wisp_core::ProvenanceRecord) {
+        if let Some(tx) = &self.prov {
+            let _ = tx.send(rec.clone());
         }
     }
 }
@@ -1574,6 +1583,41 @@ async fn send_message(
         (handle, tx)
     };
 
+    let (prov_handle, prov_tx) = {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<wisp_core::ProvenanceRecord>();
+        let store = state.store.clone();
+        let app_data = state.app_data.clone();
+        let fid = frame_id.clone();
+        let handle = tokio::spawn(async move {
+            let mut env_hash: Option<String> = None;
+            while let Some(rec) = rx.recv().await {
+                if env_hash.is_none() {
+                    env_hash = capture_env(&store, &app_data).await;
+                }
+                let cell_index = store.next_cell_index(&fid).await.unwrap_or(0);
+                let e = wisp_store::ExecLog {
+                    id: Uuid::new_v4().to_string(),
+                    frame_id: fid.clone(),
+                    cell_index,
+                    tool: rec.tool,
+                    language: rec.language,
+                    source: rec.source,
+                    stdout: rec.output,
+                    stderr: String::new(),
+                    exit_status: if rec.success { "ok".into() } else { "error".into() },
+                    wall_s: None,
+                    files_written: rec.files_written,
+                    files_read: rec.files_read,
+                    env_hash: env_hash.clone(),
+                };
+                if let Err(e) = store.insert_execution_log(&e).await {
+                    tracing::warn!("provenance persist failed: {e}");
+                }
+            }
+        });
+        (handle, tx)
+    };
+
     let output = TauriOutput {
         app: app.clone(),
         frame_id: frame_id.clone(),
@@ -1581,6 +1625,7 @@ async fn send_message(
         awaiting_confirm: state.awaiting_confirm.clone(),
         approvals: state.approvals.clone(),
         persist: Some(persist_tx),
+        prov: Some(prov_tx),
     };
 
     state.running_turns.lock().await.insert(frame_id.clone());
@@ -1598,6 +1643,7 @@ async fn send_message(
             rt.set_last_seq(agent.ctx.messages.len() as i64);
         }
     }
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), prov_handle).await;
     drop(guard);
 
     match result {
@@ -3253,6 +3299,75 @@ fn unique_upload_path(root: &std::path::Path, dir: &str, name: &str) -> std::pat
     root.join(dir).join(name)
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct PipPkg {
+    name: String,
+    #[serde(default)]
+    version: String,
+}
+
+#[derive(serde::Serialize)]
+struct ProvInput {
+    path: String,
+    produced_here: bool,
+}
+
+#[derive(serde::Serialize)]
+struct ProvEnv {
+    name: Option<String>,
+    packages: Vec<PipPkg>,
+}
+
+#[derive(serde::Serialize)]
+struct ArtifactProvenance {
+    code: String,
+    language: String,
+    output: String,
+    exit_status: String,
+    inputs: Vec<ProvInput>,
+    env: Option<ProvEnv>,
+}
+
+/// Normalize a UI path (absolute or relative) to the workspace-relative form used
+/// in `execution_log.files_written`.
+fn to_workspace_rel(root: &std::path::Path, path: &str) -> String {
+    let p = std::path::Path::new(path);
+    p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/")
+}
+
+/// Parse `uv pip list --format=json` / `pip list --format=json` output.
+fn parse_pip_list(json: &str) -> Vec<PipPkg> {
+    serde_json::from_str::<Vec<PipPkg>>(json).unwrap_or_default()
+}
+
+/// Capture the kernel venv's package list once; store it hashed; return the hash.
+/// Non-fatal: any failure returns `None` and the Environment panel shows "unavailable".
+async fn capture_env(store: &wisp_store::Store, app_data: &std::path::Path) -> Option<String> {
+    let venv = app_data.join("python").join(".venv");
+    let python = wisp_python::PythonEnv { venv }.python();
+    let uv = wisp_python::PythonEnv::find_uv()?;
+    let out = tokio::process::Command::new(&uv)
+        .args(["pip", "list", "--format=json", "--python"])
+        .arg(&python)
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() || out.stdout.is_empty() {
+        return None;
+    }
+    let json = String::from_utf8_lossy(&out.stdout).into_owned();
+    let packages = parse_pip_list(&json);
+    if packages.is_empty() {
+        return None;
+    }
+    let packages_json = serde_json::to_string(&packages).ok()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&packages_json, &mut h);
+    let hash = format!("{:016x}", std::hash::Hasher::finish(&h));
+    store.record_env_snapshot(&hash, Some("kernel"), &packages_json).await.ok()?;
+    Some(hash)
+}
+
 async fn register_artifact_at(
     state: &AppState,
     ap: &ActiveProject,
@@ -3319,6 +3434,55 @@ async fn register_artifact(
 ) -> Result<ArtifactInfo, String> {
     let ap = state.active();
     register_artifact_at(&state, &ap, path, content_type).await
+}
+
+/// Provenance for a produced artifact, addressed by workspace path. `None` when the
+/// path has no recorded producing cell (uploads, pre-feature figures) → empty modal.
+#[tauri::command]
+async fn get_artifact_provenance(
+    state: State<'_, AppState>,
+    session_id: Option<String>,
+    path: String,
+) -> Result<Option<ArtifactProvenance>, String> {
+    let frame_id = match session_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(id) => Some(id.to_string()),
+        None => state.active_frame.read().unwrap().clone(),
+    };
+    let Some(fid) = frame_id else { return Ok(None) };
+    let ap = state.active();
+    let rel = to_workspace_rel(&ap.root, &path);
+    let Some(e) = state
+        .store
+        .find_provenance_by_path(&fid, &rel)
+        .await
+        .map_err(|e| format!("{e}"))?
+    else {
+        return Ok(None);
+    };
+    let written = state.store.frame_written_paths(&fid).await.unwrap_or_default();
+    let inputs = e
+        .files_read
+        .iter()
+        .map(|p| ProvInput { path: p.clone(), produced_here: written.contains(p) })
+        .collect();
+    let env = match e.env_hash.as_deref() {
+        Some(h) => state
+            .store
+            .get_env_snapshot(h)
+            .await
+            .ok()
+            .flatten()
+            .map(|(name, pj)| ProvEnv { name, packages: parse_pip_list(&pj) }),
+        None => None,
+    };
+    Ok(Some(ArtifactProvenance {
+        code: e.source,
+        language: e.language,
+        output: e.stdout,
+        exit_status: e.exit_status,
+        inputs,
+        env,
+    }))
 }
 
 /// Tell the webview whether we're in dev (keep native context menu / DevTools).
@@ -3491,6 +3655,7 @@ pub fn run() {
             missing_files,
             upload_file,
             register_artifact,
+            get_artifact_provenance,
             get_project_info,
             get_capabilities,
             list_memory,
@@ -3711,5 +3876,31 @@ mod tests {
         })
         .unwrap();
         assert_eq!(j["transport"]["kind"], "http");
+    }
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+    #[test]
+    fn parse_pip_list_reads_name_version() {
+        let json = r#"[{"name":"numpy","version":"1.26.0"},{"name":"pandas","version":"2.2.0"}]"#;
+        let pkgs = parse_pip_list(json);
+        assert_eq!(pkgs.len(), 2);
+        assert_eq!(pkgs[0].name, "numpy");
+        assert_eq!(pkgs[1].version, "2.2.0");
+        assert!(parse_pip_list("not json").is_empty());
+    }
+
+    #[test]
+    fn to_workspace_rel_normalizes_absolute_and_passes_relative() {
+        use std::path::Path;
+        let root = Path::new("/proj");
+        // absolute path under root → stripped to workspace-relative
+        assert_eq!(to_workspace_rel(root, "/proj/out/fig.png"), "out/fig.png");
+        // already-relative path → passed through unchanged
+        assert_eq!(to_workspace_rel(root, "out/fig.png"), "out/fig.png");
+        // path not under root → left as-is (strip_prefix fails, falls through)
+        assert_eq!(to_workspace_rel(root, "/other/x.png"), "/other/x.png");
     }
 }
