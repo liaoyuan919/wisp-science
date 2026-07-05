@@ -58,7 +58,7 @@ impl ProviderConfig {
             api_key: api_key.into(),
             model: model.into(),
             anthropic_version: "2023-06-01".into(),
-            max_tokens: 4096,
+            max_tokens: 8192,
             reasoning_effort: None,
         }
     }
@@ -73,7 +73,7 @@ impl ProviderConfig {
             api_key: api_key.into(),
             model: model.into(),
             anthropic_version: "2023-06-01".into(),
-            max_tokens: 4096,
+            max_tokens: 8192,
             reasoning_effort: None,
         }
     }

@@ -129,7 +129,7 @@ impl Default for Settings {
             has_api_key: false,
             locale: Locale::En.code().into(),
             workspace_dir: String::new(),
-            max_tokens: 4096,
+            max_tokens: 8192,
             reasoning_effort: String::new(),
         }
     }

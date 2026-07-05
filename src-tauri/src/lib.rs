@@ -847,7 +847,7 @@ async fn load_locale(store: &Store) -> String {
 fn default_max_tokens(provider: &str) -> u64 {
     match normalized_provider(provider).as_str() {
         "anthropic" => 8192,
-        _ => 4096,
+        _ => 8192,
     }
 }
 
