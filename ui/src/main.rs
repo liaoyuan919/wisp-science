@@ -601,7 +601,7 @@ fn profile_to_form(m: &ModelProfile) -> ModelForm {
         provider: m.provider.clone(),
         api_url: m.api_url.clone(),
         model: m.model.clone(),
-        max_tokens: if m.max_tokens >= 16 { m.max_tokens } else { 4096 },
+        max_tokens: if m.max_tokens >= 16 { m.max_tokens } else { 8192 },
         reasoning_effort: m.reasoning_effort.clone(),
     }
 }
@@ -612,7 +612,7 @@ fn new_model_form() -> ModelForm {
         provider: "openai".into(),
         api_url: api_url.into(),
         model: model.into(),
-        max_tokens: 4096,
+        max_tokens: 8192,
         ..Default::default()
     }
 }
@@ -4423,7 +4423,7 @@ fn App() -> impl IntoView {
                                                         on:input=move|ev| model_form.update(|o| if let Some(o)=o {
                                                             o.max_tokens = dom_value(&ev).parse().unwrap_or(0);
                                                         })
-                                                        prop:value=move || model_form.get().map(|f| f.max_tokens.to_string()).unwrap_or_else(|| "4096".into()) />
+                                                        prop:value=move || model_form.get().map(|f| f.max_tokens.to_string()).unwrap_or_else(|| "8192".into()) />
                                                 </label>
                                                 <label>{move || t(locale.get(), "settings.reasoning_effort")}
                                                     <select
