@@ -3900,6 +3900,15 @@ fn App() -> impl IntoView {
             </div>
 
             <div class="composer">
+                {move || stopping_session.get().is_some().then(|| view! {
+                    <div class="stopping-toast">
+                        <span class="stopping-spinner"></span>
+                        <div class="stopping-text">
+                            <strong>{move || t(locale.get(), "composer.stopping")}</strong>
+                            <span>{move || t(locale.get(), "composer.stopping_hint")}</span>
+                        </div>
+                    </div>
+                })}
                 <div class="composer-inner"
                     class:composer-dragover=move || drag_over.get()
                     on:dragover=on_drag_over
@@ -5597,17 +5606,6 @@ fn App() -> impl IntoView {
                 </div>
             </div>
         }.into_view())}
-
-        {move || stopping_session.get().is_some().then(|| view! {
-            <div class="stopping-toast"
-                style=move || format!("bottom:{}px", (composer_h.get() - 92.0).max(80.0))>
-                <span class="stopping-spinner"></span>
-                <div class="stopping-text">
-                    <strong>{move || t(locale.get(), "composer.stopping")}</strong>
-                    <span>{move || t(locale.get(), "composer.stopping_hint")}</span>
-                </div>
-            </div>
-        })}
 
         {move || show_add_host.get().then(|| view! {
             <div class="overlay">
