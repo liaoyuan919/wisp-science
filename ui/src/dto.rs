@@ -34,7 +34,16 @@ pub(crate) enum ChatItem {
     QueuedUser(String),
     Assistant { text: String, model: Option<String> },
     Reasoning(String),
-    Tool { name: String, ok: Option<bool>, input: String, output: String },
+    Tool {
+        name: String,
+        ok: Option<bool>,
+        input: String,
+        output: String,
+        /// Wall-clock start (ms) while the tool is running; cleared on result.
+        started_at_ms: Option<u64>,
+        /// Elapsed ms from tool call card to result.
+        duration_ms: Option<u64>,
+    },
     /// Inline tool-approval card (replaces the old centered modal).
     ApprovalPending { tool: String, preview: String, message: String },
     Review(String),
@@ -52,7 +61,9 @@ impl ChatItem {
             Self::QueuedUser(s) => (1u8, s).hash(&mut h),
             Self::Assistant { text, model } => (2u8, text, model).hash(&mut h),
             Self::Reasoning(s) => (3u8, s).hash(&mut h),
-            Self::Tool { name, ok, input, output } => (4u8, name, ok, input, output).hash(&mut h),
+            Self::Tool { name, ok, input, output, duration_ms, .. } => {
+                (4u8, name, ok, input, output, duration_ms).hash(&mut h)
+            }
             Self::ApprovalPending { tool, preview, message } => (6u8, tool, preview, message).hash(&mut h),
             Self::Review(s) => (5u8, s).hash(&mut h),
         }
@@ -196,6 +207,8 @@ impl LoadedItem {
                 ok: self.ok,
                 input: String::new(),
                 output: self.text,
+                started_at_ms: None,
+                duration_ms: None,
             },
             _ => ChatItem::Assistant { text: self.text, model: self.model_name },
         }

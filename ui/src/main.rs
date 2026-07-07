@@ -18,7 +18,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use text::{
     dom_value, event_target_checked, event_target_input, event_target_value, extract_href_from_tag,
-    fasta_seq_count, file_kind, format_bytes, html_escape, is_external_href, is_separator,
+    fasta_seq_count, file_kind, format_bytes, format_duration_ms, html_escape, is_external_href, is_separator,
     is_table_row, join_path, md_inline_to_html, md_to_html, next_artifact_id, normalize_path,
     opens_in_system_browser, parent_path, parse_csv_line, provider_defaults, provider_value, split_row, tool_lang,
     unique_dom_id,
@@ -41,6 +41,22 @@ enum FolderModal {
 enum UiConfirm {
     DeleteFolder(String),
     DeleteSession(String),
+}
+
+fn now_ms() -> u64 {
+    js_sys::Date::now() as u64
+}
+
+fn step_tool_meta(locale: Locale, duration_ms: Option<u64>, ok: Option<bool>, lines: usize) -> Option<String> {
+    let dur = duration_ms.map(format_duration_ms);
+    let line_label = (ok == Some(true) && lines > 0)
+        .then(|| tf(locale, "chat.step_lines", &[("n", &lines.to_string())]));
+    match (dur, line_label) {
+        (Some(d), Some(l)) => Some(format!("{d} · {l}")),
+        (Some(d), None) => Some(d),
+        (None, Some(l)) => Some(l),
+        (None, None) => None,
+    }
 }
 
 fn allow_drop(ev: &web_sys::DragEvent) {
@@ -550,7 +566,14 @@ fn append_stdout_chunk(items: &mut Vec<ChatItem>, chunk: String) {
             return;
         }
     }
-    items.insert(queue_start, ChatItem::Tool { name: "stdout".into(), ok: None, input: String::new(), output: chunk });
+    items.insert(queue_start, ChatItem::Tool {
+        name: "stdout".into(),
+        ok: None,
+        input: String::new(),
+        output: chunk,
+        started_at_ms: None,
+        duration_ms: None,
+    });
 }
 
 // --- Streaming delta batching (#65) ------------------------------------------
@@ -2388,18 +2411,35 @@ fn App() -> impl IntoView {
             AgentEvent::Reasoning { frame_id, delta } => queue(frame_id, PendingDelta::Reasoning(delta)),
             AgentEvent::ToolCall { frame_id, name, preview } => { flush_now(); route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
                 let idx = trailing_queue_start(v);
-                v.insert(idx, ChatItem::Tool { name, ok: None, input: preview, output: String::new() });
+                v.insert(idx, ChatItem::Tool {
+                    name,
+                    ok: None,
+                    input: preview,
+                    output: String::new(),
+                    started_at_ms: Some(now_ms()),
+                    duration_ms: None,
+                });
             }) }
             AgentEvent::ToolResult { frame_id, name, ok, content } => { flush_now(); route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
                 let queue_start = trailing_queue_start(v);
                 let idx = v[..queue_start].iter().rposition(|c| matches!(c, ChatItem::Tool { name: n, ok: None, .. } if n == &name));
                 if let Some(i) = idx {
-                    if let ChatItem::Tool { ok: o, output, .. } = &mut v[i] {
+                    if let ChatItem::Tool { ok: o, output, started_at_ms, duration_ms, .. } = &mut v[i] {
                         *o = Some(ok);
                         *output = content.clone();
+                        if let Some(start) = started_at_ms.take() {
+                            *duration_ms = Some(now_ms().saturating_sub(start));
+                        }
                     }
                 } else {
-                    v.insert(queue_start, ChatItem::Tool { name: name.clone(), ok: Some(ok), input: String::new(), output: content.clone() });
+                    v.insert(queue_start, ChatItem::Tool {
+                        name: name.clone(),
+                        ok: Some(ok),
+                        input: String::new(),
+                        output: content.clone(),
+                        started_at_ms: None,
+                        duration_ms: None,
+                    });
                 }
                 if name == "attempt_completion" && ok {
                     promote_assistant_text(v, &content);
@@ -4441,7 +4481,7 @@ fn App() -> impl IntoView {
                         RightTab::Provenance => {
                             let loc = locale.get();
                             let tools: Vec<_> = items.get().iter().filter_map(|it| match it {
-                                ChatItem::Tool { name, ok, input, output } => Some((name.clone(), *ok, input.clone(), output.clone())),
+                                ChatItem::Tool { name, ok, input, output, .. } => Some((name.clone(), *ok, input.clone(), output.clone())),
                                 _ => None,
                             }).collect();
                             if tools.is_empty() {
@@ -5877,11 +5917,16 @@ enum ThreadRow {
 fn render_steps_group(items: Vec<ChatItem>, live: bool) -> impl IntoView {
     let locale = use_locale();
     let n_tools = items.iter().filter(|c| matches!(c, ChatItem::Tool { .. })).count();
+    let total_ms: u64 = items.iter().filter_map(|c| match c {
+        ChatItem::Tool { duration_ms: Some(d), .. } => Some(*d),
+        _ => None,
+    }).sum();
     let title = move || {
         if live { t(locale.get(), "chat.steps_running").to_string() }
         else if n_tools == 1 { t(locale.get(), "chat.steps_1").to_string() }
         else { tf(locale.get(), "chat.steps_n", &[("n", &n_tools.to_string())]) }
     };
+    let total_label = (!live && total_ms > 0).then(|| format_duration_ms(total_ms));
     let open = create_rw_signal(live);
     let rows = items.into_iter().map(|it| match it {
         ChatItem::Reasoning(text) => {
@@ -5896,7 +5941,7 @@ fn render_steps_group(items: Vec<ChatItem>, live: bool) -> impl IntoView {
                 </div>
             }.into_view()
         }
-        ChatItem::Tool { name, ok, input, output } => {
+        ChatItem::Tool { name, ok, input, output, duration_ms, .. } => {
             let sopen = create_rw_signal(ok.is_none() && live);
             let detail: String = input
                 .lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim()
@@ -5908,9 +5953,8 @@ fn render_steps_group(items: Vec<ChatItem>, live: bool) -> impl IntoView {
                 Some(false) => view! { <span class="step-icon fail">"✗"</span> }.into_view(),
                 None => view! { <span class="step-icon run"><span class="run-dot"></span></span> }.into_view(),
             };
-            let meta = (ok == Some(true) && lines > 0).then(|| view! {
-                <span class="step-meta">{move || tf(locale.get(), "chat.step_lines", &[("n", &lines.to_string())])}</span>
-            });
+            let meta_text = step_tool_meta(locale.get(), duration_ms, ok, lines);
+            let meta = meta_text.map(|text| view! { <span class="step-meta">{text}</span> });
             view! {
                 <div class="step" class:open=move || sopen.get() class=("no-body", !has_body)>
                     <div class="step-head" on:click=move |_| { if has_body { sopen.update(|o| *o = !*o) } }>
@@ -5935,6 +5979,7 @@ fn render_steps_group(items: Vec<ChatItem>, live: bool) -> impl IntoView {
             <div class="steps-head" on:click=move |_| open.update(|o| *o = !*o)>
                 <span class="steps-chevron"></span>
                 <span class="steps-title">{title}</span>
+                {total_label.map(|label| view! { <span class="steps-meta">{label}</span> })}
             </div>
             <div class="steps-body">{rows}</div>
         </div>
@@ -6012,7 +6057,7 @@ fn render_item(
                 </details>
             }.into_view()
         }
-        ChatItem::Tool { name, ok, input, output } => view! {
+        ChatItem::Tool { name, ok, input, output, .. } => view! {
             <ToolBlock name=name.clone() ok=*ok input=input.clone() output=output.clone() />
         }.into_view(),
         ChatItem::ApprovalPending { tool, preview, message: _ } => view! {

@@ -55,6 +55,23 @@ pub(crate) fn parent_path(path: &str) -> String {
     }
 }
 
+/// Human-readable duration for tool/step timing labels (e.g. `850ms`, `15s`).
+pub(crate) fn format_duration_ms(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{}s", ms / 1000)
+    } else {
+        let mins = ms / 60_000;
+        let secs = (ms % 60_000) / 1000;
+        if secs == 0 {
+            format!("{mins}m")
+        } else {
+            format!("{mins}m {secs}s")
+        }
+    }
+}
+
 pub(crate) fn format_bytes(n: u64) -> String {
     if n < 1024 { format!("{n} B") }
     else if n < 1024 * 1024 { format!("{:.1} KB", n as f64 / 1024.0) }
