@@ -5650,7 +5650,7 @@ checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
 
 [[package]]
 name = "wisp-cli"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5669,7 +5669,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-core"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5688,7 +5688,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-llm"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5704,7 +5704,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-mcp"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5720,11 +5720,11 @@ dependencies = [
 
 [[package]]
 name = "wisp-paths"
-version = "0.5.2"
+version = "0.5.3"
 
 [[package]]
 name = "wisp-python"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5741,7 +5741,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-skills"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "async-trait",
  "serde",
@@ -5756,7 +5756,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-store"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5772,7 +5772,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-tauri"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5804,7 +5804,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-tools"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "async-trait",
