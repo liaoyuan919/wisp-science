@@ -27,6 +27,22 @@ pub struct ModelProfile {
     pub max_tokens: u64,
     #[serde(default)]
     pub reasoning_effort: String,
+    #[serde(default)]
+    pub runner_command: String,
+    #[serde(default)]
+    pub runner_profile: String,
+    #[serde(default = "default_runner_sandbox")]
+    pub runner_sandbox: String,
+    #[serde(default)]
+    pub runner_web_search: bool,
+    #[serde(default)]
+    pub runner_claude_command: String,
+    #[serde(default)]
+    pub runner_claude_port: String,
+}
+
+fn default_runner_sandbox() -> String {
+    "danger-full-access".into()
 }
 
 const PROFILES_KEY: &str = "model_profiles";
@@ -204,6 +220,12 @@ async fn ensure(store: &wisp_store::Store) -> Vec<ModelProfile> {
         active: false,
         max_tokens,
         reasoning_effort,
+        runner_command: String::new(),
+        runner_profile: String::new(),
+        runner_sandbox: default_runner_sandbox(),
+        runner_web_search: false,
+        runner_claude_command: String::new(),
+        runner_claude_port: String::new(),
     };
     let profiles = vec![default];
     let _ = save_raw(store, &profiles).await;
@@ -253,6 +275,37 @@ pub async fn active_config(store: &wisp_store::Store) -> (String, String, String
     (p.provider, p.api_url, p.model, key_for(&p.id))
 }
 
+pub async fn active_runner_settings(
+    store: &wisp_store::Store,
+) -> crate::local_runner::LocalRunnerSettings {
+    let profiles = ensure(store).await;
+    let id = active_id(store, &profiles).await;
+    let p = profiles
+        .iter()
+        .find(|p| p.id == id)
+        .cloned()
+        .unwrap_or_else(|| profiles[0].clone());
+    crate::local_runner::LocalRunnerSettings {
+        command: p.runner_command,
+        profile: p.runner_profile,
+        sandbox: p.runner_sandbox,
+        web_search: p.runner_web_search,
+        model: p.model,
+        claude_command: p.runner_claude_command,
+    }
+}
+
+pub async fn active_runner_claude_port(store: &wisp_store::Store) -> String {
+    let profiles = ensure(store).await;
+    let id = active_id(store, &profiles).await;
+    profiles
+        .iter()
+        .find(|p| p.id == id)
+        .or_else(|| profiles.first())
+        .map(|p| p.runner_claude_port.clone())
+        .unwrap_or_default()
+}
+
 /// Update the active profile's provider/api_url/model/label. The classic Settings
 /// form now edits whichever model is active, rather than a single global config.
 pub async fn set_active_fields(
@@ -261,6 +314,12 @@ pub async fn set_active_fields(
     api_url: &str,
     model: &str,
     label: &str,
+    runner_command: &str,
+    runner_profile: &str,
+    runner_sandbox: &str,
+    runner_web_search: bool,
+    runner_claude_command: &str,
+    runner_claude_port: &str,
 ) -> Result<(), String> {
     let mut profiles = ensure(store).await;
     let id = active_id(store, &profiles).await;
@@ -268,6 +327,12 @@ pub async fn set_active_fields(
         p.provider = provider.to_string();
         p.api_url = api_url.to_string();
         p.model = model.to_string();
+        p.runner_command = runner_command.to_string();
+        p.runner_profile = runner_profile.to_string();
+        p.runner_sandbox = default_runner_sandbox_for(runner_sandbox);
+        p.runner_web_search = runner_web_search;
+        p.runner_claude_command = runner_claude_command.trim().to_string();
+        p.runner_claude_port = runner_claude_port.trim().to_string();
         let alias = label.trim();
         p.label = if alias.is_empty() {
             model.to_string()
@@ -276,6 +341,13 @@ pub async fn set_active_fields(
         };
     }
     save_raw(store, &profiles).await
+}
+
+pub fn default_runner_sandbox_for(raw: &str) -> String {
+    match raw.trim() {
+        "read-only" | "workspace-write" | "danger-full-access" => raw.trim().to_string(),
+        _ => default_runner_sandbox(),
+    }
 }
 
 /// Display alias for the active profile (shown in the composer picker).
@@ -389,15 +461,20 @@ pub async fn save_model(
     mut profile: ModelProfile,
     key: Option<String>,
 ) -> Result<Vec<ModelProfile>, String> {
+    let is_runner = crate::local_runner::is_local_runner(&profile.provider);
     if profile.model.trim().is_empty() {
         return Err("Model is required.".into());
     }
-    if profile.api_url.trim().is_empty() {
+    if !is_runner && profile.api_url.trim().is_empty() {
         return Err("API URL is required.".into());
     }
     let mut profiles = ensure(&state.store).await;
     if profile.label.trim().is_empty() {
         profile.label = profile.model.clone();
+    }
+    profile.runner_sandbox = default_runner_sandbox_for(&profile.runner_sandbox);
+    if is_runner {
+        profile.api_url.clear();
     }
     if profile.id.trim().is_empty() {
         profile.id = fresh_id(&profiles);
@@ -490,6 +567,12 @@ mod tests {
                 active: false,
                 max_tokens: 0,
                 reasoning_effort: String::new(),
+                runner_command: String::new(),
+                runner_profile: String::new(),
+                runner_sandbox: default_runner_sandbox(),
+                runner_web_search: false,
+                runner_claude_command: String::new(),
+                runner_claude_port: String::new(),
             },
             ModelProfile {
                 id: "m2".into(),
@@ -501,6 +584,12 @@ mod tests {
                 active: false,
                 max_tokens: 0,
                 reasoning_effort: String::new(),
+                runner_command: String::new(),
+                runner_profile: String::new(),
+                runner_sandbox: default_runner_sandbox(),
+                runner_web_search: false,
+                runner_claude_command: String::new(),
+                runner_claude_port: String::new(),
             },
         ];
         assert_eq!(fresh_id(&existing), "m3");

@@ -85,6 +85,11 @@ test("uploaded file shows up in the artifacts panel after send", async ({ page }
   await expect(page.locator(".composer-attachment.ready")).toHaveText("counts.csv");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("Hello from mock wisp-science.")).toBeVisible({ timeout: 10_000 });
+  await expect.poll(async () => page.evaluate(() => {
+    const calls = ((window as any).__skillInvokeLog ?? []).filter((c: any) => c.cmd === "send_message");
+    const args = calls.at(-1)?.args;
+    return args instanceof Map ? Object.fromEntries(args) : (args ?? null);
+  })).toMatchObject({ attachments: ["uploads/counts.csv"] });
   // The right panel starts collapsed; open it to see the collected artifact.
   await page.getByRole("button", { name: "Toggle panel" }).click();
   // The upload path lives in the user turn; the panel must pick it up from there.
@@ -187,6 +192,11 @@ test("provider switch fills current API defaults", async ({ page }) => {
   await providerSelect(page).selectOption("anthropic");
   await expect(page.getByLabel("API URL")).toHaveValue("https://api.anthropic.com");
   await expect(page.getByLabel("Model")).toHaveValue("claude-sonnet-5");
+  await providerSelect(page).selectOption("codex_cli");
+  await expect(page.getByLabel("API URL")).toHaveCount(0);
+  await expect(page.getByLabel("Runner command")).toBeVisible();
+  await expect(page.getByLabel("Runner sandbox")).toHaveValue("danger-full-access");
+  await expect(page.getByText(/without Wisp approvals/i)).toBeVisible();
 });
 
 test("model form input keeps focus while typing (#62)", async ({ page }) => {
