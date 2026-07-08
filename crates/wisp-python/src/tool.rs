@@ -12,6 +12,8 @@ pub struct ReplTool {
     client: Arc<Mutex<KernelClient>>,
 }
 
+const PYTHON_TOOL_DESCRIPTION: &str = "Execute Python code in a persistent REPL. Variables, imports, and loaded data persist across calls. Return values of expressions are printed. Use this for analysis, data loading, plotting, and computation when required packages already exist. Do not use this as a package installer; if dependencies are missing, set up a project-local pixi environment or use local-env-setup first.";
+
 impl ReplTool {
     pub fn new(client: KernelClient) -> Self {
         Self {
@@ -53,7 +55,7 @@ impl Tool for ReplTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema::new(
             "python",
-            "Execute Python code in a persistent REPL. Variables, imports, and loaded data persist across calls. Return values of expressions are printed. Use this for analysis, data loading, plotting, and any computation.",
+            PYTHON_TOOL_DESCRIPTION,
             json!({
                 "type": "object",
                 "properties": {
@@ -87,5 +89,17 @@ impl Tool for ReplTool {
             }
             Err(e) => ToolResult::fail(format!("python error: {e}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PYTHON_TOOL_DESCRIPTION;
+
+    #[test]
+    fn python_description_keeps_package_setup_out_of_the_repl() {
+        assert!(PYTHON_TOOL_DESCRIPTION.contains("Do not use this as a package installer"));
+        assert!(PYTHON_TOOL_DESCRIPTION.contains("project-local pixi"));
+        assert!(PYTHON_TOOL_DESCRIPTION.contains("local-env-setup"));
     }
 }

@@ -1,7 +1,7 @@
 //! Layered system-prompt assembly, ported from mangopi-cli's `SystemPrompt`.
 //!
 //! Sections: base intro, safety, built-in rules, tool guidance, skills
-//! guidance, user rules (memory), environment. Windows/PowerShell-flavored.
+//! guidance, user rules (memory), environment.
 
 use std::path::Path;
 use wisp_skills::SkillIndex;
@@ -43,11 +43,19 @@ read the exact version from inside a turn, and point them to Settings — never 
 Use the instructions below and the tools available to you to assist the user.\n\
 IMPORTANT: Never generate or guess URLs unless you are confident they help the user with their work. \
 For file paths, prefer absolute paths when possible. If you need to read a directory, use the `shell` tool \
-(`Get-ChildItem`) because the `read` tool cannot read directories.".into()
+with the current platform's directory-listing command because the `read` tool cannot read directories.".into()
     }
 
     fn safety() -> String {
         "## Safety\n\nDestructive commands and any access outside the project root require explicit user confirmation.\n".into()
+    }
+
+    fn shell_name() -> &'static str {
+        if cfg!(target_os = "windows") {
+            "PowerShell"
+        } else {
+            "POSIX sh"
+        }
     }
 
     fn builtin_rules() -> String {
@@ -60,11 +68,19 @@ For file paths, prefer absolute paths when possible. If you need to read a direc
 
     fn tool_guidance() -> String {
         "## Tool Selection\n\n\
-Use the dedicated tool when one exists (read/write/edit/search/grep/attempt_completion). Reach for **shell** only when no dedicated tool fits — it runs PowerShell on Windows with a 60s timeout.\n\
+Use the dedicated tool when one exists (read/write/edit/search/grep/attempt_completion). Reach for **shell** only when no dedicated tool fits — it runs PowerShell on Windows and POSIX `sh` on macOS/Linux, with a 60s timeout.\n\
 Use **edit** (not write) for small in-place changes; ensure `old` is unique or pass `all=true`.\n\
 Use **view_image** for screenshots, UI mockups, error screens, and diagrams. The `read` tool auto-routes image files (.png/.jpg/.jpeg/.gif/.webp) to vision, but call `view_image` directly when the path is computed.\n\
-Use **python** (the `repl` tool, when available) for persistent Python execution — variables persist across cells.\n\
+Write shell commands for the OS in the Environment section. Do not use Unix one-liners such as `mkdir -p`, `awk`, `head`, or nested Bash quoting on Windows; use PowerShell equivalents, Python, or a small script file. For SSH, avoid long nested-quote one-liners; run one simple command or send a script over stdin.\n\
+Use **python** (the `repl` tool, when available) for persistent Python execution — variables persist across cells. Put multi-line Python in one valid cell, and prefer pandas/Python over shell `awk` for tabular analysis.\n\
 Always finish with **attempt_completion** to present the final result.\n".into()
+    }
+
+    fn environment_guidance() -> String {
+        "## Python And Local Environments\n\n\
+Use the existing **python** tool for ordinary analysis when its imports are already available. Do not hunt for random system Python installs with repeated `where`/`Get-Command` probes, and do not install packages into an arbitrary global Python.\n\
+When packages or a project-specific scientific stack are needed, call `use_skill` for `local-env-setup` first. For local bioinformatics/scientific package work, prefer a project-local **pixi** environment: `pixi init`, `pixi add ...`, then `pixi run python ...` from the project directory.\n\
+Before any `pip`, `uv`, `npm`, or `pixi add` download, consider the user's network. If mainland-China or corporate-mirror access is likely or requested, configure PyPI/uv and pixi conda/PyPI mirrors first; otherwise use defaults.\n".into()
     }
 
     fn skills_guidance(&self) -> String {
@@ -89,8 +105,9 @@ Always finish with **attempt_completion** to present the final result.\n".into()
             std::env::consts::OS.to_string()
         };
         format!(
-            "## Environment\n- Working directory: {}\n- Operating system: {os}\n- Host: wisp-science (Rust)\n- Shell: PowerShell\n",
-            self.project_root.display()
+            "## Environment\n- Working directory: {}\n- Operating system: {os}\n- Host: wisp-science (Rust)\n- Shell: {}\n",
+            self.project_root.display(),
+            Self::shell_name()
         )
     }
 
@@ -100,6 +117,7 @@ Always finish with **attempt_completion** to present the final result.\n".into()
             Self::safety(),
             Self::builtin_rules(),
             Self::tool_guidance(),
+            Self::environment_guidance(),
             self.skills_guidance(),
         ];
         if let Some(hosts) = &self.compute_hosts {
@@ -152,6 +170,52 @@ mod tests {
         assert!(
             out.contains("wisp-science's Settings"),
             "model-agnostic guidance missing:\n{out}"
+        );
+    }
+
+    #[test]
+    fn environment_reports_the_actual_shell_family() {
+        let skills = SkillIndex::default();
+        let out = SystemPrompt::new(std::path::Path::new("/tmp"), &skills, None).assemble();
+        let expected = if cfg!(target_os = "windows") {
+            "- Shell: PowerShell"
+        } else {
+            "- Shell: POSIX sh"
+        };
+        assert!(out.contains(expected), "shell environment mismatch:\n{out}");
+    }
+
+    #[test]
+    fn prompt_prefers_pixi_and_mirrors_for_local_env_setup() {
+        let skills = SkillIndex::default();
+        let out = SystemPrompt::new(std::path::Path::new("/tmp"), &skills, None).assemble();
+        assert!(
+            out.contains("local-env-setup"),
+            "env setup skill guidance missing:\n{out}"
+        );
+        assert!(
+            out.contains("project-local **pixi** environment"),
+            "pixi-first local env guidance missing:\n{out}"
+        );
+        assert!(
+            out.contains("mirrors first"),
+            "mirror guidance missing:\n{out}"
+        );
+    }
+
+    #[test]
+    fn prompt_warns_against_cross_shell_one_liners() {
+        let skills = SkillIndex::default();
+        let out = SystemPrompt::new(std::path::Path::new("/tmp"), &skills, None).assemble();
+        assert!(
+            out.contains("current platform's directory-listing command"),
+            "directory listing guidance should be platform-neutral:\n{out}"
+        );
+        assert!(out.contains("mkdir -p"), "mkdir guidance missing:\n{out}");
+        assert!(out.contains("awk"), "awk guidance missing:\n{out}");
+        assert!(
+            out.contains("nested-quote one-liners"),
+            "ssh quoting guidance missing:\n{out}"
         );
     }
 }

@@ -46,6 +46,15 @@ async fn next_stderr_line(
 
 pub struct ShellTool;
 
+fn shell_description() -> String {
+    let shell = if cfg!(target_os = "windows") {
+        "PowerShell"
+    } else {
+        "POSIX sh"
+    };
+    format!("Execute a shell command via {shell} (60s timeout) and return stdout/stderr. Reach for this only when no dedicated tool fits. Write commands for this OS; avoid cross-shell one-liners and use Python or pixi for package-heavy scientific work.")
+}
+
 #[async_trait]
 impl Tool for ShellTool {
     fn name(&self) -> &str {
@@ -54,7 +63,7 @@ impl Tool for ShellTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema::new(
             "shell",
-            "Execute a shell command via PowerShell on Windows (60s timeout) and return stdout/stderr. Reach for this only when no dedicated tool fits.",
+            &shell_description(),
             json!({
                 "type": "object",
                 "properties": {
@@ -187,5 +196,26 @@ impl Tool for ShellTool {
         } else {
             body
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool::Tool;
+
+    #[test]
+    fn shell_schema_names_the_actual_shell_and_pixi_escape_hatch() {
+        let desc = ShellTool.schema().function.description;
+        let shell = if cfg!(target_os = "windows") {
+            "PowerShell"
+        } else {
+            "POSIX sh"
+        };
+        assert!(desc.contains(shell), "shell family missing: {desc}");
+        assert!(
+            desc.contains("pixi"),
+            "scientific env guidance missing: {desc}"
+        );
     }
 }
