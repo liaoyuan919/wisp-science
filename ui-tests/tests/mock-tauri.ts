@@ -52,6 +52,11 @@ export function tauriMock(): void {
       active: true,
       max_tokens: 4096,
       reasoning_effort: "",
+      runner_command: "",
+      runner_profile: "",
+      runner_sandbox: "danger-full-access",
+      runner_web_search: false,
+      runner_claude_command: "",
     },
   ];
   const executionContexts = [
@@ -152,7 +157,20 @@ export function tauriMock(): void {
           case "open_project_window":
             return `proj-${arg("id")}`;
           case "get_settings":
-            return { provider: "", api_url: "https://api.deepseek.com", model: "deepseek-v4-pro", has_api_key: true, locale: "en", max_tokens: 4096, reasoning_effort: "" };
+            return {
+              provider: "",
+              api_url: "https://api.deepseek.com",
+              model: "deepseek-v4-pro",
+              has_api_key: true,
+              locale: "en",
+              max_tokens: 4096,
+              reasoning_effort: "",
+              runner_command: "",
+              runner_profile: "",
+              runner_sandbox: "danger-full-access",
+              runner_web_search: false,
+              runner_claude_command: "",
+            };
           case "list_models":
             return mockModels;
           case "list_ssh_hosts":
@@ -375,7 +393,19 @@ export function parallelMock(): void {
           case "create_project":
             return { id: "default", name: project.name, workspace_dir: project.root, session_count: 0, updated_at: 1, running_count: 0, needs_you_count: 0 };
           case "delete_project": return null;
-          case "get_settings": return { provider: "openai", api_url: "https://api.deepseek.com", model: "deepseek-v4-pro", label: "deepseek-v4-pro", has_api_key: true, locale: "en" };
+          case "get_settings": return {
+            provider: "openai",
+            api_url: "https://api.deepseek.com",
+            model: "deepseek-v4-pro",
+            label: "deepseek-v4-pro",
+            has_api_key: true,
+            locale: "en",
+            runner_command: "",
+            runner_profile: "",
+            runner_sandbox: "danger-full-access",
+            runner_web_search: false,
+            runner_claude_command: "",
+          };
           case "get_project_info": return project;
           case "get_onboarding_state": return { show: false, has_api_key: true };
           case "get_capabilities": return { skills: [], mcp_servers: [], memory_files: [], project };

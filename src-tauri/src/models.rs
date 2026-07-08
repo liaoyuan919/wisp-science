@@ -27,6 +27,20 @@ pub struct ModelProfile {
     pub max_tokens: u64,
     #[serde(default)]
     pub reasoning_effort: String,
+    #[serde(default)]
+    pub runner_command: String,
+    #[serde(default)]
+    pub runner_profile: String,
+    #[serde(default = "default_runner_sandbox")]
+    pub runner_sandbox: String,
+    #[serde(default)]
+    pub runner_web_search: bool,
+    #[serde(default)]
+    pub runner_claude_command: String,
+}
+
+fn default_runner_sandbox() -> String {
+    "danger-full-access".into()
 }
 
 const PROFILES_KEY: &str = "model_profiles";
@@ -57,21 +71,32 @@ fn secret_get(name: &str) -> String {
     if let Some(v) = secret_cache().lock().unwrap().get(name) {
         return v.clone();
     }
-    let v = wisp_store::secrets::Secret::get(name).ok().unwrap_or_default();
-    secret_cache().lock().unwrap().insert(name.to_string(), v.clone());
+    let v = wisp_store::secrets::Secret::get(name)
+        .ok()
+        .unwrap_or_default();
+    secret_cache()
+        .lock()
+        .unwrap()
+        .insert(name.to_string(), v.clone());
     v
 }
 
 fn secret_set(name: &str, value: &str) -> Result<(), String> {
     wisp_store::secrets::Secret::set(name, value).map_err(|e| e.to_string())?;
-    secret_cache().lock().unwrap().insert(name.to_string(), value.to_string());
+    secret_cache()
+        .lock()
+        .unwrap()
+        .insert(name.to_string(), value.to_string());
     Ok(())
 }
 
 fn secret_del(name: &str) -> Result<(), String> {
     let r = wisp_store::secrets::Secret::delete(name).map_err(|e| e.to_string());
     // Remember "absent" so existence checks don't re-hit (and re-prompt) the keyring.
-    secret_cache().lock().unwrap().insert(name.to_string(), String::new());
+    secret_cache()
+        .lock()
+        .unwrap()
+        .insert(name.to_string(), String::new());
     r
 }
 
@@ -88,10 +113,26 @@ struct Credential {
 }
 
 const CREDENTIALS: &[Credential] = &[
-    Credential { id: "openalex_api_key", secret: "openalex_api_key", env: "OPENALEX_API_KEY" },
-    Credential { id: "infinisynapse_api_key", secret: "infinisynapse_api_key", env: "INFINISYNAPSE_API_KEY" },
-    Credential { id: "ncbi_api_key", secret: "ncbi_api_key", env: "NCBI_API_KEY" },
-    Credential { id: "ncbi_email", secret: "ncbi_email", env: "NCBI_EMAIL" },
+    Credential {
+        id: "openalex_api_key",
+        secret: "openalex_api_key",
+        env: "OPENALEX_API_KEY",
+    },
+    Credential {
+        id: "infinisynapse_api_key",
+        secret: "infinisynapse_api_key",
+        env: "INFINISYNAPSE_API_KEY",
+    },
+    Credential {
+        id: "ncbi_api_key",
+        secret: "ncbi_api_key",
+        env: "NCBI_API_KEY",
+    },
+    Credential {
+        id: "ncbi_email",
+        secret: "ncbi_email",
+        env: "NCBI_EMAIL",
+    },
 ];
 
 fn credential(id: &str) -> Option<&'static Credential> {
@@ -204,6 +245,11 @@ async fn ensure(store: &wisp_store::Store) -> Vec<ModelProfile> {
         active: false,
         max_tokens,
         reasoning_effort,
+        runner_command: String::new(),
+        runner_profile: String::new(),
+        runner_sandbox: default_runner_sandbox(),
+        runner_web_search: false,
+        runner_claude_command: String::new(),
     };
     let profiles = vec![default];
     let _ = save_raw(store, &profiles).await;
@@ -253,6 +299,26 @@ pub async fn active_config(store: &wisp_store::Store) -> (String, String, String
     (p.provider, p.api_url, p.model, key_for(&p.id))
 }
 
+pub async fn active_runner_settings(
+    store: &wisp_store::Store,
+) -> crate::local_runner::LocalRunnerSettings {
+    let profiles = ensure(store).await;
+    let id = active_id(store, &profiles).await;
+    let p = profiles
+        .iter()
+        .find(|p| p.id == id)
+        .cloned()
+        .unwrap_or_else(|| profiles[0].clone());
+    crate::local_runner::LocalRunnerSettings {
+        command: p.runner_command,
+        profile: p.runner_profile,
+        sandbox: p.runner_sandbox,
+        web_search: p.runner_web_search,
+        model: p.model,
+        claude_command: p.runner_claude_command,
+    }
+}
+
 /// Update the active profile's provider/api_url/model/label. The classic Settings
 /// form now edits whichever model is active, rather than a single global config.
 pub async fn set_active_fields(
@@ -261,6 +327,11 @@ pub async fn set_active_fields(
     api_url: &str,
     model: &str,
     label: &str,
+    runner_command: &str,
+    runner_profile: &str,
+    runner_sandbox: &str,
+    runner_web_search: bool,
+    runner_claude_command: &str,
 ) -> Result<(), String> {
     let mut profiles = ensure(store).await;
     let id = active_id(store, &profiles).await;
@@ -268,6 +339,11 @@ pub async fn set_active_fields(
         p.provider = provider.to_string();
         p.api_url = api_url.to_string();
         p.model = model.to_string();
+        p.runner_command = runner_command.to_string();
+        p.runner_profile = runner_profile.to_string();
+        p.runner_sandbox = default_runner_sandbox_for(runner_sandbox);
+        p.runner_web_search = runner_web_search;
+        p.runner_claude_command = runner_claude_command.trim().to_string();
         let alias = label.trim();
         p.label = if alias.is_empty() {
             model.to_string()
@@ -276,6 +352,13 @@ pub async fn set_active_fields(
         };
     }
     save_raw(store, &profiles).await
+}
+
+pub fn default_runner_sandbox_for(raw: &str) -> String {
+    match raw.trim() {
+        "read-only" | "workspace-write" | "danger-full-access" => raw.trim().to_string(),
+        _ => default_runner_sandbox(),
+    }
 }
 
 /// Display alias for the active profile (shown in the composer picker).
@@ -389,15 +472,20 @@ pub async fn save_model(
     mut profile: ModelProfile,
     key: Option<String>,
 ) -> Result<Vec<ModelProfile>, String> {
+    let is_runner = crate::local_runner::is_local_runner(&profile.provider);
     if profile.model.trim().is_empty() {
         return Err("Model is required.".into());
     }
-    if profile.api_url.trim().is_empty() {
+    if !is_runner && profile.api_url.trim().is_empty() {
         return Err("API URL is required.".into());
     }
     let mut profiles = ensure(&state.store).await;
     if profile.label.trim().is_empty() {
         profile.label = profile.model.clone();
+    }
+    profile.runner_sandbox = default_runner_sandbox_for(&profile.runner_sandbox);
+    if is_runner {
+        profile.api_url.clear();
     }
     if profile.id.trim().is_empty() {
         profile.id = fresh_id(&profiles);
@@ -490,6 +578,11 @@ mod tests {
                 active: false,
                 max_tokens: 0,
                 reasoning_effort: String::new(),
+                runner_command: String::new(),
+                runner_profile: String::new(),
+                runner_sandbox: default_runner_sandbox(),
+                runner_web_search: false,
+                runner_claude_command: String::new(),
             },
             ModelProfile {
                 id: "m2".into(),
@@ -501,6 +594,11 @@ mod tests {
                 active: false,
                 max_tokens: 0,
                 reasoning_effort: String::new(),
+                runner_command: String::new(),
+                runner_profile: String::new(),
+                runner_sandbox: default_runner_sandbox(),
+                runner_web_search: false,
+                runner_claude_command: String::new(),
             },
         ];
         assert_eq!(fresh_id(&existing), "m3");
@@ -523,7 +621,9 @@ mod tests {
     #[test]
     fn credential_registry_roundtrip() {
         store_credential("ncbi_email", "me@lab.org").unwrap();
-        assert!(credential_status().iter().any(|(id, ok)| id == "ncbi_email" && *ok));
+        assert!(credential_status()
+            .iter()
+            .any(|(id, ok)| id == "ncbi_email" && *ok));
         assert!(service_env()
             .iter()
             .any(|(k, v)| k == "NCBI_EMAIL" && v == "me@lab.org"));

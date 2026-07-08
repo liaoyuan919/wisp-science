@@ -135,6 +135,16 @@ pub(crate) struct Settings {
     pub(crate) max_tokens: u64,
     #[serde(default)]
     pub(crate) reasoning_effort: String,
+    #[serde(default)]
+    pub(crate) runner_command: String,
+    #[serde(default)]
+    pub(crate) runner_profile: String,
+    #[serde(default)]
+    pub(crate) runner_sandbox: String,
+    #[serde(default)]
+    pub(crate) runner_web_search: bool,
+    #[serde(default)]
+    pub(crate) runner_claude_command: String,
 }
 
 impl Default for Settings {
@@ -149,6 +159,11 @@ impl Default for Settings {
             workspace_dir: String::new(),
             max_tokens: 8192,
             reasoning_effort: String::new(),
+            runner_command: String::new(),
+            runner_profile: String::new(),
+            runner_sandbox: "danger-full-access".into(),
+            runner_web_search: false,
+            runner_claude_command: String::new(),
         }
     }
 }
@@ -175,6 +190,8 @@ pub(crate) struct SendMessageArgs {
     // send `sessionId` or the backend sees `None` and forks a new conversation.
     pub(crate) session_id: Option<String>,
     pub(crate) message: String,
+    #[serde(default)]
+    pub(crate) attachments: Vec<String>,
     #[serde(default)]
     pub(crate) resume: bool,
 }
@@ -346,6 +363,11 @@ pub(crate) struct ModelProfile {
     #[serde(default)] pub(crate) active: bool,
     #[serde(default)] pub(crate) max_tokens: u64,
     #[serde(default)] pub(crate) reasoning_effort: String,
+    #[serde(default)] pub(crate) runner_command: String,
+    #[serde(default)] pub(crate) runner_profile: String,
+    #[serde(default)] pub(crate) runner_sandbox: String,
+    #[serde(default)] pub(crate) runner_web_search: bool,
+    #[serde(default)] pub(crate) runner_claude_command: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -412,6 +434,11 @@ pub(crate) struct ModelForm {
     pub(crate) model: String,
     pub(crate) max_tokens: u64,
     pub(crate) reasoning_effort: String,
+    pub(crate) runner_command: String,
+    pub(crate) runner_profile: String,
+    pub(crate) runner_sandbox: String,
+    pub(crate) runner_web_search: bool,
+    pub(crate) runner_claude_command: String,
 }
 
 #[derive(Deserialize, Clone)]

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 use wisp_core::{Agent, MemoryManager, Output};
 use wisp_llm::{Message, ProviderConfig};
@@ -16,6 +17,7 @@ use wisp_store::Store;
 
 mod context_probe;
 mod harvest;
+mod local_runner;
 mod models;
 mod review;
 mod run_context;
@@ -608,6 +610,20 @@ struct Settings {
     /// OpenAI reasoning effort (none/minimal/low/medium/high/xhigh). Empty = provider default.
     #[serde(default)]
     reasoning_effort: String,
+    #[serde(default)]
+    runner_command: String,
+    #[serde(default)]
+    runner_profile: String,
+    #[serde(default = "default_runner_sandbox_setting")]
+    runner_sandbox: String,
+    #[serde(default)]
+    runner_web_search: bool,
+    #[serde(default)]
+    runner_claude_command: String,
+}
+
+fn default_runner_sandbox_setting() -> String {
+    "danger-full-access".into()
 }
 
 /// Drop cached per-session agents so the next turn picks up new model settings.
@@ -653,6 +669,7 @@ struct SessionRuntime {
     agent: tokio::sync::Mutex<Option<Agent>>,
     cancel: Arc<AtomicBool>,
     last_seq: StdMutex<i64>,
+    local_child: tokio::sync::Mutex<Option<tokio::process::Child>>,
 }
 
 impl SessionRuntime {
@@ -661,6 +678,7 @@ impl SessionRuntime {
             agent: tokio::sync::Mutex::new(None),
             cancel: Arc::new(AtomicBool::new(false)),
             last_seq: StdMutex::new(0),
+            local_child: tokio::sync::Mutex::new(None),
         }
     }
     fn last_seq(&self) -> i64 {
@@ -894,6 +912,8 @@ fn env_or(key: &str, default: &str) -> String {
 
 fn normalized_provider(provider: &str) -> String {
     match provider.trim() {
+        local_runner::PROVIDER_CODEX_CLI => local_runner::PROVIDER_CODEX_CLI.into(),
+        local_runner::PROVIDER_CLAUDE_CODE => local_runner::PROVIDER_CLAUDE_CODE.into(),
         "anthropic" => "anthropic".into(),
         "openai_responses" | "openai-responses" | "responses" => "openai_responses".into(),
         _ => "openai".into(),
@@ -1316,17 +1336,21 @@ async fn connect_mcp(conn: &McpConnection) -> anyhow::Result<wisp_mcp::McpClient
 }
 
 fn default_api_url(provider: &str) -> &'static str {
-    match provider {
+    match normalized_provider(provider).as_str() {
         "anthropic" => "https://api.anthropic.com",
         "openai_responses" => "https://api.openai.com/v1",
+        local_runner::PROVIDER_CODEX_CLI => "",
+        local_runner::PROVIDER_CLAUDE_CODE => "",
         _ => "https://api.deepseek.com",
     }
 }
 
 fn default_model(provider: &str) -> &'static str {
-    match provider {
+    match normalized_provider(provider).as_str() {
         "anthropic" => "claude-sonnet-5",
         "openai_responses" => "gpt-5.5",
+        local_runner::PROVIDER_CODEX_CLI => "inherit",
+        local_runner::PROVIDER_CLAUDE_CODE => "inherit",
         _ => "deepseek-v4-pro",
     }
 }
@@ -1343,6 +1367,12 @@ fn build_provider_config(
     let api_url = api_url.trim();
     let api_key = api_key.trim();
     let model = model.trim();
+    if local_runner::is_codex_cli(&provider) {
+        return Err("Codex CLI uses the local runner path, not an API provider.".into());
+    }
+    if local_runner::is_claude_code(&provider) {
+        return Err("Claude Code uses the local runner path, not an API provider.".into());
+    }
     if api_url.is_empty() {
         return Err("API URL is required.".into());
     }
@@ -1554,6 +1584,311 @@ async fn ensure_active_frame(
     Ok(id)
 }
 
+async fn run_local_runner_turn(
+    state: &State<'_, AppState>,
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    provider: String,
+    session_id: Option<String>,
+    message: String,
+    attachments: Vec<String>,
+    resume: bool,
+    model_label: String,
+) -> Result<String, String> {
+    let ap = state.active(window.label());
+    let frame_id = match session_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(id) => id.to_string(),
+        None => create_session_frame(&state.store, &ap.id).await?,
+    };
+    state.set_active_frame(window.label(), Some(frame_id.clone()));
+    let rt = {
+        let mut sessions = state.sessions.lock().await;
+        sessions
+            .entry(frame_id.clone())
+            .or_insert_with(|| Arc::new(SessionRuntime::new()))
+            .clone()
+    };
+    let _turn_guard = rt.agent.lock().await;
+    rt.cancel.store(false, Ordering::Relaxed);
+    let mut history = state
+        .store
+        .load_messages(&frame_id)
+        .await
+        .map_err(|e| format!("{e}"))?;
+    rt.set_last_seq(history.len() as i64);
+
+    if !resume {
+        let user = Message::user(message.clone());
+        let seq = rt.last_seq() + 1;
+        state
+            .store
+            .append_message(&frame_id, seq, &user)
+            .await
+            .map_err(|e| format!("{e}"))?;
+        rt.set_last_seq(seq);
+        history.push(user);
+        let _ = app.emit(
+            "agent",
+            AgentEvent::User {
+                frame_id: frame_id.clone(),
+                text: message.clone(),
+            },
+        );
+    }
+
+    let runner_settings = models::active_runner_settings(&state.store).await;
+    let current_request = if resume && message.trim().is_empty() {
+        if local_runner::is_claude_code(&provider) {
+            "Continue the previous Wisp local Claude Code runner task from the conversation context."
+                .to_string()
+        } else {
+            "Continue the previous Wisp local Codex runner task from the conversation context."
+                .to_string()
+        }
+    } else {
+        message.clone()
+    };
+    let prompt = local_runner::build_prompt(&ap.root, &history, &current_request, &attachments);
+    let (runner_name, runner_cmd) = if local_runner::is_claude_code(&provider) {
+        (
+            "Claude Code",
+            local_runner::build_claude_code_command(&runner_settings, &ap.root),
+        )
+    } else {
+        (
+            "Codex CLI",
+            local_runner::build_codex_command(&runner_settings, &ap.root, &attachments),
+        )
+    };
+
+    let mut cmd = tokio::process::Command::new(&runner_cmd.program);
+    cmd.args(&runner_cmd.args)
+        .current_dir(&runner_cmd.cwd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    wisp_tools::process::hide_console_async(&mut cmd);
+    let mut child = cmd.spawn().map_err(|e| {
+        format!(
+            "Failed to launch {runner_name} '{}': {e}. Configure the runner command in Settings.",
+            runner_cmd.program,
+        )
+    })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| format!("{runner_name} stdin unavailable"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("{runner_name} stdout unavailable"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("{runner_name} stderr unavailable"))?;
+    {
+        let mut slot = rt.local_child.lock().await;
+        *slot = Some(child);
+    }
+    let stderr_handle = tokio::spawn(async move {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s).await;
+        s
+    });
+
+    state.running_turns.lock().await.insert(frame_id.clone());
+    let write_result = async {
+        stdin.write_all(prompt.as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+        stdin.shutdown().await
+    }
+    .await;
+    if let Err(e) = write_result {
+        state.running_turns.lock().await.remove(&frame_id);
+        let mut slot = rt.local_child.lock().await;
+        if let Some(mut child) = slot.take() {
+            let _ = child.kill().await;
+        }
+        return Err(format!("Failed to write prompt to {runner_name}: {e}"));
+    }
+    drop(stdin);
+
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    let mut final_text = String::new();
+    let mut error_text: Option<String> = None;
+    loop {
+        line.clear();
+        let n = match reader.read_line(&mut line).await {
+            Ok(n) => n,
+            Err(e) => {
+                state.running_turns.lock().await.remove(&frame_id);
+                let mut slot = rt.local_child.lock().await;
+                if let Some(mut child) = slot.take() {
+                    let _ = child.kill().await;
+                }
+                return Err(format!("Failed to read {runner_name} output: {e}"));
+            }
+        };
+        if n == 0 {
+            break;
+        }
+        let raw = line.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let events = if local_runner::is_claude_code(&provider) {
+            local_runner::parse_claude_jsonl(raw)
+        } else {
+            local_runner::parse_codex_jsonl(raw)
+        };
+        for event in events {
+            emit_local_runner_event(&app, &frame_id, event, &mut final_text, &mut error_text);
+        }
+    }
+    let status = {
+        let mut slot = rt.local_child.lock().await;
+        if let Some(mut child) = slot.take() {
+            child.wait().await.map_err(|e| format!("{e}"))?
+        } else {
+            state.running_turns.lock().await.remove(&frame_id);
+            let err = format!("{runner_name} run stopped by user.");
+            let _ = app.emit(
+                "agent",
+                AgentEvent::Error {
+                    frame_id: frame_id.clone(),
+                    message: err.clone(),
+                },
+            );
+            let _ = app.emit(
+                "agent",
+                AgentEvent::Done {
+                    frame_id: frame_id.clone(),
+                },
+            );
+            return Err(err);
+        }
+    };
+    state.running_turns.lock().await.remove(&frame_id);
+    let stderr_text = stderr_handle.await.unwrap_or_default();
+    if !status.success() && error_text.is_none() {
+        error_text = Some(if stderr_text.trim().is_empty() {
+            format!("{runner_name} exited with status {status}")
+        } else {
+            stderr_text.trim().to_string()
+        });
+    }
+
+    if let Some(err) = error_text {
+        let _ = app.emit(
+            "agent",
+            AgentEvent::Error {
+                frame_id: frame_id.clone(),
+                message: err.clone(),
+            },
+        );
+        return Err(err);
+    }
+
+    if final_text.trim().is_empty() {
+        final_text = format!("{runner_name} completed without a final message.");
+    }
+    let mut assistant = Message::assistant(final_text.clone());
+    assistant.model_name = Some(model_label);
+    let seq = rt.last_seq() + 1;
+    state
+        .store
+        .append_message(&frame_id, seq, &assistant)
+        .await
+        .map_err(|e| format!("{e}"))?;
+    rt.set_last_seq(seq);
+    let _ = app.emit(
+        "agent",
+        AgentEvent::Done {
+            frame_id: frame_id.clone(),
+        },
+    );
+    Ok(frame_id)
+}
+
+fn emit_local_runner_event(
+    app: &AppHandle,
+    frame_id: &str,
+    event: local_runner::RunnerEvent,
+    final_text: &mut String,
+    error_text: &mut Option<String>,
+) {
+    match event {
+        local_runner::RunnerEvent::Text(text) => {
+            final_text.push_str(&text);
+            final_text.push('\n');
+            let _ = app.emit(
+                "agent",
+                AgentEvent::Text {
+                    frame_id: frame_id.to_string(),
+                    delta: text,
+                },
+            );
+        }
+        local_runner::RunnerEvent::Reasoning(delta) => {
+            let _ = app.emit(
+                "agent",
+                AgentEvent::Reasoning {
+                    frame_id: frame_id.to_string(),
+                    delta,
+                },
+            );
+        }
+        local_runner::RunnerEvent::ToolCall { name, preview } => {
+            let _ = app.emit(
+                "agent",
+                AgentEvent::ToolCall {
+                    frame_id: frame_id.to_string(),
+                    name,
+                    preview,
+                },
+            );
+        }
+        local_runner::RunnerEvent::ToolResult { name, ok, content } => {
+            let _ = app.emit(
+                "agent",
+                AgentEvent::ToolResult {
+                    frame_id: frame_id.to_string(),
+                    name,
+                    ok,
+                    content,
+                    duration_ms: 0,
+                },
+            );
+        }
+        local_runner::RunnerEvent::Diff { path } => {
+            let _ = app.emit(
+                "agent",
+                AgentEvent::Diff {
+                    frame_id: frame_id.to_string(),
+                    path,
+                },
+            );
+        }
+        local_runner::RunnerEvent::Usage { input, output } => {
+            let _ = app.emit(
+                "agent",
+                AgentEvent::Usage {
+                    frame_id: frame_id.to_string(),
+                    round: 1,
+                    input,
+                    output,
+                    ctx_tokens: 0,
+                    max_context: 0,
+                },
+            );
+        }
+        local_runner::RunnerEvent::Error(msg) => {
+            *error_text = Some(msg);
+        }
+    }
+}
+
 #[tauri::command]
 async fn send_message(
     state: State<'_, AppState>,
@@ -1561,6 +1896,7 @@ async fn send_message(
     window: tauri::WebviewWindow,
     session_id: Option<String>,
     message: String,
+    attachments: Option<Vec<String>>,
     resume: Option<bool>,
 ) -> Result<String, String> {
     let resume = resume.unwrap_or(false);
@@ -1570,6 +1906,34 @@ async fn send_message(
     let (provider, api_url, model, api_key) = load_settings(&state.store).await;
     let (max_tokens, reasoning_effort) = models::active_llm_advanced(&state.store).await;
     let model_label = models::active_label(&state.store).await;
+    if local_runner::is_codex_cli(&provider) {
+        return run_local_runner_turn(
+            &state,
+            app,
+            window,
+            provider.clone(),
+            session_id,
+            message,
+            attachments.unwrap_or_default(),
+            resume,
+            model_label,
+        )
+        .await;
+    }
+    if local_runner::is_claude_code(&provider) {
+        return run_local_runner_turn(
+            &state,
+            app,
+            window,
+            provider.clone(),
+            session_id,
+            message,
+            attachments.unwrap_or_default(),
+            resume,
+            model_label,
+        )
+        .await;
+    }
     let cfg = build_provider_config(
         &provider,
         &api_url,
@@ -1805,6 +2169,9 @@ async fn stop_agent(state: State<'_, AppState>, session_id: Option<String>) -> R
     };
     for rt in targets {
         rt.cancel.store(true, Ordering::Relaxed);
+        if let Some(mut child) = rt.local_child.lock().await.take() {
+            let _ = child.kill().await;
+        }
     }
     Ok(())
 }
@@ -3040,6 +3407,7 @@ async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     let (max_tokens, reasoning_effort) = models::active_llm_advanced(&state.store).await;
     let has_api_key = models::active_has_key(&state.store).await;
     let label = models::active_label(&state.store).await;
+    let runner = models::active_runner_settings(&state.store).await;
     Ok(Settings {
         provider,
         api_url,
@@ -3050,6 +3418,11 @@ async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
         workspace_dir,
         max_tokens,
         reasoning_effort,
+        runner_command: runner.command,
+        runner_profile: runner.profile,
+        runner_sandbox: runner.sandbox,
+        runner_web_search: runner.web_search,
+        runner_claude_command: runner.claude_command,
     })
 }
 
@@ -3058,7 +3431,7 @@ async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Result<
     let provider = normalized_provider(&settings.provider);
     let api_url = settings.api_url.trim();
     let model = settings.model.trim();
-    if api_url.is_empty() {
+    if !local_runner::is_local_runner(&provider) && api_url.is_empty() {
         return Err("API URL is required.".into());
     }
     if model.is_empty() {
@@ -3079,6 +3452,11 @@ async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Result<
         api_url,
         model,
         settings.label.trim(),
+        settings.runner_command.trim(),
+        settings.runner_profile.trim(),
+        settings.runner_sandbox.trim(),
+        settings.runner_web_search,
+        settings.runner_claude_command.trim(),
     )
     .await?;
     let locale = match settings.locale.trim() {
@@ -3184,7 +3562,10 @@ async fn init_agent_infini(api_key: &str) -> Result<(), String> {
     }
     let detail = detail.replace(api_key, "<redacted>");
     if detail.is_empty() {
-        Err(format!("agent_infini init failed with status {}", out.status))
+        Err(format!(
+            "agent_infini init failed with status {}",
+            out.status
+        ))
     } else {
         Err(format!("agent_infini init failed: {detail}"))
     }
@@ -3236,9 +3617,15 @@ async fn validate_settings(
     settings: Settings,
     key: Option<String>,
 ) -> Result<String, String> {
+    let provider_name = normalized_provider(&settings.provider);
+    if local_runner::is_codex_cli(&provider_name) {
+        return Ok("Codex CLI settings saved. Validate with a normal message; this runner uses your local Codex authentication.".into());
+    }
+    if local_runner::is_claude_code(&provider_name) {
+        return Ok("Claude Code settings saved. Validate with a normal message; this runner uses your local Claude Code authentication.".into());
+    }
     let (_, _, _, stored_key) = load_settings(&state.store).await;
     let api_key = effective_api_key(key, stored_key);
-    let provider_name = normalized_provider(&settings.provider);
     let mut cfg = build_provider_config(
         &settings.provider,
         &settings.api_url,

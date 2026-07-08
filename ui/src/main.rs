@@ -367,7 +367,8 @@ fn normalized_settings(mut cfg: Settings) -> Settings {
 }
 
 fn settings_required_error_key(cfg: &Settings, key: &str) -> Option<&'static str> {
-    if cfg.api_url.trim().is_empty() {
+    let is_runner = provider_is_local_runner(&cfg.provider);
+    if !is_runner && cfg.api_url.trim().is_empty() {
         return Some("err.api_url_required");
     }
     if cfg.model.trim().is_empty() {
@@ -375,7 +376,7 @@ fn settings_required_error_key(cfg: &Settings, key: &str) -> Option<&'static str
     }
     let stored = t(Locale::En, "settings.stored_key");
     let has_new_key = !key.trim().is_empty() && !key.starts_with(&stored) && !key.starts_with("(stored");
-    if !cfg.has_api_key && !has_new_key {
+    if !is_runner && !cfg.has_api_key && !has_new_key {
         return Some("err.api_key_required");
     }
     None
@@ -447,11 +448,13 @@ mod tauri_args_tests {
         let v = serde_json::to_value(SendMessageArgs {
             session_id: Some("frame-1".into()),
             message: "hi".into(),
+            attachments: vec!["a.png".into()],
             resume: false,
         })
         .unwrap();
         assert_eq!(v["sessionId"], "frame-1");
         assert_eq!(v["message"], "hi");
+        assert_eq!(v["attachments"][0], "a.png");
         assert!(v.get("session_id").is_none(), "snake_case key would bind to None on the backend");
     }
 
@@ -521,6 +524,19 @@ fn refresh_capabilities(caps: RwSignal<Option<Capabilities>>) {
             caps.set(Some(data));
         }
     });
+}
+
+fn active_model_is_local_runner(models: &[ModelProfile]) -> bool {
+    models
+        .iter()
+        .find(|m| m.active)
+        .or_else(|| models.first())
+        .map(|m| provider_is_local_runner(&m.provider))
+        .unwrap_or(false)
+}
+
+fn provider_is_local_runner(provider: &str) -> bool {
+    matches!(provider_value(provider), "codex_cli" | "claude_code")
 }
 
 fn begin_pending_turn(pending: RwSignal<HashMap<String, usize>>, running: RwSignal<HashSet<String>>, id: &str) {
@@ -800,6 +816,15 @@ fn profile_to_form(m: &ModelProfile) -> ModelForm {
         model: m.model.clone(),
         max_tokens: if m.max_tokens >= 16 { m.max_tokens } else { 8192 },
         reasoning_effort: m.reasoning_effort.clone(),
+        runner_command: m.runner_command.clone(),
+        runner_profile: m.runner_profile.clone(),
+        runner_sandbox: if m.runner_sandbox.is_empty() {
+            "danger-full-access".into()
+        } else {
+            m.runner_sandbox.clone()
+        },
+        runner_web_search: m.runner_web_search,
+        runner_claude_command: m.runner_claude_command.clone(),
     }
 }
 
@@ -810,6 +835,7 @@ fn new_model_form() -> ModelForm {
         api_url: api_url.into(),
         model: model.into(),
         max_tokens: 8192,
+        runner_sandbox: "danger-full-access".into(),
         ..Default::default()
     }
 }
@@ -823,6 +849,15 @@ fn model_form_to_settings(form: &ModelForm, has_api_key: bool) -> Settings {
     cfg.has_api_key = has_api_key;
     cfg.max_tokens = form.max_tokens;
     cfg.reasoning_effort = form.reasoning_effort.clone();
+    cfg.runner_command = form.runner_command.trim().into();
+    cfg.runner_profile = form.runner_profile.trim().into();
+    cfg.runner_sandbox = if form.runner_sandbox.trim().is_empty() {
+        "danger-full-access".into()
+    } else {
+        form.runner_sandbox.trim().into()
+    };
+    cfg.runner_web_search = form.runner_web_search;
+    cfg.runner_claude_command = form.runner_claude_command.trim().into();
     cfg
 }
 
@@ -2722,6 +2757,10 @@ fn App() -> impl IntoView {
         if message.trim().is_empty() || uploading.get() { return; }
         let active = active_session.get();
         if active.as_ref().is_some_and(|id| running.get().contains(id)) {
+            if active_model_is_local_runner(&models.get()) {
+                status.set("Local runner is still running. Stop it or wait for it to finish before sending another message.".into());
+                return;
+            }
             items.update(|v| v.push(ChatItem::QueuedUser(message.clone())));
             force_chat_bottom();
         }
@@ -2758,7 +2797,7 @@ fn App() -> impl IntoView {
             };
             active_session.set(Some(id.clone()));
             begin_pending_turn(pending_turns, running, &id);
-            let arg = to_value(&SendMessageArgs { session_id: Some(id.clone()), message, resume: false }).unwrap();
+            let arg = to_value(&SendMessageArgs { session_id: Some(id.clone()), message, attachments: paths, resume: false }).unwrap();
             match invoke_checked("send_message", arg).await {
                 Ok(_) => {
                     // send_message is awaited for the whole turn, so it resolves only
@@ -2888,6 +2927,7 @@ fn App() -> impl IntoView {
                 let arg = to_value(&SendMessageArgs {
                     session_id: Some(id.clone()),
                     message: String::new(),
+                    attachments: vec![],
                     resume: true,
                 })
                 .unwrap();
@@ -3177,6 +3217,11 @@ fn App() -> impl IntoView {
             "model": form.model.trim(),
             "max_tokens": form.max_tokens,
             "reasoning_effort": form.reasoning_effort.trim(),
+            "runner_command": form.runner_command.trim(),
+            "runner_profile": form.runner_profile.trim(),
+            "runner_sandbox": if form.runner_sandbox.trim().is_empty() { "danger-full-access" } else { form.runner_sandbox.trim() },
+            "runner_web_search": form.runner_web_search,
+            "runner_claude_command": form.runner_claude_command.trim(),
         });
         let key_arg = if key.is_empty() { None } else { Some(key) };
         spawn_local(async move {
@@ -3301,7 +3346,7 @@ fn App() -> impl IntoView {
                 active_session.set(Some(id.clone()));
                 running.update(|r| { r.insert(id.clone()); });
                 refresh_sessions(sessions);
-                let arg = to_value(&SendMessageArgs { session_id: Some(id.clone()), message: text, resume: false }).unwrap();
+                let arg = to_value(&SendMessageArgs { session_id: Some(id.clone()), message: text, attachments: vec![], resume: false }).unwrap();
                 match invoke_checked("send_message", arg).await {
                     // The awaited command resolving is the reliable turn-complete
                     // signal; clear `running` here so a dropped `Done` broadcast
@@ -5297,17 +5342,24 @@ fn App() -> impl IntoView {
                                                                 o.provider = provider_value(&p).into();
                                                                 o.api_url = api_url.into();
                                                                 o.model = model.into();
+                                                                if provider_value(&p) == "codex_cli" && o.runner_sandbox.is_empty() {
+                                                                    o.runner_sandbox = "danger-full-access".into();
+                                                                }
                                                             });
                                                         }
                                                         prop:value=move || model_form.get().map(|f| provider_value(&f.provider).to_string()).unwrap_or_else(|| "openai".into())>
                                                         <option value="openai">{move || t(locale.get(), "settings.provider.openai")}</option>
                                                         <option value="openai_responses">{move || t(locale.get(), "settings.provider.openai_responses")}</option>
                                                         <option value="anthropic">{move || t(locale.get(), "settings.provider.anthropic")}</option>
+                                                        <option value="codex_cli">{move || t(locale.get(), "settings.provider.codex_cli")}</option>
+                                                        <option value="claude_code">{move || t(locale.get(), "settings.provider.claude_code")}</option>
                                                     </select>
                                                 </label>
-                                                <label class="span-2">{move || t(locale.get(), "settings.api_url")}
-                                                    <input prop:value=move || model_form.get().map(|f| f.api_url.clone()).unwrap_or_default()
-                                                        on:input=move |ev| model_form.update(|o| if let Some(o)=o { o.api_url = event_target_input(&ev).value(); }) /></label>
+                                                {move || (model_form.get().map(|f| !provider_is_local_runner(&f.provider)).unwrap_or(true)).then(|| view! {
+                                                    <label class="span-2">{move || t(locale.get(), "settings.api_url")}
+                                                        <input prop:value=move || model_form.get().map(|f| f.api_url.clone()).unwrap_or_default()
+                                                            on:input=move |ev| model_form.update(|o| if let Some(o)=o { o.api_url = event_target_input(&ev).value(); }) /></label>
+                                                })}
                                                 <label>{move || t(locale.get(), "settings.label")}
                                                     <input prop:value=move || model_form.get().map(|f| f.label.clone()).unwrap_or_default()
                                                         placeholder=move || t(locale.get(), "settings.label_ph")
@@ -5342,9 +5394,49 @@ fn App() -> impl IntoView {
                                                         <option value="xhigh">"xhigh"</option>
                                                     </select>
                                                 </label>
-                                                <label class="span-2">{move || t(locale.get(), "settings.api_key")}
-                                                    <input type="password" prop:value=move || model_form_key.get()
-                                                        on:input=move |ev| model_form_key.set(event_target_input(&ev).value()) /></label>
+                                                {move || (model_form.get().map(|f| provider_value(&f.provider) == "codex_cli").unwrap_or(false)).then(|| view! {
+                                                    <div class="span-2 settings-form-grid">
+                                                        <label class="span-2">{move || t(locale.get(), "settings.runner_command")}
+                                                            <input prop:value=move || model_form.get().map(|f| f.runner_command.clone()).unwrap_or_default()
+                                                                placeholder="C:\\Users\\...\\codex.exe"
+                                                                on:input=move |ev| model_form.update(|o| if let Some(o)=o { o.runner_command = event_target_input(&ev).value(); }) /></label>
+                                                        <span class="hint span-2">{move || t(locale.get(), "settings.runner_command_hint")}</span>
+                                                        <label>{move || t(locale.get(), "settings.runner_profile")}
+                                                            <input prop:value=move || model_form.get().map(|f| f.runner_profile.clone()).unwrap_or_default()
+                                                                placeholder="default"
+                                                                on:input=move |ev| model_form.update(|o| if let Some(o)=o { o.runner_profile = event_target_input(&ev).value(); }) /></label>
+                                                        <label>{move || t(locale.get(), "settings.runner_sandbox")}
+                                                            <select
+                                                                on:change=move|ev| model_form.update(|o| if let Some(o)=o { o.runner_sandbox = dom_value(&ev); })
+                                                                prop:value=move || model_form.get().map(|f| if f.runner_sandbox.is_empty() { "danger-full-access".into() } else { f.runner_sandbox }).unwrap_or_else(|| "danger-full-access".into())>
+                                                                <option value="danger-full-access">"danger-full-access"</option>
+                                                                <option value="workspace-write">"workspace-write"</option>
+                                                                <option value="read-only">"read-only"</option>
+                                                            </select>
+                                                        </label>
+                                                        <label class="settings-check span-2">
+                                                            <input type="checkbox"
+                                                                prop:checked=move || model_form.get().map(|f| f.runner_web_search).unwrap_or(false)
+                                                                on:change=move|ev| model_form.update(|o| if let Some(o)=o { o.runner_web_search = event_target_checked(&ev); }) />
+                                                            <span>{move || t(locale.get(), "settings.runner_web_search")}</span>
+                                                        </label>
+                                                        <span class="hint span-2">{move || t(locale.get(), "settings.runner_danger_hint")}</span>
+                                                    </div>
+                                                })}
+                                                {move || (model_form.get().map(|f| provider_value(&f.provider) == "claude_code").unwrap_or(false)).then(|| view! {
+                                                    <div class="span-2 settings-form-grid">
+                                                        <label class="span-2">{move || t(locale.get(), "settings.claude_command")}
+                                                            <input prop:value=move || model_form.get().map(|f| f.runner_claude_command.clone()).unwrap_or_default()
+                                                                placeholder="claude"
+                                                                on:input=move |ev| model_form.update(|o| if let Some(o)=o { o.runner_claude_command = event_target_input(&ev).value(); }) /></label>
+                                                        <span class="hint span-2">{move || t(locale.get(), "settings.claude_command_hint")}</span>
+                                                    </div>
+                                                })}
+                                                {move || (model_form.get().map(|f| !provider_is_local_runner(&f.provider)).unwrap_or(true)).then(|| view! {
+                                                    <label class="span-2">{move || t(locale.get(), "settings.api_key")}
+                                                        <input type="password" prop:value=move || model_form_key.get()
+                                                            on:input=move |ev| model_form_key.set(event_target_input(&ev).value()) /></label>
+                                                })}
                                             </div>
                                             <span class="hint">{move || t(locale.get(), "settings.tip")}</span>
                                             {move || model_form_msg.get().map(|(ok, text)| view! {
