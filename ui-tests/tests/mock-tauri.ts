@@ -57,7 +57,6 @@ export function tauriMock(): void {
       runner_sandbox: "danger-full-access",
       runner_web_search: false,
       runner_claude_command: "",
-      runner_claude_port: "",
     },
   ];
   const executionContexts = [
@@ -171,7 +170,6 @@ export function tauriMock(): void {
               runner_sandbox: "danger-full-access",
               runner_web_search: false,
               runner_claude_command: "",
-              runner_claude_port: "",
             };
           case "list_models":
             return mockModels;
@@ -407,7 +405,6 @@ export function parallelMock(): void {
             runner_sandbox: "danger-full-access",
             runner_web_search: false,
             runner_claude_command: "",
-            runner_claude_port: "",
           };
           case "get_project_info": return project;
           case "get_onboarding_state": return { show: false, has_api_key: true };

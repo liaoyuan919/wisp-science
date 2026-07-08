@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use wisp_llm::{Message, Role};
 
 pub const PROVIDER_CODEX_CLI: &str = "codex_cli";
-pub const PROVIDER_CLAUDE_CODE_DESKTOP: &str = "claude_code_desktop";
+pub const PROVIDER_CLAUDE_CODE: &str = "claude_code";
 
 #[derive(Debug, Clone)]
 pub struct LocalRunnerSettings {
@@ -28,10 +28,22 @@ pub struct LocalRunnerCommand {
 pub enum RunnerEvent {
     Text(String),
     Reasoning(String),
-    ToolCall { name: String, preview: String },
-    ToolResult { name: String, ok: bool, content: String },
-    Diff { path: String },
-    Usage { input: u64, output: u64 },
+    ToolCall {
+        name: String,
+        preview: String,
+    },
+    ToolResult {
+        name: String,
+        ok: bool,
+        content: String,
+    },
+    Diff {
+        path: String,
+    },
+    Usage {
+        input: u64,
+        output: u64,
+    },
     Error(String),
 }
 
@@ -39,12 +51,12 @@ pub fn is_codex_cli(provider: &str) -> bool {
     provider.trim() == PROVIDER_CODEX_CLI
 }
 
-pub fn is_claude_code_desktop(provider: &str) -> bool {
-    provider.trim() == PROVIDER_CLAUDE_CODE_DESKTOP
+pub fn is_claude_code(provider: &str) -> bool {
+    provider.trim() == PROVIDER_CLAUDE_CODE
 }
 
 pub fn is_local_runner(provider: &str) -> bool {
-    is_codex_cli(provider) || is_claude_code_desktop(provider)
+    is_codex_cli(provider) || is_claude_code(provider)
 }
 
 pub fn default_runner_sandbox(raw: &str) -> String {
@@ -310,7 +322,10 @@ pub fn build_prompt(
     out.push_str("- Treat attached files as authoritative input data.\n");
     out.push_str("- Save generated reports, tables, figures, or code artifacts under the project workspace when useful.\n");
     out.push_str("- In the final answer, summarize what you did and mention important output file paths.\n\n");
-    out.push_str(&format!("Project workspace: {}\n\n", project_root.display()));
+    out.push_str(&format!(
+        "Project workspace: {}\n\n",
+        project_root.display()
+    ));
     if !attachments.is_empty() {
         out.push_str("Attached files:\n");
         for path in attachments {
@@ -366,7 +381,11 @@ fn truncate(text: &str, limit: usize) -> String {
         return text.to_string();
     }
     let head = limit.saturating_sub(160);
-    format!("{}\n...[truncated]...\n{}", &text[..floor_boundary(text, head)], &text[floor_boundary(text, text.len().saturating_sub(120))..])
+    format!(
+        "{}\n...[truncated]...\n{}",
+        &text[..floor_boundary(text, head)],
+        &text[floor_boundary(text, text.len().saturating_sub(120))..]
+    )
 }
 
 fn floor_boundary(s: &str, mut i: usize) -> usize {
@@ -738,13 +757,22 @@ mod tests {
         let events = parse_codex_jsonl(
             r#"{"type":"turn.completed","usage":{"input_tokens":7,"output_tokens":3}}"#,
         );
-        assert_eq!(events, vec![RunnerEvent::Usage { input: 7, output: 3 }]);
+        assert_eq!(
+            events,
+            vec![RunnerEvent::Usage {
+                input: 7,
+                output: 3
+            }]
+        );
         let events = parse_codex_jsonl(
             r#"{"type":"item.completed","item":{"type":"message","content":[{"type":"output_text","text":"hello"}]}}"#,
         );
         assert_eq!(events, vec![RunnerEvent::Text("hello".into())]);
         let events = parse_codex_jsonl(r#"{"type":"error","message":"Reconnecting..."}"#);
-        assert_eq!(events, vec![RunnerEvent::Reasoning("Reconnecting...".into())]);
+        assert_eq!(
+            events,
+            vec![RunnerEvent::Reasoning("Reconnecting...".into())]
+        );
     }
 
     #[test]
@@ -762,7 +790,12 @@ mod tests {
         let events = parse_codex_jsonl(
             r#"{"type":"item.completed","item":{"type":"file_change","path":"out.md"}}"#,
         );
-        assert_eq!(events, vec![RunnerEvent::Diff { path: "out.md".into() }]);
+        assert_eq!(
+            events,
+            vec![RunnerEvent::Diff {
+                path: "out.md".into()
+            }]
+        );
     }
 
     #[test]

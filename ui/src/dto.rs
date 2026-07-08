@@ -145,8 +145,6 @@ pub(crate) struct Settings {
     pub(crate) runner_web_search: bool,
     #[serde(default)]
     pub(crate) runner_claude_command: String,
-    #[serde(default)]
-    pub(crate) runner_claude_port: String,
 }
 
 impl Default for Settings {
@@ -166,7 +164,6 @@ impl Default for Settings {
             runner_sandbox: "danger-full-access".into(),
             runner_web_search: false,
             runner_claude_command: String::new(),
-            runner_claude_port: String::new(),
         }
     }
 }
@@ -371,7 +368,6 @@ pub(crate) struct ModelProfile {
     #[serde(default)] pub(crate) runner_sandbox: String,
     #[serde(default)] pub(crate) runner_web_search: bool,
     #[serde(default)] pub(crate) runner_claude_command: String,
-    #[serde(default)] pub(crate) runner_claude_port: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -443,7 +439,6 @@ pub(crate) struct ModelForm {
     pub(crate) runner_sandbox: String,
     pub(crate) runner_web_search: bool,
     pub(crate) runner_claude_command: String,
-    pub(crate) runner_claude_port: String,
 }
 
 #[derive(Deserialize, Clone)]

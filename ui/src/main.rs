@@ -536,7 +536,7 @@ fn active_model_is_local_runner(models: &[ModelProfile]) -> bool {
 }
 
 fn provider_is_local_runner(provider: &str) -> bool {
-    matches!(provider_value(provider), "codex_cli" | "claude_code_desktop")
+    matches!(provider_value(provider), "codex_cli" | "claude_code")
 }
 
 fn begin_pending_turn(pending: RwSignal<HashMap<String, usize>>, running: RwSignal<HashSet<String>>, id: &str) {
@@ -825,7 +825,6 @@ fn profile_to_form(m: &ModelProfile) -> ModelForm {
         },
         runner_web_search: m.runner_web_search,
         runner_claude_command: m.runner_claude_command.clone(),
-        runner_claude_port: m.runner_claude_port.clone(),
     }
 }
 
@@ -859,7 +858,6 @@ fn model_form_to_settings(form: &ModelForm, has_api_key: bool) -> Settings {
     };
     cfg.runner_web_search = form.runner_web_search;
     cfg.runner_claude_command = form.runner_claude_command.trim().into();
-    cfg.runner_claude_port = form.runner_claude_port.trim().into();
     cfg
 }
 
@@ -3224,7 +3222,6 @@ fn App() -> impl IntoView {
             "runner_sandbox": if form.runner_sandbox.trim().is_empty() { "danger-full-access" } else { form.runner_sandbox.trim() },
             "runner_web_search": form.runner_web_search,
             "runner_claude_command": form.runner_claude_command.trim(),
-            "runner_claude_port": form.runner_claude_port.trim(),
         });
         let key_arg = if key.is_empty() { None } else { Some(key) };
         spawn_local(async move {
@@ -5355,7 +5352,7 @@ fn App() -> impl IntoView {
                                                         <option value="openai_responses">{move || t(locale.get(), "settings.provider.openai_responses")}</option>
                                                         <option value="anthropic">{move || t(locale.get(), "settings.provider.anthropic")}</option>
                                                         <option value="codex_cli">{move || t(locale.get(), "settings.provider.codex_cli")}</option>
-                                                        <option value="claude_code_desktop">{move || t(locale.get(), "settings.provider.claude_code_desktop")}</option>
+                                                        <option value="claude_code">{move || t(locale.get(), "settings.provider.claude_code")}</option>
                                                     </select>
                                                 </label>
                                                 {move || (model_form.get().map(|f| !provider_is_local_runner(&f.provider)).unwrap_or(true)).then(|| view! {
@@ -5426,18 +5423,13 @@ fn App() -> impl IntoView {
                                                         <span class="hint span-2">{move || t(locale.get(), "settings.runner_danger_hint")}</span>
                                                     </div>
                                                 })}
-                                                {move || (model_form.get().map(|f| provider_value(&f.provider) == "claude_code_desktop").unwrap_or(false)).then(|| view! {
+                                                {move || (model_form.get().map(|f| provider_value(&f.provider) == "claude_code").unwrap_or(false)).then(|| view! {
                                                     <div class="span-2 settings-form-grid">
                                                         <label class="span-2">{move || t(locale.get(), "settings.claude_command")}
                                                             <input prop:value=move || model_form.get().map(|f| f.runner_claude_command.clone()).unwrap_or_default()
                                                                 placeholder="claude"
                                                                 on:input=move |ev| model_form.update(|o| if let Some(o)=o { o.runner_claude_command = event_target_input(&ev).value(); }) /></label>
                                                         <span class="hint span-2">{move || t(locale.get(), "settings.claude_command_hint")}</span>
-                                                        <label>{move || t(locale.get(), "settings.claude_desktop_port")}
-                                                            <input prop:value=move || model_form.get().map(|f| f.runner_claude_port.clone()).unwrap_or_default()
-                                                                placeholder="5897"
-                                                                on:input=move |ev| model_form.update(|o| if let Some(o)=o { o.runner_claude_port = event_target_input(&ev).value(); }) /></label>
-                                                        <span class="hint span-2">{move || t(locale.get(), "settings.claude_desktop_hint")}</span>
                                                     </div>
                                                 })}
                                                 {move || (model_form.get().map(|f| !provider_is_local_runner(&f.provider)).unwrap_or(true)).then(|| view! {

@@ -620,8 +620,6 @@ struct Settings {
     runner_web_search: bool,
     #[serde(default)]
     runner_claude_command: String,
-    #[serde(default)]
-    runner_claude_port: String,
 }
 
 fn default_runner_sandbox_setting() -> String {
@@ -915,9 +913,7 @@ fn env_or(key: &str, default: &str) -> String {
 fn normalized_provider(provider: &str) -> String {
     match provider.trim() {
         local_runner::PROVIDER_CODEX_CLI => local_runner::PROVIDER_CODEX_CLI.into(),
-        local_runner::PROVIDER_CLAUDE_CODE_DESKTOP => {
-            local_runner::PROVIDER_CLAUDE_CODE_DESKTOP.into()
-        }
+        local_runner::PROVIDER_CLAUDE_CODE => local_runner::PROVIDER_CLAUDE_CODE.into(),
         "anthropic" => "anthropic".into(),
         "openai_responses" | "openai-responses" | "responses" => "openai_responses".into(),
         _ => "openai".into(),
@@ -1344,7 +1340,7 @@ fn default_api_url(provider: &str) -> &'static str {
         "anthropic" => "https://api.anthropic.com",
         "openai_responses" => "https://api.openai.com/v1",
         local_runner::PROVIDER_CODEX_CLI => "",
-        local_runner::PROVIDER_CLAUDE_CODE_DESKTOP => "",
+        local_runner::PROVIDER_CLAUDE_CODE => "",
         _ => "https://api.deepseek.com",
     }
 }
@@ -1354,7 +1350,7 @@ fn default_model(provider: &str) -> &'static str {
         "anthropic" => "claude-sonnet-5",
         "openai_responses" => "gpt-5.5",
         local_runner::PROVIDER_CODEX_CLI => "inherit",
-        local_runner::PROVIDER_CLAUDE_CODE_DESKTOP => "inherit",
+        local_runner::PROVIDER_CLAUDE_CODE => "inherit",
         _ => "deepseek-v4-pro",
     }
 }
@@ -1374,8 +1370,8 @@ fn build_provider_config(
     if local_runner::is_codex_cli(&provider) {
         return Err("Codex CLI uses the local runner path, not an API provider.".into());
     }
-    if local_runner::is_claude_code_desktop(&provider) {
-        return Err("Claude Code Desktop runner is not implemented yet.".into());
+    if local_runner::is_claude_code(&provider) {
+        return Err("Claude Code uses the local runner path, not an API provider.".into());
     }
     if api_url.is_empty() {
         return Err("API URL is required.".into());
@@ -1642,7 +1638,7 @@ async fn run_local_runner_turn(
 
     let runner_settings = models::active_runner_settings(&state.store).await;
     let current_request = if resume && message.trim().is_empty() {
-        if local_runner::is_claude_code_desktop(&provider) {
+        if local_runner::is_claude_code(&provider) {
             "Continue the previous Wisp local Claude Code runner task from the conversation context."
                 .to_string()
         } else {
@@ -1653,7 +1649,7 @@ async fn run_local_runner_turn(
         message.clone()
     };
     let prompt = local_runner::build_prompt(&ap.root, &history, &current_request, &attachments);
-    let (runner_name, runner_cmd) = if local_runner::is_claude_code_desktop(&provider) {
+    let (runner_name, runner_cmd) = if local_runner::is_claude_code(&provider) {
         (
             "Claude Code",
             local_runner::build_claude_code_command(&runner_settings, &ap.root),
@@ -1741,7 +1737,7 @@ async fn run_local_runner_turn(
         if raw.is_empty() {
             continue;
         }
-        let events = if local_runner::is_claude_code_desktop(&provider) {
+        let events = if local_runner::is_claude_code(&provider) {
             local_runner::parse_claude_jsonl(raw)
         } else {
             local_runner::parse_codex_jsonl(raw)
@@ -1924,7 +1920,7 @@ async fn send_message(
         )
         .await;
     }
-    if local_runner::is_claude_code_desktop(&provider) {
+    if local_runner::is_claude_code(&provider) {
         return run_local_runner_turn(
             &state,
             app,
@@ -3427,7 +3423,6 @@ async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
         runner_sandbox: runner.sandbox,
         runner_web_search: runner.web_search,
         runner_claude_command: runner.claude_command,
-        runner_claude_port: models::active_runner_claude_port(&state.store).await,
     })
 }
 
@@ -3462,7 +3457,6 @@ async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Result<
         settings.runner_sandbox.trim(),
         settings.runner_web_search,
         settings.runner_claude_command.trim(),
-        settings.runner_claude_port.trim(),
     )
     .await?;
     let locale = match settings.locale.trim() {
@@ -3568,7 +3562,10 @@ async fn init_agent_infini(api_key: &str) -> Result<(), String> {
     }
     let detail = detail.replace(api_key, "<redacted>");
     if detail.is_empty() {
-        Err(format!("agent_infini init failed with status {}", out.status))
+        Err(format!(
+            "agent_infini init failed with status {}",
+            out.status
+        ))
     } else {
         Err(format!("agent_infini init failed: {detail}"))
     }
@@ -3624,7 +3621,7 @@ async fn validate_settings(
     if local_runner::is_codex_cli(&provider_name) {
         return Ok("Codex CLI settings saved. Validate with a normal message; this runner uses your local Codex authentication.".into());
     }
-    if local_runner::is_claude_code_desktop(&provider_name) {
+    if local_runner::is_claude_code(&provider_name) {
         return Ok("Claude Code settings saved. Validate with a normal message; this runner uses your local Claude Code authentication.".into());
     }
     let (_, _, _, stored_key) = load_settings(&state.store).await;

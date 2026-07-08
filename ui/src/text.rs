@@ -27,7 +27,7 @@ pub(crate) fn dom_value(ev: &web_sys::Event) -> String {
 pub(crate) fn provider_value(provider: &str) -> &'static str {
     match provider.trim() {
         "codex_cli" => "codex_cli",
-        "claude_code_desktop" => "claude_code_desktop",
+        "claude_code" => "claude_code",
         "anthropic" => "anthropic",
         "openai_responses" | "openai-responses" | "responses" => "openai_responses",
         _ => "openai",
@@ -39,7 +39,7 @@ pub(crate) fn provider_defaults(provider: &str) -> (&'static str, &'static str) 
         "anthropic" => ("https://api.anthropic.com", "claude-sonnet-5"),
         "openai_responses" => ("https://api.openai.com/v1", "gpt-5.5"),
         "codex_cli" => ("", "inherit"),
-        "claude_code_desktop" => ("", "inherit"),
+        "claude_code" => ("", "inherit"),
         _ => ("https://api.deepseek.com", "deepseek-v4-pro"),
     }
 }
