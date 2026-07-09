@@ -1473,7 +1473,11 @@ async fn wire_python_and_mcp(
         if parts.len() >= 2 {
             let args: Vec<String> = parts[1..].to_vec();
             match wisp_mcp::McpClient::launch(&parts[0], &args).await {
-                Ok(client) => register_mcp(agent, std::sync::Arc::new(client)).await,
+                Ok(client) => {
+                    if let Some(e) = register_mcp(agent, std::sync::Arc::new(client)).await {
+                        errors.push(e);
+                    }
+                }
                 Err(e) => errors.push(format!("MCP command: {e}")),
             }
         }
@@ -1492,7 +1496,11 @@ async fn wire_python_and_mcp(
         if !all_off {
             match wisp_mcp::McpClient::launch_bio_tools(&env.python(), &pkg, &service_env).await {
                 Ok(client) => {
-                    register_mcp_filtered(agent, std::sync::Arc::new(client), &skip).await
+                    if let Some(e) =
+                        register_mcp_filtered(agent, std::sync::Arc::new(client), &skip).await
+                    {
+                        errors.push(e);
+                    }
                 }
                 Err(e) => errors.push(format!("MCP {pkg}: {e}")),
             }
@@ -1524,14 +1532,21 @@ async fn wire_python_and_mcp(
     results.sort_by_key(|(i, _, _)| *i);
     for (_, name, res) in results {
         match res {
-            Ok(client) => register_mcp(agent, std::sync::Arc::new(client)).await,
+            Ok(client) => {
+                if let Some(e) = register_mcp(agent, std::sync::Arc::new(client)).await {
+                    errors.push(format!("MCP '{name}': {e}"));
+                }
+            }
             Err(e) => errors.push(format!("MCP '{name}': {e}")),
         }
     }
     errors
 }
 
-async fn register_mcp(agent: &mut wisp_core::Agent, client: std::sync::Arc<wisp_mcp::McpClient>) {
+async fn register_mcp(
+    agent: &mut wisp_core::Agent,
+    client: std::sync::Arc<wisp_mcp::McpClient>,
+) -> Option<String> {
     register_mcp_filtered(agent, client, &HashSet::new()).await
 }
 
@@ -1541,7 +1556,7 @@ async fn register_mcp_filtered(
     agent: &mut wisp_core::Agent,
     client: std::sync::Arc<wisp_mcp::McpClient>,
     skip: &HashSet<String>,
-) {
+) -> Option<String> {
     match client.tools_list().await {
         Ok(tools) => {
             for t in tools {
@@ -1550,8 +1565,12 @@ async fn register_mcp_filtered(
                 }
                 agent.add_tool(Box::new(wisp_mcp::McpTool::new(t, client.clone())));
             }
+            None
         }
-        Err(e) => tracing::warn!("mcp tools_list failed: {e}"),
+        Err(e) => {
+            tracing::warn!("mcp tools_list failed: {e}");
+            Some(format!("MCP tools/list: {e}"))
+        }
     }
 }
 
