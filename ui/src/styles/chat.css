@@ -523,14 +523,14 @@ button.stop { display: inline-flex; align-items: center; justify-content: center
 button.stop:hover:not(:disabled) { background: hsl(0 70% 50% / 0.08); border-color: hsl(0 70% 50% / 0.55); }
 button.stop:disabled { opacity: .6; cursor: default; }
 
-.sidechat-pane { position: fixed; z-index: 80; top: 0; right: 0; bottom: 0; width: min(430px, 100vw); display: flex; flex-direction: column; background: var(--bg); border-left: 1px solid var(--border-strong); box-shadow: -10px 0 30px rgba(20, 20, 19, 0.12); }
-.sidechat-head { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 54px; padding: 0 14px 0 18px; border-bottom: 1px solid var(--border); }
+.sidechat-pane { position: fixed; z-index: 80; top: 0; right: 0; bottom: 0; width: min(430px, 100vw); display: flex; flex-direction: column; background: var(--bg-elev); border-left: 1px solid var(--border-strong); box-shadow: -18px 0 42px rgba(20, 20, 19, 0.2); }
+.sidechat-head { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 54px; padding: 0 18px; border-bottom: 1px solid var(--border-strong); background: var(--bg-elev); box-shadow: var(--shadow-sm); }
 .sidechat-title { display: inline-flex; align-items: center; gap: 8px; font-weight: 650; color: var(--text); }
 .sidechat-dot { display: inline-flex; color: var(--text-muted); }
 .sidechat-dot svg { width: 16px; height: 16px; }
-.sidechat-close { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border: none; border-radius: 999px; background: transparent; color: var(--text-muted); font-size: 22px; line-height: 1; cursor: pointer; }
+.sidechat-close { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 30px; height: 30px; border: 1px solid transparent; border-radius: 999px; background: var(--bg-elev); color: var(--text-muted); font-size: 20px; line-height: 1; cursor: pointer; }
 .sidechat-close:hover { background: var(--bg-sunken); color: var(--text); }
-.sidechat-log { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; }
+.sidechat-log { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; background: var(--bg-elev); }
 .sidechat-empty { margin: auto; max-width: 260px; color: var(--text-faint); font-size: 13px; line-height: 1.5; text-align: center; }
 .sidechat-row { display: flex; flex-direction: column; gap: 4px; }
 .sidechat-row.user { align-items: flex-end; }

@@ -91,6 +91,10 @@ test("side chat answers in a temporary side panel and can switch model", async (
 
   const panel = page.locator(".sidechat-pane");
   await expect(panel.getByText("Side answer: what did the main thread miss?")).toBeVisible();
+  await expect(panel).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  const closeBox = await panel.getByRole("button", { name: "Close side chat" }).boundingBox();
+  const panelBox = await panel.boundingBox();
+  expect(closeBox && panelBox && closeBox.x + closeBox.width <= panelBox.x + panelBox.width).toBeTruthy();
   await expect.poll(() => lastInvokeArgs(page, "side_chat")).toMatchObject({
     question: "what did the main thread miss?",
   });
