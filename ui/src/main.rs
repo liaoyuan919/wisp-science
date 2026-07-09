@@ -2016,12 +2016,13 @@ fn compose_icon(kind: &str) -> impl IntoView {
         "plan" => view! { <path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6l1 1 2-2"/><path d="M3 12l1 1 2-2"/><path d="M3 18l1 1 2-2"/> }.into_view(),
         "chat" => view! { <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/><path d="M8 10h8"/><path d="M8 14h5"/> }.into_view(),
         "branch" => view! { <path d="M6 3v6a4 4 0 0 0 4 4h8"/><path d="M18 7v12"/><path d="M14 15l4 4 4-4"/><circle cx="6" cy="3" r="2"/> }.into_view(),
+        "chevron-down" => view! { <path d="m6 9 6 6 6-6"/> }.into_view(),
         "review" => view! { <circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18Z" fill="currentColor" stroke="none"/> }.into_view(),
         "skill" => view! { <path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/> }.into_view(),
         "server" => view! { <rect x="3" y="4" width="18" height="7" rx="1"/><rect x="3" y="13" width="18" height="7" rx="1"/><circle cx="7" cy="7.5" r="0.5" fill="currentColor"/><circle cx="7" cy="16.5" r="0.5" fill="currentColor"/> }.into_view(),
         _ => view! { <path d="M9 18l6-6-6-6"/> }.into_view(), // chevron
     };
-    let size = if kind == "chevron" { "16" } else { "18" };
+    let size = if kind == "chevron" || kind == "chevron-down" { "16" } else { "18" };
     view! {
         <svg width=size height=size viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{body}</svg>
@@ -5591,7 +5592,7 @@ fn App() -> impl IntoView {
                                     aria-label=move || t(locale.get(), "composer.send_options")
                                     title=move || t(locale.get(), "composer.send_options")
                                     on:click=move |_| send_mode_menu_open.update(|o| *o = !*o)>
-                                    "⌄"
+                                    {compose_icon("chevron-down")}
                                 </button>
                                 {move || send_mode_menu_open.get().then(|| view! {
                                     <div class="send-menu-backdrop" on:click=move |_| send_mode_menu_open.set(false)></div>

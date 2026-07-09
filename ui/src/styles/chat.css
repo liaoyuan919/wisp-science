@@ -510,7 +510,8 @@ button.send:hover:not(:disabled) { background: var(--clay-strong); }
 button.send:disabled { opacity: .45; cursor: default; }
 .send-split { position: relative; display: inline-flex; align-items: center; flex: 0 0 auto; }
 .send-split button.send { border-radius: 999px 0 0 999px; }
-.send-menu-toggle { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 32px; border: none; border-left: 1px solid rgba(255,255,255,.28); border-radius: 0 999px 999px 0; background: var(--clay); color: var(--on-clay); font: inherit; font-size: 16px; cursor: pointer; }
+.send-menu-toggle { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 32px; border: none; border-left: 1px solid rgba(255,255,255,.28); border-radius: 0 999px 999px 0; background: var(--clay); color: var(--on-clay); cursor: pointer; }
+.send-menu-toggle svg { width: 16px; height: 16px; stroke-width: 2.25; }
 .send-menu-toggle:hover:not(:disabled) { background: var(--clay-strong); }
 .send-menu-toggle:disabled { opacity: .45; cursor: default; }
 .send-menu-backdrop { position: fixed; inset: 0; z-index: 60; }
