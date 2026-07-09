@@ -2215,7 +2215,16 @@ fn ApprovalCard(
                 {is_plan.then(move || {
                     view! {
                         <Show when=move || show_feedback.get()>
-                            <div class="plan-feedback">
+                            <div class="plan-feedback"
+                                on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                    if ev.key() == "Escape" && !ev.is_composing() {
+                                        // Collapse feedback before the window-level
+                                        // handler rejects the whole plan.
+                                        ev.prevent_default();
+                                        feedback.set(String::new());
+                                        show_feedback.set(false);
+                                    }
+                                }>
                                 <textarea
                                     class="plan-feedback-input"
                                     rows="3"
@@ -2329,6 +2338,24 @@ fn ProjectsScreen(
         });
     };
     let delete_confirmed = delete.clone(); // used by the confirm modal below
+
+    // Local Escape stack — ProjectsScreen owns its own modals, so the App
+    // window listener cannot see `creating` / `pending_delete`.
+    window_event_listener(ev::keydown, move |ev| {
+        let Some(ev) = ev.dyn_ref::<web_sys::KeyboardEvent>() else { return };
+        if ev.key() != "Escape" || ev.default_prevented() || ev.is_composing() {
+            return;
+        }
+        if pending_delete.get().is_some() {
+            ev.prevent_default();
+            pending_delete.set(None);
+            return;
+        }
+        if creating.get() {
+            ev.prevent_default();
+            creating.set(false);
+        }
+    });
 
     view! {
         <div class="projects-screen">
@@ -3994,25 +4021,23 @@ fn App() -> impl IntoView {
         }
     };
 
+    // Escape stack: topmost overlay → menus → drag cancel → right pane →
+    // approval reject last. Composer @-mention and plan-feedback collapse
+    // preventDefault locally so they win before this handler runs.
+    // ProjectsScreen owns its own Escape listener while `show_projects`.
     window_event_listener(ev::keydown, move |ev| {
         let Some(ev) = ev.dyn_ref::<web_sys::KeyboardEvent>() else { return };
         if ev.key() != "Escape" || ev.default_prevented() || ev.is_composing() {
             return;
         }
-
-        if active_session
-            .get()
-            .is_some_and(|_sid| items.get().iter().any(|i| matches!(i, ChatItem::ApprovalPending { .. })))
-        {
-            ev.prevent_default();
-            if let Some(sid) = active_session.get() {
-                respond_confirm.call((sid, false, None));
-            }
+        if show_projects.get() {
             return;
         }
-        if ctx_menu.get().is_some() {
+
+        // --- overlays (most interrupting first) ---
+        if ui_confirm.get().is_some() {
             ev.prevent_default();
-            ctx_menu.set(None);
+            ui_confirm.set(None);
             return;
         }
         if rename_session_target.get().is_some() {
@@ -4025,18 +4050,19 @@ fn App() -> impl IntoView {
             folder_modal.set(None);
             return;
         }
-        if ui_confirm.get().is_some() {
+        if show_add_host.get() {
             ev.prevent_default();
-            ui_confirm.set(None);
+            show_add_host.set(false);
             return;
         }
-        if show_onboarding.get() {
+        if modal_artifact.get().is_some() {
             ev.prevent_default();
-            if onboard_step.get() > 0 {
-                onboard_step.update(|s| *s = s.saturating_sub(1));
-            } else {
-                dismiss_onboarding.call(());
-            }
+            modal_artifact.set(None);
+            return;
+        }
+        if show_proj_settings.get() && !proj_settings_busy.get() {
+            ev.prevent_default();
+            show_proj_settings.set(false);
             return;
         }
         if show_settings.get() && !settings_busy.get() {
@@ -4049,14 +4075,81 @@ fn App() -> impl IntoView {
             show_capabilities.set(false);
             return;
         }
+        if show_onboarding.get() {
+            ev.prevent_default();
+            if onboard_step.get() > 0 {
+                onboard_step.update(|s| *s = s.saturating_sub(1));
+            } else {
+                dismiss_onboarding.call(());
+            }
+            return;
+        }
+
+        // --- menus / popovers ---
+        if ctx_menu.get().is_some() {
+            ev.prevent_default();
+            ctx_menu.set(None);
+            return;
+        }
+        if artifact_menu.get().is_some() {
+            ev.prevent_default();
+            artifact_menu.set(None);
+            return;
+        }
+        if show_proj_menu.get() {
+            ev.prevent_default();
+            show_proj_menu.set(false);
+            return;
+        }
+        if compose_menu_open.get() {
+            ev.prevent_default();
+            compose_menu_open.set(false);
+            return;
+        }
+        if compute_menu_open.get() {
+            ev.prevent_default();
+            compute_menu_open.set(false);
+            return;
+        }
+        if specialist_menu_open.get() {
+            ev.prevent_default();
+            specialist_menu_open.set(false);
+            return;
+        }
+        if model_menu_open.get() {
+            ev.prevent_default();
+            model_menu_open.set(false);
+            return;
+        }
+
+        // --- drag cancel ---
         if dragging.get() {
             ev.prevent_default();
             dragging.set(false);
             return;
         }
+        if composer_dragging.get() {
+            ev.prevent_default();
+            composer_dragging.set(false);
+            return;
+        }
+
+        // --- right pane (only when focus is in-pane or on body) ---
         if show_right.get() && should_close_right_pane_on_escape(ev) {
             ev.prevent_default();
             show_right.set(false);
+            return;
+        }
+
+        // --- approval reject last ---
+        if active_session
+            .get()
+            .is_some_and(|_sid| items.get().iter().any(|i| matches!(i, ChatItem::ApprovalPending { .. })))
+        {
+            ev.prevent_default();
+            if let Some(sid) = active_session.get() {
+                respond_confirm.call((sid, false, None));
+            }
         }
     });
 
