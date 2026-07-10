@@ -235,6 +235,8 @@ pub(crate) struct LoadedItem {
     pub(crate) tool_name: Option<String>,
     pub(crate) ok: Option<bool>,
     #[serde(default)]
+    pub(crate) input: String,
+    #[serde(default)]
     pub(crate) model_name: Option<String>,
 }
 
@@ -246,7 +248,7 @@ impl LoadedItem {
             "tool" => ChatItem::Tool {
                 name: self.tool_name.unwrap_or_else(|| "tool".into()),
                 ok: self.ok,
-                input: String::new(),
+                input: self.input,
                 output: self.text,
                 started_at_ms: None,
                 duration_ms: None,
@@ -268,7 +270,6 @@ pub(crate) enum PreviewData {
     Table(TableData),
     Text(String),
     Markdown(String),
-    Code { lang: String, body: String },
     Latex { tex: String, display: bool },
     File { path: String, kind: String },
     Smiles(String),
@@ -538,6 +539,7 @@ pub(crate) struct OnboardingState {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RightTab {
     Artifacts,
+    Notebook,
     File,
     Provenance,
     Hosts,

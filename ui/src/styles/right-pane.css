@@ -78,6 +78,26 @@
 .run-status.running, .run-status.submitted, .run-status.cancelling { background:var(--clay-soft); color:var(--clay-strong); }
 .run-cancel { margin-left:-4px; }
 
+/* Notebook: transcript code is a first-class execution surface, not an artifact tile. */
+.notebook-cells { flex:1 1 auto; min-height:0; overflow:auto; background:var(--bg-elev); }
+.notebook-cell { border-bottom:1px solid var(--border-strong); padding:14px 12px 16px; }
+.notebook-cell-head { display:flex; align-items:center; gap:9px; min-height:28px; margin-bottom:8px; color:var(--text-faint); }
+.notebook-cell-head .spacer { flex:1; }
+.notebook-index { font:12px/1 var(--font-mono); color:var(--text-muted); font-variant-numeric:tabular-nums; }
+.notebook-language { padding:3px 9px; border-radius:999px; background:var(--bg-sunken); color:var(--text-muted); font:11px/1.2 var(--font-mono); }
+.notebook-runtime { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:11px/1.2 var(--font-mono); }
+.notebook-status { width:7px; height:7px; flex:0 0 auto; border-radius:50%; background:var(--text-faint); }
+.notebook-status.ok { background:hsl(152 42% 42%); }
+.notebook-status.error { background:var(--err); }
+.notebook-status.running { background:var(--clay-strong); }
+.notebook-copy { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; padding:0; border:1px solid transparent; border-radius:7px; background:transparent; color:var(--text-faint); cursor:pointer; }
+.notebook-copy:hover { border-color:var(--border); background:var(--bg-sunken); color:var(--text); }
+.notebook-copy svg { width:15px; height:15px; }
+.notebook-source .rp-code { max-height:none; border-radius:0; background:var(--bg-app); }
+.notebook-output { margin-top:8px; color:var(--text-muted); font-size:12px; }
+.notebook-output > summary { cursor:pointer; user-select:none; }
+.notebook-output > pre { max-height:320px; margin:8px 0 0; padding:10px 12px; overflow:auto; border:1px solid var(--border); background:var(--bg-sunken); color:var(--text); font:11.5px/1.5 var(--font-mono); white-space:pre-wrap; overflow-wrap:anywhere; }
+
 .rp-artifacts-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
 .rp-artifacts-body.preview-hidden .rp-tiles {
   max-height: none; flex: 1 1 auto; border-bottom: none;

@@ -1,10 +1,31 @@
 use super::{
-    branch_title, copy_dir_recursive, parse_disabled_skills, parse_enabled_skill_names,
-    parse_skill_tags, resolve_composer_references, resolve_workspace, session_runtime_status,
-    side_chat_prompt, ComposerReferenceArg, McpConnection, McpTransport,
+    branch_title, copy_dir_recursive, messages_to_items, parse_disabled_skills,
+    parse_enabled_skill_names, parse_skill_tags, resolve_composer_references, resolve_workspace,
+    session_runtime_status, side_chat_prompt, ComposerReferenceArg, McpConnection, McpTransport,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
+
+#[test]
+fn reloaded_tool_items_keep_notebook_source() {
+    let mut assistant = wisp_llm::Message::assistant("");
+    assistant.tool_calls = vec![wisp_llm::ToolCall {
+        id: "call-python".into(),
+        kind: "function".into(),
+        function: wisp_llm::FunctionCall {
+            name: "python".into(),
+            arguments: r#"{"code":"print(1)"}"#.into(),
+        },
+    }];
+    let result = wisp_llm::Message::tool("call-python", "python", "1");
+
+    let items = messages_to_items(&[assistant, result]);
+
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].tool_name.as_deref(), Some("python"));
+    assert_eq!(items[0].input.as_deref(), Some("print(1)"));
+    assert_eq!(items[0].text, "1");
+}
 
 #[tokio::test]
 async fn composer_references_resolve_artifact_session_and_skill() {

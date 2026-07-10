@@ -258,7 +258,10 @@ line notes what wisp ships today versus the reference behaviour.
 - **Artifacts gallery.** Thumbnail grid for figure artifacts (PNG/plots),
   plus figure↔caption pairing (a plot alongside a structured caption doc:
   *Panels / Artifacts / what is real vs. illustrative*). wisp today: a text
-  tile list with a single active preview.
+  tile list with a single active preview; code is kept out of this list.
+- **Notebook panel.** Python/Shell tool executions and assistant code blocks
+  render as numbered, line-highlighted cells with collapsible output. The view
+  is transcript-backed and read-only; it is not an editable live-kernel notebook.
 - **Projects home.** Multiple projects, each with session/artifact counts and
   a "+ New project" action, versus today's single project + flat session list.
 - **Web-search toggle** surfaced directly in the composer.

@@ -9,7 +9,7 @@ use crate::bindings::{
 use crate::dto::*;
 use crate::i18n::{localize_backend, tf, t, use_locale, Locale};
 use crate::text::{
-    dom_value, event_target_value, extract_href_from_tag, fasta_seq_count, file_kind,
+    dom_value, event_target_value, extract_href_from_tag, fasta_seq_count, fenced_blocks, file_kind,
     format_duration_ms, html_escape, is_external_href, is_separator, is_table_row,
     md_inline_to_html, md_to_html, next_artifact_id,
     normalize_path, opens_in_system_browser, parent_path, parse_csv_line, provider_defaults,
@@ -1235,8 +1235,9 @@ pub(super) fn open_workspace_file(path: String, modal_artifact: RwSignal<Option<
     modal_artifact.set(Some((path, name, kind)));
 }
 
-pub(super) const ALL_RIGHT_TABS: [RightTab; 5] = [
+pub(super) const ALL_RIGHT_TABS: [RightTab; 6] = [
     RightTab::Artifacts,
+    RightTab::Notebook,
     RightTab::File,
     RightTab::Provenance,
     RightTab::Hosts,
@@ -1615,7 +1616,6 @@ pub(super) enum ProtoArtifact {
     Table(TableData),
     Csv(TableData),
     Fasta(String),
-    Code { lang: String, body: String },
     Latex(String),
     File { path: String, kind: &'static str },
 }
@@ -1630,7 +1630,6 @@ pub(super) fn file_proto(word: &str) -> Option<ProtoArtifact> {
 pub(super) struct ArtifactScan {
     tbl_n: usize,
     csv_n: usize,
-    code_n: usize,
     tex_n: usize,
 }
 
@@ -1640,27 +1639,27 @@ pub(super) fn extract_markdown_protos(out: &mut Vec<ProtoArtifact>, s: &str) {
             out.push(ProtoArtifact::Table(t));
         }
     }
+    for (lang, body) in fenced_blocks(s) {
+        if lang == "csv" || lang == "tsv" {
+            let lines: Vec<&str> = body.lines().collect();
+            if let Some(header) = lines.first() {
+                let headers = parse_csv_line(header);
+                let rows = lines[1..].iter().map(|line| parse_csv_line(line)).collect();
+                out.push(ProtoArtifact::Csv(TableData { headers, rows }));
+            }
+        } else if lang == "fasta" || lang == "fa" {
+            out.push(ProtoArtifact::Fasta(body));
+        }
+    }
     let lines: Vec<&str> = s.lines().collect();
     let mut i = 0;
     while i < lines.len() {
-        let f = lines[i].trim().to_ascii_lowercase();
-        if f.starts_with("```") {
-            let lang = f.trim_start_matches('`').split_whitespace().next().unwrap_or("").to_string();
-            let mut body = vec![];
-            let mut j = i + 1;
-            while j < lines.len() && !lines[j].trim().starts_with("```") { body.push(lines[j]); j += 1; }
-            if !body.is_empty() {
-                if lang == "csv" || lang == "tsv" {
-                    let headers = parse_csv_line(body[0]);
-                    let rows: Vec<Vec<String>> = body[1..].iter().map(|l| parse_csv_line(l)).collect();
-                    out.push(ProtoArtifact::Csv(TableData { headers, rows }));
-                } else if lang == "fasta" || lang == "fa" {
-                    out.push(ProtoArtifact::Fasta(body.join("\n")));
-                } else {
-                    out.push(ProtoArtifact::Code { lang, body: body.join("\n") });
-                }
+        if lines[i].trim().starts_with("```") {
+            i += 1;
+            while i < lines.len() && !lines[i].trim().starts_with("```") {
+                i += 1;
             }
-            i = j + 1;
+            i = i.saturating_add(1);
             continue;
         }
         if lines[i].trim().starts_with("$") {
@@ -1710,7 +1709,7 @@ pub(super) fn extract_protos(it: &ChatItem) -> Vec<ProtoArtifact> {
 pub(super) fn assemble_artifacts(per_item: &[Rc<Vec<ProtoArtifact>>], locale: Locale) -> Vec<Artifact> {
     let mut out: Vec<Artifact> = vec![];
     let mut seen = std::collections::HashSet::<String>::new();
-    let mut scan = ArtifactScan { tbl_n: 0, csv_n: 0, code_n: 0, tex_n: 0 };
+    let mut scan = ArtifactScan { tbl_n: 0, csv_n: 0, tex_n: 0 };
     for protos in per_item {
         for p in protos.iter() {
             match p {
@@ -1732,16 +1731,6 @@ pub(super) fn assemble_artifacts(per_item: &[Rc<Vec<ProtoArtifact>>], locale: Lo
                 ProtoArtifact::Fasta(body) => {
                     let id = next_artifact_id(out.len());
                     out.push(Artifact { id, name: format!("alignment-{}.fasta", scan.csv_n), kind: "fasta", data: PreviewData::Fasta(body.clone()) });
-                }
-                ProtoArtifact::Code { lang, body } => {
-                    scan.code_n += 1;
-                    let id = next_artifact_id(out.len());
-                    out.push(Artifact {
-                        id,
-                        name: tf(locale, "artifact.code", &[("n", &scan.code_n.to_string())]),
-                        kind: "code",
-                        data: PreviewData::Code { lang: lang.clone(), body: body.clone() },
-                    });
                 }
                 ProtoArtifact::Latex(tex) => {
                     scan.tex_n += 1;
@@ -1795,7 +1784,7 @@ pub(super) fn artifacts_fingerprint(arts: &[Artifact]) -> u64 {
 
 pub(super) type ProtoCache = HashMap<(usize, u64), Rc<Vec<ProtoArtifact>>>;
 
-/// Collect tables, code, latex, and file-path artifacts from the transcript.
+/// Collect tables, data blocks, equations, and file-path artifacts from the transcript.
 /// Extraction is cached per (index, content hash): a streaming flush only
 /// re-extracts the message it touched, then renumbering runs over the cached
 /// protos — instead of rescanning every message on every signal write.
@@ -1844,7 +1833,7 @@ mod artifact_scan_tests {
         });
         let a2 = collect_artifacts(&items, Locale::En, &mut cache);
         assert!(a2 == fresh(&items, Locale::En));
-        assert_eq!(a2.len(), 5); // + code block, + result.csv file
+        assert_eq!(a2.len(), 4); // code moves to Notebook; result.csv remains an artifact
     }
 }
 
@@ -1876,7 +1865,6 @@ pub(super) fn artifact_group_label(key: &str, locale: Locale) -> String {
     if let Some(kind) = key.strip_prefix('@') {
         let i18n = match kind {
             "table" => "artifact.group.table",
-            "code" => "artifact.group.code",
             "latex" => "artifact.group.latex",
             "csv" => "artifact.group.csv",
             "fasta" => "artifact.group.fasta",
@@ -1897,10 +1885,6 @@ pub(super) fn artifact_meta(a: &Artifact, locale: Locale) -> String {
         PreviewData::Table(t) => tf(locale, "artifact.meta.table", &[
             ("rows", &t.rows.len().to_string()),
             ("cols", &t.headers.len().to_string()),
-        ]),
-        PreviewData::Code { lang, body } => tf(locale, "artifact.meta.code", &[
-            ("lang", lang),
-            ("lines", &body.lines().count().to_string()),
         ]),
         PreviewData::File { path, kind } => {
             if kind == "fasta" {
@@ -2049,9 +2033,6 @@ pub(super) fn artifact_preview(a: &Artifact, dom_id: String, locale: Locale) -> 
         PreviewData::Table(t) => table_view(t, locale).into_view(),
         PreviewData::Text(s) => view! { <pre class="rp-pre">{s.clone()}</pre> }.into_view(),
         PreviewData::Markdown(s) => view! { <div class="md rp-md" inner_html=md_to_html(s)></div> }.into_view(),
-        PreviewData::Code { lang, body } => view! {
-            <RpCodeView lang=lang.clone() body=body.clone() />
-        }.into_view(),
         PreviewData::Latex { tex, display } => {
             let payload = serde_json::json!({ "tex": tex, "display": display }).to_string();
             view! { <HeavyPreview dom_id=dom_id kind="latex".to_string() payload=payload /> }.into_view()
@@ -3427,6 +3408,7 @@ pub(super) fn ActionPalette(open: RwSignal<bool>, on_action: Callback<&'static s
             ("projects", "folder", "command.projects", navigate.clone(), ""),
             ("toggle-sidebar", "panel", "command.toggle_sidebar", navigate.clone(), "Ctrl/⌘ B"),
             ("artifacts", "grid", "command.artifacts", navigate.clone(), ""),
+            ("notebook", "doc", "command.notebook", navigate.clone(), ""),
             ("files", "doc", "command.files", navigate.clone(), ""),
             ("provenance", "copy", "command.provenance", navigate.clone(), ""),
             ("contexts", "server", "command.contexts", navigate.clone(), ""),
