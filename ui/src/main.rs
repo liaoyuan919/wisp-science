@@ -4993,6 +4993,10 @@ fn App() -> impl IntoView {
         let artifacts = artifacts;
         let input = input;
         Callback::new(move |(action, payload): (String, String)| {
+            if action == "downloadFile" {
+                download_artifact(payload);
+                return;
+            }
             if action == "copyImage" {
                 spawn_local(async move {
                     if context_menu::copy_image(&payload).await { show_copy_toast(); }
@@ -6551,6 +6555,7 @@ fn App() -> impl IntoView {
                                             None
                                         };
                                         let file_click = file.clone();
+                                        let context_path = file.as_ref().map(|(path, _)| path.clone()).unwrap_or_default();
                                         let name_click = name.clone();
                                         let tools = file.map(|(path, fkind)| {
                                         let (dl, vn) = (path.clone(), name.clone());
@@ -6608,7 +6613,8 @@ fn App() -> impl IntoView {
                                     });
                                     view! {
                                         <div class="rp-tile" class:active=move || sel_artifact.get() == i
-                                            data-artifact-name=name.clone()>
+                                            data-artifact-name=name.clone()
+                                            data-artifact-path=context_path>
                                             <button type="button" class="rp-tile-main"
                                                 on:click=move |_| {
                                                     artifact_menu.set(None);

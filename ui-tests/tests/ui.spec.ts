@@ -305,7 +305,11 @@ test("uploaded file shows up in the artifacts panel after send", async ({ page }
   // The right panel starts collapsed; open it to see the collected artifact.
   await page.getByRole("button", { name: "Toggle panel" }).click();
   // The upload path lives in the user turn; the panel must pick it up from there.
-  await expect(page.locator('.rp-tile[data-artifact-name="counts.csv"]')).toBeVisible();
+  const tile = page.locator('.rp-tile[data-artifact-name="counts.csv"]');
+  await expect(tile).toBeVisible();
+  await tile.click({ button: "right" });
+  await page.locator(".ctx-menu").getByRole("button", { name: "Download" }).click();
+  await expect.poll(() => lastInvokeArgs(page, "download_file")).toMatchObject({ path: "uploads/counts.csv" });
 });
 
 test("dropped local file uploads and attaches to the composer", async ({ page }) => {
@@ -324,6 +328,9 @@ test("workspace file context menu attaches its path to the composer", async ({ p
   await page.getByRole("button", { name: "Files" }).click();
   const file = page.locator('.fb-row[data-workspace-path="report.csv"]');
   await expect(file).toBeVisible();
+  await file.click({ button: "right" });
+  await page.locator(".ctx-menu").getByRole("button", { name: "Download" }).click();
+  await expect.poll(() => lastInvokeArgs(page, "download_file")).toMatchObject({ path: "report.csv" });
   await file.click({ button: "right" });
   await page.getByRole("button", { name: "Attach to chat" }).click();
   await expect(composer(page)).toHaveValue(/report\.csv/);
