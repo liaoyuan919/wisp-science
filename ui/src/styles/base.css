@@ -47,6 +47,50 @@
   color-scheme: light;
 }
 
+:root[data-theme="dark"] {
+  --bg-app: #171816;
+  --bg-elev: #22231f;
+  --bg-sunken: #1c1d1a;
+  --bg-input: #282923;
+  --bg-panel: #2b2c26;
+  --text: #f1f0ea;
+  --text-muted: #b8b6ac;
+  --text-faint: #918f87;
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: #3d3e37;
+  --clay: #2dd4bf;
+  --clay-strong: #5eead4;
+  --clay-soft: rgba(45, 212, 191, 0.14);
+  --on-clay: #092f2b;
+  --warm: #5eead4;
+  --shadow: 0 16px 36px -12px rgba(0, 0, 0, 0.55);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    --bg-app: #171816;
+    --bg-elev: #22231f;
+    --bg-sunken: #1c1d1a;
+    --bg-input: #282923;
+    --bg-panel: #2b2c26;
+    --text: #f1f0ea;
+    --text-muted: #b8b6ac;
+    --text-faint: #918f87;
+    --border: rgba(255, 255, 255, 0.09);
+    --border-strong: #3d3e37;
+    --clay: #2dd4bf;
+    --clay-strong: #5eead4;
+    --clay-soft: rgba(45, 212, 191, 0.14);
+    --on-clay: #092f2b;
+    --warm: #5eead4;
+    --shadow: 0 16px 36px -12px rgba(0, 0, 0, 0.55);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.04);
+    color-scheme: dark;
+  }
+}
+
 :lang(zh) {
   /* Keep Inter for Latin; CJK faces before Segoe so Chinese doesn't use linked fallbacks. */
   --font-ui: "Inter", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", system-ui, "Segoe UI", sans-serif;

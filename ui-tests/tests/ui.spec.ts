@@ -108,6 +108,46 @@ test("Ctrl+K opens the unified command palette and Shift+Enter attaches", async 
   await expect(page.locator(".composer-reference-chips")).toContainText(/counts\.csv|Cross-project counts/);
 });
 
+test("Ctrl+P command palette runs commands and switches themes", async ({ page }) => {
+  await enterApp(page);
+  await page.keyboard.press("Control+p");
+  const palette = page.getByRole("dialog", { name: "Command Palette" });
+  const input = page.locator("#action-palette-input");
+  await expect(palette).toBeVisible();
+  await expect(input).toBeFocused();
+  await expect(palette).toContainText("New session");
+
+  await input.press("ArrowDown");
+  await input.press("Enter");
+  await expect(page.getByPlaceholder("Search this project…")).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await page.keyboard.press("Control+p");
+  await input.fill("dark theme");
+  await input.press("Enter");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("wisp-theme"))).toBe("dark");
+
+  await page.keyboard.press("Control+p");
+  await input.fill("open files");
+  await input.press("Enter");
+  await expect(page.locator(".rp-files")).toBeVisible();
+
+  await page.keyboard.press("Control+p");
+  await input.fill("system theme");
+  await input.press("Enter");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "system");
+
+  await page.keyboard.press("Control+b");
+  await expect(page.locator(".sidebar")).toHaveClass(/collapsed/);
+  await page.keyboard.press("Control+,");
+  await expect(page.locator(".settings-modal")).toBeVisible();
+  await page.keyboard.press("Escape");
+  const before = await page.evaluate(() => ((window as any).__skillInvokeLog ?? []).filter((c: any) => c.cmd === "new_session").length);
+  await page.keyboard.press("Control+n");
+  await expect.poll(() => page.evaluate(() => ((window as any).__skillInvokeLog ?? []).filter((c: any) => c.cmd === "new_session").length)).toBeGreaterThan(before);
+});
+
 test("user message renders before a delayed backend User event", async ({ page }) => {
   await enterApp(page);
   await page.getByPlaceholder(/Ask wisp-science/i).fill("DELAYUSER");

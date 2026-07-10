@@ -59,6 +59,11 @@ button.proj-card { width: 100%; padding: 16px 18px; color: var(--text); font: in
   padding: min(18vh, 150px) 20px 24px; background: hsl(0 0% 100% / .38); backdrop-filter: blur(8px); }
 .project-search-dialog { width: min(760px, 100%); max-height: min(820px, calc(100vh - 48px)); display: flex; flex-direction: column;
   background: var(--bg-elev); border: 1px solid var(--border-strong); border-radius: 13px; box-shadow: var(--shadow); overflow: hidden; }
+.action-palette { width: min(720px, 100%); }
+.action-palette-results { padding: 8px; }
+.action-palette-group { padding: 8px 10px 5px; color: var(--text-faint); font-size: 11px; font-weight: 650; }
+.action-palette-row { border-radius: 9px; }
+.action-shortcut { flex: 0 0 auto; margin-left: 12px; white-space: nowrap; }
 .project-search-input { display: flex; align-items: center; gap: 14px; padding: 14px 18px; border-bottom: 1px solid var(--border); }
 .project-search-input .gi { width: 20px; height: 20px; color: var(--text-faint); }
 .project-search-input input { flex: 1 1 auto; min-width: 0; border: 0; outline: none; background: transparent; color: var(--text);
