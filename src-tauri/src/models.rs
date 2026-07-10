@@ -34,6 +34,158 @@ pub struct ModelProfile {
     /// to image analysis. Not persisted inside the profile list.
     #[serde(default, skip_serializing)]
     pub use_for_vision: bool,
+    /// Optional executable override for the local Codex runner. Empty means
+    /// use Wisp's platform-aware discovery.
+    #[serde(default)]
+    pub runner_command: String,
+    /// Optional profile from the user's Codex config.
+    #[serde(default)]
+    pub runner_profile: String,
+    #[serde(default = "default_inherit")]
+    pub runner_sandbox: String,
+    /// Wisp-only web-search override. Old boolean `runner_web_search` values
+    /// deserialize losslessly (`true` -> live, `false` -> inherit).
+    #[serde(
+        default = "default_inherit",
+        alias = "runner_web_search",
+        deserialize_with = "deserialize_web_search_mode"
+    )]
+    pub runner_web_search_mode: String,
+    /// Optional executable override for Claude Code.
+    #[serde(default)]
+    pub runner_claude_command: String,
+    #[serde(default)]
+    pub runner_persistent: bool,
+
+    /// Settings for an ordinary/default Codex collaboration turn. These are
+    /// separate from the legacy fields so Plan mode can be configured without
+    /// changing API-provider behavior. On load, old `model` and
+    /// `reasoning_effort` values are copied here verbatim.
+    #[serde(default)]
+    pub normal_model: String,
+    #[serde(default)]
+    pub normal_reasoning_effort: String,
+    /// Plan settings default to inheritance, allowing Codex's built-in Plan
+    /// collaboration mode to choose its own model/effort defaults.
+    #[serde(default = "default_inherit")]
+    pub plan_model: String,
+    #[serde(default = "default_inherit")]
+    pub plan_reasoning_effort: String,
+    /// Additional Codex overrides. `inherit` means Wisp emits no override and
+    /// never edits the user's global Codex configuration.
+    #[serde(default = "default_inherit")]
+    pub service_tier: String,
+    #[serde(default = "default_inherit")]
+    pub personality: String,
+    #[serde(default = "default_inherit")]
+    pub reasoning_summary: String,
+    #[serde(default = "default_inherit")]
+    pub verbosity: String,
+}
+
+fn default_inherit() -> String {
+    "inherit".into()
+}
+
+fn default_runner_sandbox() -> String {
+    default_inherit()
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredWebSearchMode {
+    Mode(String),
+    Legacy(bool),
+}
+
+fn deserialize_web_search_mode<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match StoredWebSearchMode::deserialize(deserializer)? {
+        StoredWebSearchMode::Mode(mode) => normalize_web_search_mode(&mode),
+        StoredWebSearchMode::Legacy(true) => "live".into(),
+        StoredWebSearchMode::Legacy(false) => default_inherit(),
+    })
+}
+
+pub fn normalize_web_search_mode(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "live" => "live".into(),
+        "indexed" => "indexed".into(),
+        "cached" => "cached".into(),
+        "disabled" | "off" | "false" => "disabled".into(),
+        _ => default_inherit(),
+    }
+}
+
+pub fn default_runner_sandbox_for(raw: &str) -> String {
+    match raw.trim() {
+        "inherit" | "read-only" | "workspace-write" | "danger-full-access" => {
+            raw.trim().to_string()
+        }
+        _ => default_runner_sandbox(),
+    }
+}
+
+/// Upgrade a deserialized profile in memory without discarding any legacy
+/// model choice. Returns true when a persisted migration is useful.
+fn migrate_profile(profile: &mut ModelProfile) -> bool {
+    let mut changed = normalize_local_runner_provider(profile);
+    if profile.normal_model.trim().is_empty() {
+        profile.normal_model = if profile.model.trim().is_empty() {
+            default_inherit()
+        } else {
+            profile.model.clone()
+        };
+        changed = true;
+    }
+    if profile.normal_reasoning_effort.trim().is_empty() {
+        profile.normal_reasoning_effort = if profile.reasoning_effort.trim().is_empty() {
+            default_inherit()
+        } else {
+            profile.reasoning_effort.clone()
+        };
+        changed = true;
+    }
+    for value in [
+        &mut profile.plan_model,
+        &mut profile.plan_reasoning_effort,
+        &mut profile.service_tier,
+        &mut profile.personality,
+        &mut profile.reasoning_summary,
+        &mut profile.verbosity,
+    ] {
+        if value.trim().is_empty() {
+            *value = default_inherit();
+            changed = true;
+        }
+    }
+    let sandbox = default_runner_sandbox_for(&profile.runner_sandbox);
+    if sandbox != profile.runner_sandbox {
+        profile.runner_sandbox = sandbox;
+        changed = true;
+    }
+    let web_search = normalize_web_search_mode(&profile.runner_web_search_mode);
+    if web_search != profile.runner_web_search_mode {
+        profile.runner_web_search_mode = web_search;
+        changed = true;
+    }
+    changed
+}
+
+fn normalize_local_runner_provider(profile: &mut ModelProfile) -> bool {
+    let canonical = match profile.provider.trim() {
+        "codex" | "codex-cli" | "codex_local" | "codex-local" => "codex_cli",
+        "claude-code" => "claude_code",
+        _ => return false,
+    };
+    if profile.provider == canonical {
+        false
+    } else {
+        profile.provider = canonical.into();
+        true
+    }
 }
 
 const PROFILES_KEY: &str = "model_profiles";
@@ -169,13 +321,25 @@ pub fn service_env() -> Vec<(String, String)> {
 }
 
 async fn load_raw(store: &wisp_store::Store) -> Vec<ModelProfile> {
-    store
+    let Some(mut profiles) = store
         .get_setting(PROFILES_KEY)
         .await
         .ok()
         .flatten()
         .and_then(|s| serde_json::from_str::<Vec<ModelProfile>>(&s).ok())
-        .unwrap_or_default()
+    else {
+        return Vec::new();
+    };
+    let mut migrated = false;
+    for profile in &mut profiles {
+        migrated |= migrate_profile(profile);
+    }
+    if migrated {
+        // This updates Wisp's own profile JSON only. It never touches
+        // ~/.codex/config.toml or any other global CLI configuration.
+        let _ = save_raw(store, &profiles).await;
+    }
+    profiles
 }
 
 async fn save_raw(store: &wisp_store::Store, profiles: &[ModelProfile]) -> Result<(), String> {
@@ -225,6 +389,16 @@ async fn ensure(store: &wisp_store::Store) -> Vec<ModelProfile> {
         .ok()
         .flatten()
         .unwrap_or_default();
+    let normal_model = if model.trim().is_empty() {
+        default_inherit()
+    } else {
+        model.clone()
+    };
+    let normal_reasoning_effort = if reasoning_effort.trim().is_empty() {
+        default_inherit()
+    } else {
+        reasoning_effort.clone()
+    };
     let default = ModelProfile {
         id: "default".into(),
         label: if model.trim().is_empty() {
@@ -241,6 +415,20 @@ async fn ensure(store: &wisp_store::Store) -> Vec<ModelProfile> {
         reasoning_effort,
         supports_vision: false,
         use_for_vision: false,
+        runner_command: String::new(),
+        runner_profile: String::new(),
+        runner_sandbox: default_runner_sandbox(),
+        runner_web_search_mode: default_inherit(),
+        runner_claude_command: String::new(),
+        runner_persistent: false,
+        normal_model,
+        normal_reasoning_effort,
+        plan_model: default_inherit(),
+        plan_reasoning_effort: default_inherit(),
+        service_tier: default_inherit(),
+        personality: default_inherit(),
+        reasoning_summary: default_inherit(),
+        verbosity: default_inherit(),
     };
     let profiles = vec![default];
     let _ = save_raw(store, &profiles).await;
@@ -290,8 +478,27 @@ pub async fn active_config(store: &wisp_store::Store) -> (String, String, String
     (p.provider, p.api_url, p.model, key_for(&p.id))
 }
 
+/// Full active profile for runtime-specific backends.  Secrets remain in the
+/// keyring and therefore are not included in this value.
+pub async fn active_profile(store: &wisp_store::Store) -> ModelProfile {
+    let profiles = ensure(store).await;
+    let id = active_id(store, &profiles).await;
+    profiles
+        .iter()
+        .find(|profile| profile.id == id)
+        .cloned()
+        .unwrap_or_else(|| profiles[0].clone())
+}
+
+pub async fn profile(store: &wisp_store::Store, id: &str) -> Option<ModelProfile> {
+    ensure(store)
+        .await
+        .into_iter()
+        .find(|profile| profile.id == id)
+}
+
 fn can_describe_images(p: &ModelProfile) -> bool {
-    p.supports_vision
+    p.supports_vision && !crate::local_runner::is_local_runner(&p.provider)
 }
 
 async fn vision_id(store: &wisp_store::Store, profiles: &[ModelProfile]) -> Option<String> {
@@ -326,6 +533,46 @@ pub async fn vision_config(
     ))
 }
 
+/// Resolve the active profile into local-runner settings. Every value here is
+/// a Wisp-side override; `inherit` is carried through so command/app-server
+/// builders can omit it rather than editing the user's Codex configuration.
+pub async fn active_runner_settings(
+    store: &wisp_store::Store,
+) -> crate::local_runner::LocalRunnerSettings {
+    let profiles = ensure(store).await;
+    let id = active_id(store, &profiles).await;
+    let p = profiles
+        .iter()
+        .find(|p| p.id == id)
+        .cloned()
+        .unwrap_or_else(|| profiles[0].clone());
+    let normal_model = if p.normal_model.trim().is_empty() {
+        p.model.clone()
+    } else {
+        p.normal_model.clone()
+    };
+    let web_search_mode = normalize_web_search_mode(&p.runner_web_search_mode);
+    crate::local_runner::LocalRunnerSettings {
+        command: p.runner_command,
+        profile: p.runner_profile,
+        sandbox: default_runner_sandbox_for(&p.runner_sandbox),
+        // Compatibility for callers carried over from v0.7.
+        web_search: web_search_mode == "live",
+        web_search_mode,
+        model: normal_model.clone(),
+        normal_model,
+        normal_reasoning_effort: p.normal_reasoning_effort,
+        plan_model: p.plan_model,
+        plan_reasoning_effort: p.plan_reasoning_effort,
+        service_tier: p.service_tier,
+        personality: p.personality,
+        reasoning_summary: p.reasoning_summary,
+        verbosity: p.verbosity,
+        claude_command: p.runner_claude_command,
+        persistent: p.runner_persistent,
+    }
+}
+
 /// Update the active profile's provider/api_url/model/label. The classic Settings
 /// form now edits whichever model is active, rather than a single global config.
 pub async fn set_active_fields(
@@ -341,6 +588,13 @@ pub async fn set_active_fields(
         p.provider = provider.to_string();
         p.api_url = api_url.to_string();
         p.model = model.to_string();
+        // Keep the old settings command compatible while making Normal mode
+        // authoritative for local runners.
+        p.normal_model = if model.trim().is_empty() {
+            default_inherit()
+        } else {
+            model.to_string()
+        };
         let alias = label.trim();
         p.label = if alias.is_empty() {
             model.to_string()
@@ -448,7 +702,7 @@ pub async fn active_supports_vision(store: &wisp_store::Store) -> bool {
     profiles
         .iter()
         .find(|p| p.id == id)
-        .is_some_and(|p| p.supports_vision)
+        .is_some_and(can_describe_images)
 }
 
 /// Profiles with `has_api_key`/`active` filled in, for the UI.
@@ -497,18 +751,53 @@ pub async fn save_model(
     // assignment on save (#131 follow-up).
     let assign_vision = use_for_vision.unwrap_or(profile.use_for_vision);
     profile.use_for_vision = assign_vision;
-    if profile.model.trim().is_empty() {
+    normalize_local_runner_provider(&mut profile);
+    let is_runner = crate::local_runner::is_local_runner(&profile.provider);
+    let mut profiles = ensure(&state.store).await;
+    let extended_payload = has_explicit_extended_settings(&profile);
+    if !extended_payload {
+        if let Some(existing) = profiles.iter().find(|p| p.id == profile.id) {
+            preserve_wisp_overrides(existing, &mut profile);
+        }
+        // The pre-runner UI still edits the legacy fields. Treat those edits
+        // as Normal-mode edits while retaining Plan/runner-only overrides.
+        profile.normal_model = if profile.model.trim().is_empty() {
+            default_inherit()
+        } else {
+            profile.model.clone()
+        };
+        profile.normal_reasoning_effort = if profile.reasoning_effort.trim().is_empty() {
+            default_inherit()
+        } else {
+            profile.reasoning_effort.clone()
+        };
+    }
+    migrate_profile(&mut profile);
+    if !is_runner && profile.model.trim().is_empty() {
         return Err("Model is required.".into());
     }
-    if profile.api_url.trim().is_empty() {
+    if !is_runner && profile.api_url.trim().is_empty() {
         return Err("API URL is required.".into());
     }
     if assign_vision && !can_describe_images(&profile) {
         return Err("Image analysis requires an API model marked as vision-capable.".into());
     }
-    let mut profiles = ensure(&state.store).await;
     if profile.label.trim().is_empty() {
-        profile.label = profile.model.clone();
+        profile.label = if is_runner {
+            profile.normal_model.clone()
+        } else {
+            profile.model.clone()
+        };
+    }
+    if is_runner {
+        // Local CLIs do not use an API endpoint/key and image files are passed
+        // directly to Codex rather than through Wisp's vision-profile path.
+        profile.api_url.clear();
+        profile.supports_vision = false;
+        profile.use_for_vision = false;
+        if extended_payload || profile.model.trim().is_empty() {
+            profile.model = profile.normal_model.clone();
+        }
     }
     if profile.id.trim().is_empty() {
         profile.id = fresh_id(&profiles);
@@ -553,6 +842,38 @@ pub async fn save_model(
     Ok(decorated(&state.store).await)
 }
 
+fn has_explicit_extended_settings(profile: &ModelProfile) -> bool {
+    !profile.normal_model.trim().is_empty()
+        || !profile.normal_reasoning_effort.trim().is_empty()
+        || !profile.runner_command.trim().is_empty()
+        || !profile.runner_profile.trim().is_empty()
+        || profile.runner_sandbox != default_runner_sandbox()
+        || normalize_web_search_mode(&profile.runner_web_search_mode) != "inherit"
+        || !profile.runner_claude_command.trim().is_empty()
+        || profile.runner_persistent
+        || profile.plan_model != "inherit"
+        || profile.plan_reasoning_effort != "inherit"
+        || profile.service_tier != "inherit"
+        || profile.personality != "inherit"
+        || profile.reasoning_summary != "inherit"
+        || profile.verbosity != "inherit"
+}
+
+fn preserve_wisp_overrides(existing: &ModelProfile, incoming: &mut ModelProfile) {
+    incoming.runner_command = existing.runner_command.clone();
+    incoming.runner_profile = existing.runner_profile.clone();
+    incoming.runner_sandbox = existing.runner_sandbox.clone();
+    incoming.runner_web_search_mode = existing.runner_web_search_mode.clone();
+    incoming.runner_claude_command = existing.runner_claude_command.clone();
+    incoming.runner_persistent = existing.runner_persistent;
+    incoming.plan_model = existing.plan_model.clone();
+    incoming.plan_reasoning_effort = existing.plan_reasoning_effort.clone();
+    incoming.service_tier = existing.service_tier.clone();
+    incoming.personality = existing.personality.clone();
+    incoming.reasoning_summary = existing.reasoning_summary.clone();
+    incoming.verbosity = existing.verbosity.clone();
+}
+
 #[tauri::command]
 pub async fn remove_model(
     state: State<'_, crate::AppState>,
@@ -578,6 +899,8 @@ pub async fn remove_model(
             let _ = state.store.set_setting(ACTIVE_KEY, &first.id).await;
         }
     }
+    state.codex.drop_profile(&state.store, &id).await;
+    crate::clear_idle_agents(&state).await;
     Ok(decorated(&state.store).await)
 }
 
@@ -616,6 +939,20 @@ mod tests {
             reasoning_effort: String::new(),
             supports_vision: false,
             use_for_vision: false,
+            runner_command: String::new(),
+            runner_profile: String::new(),
+            runner_sandbox: default_runner_sandbox(),
+            runner_web_search_mode: default_inherit(),
+            runner_claude_command: String::new(),
+            runner_persistent: false,
+            normal_model: model.into(),
+            normal_reasoning_effort: default_inherit(),
+            plan_model: default_inherit(),
+            plan_reasoning_effort: default_inherit(),
+            service_tier: default_inherit(),
+            personality: default_inherit(),
+            reasoning_summary: default_inherit(),
+            verbosity: default_inherit(),
         }
     }
 
@@ -654,6 +991,137 @@ mod tests {
     }
 
     #[test]
+    fn legacy_profile_migrates_model_and_effort_to_normal_losslessly() {
+        let mut p: ModelProfile = serde_json::from_str(
+            r#"{
+                "id":"m1","label":"Codex","provider":"codex",
+                "api_url":"","model":"private-model-id",
+                "reasoning_effort":"ultra","runner_web_search":true
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(p.runner_web_search_mode, "live");
+        assert!(migrate_profile(&mut p));
+        assert_eq!(p.provider, "codex_cli");
+        assert_eq!(p.model, "private-model-id");
+        assert_eq!(p.reasoning_effort, "ultra");
+        assert_eq!(p.normal_model, "private-model-id");
+        assert_eq!(p.normal_reasoning_effort, "ultra");
+        assert_eq!(p.plan_model, "inherit");
+        assert_eq!(p.plan_reasoning_effort, "inherit");
+    }
+
+    #[tokio::test]
+    async fn load_raw_persists_profile_schema_migration_in_wisp_store() {
+        let tmp = std::env::temp_dir().join(format!(
+            "wisp_model_migrate_{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = wisp_store::Store::open(&tmp).await.unwrap();
+        store
+            .set_setting(
+                PROFILES_KEY,
+                r#"[{"id":"m1","label":"old","provider":"openai","api_url":"u",
+                     "model":"gpt-old","reasoning_effort":"xhigh"}]"#,
+            )
+            .await
+            .unwrap();
+        let out = load_raw(&store).await;
+        assert_eq!(out[0].normal_model, "gpt-old");
+        assert_eq!(out[0].normal_reasoning_effort, "xhigh");
+        assert_eq!(out[0].plan_model, "inherit");
+        let persisted = store.get_setting(PROFILES_KEY).await.unwrap().unwrap();
+        assert!(persisted.contains(r#""normal_model":"gpt-old""#));
+        assert!(persisted.contains(r#""plan_model":"inherit""#));
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[tokio::test]
+    async fn active_runner_settings_exposes_normal_plan_and_codex_overrides() {
+        let tmp = std::env::temp_dir().join(format!(
+            "wisp_runner_profile_{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = wisp_store::Store::open(&tmp).await.unwrap();
+        let mut p = test_profile("m1", "codex", "legacy-model");
+        p.provider = crate::local_runner::PROVIDER_CODEX_CLI.into();
+        p.runner_command = "custom codex".into();
+        p.runner_profile = "work".into();
+        p.runner_sandbox = "workspace-write".into();
+        p.runner_web_search_mode = "indexed".into();
+        p.runner_persistent = true;
+        p.normal_model = "gpt-normal".into();
+        p.normal_reasoning_effort = "ultra".into();
+        p.plan_model = "gpt-plan".into();
+        p.plan_reasoning_effort = "medium".into();
+        p.service_tier = "priority".into();
+        p.personality = "pragmatic".into();
+        p.reasoning_summary = "concise".into();
+        p.verbosity = "low".into();
+        save_raw(&store, &[p]).await.unwrap();
+        store.set_setting(ACTIVE_KEY, "m1").await.unwrap();
+
+        let settings = active_runner_settings(&store).await;
+        assert_eq!(settings.command, "custom codex");
+        assert_eq!(settings.profile, "work");
+        assert_eq!(settings.sandbox, "workspace-write");
+        assert_eq!(settings.web_search_mode, "indexed");
+        assert!(!settings.web_search);
+        assert_eq!(settings.model, "gpt-normal");
+        assert_eq!(settings.normal_reasoning_effort, "ultra");
+        assert_eq!(settings.plan_model, "gpt-plan");
+        assert_eq!(settings.plan_reasoning_effort, "medium");
+        assert_eq!(settings.service_tier, "priority");
+        assert_eq!(settings.personality, "pragmatic");
+        assert_eq!(settings.reasoning_summary, "concise");
+        assert_eq!(settings.verbosity, "low");
+        assert!(settings.persistent);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn old_ui_payload_preserves_runner_and_plan_overrides() {
+        let mut existing = test_profile("m1", "codex", "gpt-normal");
+        existing.runner_command = "custom-codex".into();
+        existing.runner_web_search_mode = "cached".into();
+        existing.runner_persistent = true;
+        existing.plan_model = "gpt-plan".into();
+        existing.plan_reasoning_effort = "medium".into();
+        existing.service_tier = "priority".into();
+
+        let mut incoming: ModelProfile = serde_json::from_str(
+            r#"{"id":"m1","label":"codex","provider":"codex_cli","api_url":"",
+                 "model":"gpt-edited","reasoning_effort":"high"}"#,
+        )
+        .unwrap();
+        assert!(!has_explicit_extended_settings(&incoming));
+        preserve_wisp_overrides(&existing, &mut incoming);
+        incoming.normal_model = incoming.model.clone();
+        incoming.normal_reasoning_effort = incoming.reasoning_effort.clone();
+        migrate_profile(&mut incoming);
+        assert_eq!(incoming.normal_model, "gpt-edited");
+        assert_eq!(incoming.normal_reasoning_effort, "high");
+        assert_eq!(incoming.runner_command, "custom-codex");
+        assert_eq!(incoming.runner_web_search_mode, "cached");
+        assert!(incoming.runner_persistent);
+        assert_eq!(incoming.plan_model, "gpt-plan");
+        assert_eq!(incoming.service_tier, "priority");
+    }
+
+    #[test]
+    fn web_search_mode_accepts_current_and_legacy_forms() {
+        assert_eq!(normalize_web_search_mode("indexed"), "indexed");
+        assert_eq!(normalize_web_search_mode("OFF"), "disabled");
+        assert_eq!(normalize_web_search_mode("future-value"), "inherit");
+        let disabled: ModelProfile = serde_json::from_str(
+            r#"{"id":"m","label":"m","provider":"codex_cli","api_url":"",
+                 "model":"inherit","runner_web_search":false}"#,
+        )
+        .unwrap();
+        assert_eq!(disabled.runner_web_search_mode, "inherit");
+    }
+
+    #[test]
     fn fresh_id_skips_taken() {
         let existing = vec![test_profile("m1", "a", "x"), test_profile("m2", "b", "y")];
         assert_eq!(fresh_id(&existing), "m3");
@@ -676,6 +1144,14 @@ mod tests {
         profile.supports_vision = true;
         assert!(can_describe_images(&profile));
         profile.supports_vision = false;
+        assert!(!can_describe_images(&profile));
+    }
+
+    #[test]
+    fn local_runner_is_not_a_vision_api_profile() {
+        let mut profile = test_profile("m1", "codex", "inherit");
+        profile.provider = crate::local_runner::PROVIDER_CODEX_CLI.into();
+        profile.supports_vision = true;
         assert!(!can_describe_images(&profile));
     }
 

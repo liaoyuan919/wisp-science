@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 use wisp_core::{Agent, MemoryManager, Output};
 use wisp_llm::{Message, ProviderConfig};
@@ -15,12 +16,15 @@ use wisp_store::Store;
 
 mod approval_commands;
 mod artifact_commands;
+mod codex_app_server;
+mod codex_provider;
 mod codex_runtime;
 mod codex_tool;
 mod connector_commands;
 mod context_probe;
 mod file_browser;
 mod harvest;
+mod local_runner;
 mod mcp_bridge;
 pub use mcp_bridge::run_mcp_bridge_cli;
 mod models;
@@ -113,6 +117,40 @@ enum AgentEvent {
     CorrectionStarted {
         frame_id: String,
         model: String,
+    },
+    PlanDelta {
+        frame_id: String,
+        delta: String,
+        native: bool,
+    },
+    FinalPlan {
+        frame_id: String,
+        plan: String,
+        native: bool,
+        plan_id: String,
+        revision: i64,
+    },
+    PlanUpdated {
+        frame_id: String,
+        plan: String,
+        native: bool,
+    },
+    RequestUserInput {
+        frame_id: String,
+        question_id: String,
+        question: String,
+        options: Vec<serde_json::Value>,
+        is_other: bool,
+        is_secret: bool,
+    },
+    RequestUserInputResolved {
+        frame_id: String,
+        question_id: String,
+    },
+    ModelRerouted {
+        frame_id: String,
+        requested_model: String,
+        effective_model: String,
     },
 }
 
@@ -830,6 +868,13 @@ async fn clear_idle_agents(state: &AppState) {
             *guard = None;
         }
     }
+    // App Server threads bind their dynamic tool schema at thread/start.
+    // Retire idle actors (or defer active ones) so connector/skill/memory and
+    // profile changes cannot leave a thread advertising stale capabilities.
+    state
+        .codex
+        .invalidate_cached_actors("Wisp capabilities or settings changed")
+        .await;
 }
 
 fn default_locale() -> String {
@@ -857,7 +902,14 @@ struct BootstrapStatus {
 /// independent mutexes.
 struct SessionRuntime {
     agent: tokio::sync::Mutex<Option<Agent>>,
+    /// Serializes an entire user workflow (primary turn + automatic review +
+    /// correction), not merely one model turn.
+    workflow: tokio::sync::Mutex<()>,
+    /// Child used by Claude Code / compatibility `codex exec`.  App Server
+    /// turns are interrupted through their JSON-RPC client instead.
+    local_child: tokio::sync::Mutex<Option<tokio::process::Child>>,
     cancel: Arc<AtomicBool>,
+    deleted: AtomicBool,
     last_seq: StdMutex<i64>,
 }
 
@@ -865,7 +917,10 @@ impl SessionRuntime {
     fn new() -> Self {
         Self {
             agent: tokio::sync::Mutex::new(None),
+            workflow: tokio::sync::Mutex::new(()),
+            local_child: tokio::sync::Mutex::new(None),
             cancel: Arc::new(AtomicBool::new(false)),
+            deleted: AtomicBool::new(false),
             last_seq: StdMutex::new(0),
         }
     }
@@ -888,6 +943,7 @@ struct ActiveProject {
 struct AppState {
     app_data: PathBuf,
     store: Store,
+    codex: codex_provider::CodexRuntimeManager,
     run_manager: run_context::RunManager,
     active: std::sync::RwLock<HashMap<String, ActiveProject>>,
     /// One runtime per conversation frame id. Locked only briefly to clone the
@@ -1124,6 +1180,8 @@ fn normalized_provider(provider: &str) -> String {
     match provider.trim() {
         "anthropic" => "anthropic".into(),
         "openai_responses" | "openai-responses" | "responses" => "openai_responses".into(),
+        "codex_cli" | "codex-cli" | "codex" => "codex_cli".into(),
+        "claude_code" | "claude-code" => "claude_code".into(),
         _ => "openai".into(),
     }
 }
@@ -1561,6 +1619,7 @@ fn default_api_url(provider: &str) -> &'static str {
     match normalized_provider(provider).as_str() {
         "anthropic" => "https://api.anthropic.com",
         "openai_responses" => "https://api.openai.com/v1",
+        "codex_cli" | "claude_code" => "",
         _ => "https://api.deepseek.com",
     }
 }
@@ -1569,6 +1628,7 @@ fn default_model(provider: &str) -> &'static str {
     match normalized_provider(provider).as_str() {
         "anthropic" => "claude-sonnet-5",
         "openai_responses" => "gpt-5.5",
+        "codex_cli" | "claude_code" => "inherit",
         _ => "deepseek-v4-pro",
     }
 }
@@ -1839,6 +1899,228 @@ async fn ensure_active_frame(
     Ok(id)
 }
 
+fn local_bridge_launch(
+    app_data: &Path,
+    ap: &ActiveProject,
+    frame_id: &str,
+    plan_safe: bool,
+) -> Result<local_runner::McpBridgeLaunch, String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("Cannot locate Wisp executable for MCP bridge: {e}"))?
+        .display()
+        .to_string();
+    let mut bridge_args = vec![
+        "--wisp-mcp-bridge".to_string(),
+        "--app-data".to_string(),
+        app_data.display().to_string(),
+        "--project-root".to_string(),
+        ap.root.display().to_string(),
+        "--resource-root".to_string(),
+        wisp_paths::resource_root().display().to_string(),
+        "--project-id".to_string(),
+        ap.id.clone(),
+        "--frame-id".to_string(),
+        frame_id.to_string(),
+    ];
+    if plan_safe {
+        bridge_args.push("--plan-safe".into());
+    }
+    if local_runner::runner_uses_wsl(&ap.root) {
+        let mut args = vec!["/d".to_string(), "/c".to_string(), exe];
+        args.append(&mut bridge_args);
+        Ok(local_runner::McpBridgeLaunch {
+            command: "cmd.exe".into(),
+            args,
+        })
+    } else {
+        Ok(local_runner::McpBridgeLaunch {
+            command: exe,
+            args: bridge_args,
+        })
+    }
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn local_runner_settings_fingerprint(
+    provider: &str,
+    settings: &local_runner::LocalRunnerSettings,
+) -> String {
+    let sandbox = local_runner::default_runner_sandbox(&settings.sandbox);
+    let fields = [
+        provider.trim(),
+        settings.command.trim(),
+        settings.profile.trim(),
+        sandbox.as_str(),
+        settings.web_search_mode.trim(),
+        settings.normal_model.trim(),
+        settings.normal_reasoning_effort.trim(),
+        settings.plan_model.trim(),
+        settings.plan_reasoning_effort.trim(),
+        settings.service_tier.trim(),
+        settings.personality.trim(),
+        settings.reasoning_summary.trim(),
+        settings.verbosity.trim(),
+        settings.claude_command.trim(),
+    ];
+    format!("{:016x}", fnv1a64(fields.join("\0").as_bytes()))
+}
+
+fn local_runner_session_key(provider: &str, profile_id: &str, frame_id: &str) -> String {
+    format!("local_runner_session:v2:{provider}:{profile_id}:{frame_id}")
+}
+
+async fn load_local_runner_session_id(
+    store: &Store,
+    provider: &str,
+    profile_id: &str,
+    frame_id: &str,
+    settings: &local_runner::LocalRunnerSettings,
+) -> Result<Option<String>, String> {
+    let key = local_runner_session_key(provider, profile_id, frame_id);
+    if let Some(value) = store
+        .get_setting(&key)
+        .await
+        .map_err(|error| error.to_string())?
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(Some(value));
+    }
+    let legacy_exact = format!(
+        "local_runner_session:{provider}:{}:{frame_id}",
+        local_runner_settings_fingerprint(provider, settings)
+    );
+    let mut candidates = store
+        .list_settings_with_prefix(&format!("local_runner_session:{provider}:"))
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|(candidate, value)| {
+            (candidate == &legacy_exact || candidate.ends_with(&format!(":{frame_id}")))
+                && !value.trim().is_empty()
+        })
+        .map(|(_, value)| value.trim().to_string())
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.dedup();
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [external] => {
+            store
+                .set_setting(&key, external)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(Some(external.clone()))
+        }
+        _ => Err(format!(
+            "Multiple legacy {provider} thread ids exist for this session. Wisp refused to guess a lineage; start a new session or remove the stale local_runner_session settings."
+        )),
+    }
+}
+
+async fn save_local_runner_session_id(
+    store: &Store,
+    provider: &str,
+    profile_id: &str,
+    frame_id: &str,
+    external_session_id: &str,
+) {
+    if !external_session_id.trim().is_empty() {
+        let _ = store
+            .set_setting(
+                &local_runner_session_key(provider, profile_id, frame_id),
+                external_session_id.trim(),
+            )
+            .await;
+    }
+}
+
+fn emit_local_runner_event(
+    app: &AppHandle,
+    frame_id: &str,
+    event: local_runner::RunnerEvent,
+    final_text: &mut String,
+    error_text: &mut Option<String>,
+) {
+    match event {
+        local_runner::RunnerEvent::Text(text) => {
+            if !final_text.is_empty() {
+                final_text.push('\n');
+            }
+            final_text.push_str(&text);
+            let _ = app.emit(
+                "agent",
+                AgentEvent::Text {
+                    frame_id: frame_id.into(),
+                    delta: text,
+                },
+            );
+        }
+        local_runner::RunnerEvent::Reasoning(delta) => {
+            let _ = app.emit(
+                "agent",
+                AgentEvent::Reasoning {
+                    frame_id: frame_id.into(),
+                    delta,
+                },
+            );
+        }
+        local_runner::RunnerEvent::ToolCall { name, preview } => {
+            let _ = app.emit(
+                "agent",
+                AgentEvent::ToolCall {
+                    frame_id: frame_id.into(),
+                    name,
+                    preview,
+                },
+            );
+        }
+        local_runner::RunnerEvent::ToolResult { name, ok, content } => {
+            let _ = app.emit(
+                "agent",
+                AgentEvent::ToolResult {
+                    frame_id: frame_id.into(),
+                    name,
+                    ok,
+                    content,
+                    duration_ms: 0,
+                },
+            );
+        }
+        local_runner::RunnerEvent::Diff { path } => {
+            let _ = app.emit(
+                "agent",
+                AgentEvent::Diff {
+                    frame_id: frame_id.into(),
+                    path,
+                },
+            );
+        }
+        local_runner::RunnerEvent::Usage { input, output } => {
+            let _ = app.emit(
+                "agent",
+                AgentEvent::Usage {
+                    frame_id: frame_id.into(),
+                    round: 1,
+                    input,
+                    output,
+                    ctx_tokens: 0,
+                    max_context: 0,
+                },
+            );
+        }
+        local_runner::RunnerEvent::Error(message) => *error_text = Some(message),
+    }
+}
+
 const COMPOSER_SESSION_REFERENCE_LIMIT: usize = 3;
 const COMPOSER_REFERENCE_TEXT_LIMIT: usize = 80_000;
 
@@ -1858,6 +2140,7 @@ async fn resolve_composer_references(
     refs: &[ComposerReferenceArg],
     target_frame_id: &str,
     skills: &SkillIndex,
+    wsl_distribution: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let mut seen = HashSet::new();
     let mut artifact_lines = Vec::new();
@@ -1893,7 +2176,13 @@ async fn resolve_composer_references(
                         artifact.name
                     ));
                 }
-                artifact_lines.push(format!("- {}: {}", artifact.name, real.display()));
+                let display_path = if let Some(distribution) = wsl_distribution {
+                    local_runner::to_wsl_path_for(&real, Some(distribution))?
+                        .unwrap_or_else(|| real.display().to_string())
+                } else {
+                    real.display().to_string()
+                };
+                artifact_lines.push(format!("- {}: {}", artifact.name, display_path));
             }
             ComposerReferenceArg::Session { id } => {
                 if !seen.insert(format!("session:{id}")) {
@@ -1961,6 +2250,575 @@ async fn resolve_composer_references(
     Ok(injections)
 }
 
+/// Compatibility path for Claude Code and for Codex installations that do not
+/// expose App Server.  Codex App Server is selected before this function; the
+/// fallback stays fully functional but is never presented as native Plan.
+async fn run_local_runner_exec_turn(
+    state: &State<'_, AppState>,
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    provider: String,
+    session_id: Option<String>,
+    message: String,
+    attachments: Vec<String>,
+    references: Vec<ComposerReferenceArg>,
+    resume: bool,
+    model_label: String,
+    compatibility_plan: bool,
+    codex_overrides: Option<serde_json::Value>,
+    codex_config_generation: Option<String>,
+) -> Result<String, String> {
+    let ap = state.active(window.label());
+    let frame_id = match session_id.as_deref().filter(|id| !id.is_empty()) {
+        Some(id) => {
+            let owner = state
+                .store
+                .frame_project_id(id)
+                .await
+                .map_err(|error| error.to_string())?;
+            if owner.as_deref() != Some(ap.id.as_str()) {
+                return Err(format!(
+                    "Session '{id}' does not belong to the active project '{}'.",
+                    ap.id
+                ));
+            }
+            id.to_string()
+        }
+        None => create_session_frame(&state.store, &ap.id).await?,
+    };
+    state.set_active_frame(window.label(), Some(frame_id.clone()));
+    let rt = {
+        let mut sessions = state.sessions.lock().await;
+        sessions
+            .entry(frame_id.clone())
+            .or_insert_with(|| Arc::new(SessionRuntime::new()))
+            .clone()
+    };
+    rt.cancel.store(false, Ordering::SeqCst);
+    let _turn_guard = rt.agent.lock().await;
+    if rt.deleted.load(Ordering::SeqCst) {
+        return Err("This session was deleted while the local turn was queued.".into());
+    }
+    if rt.cancel.load(Ordering::SeqCst) {
+        return Err("Local runner turn was cancelled before it started.".into());
+    }
+    let mut history = state
+        .store
+        .load_messages(&frame_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    rt.set_last_seq(history.len() as i64);
+    let prior_history = history.clone();
+
+    if !resume {
+        let user = Message::user(message.clone());
+        let seq = rt.last_seq() + 1;
+        state
+            .store
+            .append_message(&frame_id, seq, &user)
+            .await
+            .map_err(|e| e.to_string())?;
+        rt.set_last_seq(seq);
+        history.push(user);
+        let _ = app.emit(
+            "agent",
+            AgentEvent::User {
+                frame_id: frame_id.clone(),
+                text: message.clone(),
+            },
+        );
+    }
+
+    let started_result: Result<String, String> = async {
+
+    let active_runner_profile = models::active_profile(&state.store).await;
+    let mut settings = models::active_runner_settings(&state.store).await;
+    let base_runner_settings_fingerprint =
+        local_runner_settings_fingerprint(&provider, &settings);
+    if local_runner::is_codex_cli(&provider) {
+        if let Some(overrides) = codex_overrides.as_ref() {
+            let mode_key = if compatibility_plan { "plan" } else { "normal" };
+            let mode = overrides.get(mode_key).and_then(serde_json::Value::as_object);
+            let explicit_value = |key: &str| {
+                mode.and_then(|mode| mode.get(key))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| {
+                        !value.is_empty()
+                            && !matches!(
+                                value.to_ascii_lowercase().as_str(),
+                                "inherit" | "default" | "codex-default"
+                            )
+                    })
+                    .map(str::to_owned)
+            };
+            if let Some(model) = explicit_value("model") {
+                if compatibility_plan {
+                    settings.plan_model = model;
+                } else {
+                    settings.normal_model = model;
+                }
+            }
+            if let Some(effort) = explicit_value("effort")
+                .or_else(|| explicit_value("reasoning_effort"))
+            {
+                if compatibility_plan {
+                    settings.plan_reasoning_effort = effort;
+                } else {
+                    settings.normal_reasoning_effort = effort;
+                }
+            }
+        }
+        if compatibility_plan {
+            // Prompt-only planning is not a sandbox. Enforce read-only at the
+            // CLI boundary and launch a plan-safe MCP bridge below.
+            settings.sandbox = "read-only".into();
+        }
+    }
+    let stored_external = if settings.persistent {
+        load_local_runner_session_id(
+            &state.store,
+            &provider,
+            &active_runner_profile.id,
+            &frame_id,
+            &settings,
+        )
+        .await?
+    } else {
+        None
+    };
+    let command_external = if settings.persistent && local_runner::is_claude_code(&provider) {
+        Some(stored_external.clone().unwrap_or_else(|| frame_id.clone()))
+    } else {
+        stored_external.clone()
+    };
+
+    if let Some(distribution) = local_runner::wsl_distribution_for(&ap.root) {
+        for attachment in &attachments {
+            local_runner::to_wsl_path_for(Path::new(attachment), Some(&distribution))?;
+        }
+    }
+
+    let mut current_request = if resume && message.trim().is_empty() {
+        if local_runner::is_claude_code(&provider) {
+            "Continue the previous Wisp local Claude Code task.".to_string()
+        } else {
+            "Continue the previous Wisp local Codex task.".to_string()
+        }
+    } else {
+        message.clone()
+    };
+    if !resume && !references.is_empty() {
+        let skills = active_skill_index(&state.store, &ap).await;
+        let selected_wsl_distribution = local_runner::wsl_distribution_for(&ap.root);
+        let injections =
+            resolve_composer_references(
+                &state.store,
+                &references,
+                &frame_id,
+                &skills,
+                selected_wsl_distribution.as_deref(),
+            )
+            .await?;
+        if !injections.is_empty() {
+            current_request = format!("{}\n\n{}", injections.join("\n\n"), current_request);
+        }
+    }
+    if compatibility_plan {
+        current_request = format!(
+            "Plan first before executing. Produce a complete implementation plan, ask any essential clarification questions, do not modify files or run mutating commands, and wait for explicit approval.\n\n{current_request}"
+        );
+    }
+    let prompt_history = if settings.persistent && stored_external.is_some() {
+        &[][..]
+    } else {
+        prior_history.as_slice()
+    };
+    let prompt = local_runner::build_prompt(
+        &ap.root,
+        prompt_history,
+        &current_request,
+        &attachments,
+    );
+    let bridge = local_bridge_launch(&state.app_data, &ap, &frame_id, compatibility_plan)?;
+    let (runner_name, mut runner_cmd) = if local_runner::is_claude_code(&provider) {
+        (
+            "Claude Code",
+            local_runner::build_claude_code_command(
+                &settings,
+                &ap.root,
+                command_external.as_deref(),
+            ),
+        )
+    } else {
+        (
+            "Codex CLI compatibility runner",
+            local_runner::build_codex_command_for_mode(
+                &settings,
+                if compatibility_plan {
+                    local_runner::RunnerModelMode::Plan
+                } else {
+                    local_runner::RunnerModelMode::Normal
+                },
+                &ap.root,
+                &attachments,
+                command_external.as_deref(),
+            ),
+        )
+    };
+    if compatibility_plan && local_runner::is_codex_cli(&provider) {
+        local_runner::audit_codex_project_external_process_config(&ap.root)?;
+        local_runner::enforce_plan_mcp_isolation(&mut runner_cmd, &bridge);
+    }
+    let (runtime_config_path, runtime_env, runtime_diagnostics) =
+        if local_runner::is_claude_code(&provider) {
+            let runtime = local_runner::prepare_claude_runtime(&ap.root, &bridge)?;
+            (runtime.config_path, runtime.env, runtime.diagnostics)
+        } else {
+            let profile = models::active_profile(&state.store).await;
+            let wsl_homes = if local_runner::runner_uses_wsl(&ap.root) {
+                Some(codex_provider::wsl_codex_homes(&ap.root).await?)
+            } else {
+                None
+            };
+            // Exec uses a frame-scoped isolated home because its MCP config
+            // embeds the frame id. Profiles/sessions must never race by
+            // rewriting a shared config.toml.
+            let runtime_profile = format!("exec-{}-{frame_id}", profile.id);
+            let runtime = codex_runtime::prepare_codex_runtime_for_profile_from_source(
+                &ap.root,
+                &runtime_profile,
+                Some(&codex_runtime::McpBridgeLaunch {
+                    command: bridge.command.clone(),
+                    args: bridge.args.clone(),
+                }),
+                wsl_homes.as_ref().map(|(host, _, _)| host.as_path()),
+            )?;
+            if let Some((source_host, source_wire, _)) = wsl_homes.as_ref() {
+                let target_wire = local_runner::to_wsl_path(&runtime.home_dir)
+                    .unwrap_or_else(|| runtime.home_dir.display().to_string());
+                codex_runtime::rewrite_config_file_references_for_runtime(
+                    &runtime.config_path,
+                    source_host,
+                    &runtime.home_dir,
+                    Some(source_wire),
+                    Some(&target_wire),
+                )?;
+            }
+            let env_home = if local_runner::runner_uses_wsl(&ap.root) {
+                local_runner::to_wsl_path(&runtime.home_dir)
+                    .unwrap_or_else(|| runtime.home_dir.display().to_string())
+            } else {
+                runtime.home_dir.display().to_string()
+            };
+            (
+                runtime.config_path,
+                vec![("CODEX_HOME".into(), env_home)],
+                runtime.diagnostics,
+            )
+        };
+    for diagnostic in &runtime_diagnostics {
+        let _ = app.emit(
+            "agent",
+            AgentEvent::Reasoning {
+                frame_id: frame_id.clone(),
+                delta: diagnostic.clone(),
+            },
+        );
+    }
+    runner_cmd.env.extend(runtime_env);
+    if local_runner::is_claude_code(&provider) {
+        local_runner::add_claude_mcp_config(&mut runner_cmd, &runtime_config_path, &ap.root);
+    }
+
+    let runner_mode = if compatibility_plan {
+        local_runner::RunnerModelMode::Plan
+    } else {
+        local_runner::RunnerModelMode::Normal
+    };
+    let effective_runner_model = settings
+        .model_override(runner_mode)
+        .map(str::to_owned)
+        .unwrap_or_else(|| model_label.clone());
+    let mut compatibility_runtime_config = None::<String>;
+    if local_runner::is_codex_cli(&provider) {
+        let now = chrono::Utc::now().timestamp();
+        let requested = codex_overrides.clone().unwrap_or_else(|| serde_json::json!({
+            "source": "profile_or_local_codex"
+        }));
+        let args_wire = serde_json::to_vec(&runner_cmd.args).unwrap_or_default();
+        let attachment_wire = serde_json::to_vec(&attachments).unwrap_or_default();
+        let sent = serde_json::json!({
+            "program": runner_cmd.program,
+            "model": settings.model_override(runner_mode),
+            "reasoning_effort": settings.reasoning_effort_override(runner_mode),
+            "sandbox": settings.sandbox,
+            "profile": settings.profile,
+            "web_search": settings.web_search_mode,
+            "service_tier": settings.service_tier,
+            "personality": settings.personality,
+            "summary": settings.reasoning_summary,
+            "verbosity": settings.verbosity,
+            "compatibility_plan": compatibility_plan,
+            "argument_summary": {
+                "count": runner_cmd.args.len(),
+                "serialized_bytes": args_wire.len(),
+                "fingerprint": format!("fnv1a64:{:016x}", fnv1a64(&args_wire)),
+                "content_stored": false,
+            },
+            "input_summary": {
+                "prompt_bytes": prompt.len(),
+                "prompt_fingerprint": format!("fnv1a64:{:016x}", fnv1a64(prompt.as_bytes())),
+                "attachment_count": attachments.len(),
+                "attachment_fingerprint": format!("fnv1a64:{:016x}", fnv1a64(&attachment_wire)),
+                "content_stored": false,
+            },
+        });
+        let audit_id = Uuid::new_v4().to_string();
+        let config_version = codex_config_generation
+            .clone()
+            .unwrap_or_else(|| format!("compatibility:{}", local_runner_settings_fingerprint(&provider, &settings)));
+        // `codex exec --json` does not provide a trustworthy echo of every
+        // resolved runtime setting. Keep sent intent separate and explicitly
+        // mark actual values unverifiable instead of copying sent into actual.
+        let actual = serde_json::json!({
+            "verification": "unavailable",
+            "backend": "codex_exec",
+            "reason": "The compatibility JSONL protocol does not report the complete effective turn configuration."
+        });
+        compatibility_runtime_config = Some(
+            serde_json::json!({
+                "codex_turn_config_id": audit_id,
+                "config_version": config_version,
+                "planProfileId": active_runner_profile.id.clone(),
+                "planProvider": provider.clone(),
+                "profileSettingsFingerprint": base_runner_settings_fingerprint.clone(),
+                "requested": requested,
+                "sent": sent,
+                "actual": actual,
+            })
+            .to_string(),
+        );
+        let record = wisp_store::CodexTurnConfigRecord {
+            id: audit_id,
+            frame_id: frame_id.clone(),
+            codex_thread_id: command_external.clone(),
+            codex_turn_id: None,
+            mode: if compatibility_plan { "compatibility_plan".into() } else { "compatibility_default".into() },
+            config_version,
+            requested_json: requested.to_string(),
+            effective_json: sent.to_string(),
+            actual_json: actual.to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        state
+            .store
+            .save_codex_turn_config(&record)
+            .await
+            .map_err(|error| {
+                format!(
+                    "[turn-started] Compatibility runner was not launched because Wisp could not persist its required configuration audit: {error}"
+                )
+            })?;
+    }
+
+    let mut command = tokio::process::Command::new(&runner_cmd.program);
+    command
+        .args(&runner_cmd.args)
+        .envs(runner_cmd.env.iter().map(|(key, value)| (key, value)))
+        .current_dir(&runner_cmd.cwd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    wisp_tools::process::hide_console_async(&mut command);
+    let mut child = command.spawn().map_err(|e| {
+        format!(
+            "Failed to launch {runner_name} '{}': {e}. Configure the runner command in Settings.",
+            runner_cmd.program
+        )
+    })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| format!("{runner_name} stdin unavailable"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("{runner_name} stdout unavailable"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("{runner_name} stderr unavailable"))?;
+    *rt.local_child.lock().await = Some(child);
+    let stderr_handle = tokio::spawn(async move {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text).await;
+        text
+    });
+
+    state.running_turns.lock().await.insert(frame_id.clone());
+    if let Err(error) = async {
+        stdin.write_all(prompt.as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+        stdin.shutdown().await
+    }
+    .await
+    {
+        state.running_turns.lock().await.remove(&frame_id);
+        if let Some(mut child) = rt.local_child.lock().await.take() {
+            let _ = child.kill().await;
+        }
+        return Err(format!("Failed to write prompt to {runner_name}: {error}"));
+    }
+    drop(stdin);
+
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    let mut final_text = String::new();
+    let mut error_text = None;
+    let mut observed_external = None;
+    loop {
+        line.clear();
+        let read = reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| format!("Failed to read {runner_name} output: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        let raw = line.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        if settings.persistent
+            && local_runner::is_codex_cli(&provider)
+            && observed_external.is_none()
+        {
+            observed_external = local_runner::codex_session_id_from_jsonl(raw);
+        }
+        let events = if local_runner::is_claude_code(&provider) {
+            local_runner::parse_claude_jsonl(raw)
+        } else {
+            local_runner::parse_codex_jsonl(raw)
+        };
+        for event in events {
+            emit_local_runner_event(
+                &app,
+                &frame_id,
+                event,
+                &mut final_text,
+                &mut error_text,
+            );
+        }
+    }
+    let status = match rt.local_child.lock().await.take() {
+        Some(mut child) => child.wait().await.map_err(|e| e.to_string())?,
+        None => {
+            state.running_turns.lock().await.remove(&frame_id);
+            return Err(format!("{runner_name} run stopped by user."));
+        }
+    };
+    state.running_turns.lock().await.remove(&frame_id);
+    let stderr_text = stderr_handle.await.unwrap_or_default();
+    if !status.success() && error_text.is_none() {
+        error_text = Some(if stderr_text.trim().is_empty() {
+            format!("{runner_name} exited with status {status}")
+        } else {
+            stderr_text.trim().to_string()
+        });
+    }
+    if let Some(error) = error_text {
+        let _ = app.emit(
+            "agent",
+            AgentEvent::Error {
+                frame_id: frame_id.clone(),
+                message: error.clone(),
+            },
+        );
+        return Err(error);
+    }
+    if final_text.trim().is_empty() {
+        final_text = format!("{runner_name} completed without a final message.");
+    }
+    if settings.persistent {
+        if let Some(external) = observed_external.or(command_external) {
+            save_local_runner_session_id(
+                &state.store,
+                &provider,
+                &active_runner_profile.id,
+                &frame_id,
+                &external,
+            )
+            .await;
+        }
+    }
+    let mut assistant = Message::assistant(final_text);
+    assistant.model_name = Some(effective_runner_model);
+    let seq = rt.last_seq() + 1;
+    state
+        .store
+        .append_message(&frame_id, seq, &assistant)
+        .await
+        .map_err(|e| e.to_string())?;
+    rt.set_last_seq(seq);
+    if compatibility_plan {
+        let revision = state
+            .store
+            .next_proposed_plan_revision(&frame_id)
+            .await
+            .unwrap_or(1);
+        let now = chrono::Utc::now().timestamp();
+        let plan = wisp_store::ProposedPlanRecord {
+            id: Uuid::new_v4().to_string(),
+            frame_id: frame_id.clone(),
+            codex_thread_id: None,
+            codex_turn_id: None,
+            revision,
+            markdown: assistant.content.as_text(),
+            status: "pending".into(),
+            mode: "compatibility".into(),
+            progress_json: "[]".into(),
+            runtime_config_json: compatibility_runtime_config
+                .clone()
+                .unwrap_or_else(|| "{}".into()),
+            created_at: now,
+            updated_at: now,
+        };
+        state.store.save_proposed_plan(&plan).await.map_err(|error| {
+            format!(
+                "[turn-started] Wisp could not persist the compatibility Plan, so it cannot be approved safely: {error}"
+            )
+        })?;
+        let _ = app.emit(
+            "agent",
+            AgentEvent::FinalPlan {
+                frame_id: frame_id.clone(),
+                plan: plan.markdown,
+                native: false,
+                plan_id: plan.id,
+                revision,
+            },
+        );
+    }
+    let _ = app.emit(
+        "agent",
+        AgentEvent::Done {
+            frame_id: frame_id.clone(),
+        },
+    );
+    Ok(frame_id)
+    }
+    .await;
+    started_result.map_err(|error| {
+        if error.starts_with("[turn-started] ") {
+            error
+        } else {
+            format!("[turn-started] {error}")
+        }
+    })
+}
+
 #[tauri::command]
 async fn send_message(
     state: State<'_, AppState>,
@@ -1971,13 +2829,133 @@ async fn send_message(
     attachments: Option<Vec<String>>,
     references: Option<Vec<ComposerReferenceArg>>,
     resume: Option<bool>,
+    collaboration_mode: Option<String>,
+    codex_config_generation: Option<String>,
+    codex_overrides: Option<serde_json::Value>,
 ) -> Result<String, String> {
     let resume = resume.unwrap_or(false);
-    let _ = &attachments;
     if !resume && message.trim().is_empty() {
         return Err("message is empty".into());
     }
     let model_label = models::active_label(&state.store).await;
+    let (active_provider, _, _, _) = load_settings(&state.store).await;
+    let local_attachments = attachments.clone().unwrap_or_default();
+    let local_references = references.clone().unwrap_or_default();
+    let plan_requested = collaboration_mode
+        .as_deref()
+        .is_some_and(|mode| mode.eq_ignore_ascii_case("plan"));
+    if local_runner::is_codex_cli(&active_provider) {
+        let codex_session_id = match session_id.clone().filter(|value| !value.trim().is_empty()) {
+            Some(value) => value,
+            None => {
+                let project = state.active(window.label());
+                create_session_frame(&state.store, &project.id).await?
+            }
+        };
+        state.set_active_frame(window.label(), Some(codex_session_id.clone()));
+        let workflow_runtime = {
+            let mut sessions = state.sessions.lock().await;
+            sessions
+                .entry(codex_session_id.clone())
+                .or_insert_with(|| Arc::new(SessionRuntime::new()))
+                .clone()
+        };
+        let _workflow_guard = workflow_runtime.workflow.lock().await;
+        match codex_provider::run_codex_turn(
+            &state,
+            app.clone(),
+            window.clone(),
+            Some(codex_session_id.clone()),
+            message.clone(),
+            local_attachments.clone(),
+            local_references.clone(),
+            resume,
+            collaboration_mode.clone(),
+            codex_config_generation.clone(),
+            codex_overrides.clone(),
+            None,
+        )
+        .await
+        {
+            Ok(frame_id) => {
+                if !plan_requested {
+                    codex_provider::automatic_review_after_turn(&state, &app, &window, &frame_id)
+                        .await;
+                }
+                let _ = app.emit(
+                    "agent",
+                    AgentEvent::Done {
+                        frame_id: frame_id.clone(),
+                    },
+                );
+                return Ok(frame_id);
+            }
+            Err(codex_provider::CodexProviderError::Turn(error)) => return Err(error),
+            Err(codex_provider::CodexProviderError::Unavailable(reason)) => {
+                if codex_config_generation.is_some()
+                    && !reason.contains("does not expose native Plan mode")
+                {
+                    return Err(format!(
+                        "Codex App Server changed or became unavailable after the displayed configuration was confirmed ({reason}). Compatibility mode was not started; refresh the runtime and confirm again."
+                    ));
+                }
+                tracing::warn!(
+                    "Codex App Server unavailable; using compatibility runner: {reason}"
+                );
+                let frame = codex_session_id.clone();
+                if !frame.is_empty() {
+                    let _ = app.emit(
+                        "agent",
+                        AgentEvent::Reasoning {
+                            frame_id: frame,
+                            delta: format!(
+                                "Codex App Server unavailable ({reason}). Using {}.",
+                                if plan_requested {
+                                    "compatibility Plan (non-native)"
+                                } else {
+                                    "codex exec compatibility mode"
+                                }
+                            ),
+                        },
+                    );
+                }
+            }
+        }
+        return run_local_runner_exec_turn(
+            &state,
+            app,
+            window,
+            active_provider,
+            Some(codex_session_id),
+            message,
+            local_attachments,
+            local_references,
+            resume,
+            model_label,
+            plan_requested,
+            codex_overrides,
+            codex_config_generation,
+        )
+        .await;
+    }
+    if local_runner::is_claude_code(&active_provider) {
+        return run_local_runner_exec_turn(
+            &state,
+            app,
+            window,
+            active_provider,
+            session_id,
+            message,
+            local_attachments,
+            local_references,
+            resume,
+            model_label,
+            plan_requested,
+            None,
+            None,
+        )
+        .await;
+    }
     let vision_cfg = build_vision_provider_config(&state.store).await;
 
     let max_context = state
@@ -2003,7 +2981,20 @@ async fn send_message(
     // one (mirrors the legacy first-send behavior). The frame id is what every
     // streamed event carries, so the UI can route by session.
     let frame_id = match session_id.as_deref().filter(|s| !s.is_empty()) {
-        Some(id) => id.to_string(),
+        Some(id) => {
+            let owner = state
+                .store
+                .frame_project_id(id)
+                .await
+                .map_err(|error| error.to_string())?;
+            if owner.as_deref() != Some(ap.id.as_str()) {
+                return Err(format!(
+                    "Session '{id}' does not belong to the active project '{}'.",
+                    ap.id
+                ));
+            }
+            id.to_string()
+        }
         None => create_session_frame(&state.store, &ap.id).await?,
     };
     state.set_active_frame(window.label(), Some(frame_id.clone()));
@@ -2036,8 +3027,11 @@ async fn send_message(
             .or_insert_with(|| Arc::new(SessionRuntime::new()))
             .clone()
     };
-
+    rt.cancel.store(false, Ordering::SeqCst);
     let mut guard = rt.agent.lock().await;
+    if rt.deleted.load(Ordering::SeqCst) {
+        return Err("This session was deleted while the turn was queued.".into());
+    }
     if guard.is_none() {
         let skills = active_skill_index(&state.store, &ap).await;
         let skills = match specialist.as_ref().and_then(|s| s.skills.as_ref()) {
@@ -2131,12 +3125,14 @@ async fn send_message(
         let skills = active_skill_index(&state.store, &ap).await;
         let refs = references.unwrap_or_default();
         for injection in
-            resolve_composer_references(&state.store, &refs, &frame_id, &skills).await?
+            resolve_composer_references(&state.store, &refs, &frame_id, &skills, None).await?
         {
             agent.ctx.inject_user(injection);
         }
     }
-    rt.cancel.store(false, Ordering::Relaxed);
+    if rt.cancel.load(Ordering::SeqCst) {
+        return Err("Turn was cancelled before it started.".into());
+    }
 
     // Incremental persistence: a background task appends each message the turn
     // produces to SQLite as it arrives (via TauriOutput::on_message), so a crash
@@ -2311,6 +3307,14 @@ async fn stop_agent(state: State<'_, AppState>, session_id: Option<String>) -> R
     };
     for rt in targets {
         rt.cancel.store(true, Ordering::Relaxed);
+        if let Some(mut child) = rt.local_child.lock().await.take() {
+            let _ = child.kill().await;
+        }
+    }
+    // Set cancellation first so a turn still between config/thread/start and
+    // active-turn registration cannot miss the user's stop request.
+    if let Some(id) = session_id.as_deref().filter(|value| !value.is_empty()) {
+        let _ = state.codex.interrupt(id).await;
     }
     Ok(())
 }
@@ -2341,7 +3345,11 @@ async fn generate_review(store: &Store, msgs: &[Message]) -> Result<review::Revi
         )
         .await
         .map_err(|e| format!("{e}"))?;
-    review::parse_report(&completion.content, &reviewer_model)
+    let mut report = review::parse_report(&completion.content, &reviewer_model)?;
+    if !local_runner::is_local_runner(&provider) {
+        report.reviewer_effort = reasoning_effort.trim().to_string();
+    }
+    Ok(report)
 }
 
 fn emit_review(app: &AppHandle, frame_id: &str, report: review::ReviewReport) {
@@ -2793,9 +3801,31 @@ async fn delete_session(
     id: String,
 ) -> Result<(), String> {
     let ap = state.active(window.label());
-    if let Some(rt) = state.sessions.lock().await.get(&id) {
+    let owner = state
+        .store
+        .frame_project_id(&id)
+        .await
+        .map_err(|error| error.to_string())?;
+    if owner.as_deref() != Some(ap.id.as_str()) {
+        return Err("Session does not belong to the active project.".into());
+    }
+    let runtime = state.sessions.lock().await.get(&id).cloned();
+    if let Some(rt) = runtime.as_ref() {
+        rt.deleted.store(true, Ordering::SeqCst);
         rt.cancel.store(true, Ordering::Relaxed);
     }
+    let _ = state.codex.interrupt(&id).await;
+    // Match send/Plan lock order. The tombstone prevents work already queued
+    // behind these guards from restarting after the DB cascade.
+    let _workflow_guard = match runtime.as_ref() {
+        Some(rt) => Some(rt.workflow.lock().await),
+        None => None,
+    };
+    let _agent_guard = match runtime.as_ref() {
+        Some(rt) => Some(rt.agent.lock().await),
+        None => None,
+    };
+    state.codex.drop_frame(&state.store, &id).await;
     state.sessions.lock().await.remove(&id);
     if state.active_frame(window.label()).as_deref() == Some(id.as_str()) {
         state.set_active_frame(window.label(), None);
@@ -2992,14 +4022,30 @@ async fn cancel_project_sessions(state: &AppState, project_id: &str) {
         .await
         .map(|rows| rows.into_iter().map(|(id, ..)| id).collect())
         .unwrap_or_default();
+    let runtimes = {
+        let sessions = state.sessions.lock().await;
+        frame_ids
+            .iter()
+            .filter_map(|fid| sessions.get(fid).cloned().map(|rt| (fid.clone(), rt)))
+            .collect::<Vec<_>>()
+    };
+    for (_, rt) in &runtimes {
+        rt.deleted.store(true, Ordering::SeqCst);
+        rt.cancel.store(true, Ordering::SeqCst);
+    }
+    for (fid, rt) in &runtimes {
+        let _ = state.codex.interrupt(fid).await;
+        let _workflow = rt.workflow.lock().await;
+        let _agent = rt.agent.lock().await;
+        state.codex.drop_frame(&state.store, fid).await;
+    }
     {
         let mut sessions = state.sessions.lock().await;
         for fid in &frame_ids {
-            if let Some(rt) = sessions.remove(fid) {
-                rt.cancel.store(true, Ordering::Relaxed);
-            }
+            sessions.remove(fid);
         }
     }
+    state.codex.drop_project(project_id).await;
     let mut running = state.running_turns.lock().await;
     for fid in &frame_ids {
         running.remove(fid);
@@ -3922,6 +4968,7 @@ pub fn run() {
             let state = AppState {
                 app_data,
                 store,
+                codex: codex_provider::CodexRuntimeManager::default(),
                 run_manager,
                 active: std::sync::RwLock::new(HashMap::from([(
                     "main".to_string(),
@@ -3943,6 +4990,22 @@ pub fn run() {
                 reviewing: Arc::new(StdMutex::new(HashSet::new())),
             };
             app.manage(state);
+            {
+                // Runtime/config monitoring must not depend on the Settings
+                // page being open. The poll is read-only for live actors and
+                // preserves each active turn's immutable startup snapshot.
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        let state = handle.state::<AppState>();
+                        state
+                            .codex
+                            .poll_external_changes(&state.store, &handle)
+                            .await;
+                    }
+                });
+            }
             set_dev_flag(app.handle());
             // Restore the project windows open when the app last quit (#52). The
             // "main" window comes from tauri.conf; these are the extra per-project
@@ -3972,6 +5035,15 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             send_message,
             stop_agent,
+            codex_provider::get_codex_runtime_snapshot,
+            codex_provider::refresh_codex_runtime_snapshot,
+            codex_provider::preview_codex_turn_config,
+            codex_provider::set_session_codex_overrides,
+            codex_provider::get_session_codex_overrides,
+            codex_provider::answer_codex_user_input,
+            codex_provider::get_latest_proposed_plan,
+            codex_provider::get_codex_turn_configs,
+            codex_provider::codex_plan_action,
             review_session,
             side_chat,
             context_probe::probe_execution_context,

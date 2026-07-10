@@ -11,7 +11,8 @@ mod text;
 
 use bindings::{
     attach_chat_autoscroll, force_chat_bottom, invoke, invoke_checked, invoke_timeout, listen,
-    open_external_url, pasted_image_count, schedule_chat_follow, CHAT_SCROLLER_ID, CHAT_THREAD_ID,
+    listen_native_file_drop, native_drop_in_composer, open_external_url, pasted_image_count,
+    schedule_chat_follow, CHAT_SCROLLER_ID, CHAT_THREAD_ID,
 };
 use context_menu::{ContextMenuPortal, CtxMenu};
 use dto::*;
@@ -33,6 +34,8 @@ use text::{
 use serde_wasm_bindgen::to_value;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use futures_channel::oneshot;
+use std::collections::VecDeque;
 
 /// Stable substring of the backend's missing-key error (`src-tauri` `send_message`),
 /// used to turn that failure into an actionable "open Settings" prompt.
@@ -41,6 +44,466 @@ const HOME_SEARCH_PROJECT_LIMIT: usize = 6;
 const HOME_SEARCH_ARTIFACT_LIMIT: usize = 8;
 const HOME_SEARCH_SESSION_LIMIT: usize = 6;
 const THEME_STORAGE_KEY: &str = "wisp-theme";
+
+fn decode_runtime_snapshot(value: JsValue) -> Option<RuntimeSnapshot> {
+    serde_wasm_bindgen::from_value::<RuntimeSnapshot>(value.clone()).ok().or_else(|| {
+        serde_wasm_bindgen::from_value::<serde_json::Value>(value).ok()
+            .and_then(|envelope| envelope.get("snapshot").cloned())
+            .and_then(|snapshot| serde_json::from_value(snapshot).ok())
+    })
+}
+
+fn decode_resolved_turn_config(value: JsValue) -> Option<ResolvedTurnConfig> {
+    serde_wasm_bindgen::from_value::<ResolvedTurnConfig>(value.clone()).ok().or_else(|| {
+        serde_wasm_bindgen::from_value::<serde_json::Value>(value).ok()
+            .and_then(|envelope| envelope.get("config").or_else(|| envelope.get("resolved")).cloned())
+            .and_then(|config| serde_json::from_value(config).ok())
+    })
+}
+
+fn decode_session_codex_state(value: JsValue) -> Option<SessionCodexState> {
+    serde_wasm_bindgen::from_value::<SessionCodexState>(value.clone()).ok().or_else(|| {
+        serde_wasm_bindgen::from_value::<serde_json::Value>(value).ok()
+            .and_then(|value| serde_json::from_value(value).ok())
+    })
+}
+
+fn decode_proposed_plan(value: JsValue) -> Option<ProposedPlanRecord> {
+    serde_wasm_bindgen::from_value::<Option<ProposedPlanRecord>>(value.clone()).ok().flatten().or_else(|| {
+        serde_wasm_bindgen::from_value::<serde_json::Value>(value).ok()
+            .and_then(|envelope| envelope.get("plan").cloned())
+            .and_then(|plan| serde_json::from_value(plan).ok())
+    })
+}
+
+fn refresh_codex_turn_audits(
+    session_id: String,
+    active_session: RwSignal<Option<String>>,
+    audits: RwSignal<Vec<CodexTurnConfigAudit>>,
+) {
+    spawn_local(async move {
+        let args = to_value(&serde_json::json!({ "sessionId": session_id.clone() })).unwrap();
+        if let Ok(value) = invoke_checked("get_codex_turn_configs", args).await {
+            if let Ok(records) = serde_wasm_bindgen::from_value::<Vec<CodexTurnConfigAudit>>(value) {
+                if active_session.get_untracked().as_deref() == Some(session_id.as_str()) {
+                    audits.set(records);
+                }
+            }
+        }
+    });
+}
+
+fn audit_json(value: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn actual_verification_unavailable(value: &serde_json::Value) -> bool {
+    value.is_null()
+        || value.as_object().is_some_and(|object| {
+            object.is_empty()
+                || object.get("verification").and_then(|value| value.as_str()) == Some("unavailable")
+                || object.get("verified").and_then(|value| value.as_bool()) == Some(false)
+        })
+}
+
+fn proposed_plan_card(plan: ProposedPlanRecord) -> PlanCard {
+    PlanCard {
+        complete: !matches!(plan.status.as_str(), "streaming" | "draft"),
+        actionable: plan.status == "pending" && !plan.id.is_empty() && plan.revision > 0,
+        text: plan.text,
+        native: plan.native,
+        plan_id: plan.id,
+        revision: plan.revision,
+    }
+}
+
+fn upsert_persisted_plan(items: &mut Vec<ChatItem>, plan: ProposedPlanRecord) {
+    let card = proposed_plan_card(plan);
+    if let Some(index) = items.iter().rposition(|item| matches!(
+        item,
+        ChatItem::Plan(existing) if existing.plan_id == card.plan_id && existing.revision == card.revision
+    )) {
+        items[index] = ChatItem::Plan(card);
+    } else {
+        let index = trailing_queue_start(items);
+        items.insert(index, ChatItem::Plan(card));
+    }
+}
+
+fn request_codex_runtime_snapshot(
+    refresh: bool,
+    report_error: bool,
+    show_loading: bool,
+    sync_profile_overrides: bool,
+    request_nonce: Rc<Cell<u64>>,
+    models: RwSignal<Vec<ModelProfile>>,
+    runtime: RwSignal<Option<RuntimeSnapshot>>,
+    runtime_error: RwSignal<Option<String>>,
+    loading: RwSignal<bool>,
+    profile_overrides: RwSignal<CodexModeOverrides>,
+) {
+    if show_loading && loading.get_untracked() { return; }
+    if show_loading { loading.set(true); }
+    let request_id = request_nonce.get().wrapping_add(1);
+    request_nonce.set(request_id);
+    spawn_local(async move {
+        let command = if refresh { "refresh_codex_runtime_snapshot" } else { "get_codex_runtime_snapshot" };
+        let response = invoke_checked(command, JsValue::UNDEFINED).await;
+        if request_nonce.get() != request_id { return; }
+        match response {
+            Ok(value) => {
+                if let Some(snapshot) = decode_runtime_snapshot(value) {
+                    let profiles = models.get_untracked();
+                    let active_codex_id = profiles.iter()
+                        .find(|profile| profile.active)
+                        .or_else(|| profiles.first())
+                        .filter(|profile| active_profile_uses_codex(std::slice::from_ref(*profile)))
+                        .map(|profile| profile.id.as_str());
+                    if !snapshot.profile_id.is_empty()
+                        && !profiles.is_empty()
+                        && active_codex_id != Some(snapshot.profile_id.as_str())
+                    {
+                        loading.set(false);
+                        return;
+                    }
+                    // Background runtime polling must never overwrite edits that
+                    // are still sitting in the Profile form.  Only initial load
+                    // and an explicit user refresh opt into reloading this layer.
+                    if sync_profile_overrides {
+                        if let Some(saved) = snapshot.profile_overrides.clone() {
+                            profile_overrides.set(saved);
+                        }
+                    }
+                    runtime.set(Some(snapshot));
+                    runtime_error.set(None);
+                } else if report_error {
+                    runtime_error.set(Some("Codex runtime returned an unsupported snapshot format.".into()));
+                }
+            }
+            Err(error) if report_error => runtime_error.set(Some(js_error_text(error))),
+            Err(_) => {} // polling must preserve the last usable snapshot
+        }
+        if request_nonce.get() == request_id { loading.set(false); }
+    });
+}
+
+fn active_profile_uses_codex(models: &[ModelProfile]) -> bool {
+    models.iter().find(|model| model.active).or_else(|| models.first())
+        .is_some_and(|model| matches!(model.provider.as_str(), "codex" | "codex_cli" | "codex_local" | "codex-local"))
+}
+
+fn active_profile_uses_local_runner(models: &[ModelProfile]) -> bool {
+    models.iter().find(|model| model.active).or_else(|| models.first())
+        .is_some_and(|model| matches!(
+            model.provider.as_str(),
+            "codex" | "codex_cli" | "codex_local" | "codex-local" | "claude" | "claude_code" | "claude-code"
+        ))
+}
+
+fn optional_profile_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()
+        && !matches!(
+            value.to_ascii_lowercase().as_str(),
+            "inherit" | "default" | "codex-default" | "inherit_local_codex_default"
+        ))
+    .then(|| value.to_string())
+}
+
+fn codex_overrides_from_profile(profile: &ModelProfile) -> CodexModeOverrides {
+    CodexModeOverrides {
+        normal: CodexModeOverride {
+            model: optional_profile_value(&profile.normal_model),
+            effort: optional_profile_value(&profile.normal_reasoning_effort),
+        },
+        plan: CodexModeOverride {
+            model: optional_profile_value(&profile.plan_model),
+            effort: optional_profile_value(&profile.plan_reasoning_effort),
+        },
+        service_tier: optional_profile_value(&profile.service_tier),
+        personality: optional_profile_value(&profile.personality),
+        summary: optional_profile_value(&profile.reasoning_summary),
+        verbosity: optional_profile_value(&profile.verbosity),
+        web_search: optional_profile_value(&profile.runner_web_search_mode),
+        sandbox: optional_profile_value(&profile.runner_sandbox),
+    }
+}
+
+fn composer_codex_efforts(
+    snapshot: &RuntimeSnapshot,
+    model: Option<&str>,
+    inherited_effective_model: Option<&str>,
+) -> Vec<String> {
+    if let Some(model_id) = model {
+        if let Some(model) = snapshot.models.iter().find(|item| item.id == model_id) {
+            return model.supported_reasoning_efforts.clone();
+        }
+        return vec!["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+            .into_iter().map(str::to_string).collect();
+    }
+    if let Some(model) = inherited_effective_model
+        .and_then(|value| snapshot.models.iter().find(|item| item.id == value))
+    {
+        return model.supported_reasoning_efforts.clone();
+    }
+    vec!["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+        .into_iter().map(str::to_string).collect()
+}
+
+/// Remove only the rows this send inserted optimistically.  Matching the
+/// adjacent empty assistant placeholder avoids deleting streamed/persisted
+/// content if the turn actually began before a later transport error.
+fn remove_optimistic_send_rows(rows: &mut Vec<ChatItem>, display_message: &str) {
+    let Some(index) = rows.iter().rposition(|item| matches!(
+        item,
+        ChatItem::User(value) | ChatItem::QueuedUser(value) if value == display_message
+    )) else { return; };
+    if matches!(rows.get(index), Some(ChatItem::QueuedUser(_))) {
+        rows.remove(index);
+        return;
+    }
+    if matches!(rows.get(index + 1), Some(ChatItem::Assistant { text, .. }) if text.is_empty()) {
+        rows.drain(index..=index + 1);
+    }
+}
+
+fn rollback_optimistic_send(
+    target_session: Option<&str>,
+    active_session: RwSignal<Option<String>>,
+    items: RwSignal<Vec<ChatItem>>,
+    transcripts: RwSignal<HashMap<String, Vec<ChatItem>>>,
+    display_message: &str,
+) {
+    if let Some(session_id) = target_session {
+        route_items(active_session, items, transcripts, session_id, |rows| {
+            remove_optimistic_send_rows(rows, display_message)
+        });
+    } else {
+        items.update(|rows| remove_optimistic_send_rows(rows, display_message));
+    }
+}
+
+fn mark_optimistic_send_failed(rows: &mut Vec<ChatItem>, display_message: &str, error: &str) {
+    let Some(index) = rows.iter().rposition(|item| matches!(
+        item,
+        ChatItem::User(value) if value == display_message
+    )) else { return; };
+    if let Some(ChatItem::Assistant { text, .. }) = rows.get_mut(index + 1) {
+        if text.is_empty() { *text = format!("Error: {error}"); }
+    }
+}
+
+fn split_turn_started_error(error: &str) -> (bool, &str) {
+    error.strip_prefix("[turn-started] ")
+        .map_or((false, error), |message| (true, message))
+}
+
+fn restore_failed_composer(
+    input: RwSignal<String>,
+    attachments: RwSignal<Vec<ComposerAttachment>>,
+    references: RwSignal<Vec<ComposerReferenceChip>>,
+    draft: String,
+    saved_attachments: Vec<ComposerAttachment>,
+    saved_references: Vec<ComposerReferenceChip>,
+) {
+    // Do not trample text/files the user may already have started adding for
+    // their next turn while the failed request was in flight.
+    if input.get_untracked().is_empty() { input.set(draft); }
+    if attachments.get_untracked().is_empty() { attachments.set(saved_attachments); }
+    if references.get_untracked().is_empty() { references.set(saved_references); }
+}
+
+#[derive(Clone, Copy)]
+struct CodexOverrideUi {
+    active_session: RwSignal<Option<String>>,
+    visible_overrides: RwSignal<CodexModeOverrides>,
+    visible_mode: RwSignal<String>,
+    needs_confirmation: RwSignal<bool>,
+    write_conflicted: RwSignal<bool>,
+    status: RwSignal<String>,
+    locale: RwSignal<Locale>,
+}
+
+struct PendingCodexOverrideWrite {
+    session_id: Option<String>,
+    mode: String,
+    generation: Option<String>,
+    overrides: CodexModeOverrides,
+    ui: CodexOverrideUi,
+    completion: Option<oneshot::Sender<Result<(), String>>>,
+}
+
+#[derive(Default)]
+struct CodexOverrideWriteQueue {
+    running: HashSet<String>,
+    pending: HashMap<String, VecDeque<PendingCodexOverrideWrite>>,
+    revisions: HashMap<String, String>,
+}
+
+thread_local! {
+    static CODEX_OVERRIDE_WRITES: RefCell<CodexOverrideWriteQueue> = RefCell::new(CodexOverrideWriteQueue::default());
+}
+
+fn set_codex_override_revision(session_id: &str, revision: String) -> bool {
+    if revision.is_empty() { return false; }
+    CODEX_OVERRIDE_WRITES.with(|queue| {
+        let mut queue = queue.borrow_mut();
+        let is_stale = queue.revisions.get(session_id).is_some_and(|current| {
+            match (current.parse::<u64>(), revision.parse::<u64>()) {
+                (Ok(current), Ok(candidate)) => candidate < current,
+                _ => false,
+            }
+        });
+        if is_stale { return false; }
+        queue.revisions.insert(session_id.to_string(), revision);
+        true
+    })
+}
+
+fn enqueue_session_codex_overrides(
+    session_id: Option<String>,
+    mode: String,
+    generation: Option<String>,
+    overrides: CodexModeOverrides,
+    ui: CodexOverrideUi,
+    completion: Option<oneshot::Sender<Result<(), String>>>,
+) {
+    if ui.write_conflicted.get_untracked() {
+        if let Some(completion) = completion {
+            let _ = completion.send(Err("Codex session configuration must be confirmed after a revision conflict.".into()));
+        }
+        return;
+    }
+    let key = session_id.clone().unwrap_or_else(|| "__pending_session__".into());
+    let should_start = CODEX_OVERRIDE_WRITES.with(|queue| {
+        let mut queue = queue.borrow_mut();
+        queue.pending.entry(key.clone()).or_default().push_back(PendingCodexOverrideWrite {
+            session_id, mode, generation, overrides, ui, completion,
+        });
+        queue.running.insert(key.clone())
+    });
+    if !should_start { return; }
+    spawn_local(async move {
+        loop {
+            let request = CODEX_OVERRIDE_WRITES.with(|queue| {
+                queue.borrow_mut().pending.get_mut(&key).and_then(VecDeque::pop_front)
+            });
+            let Some(request) = request else {
+                CODEX_OVERRIDE_WRITES.with(|queue| {
+                    let mut queue = queue.borrow_mut();
+                    queue.pending.remove(&key);
+                    queue.running.remove(&key);
+                });
+                break;
+            };
+            let mut expected_revision = CODEX_OVERRIDE_WRITES.with(|queue| {
+                queue.borrow().revisions.get(&key).cloned()
+            });
+            if expected_revision.is_none() {
+                if let Some(session_id) = request.session_id.as_ref() {
+                    let args = to_value(&serde_json::json!({ "sessionId": session_id })).unwrap();
+                    match invoke_checked("get_session_codex_overrides", args).await {
+                        Ok(value) => if let Some(saved) = decode_session_codex_state(value) {
+                            if !saved.revision.is_empty() {
+                                set_codex_override_revision(session_id, saved.revision);
+                                expected_revision = CODEX_OVERRIDE_WRITES.with(|queue| {
+                                    queue.borrow().revisions.get(&key).cloned()
+                                });
+                            }
+                        },
+                        Err(error) => {
+                            let message = js_error_text(error);
+                            if let Some(completion) = request.completion { let _ = completion.send(Err(message.clone())); }
+                            request.ui.status.set(tf(request.ui.locale.get_untracked(), "codex.override_failed", &[
+                                ("msg", &localize_backend(request.ui.locale.get_untracked(), &message)),
+                            ]));
+                            continue;
+                        }
+                    }
+                }
+            }
+            let args = to_value(&serde_json::json!({
+                "sessionId": request.session_id.clone(),
+                "mode": request.mode.clone(),
+                "configVersion": request.generation.clone(),
+                "overrides": request.overrides.clone(),
+                "expectedRevision": expected_revision,
+            })).unwrap();
+            match invoke_checked("set_session_codex_overrides", args).await {
+                Ok(value) => {
+                    if let Some(saved) = decode_session_codex_state(value) {
+                        if let Some(session_id) = request.session_id.as_ref() {
+                            set_codex_override_revision(session_id, saved.revision);
+                        }
+                    }
+                    if let Some(completion) = request.completion { let _ = completion.send(Ok(())); }
+                }
+                Err(error) => {
+                    let message = js_error_text(error);
+                    let conflict = {
+                        let lower = message.to_ascii_lowercase();
+                        lower.contains("revision") || lower.contains("conflict") || lower.contains("changed")
+                    };
+                    if let Some(completion) = request.completion { let _ = completion.send(Err(message.clone())); }
+                    let abandoned = CODEX_OVERRIDE_WRITES.with(|queue| {
+                        queue.borrow_mut().pending.remove(&key).unwrap_or_default()
+                    });
+                    for abandoned in abandoned {
+                        if let Some(completion) = abandoned.completion {
+                            let _ = completion.send(Err(message.clone()));
+                        }
+                    }
+                    if conflict {
+                        request.ui.needs_confirmation.set(true);
+                        request.ui.write_conflicted.set(true);
+                        if let Some(session_id) = request.session_id.as_ref() {
+                            let args = to_value(&serde_json::json!({ "sessionId": session_id })).unwrap();
+                            if let Ok(value) = invoke_checked("get_session_codex_overrides", args).await {
+                                if let Some(saved) = decode_session_codex_state(value) {
+                                    let accepted = set_codex_override_revision(session_id, saved.revision);
+                                    if accepted && request.ui.active_session.get_untracked().as_deref() == Some(session_id.as_str()) {
+                                        request.ui.visible_overrides.set(saved.overrides);
+                                        request.ui.visible_mode.set(if saved.mode == "plan" { "plan".into() } else { "default".into() });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    request.ui.status.set(tf(request.ui.locale.get_untracked(), "codex.override_failed", &[
+                        ("msg", &localize_backend(request.ui.locale.get_untracked(), &message)),
+                    ]));
+                }
+            }
+        }
+    });
+}
+
+fn persist_session_codex_overrides(
+    session_id: Option<String>,
+    mode: String,
+    generation: Option<String>,
+    overrides: CodexModeOverrides,
+    ui: CodexOverrideUi,
+) {
+    enqueue_session_codex_overrides(session_id, mode, generation, overrides, ui, None);
+}
+
+async fn persist_session_codex_overrides_await(
+    session_id: Option<String>,
+    mode: String,
+    generation: Option<String>,
+    overrides: CodexModeOverrides,
+    ui: CodexOverrideUi,
+) -> Result<(), String> {
+    let (sender, receiver) = oneshot::channel();
+    enqueue_session_codex_overrides(session_id, mode, generation, overrides, ui, Some(sender));
+    receiver.await.unwrap_or_else(|_| Err("Codex session configuration write was cancelled.".into()))
+}
+
+fn is_plan_command(text: &str) -> bool {
+    let command = text.trim_start();
+    command == "/plan" || command.starts_with("/plan ") || command == "/default"
+}
 
 mod app_support;
 use app_support::*;
@@ -131,6 +594,85 @@ fn App() -> impl IntoView {
     // Configured model profiles + the composer's bottom-right picker state.
     let models = create_rw_signal::<Vec<ModelProfile>>(vec![]);
     let model_menu_open = create_rw_signal(false);
+    let codex_config_menu_open = create_rw_signal(false);
+    let codex_runtime = create_rw_signal(None::<RuntimeSnapshot>);
+    let codex_runtime_error = create_rw_signal(None::<String>);
+    let codex_runtime_loading = create_rw_signal(false);
+    let codex_runtime_request_nonce = Rc::new(Cell::new(0u64));
+    let codex_config_needs_confirmation = create_rw_signal(false);
+    let codex_session_override_conflict = create_rw_signal(false);
+    let codex_runtime_refresh_pending = create_rw_signal(false);
+    let last_codex_generation = Rc::new(RefCell::new(String::new()));
+    let last_active_codex_profile = Rc::new(RefCell::new(None::<String>));
+    let codex_profile_overrides = create_rw_signal(CodexModeOverrides::default());
+    let codex_session_overrides = create_rw_signal(CodexModeOverrides::default());
+    let codex_preview = create_rw_signal(None::<ResolvedTurnConfig>);
+    let codex_preview_request_nonce = Rc::new(Cell::new(0u64));
+    let codex_settings_preview_nonce = Rc::new(Cell::new(0u64));
+    let codex_preview_normal = create_rw_signal(None::<ResolvedTurnConfig>);
+    let codex_preview_plan = create_rw_signal(None::<ResolvedTurnConfig>);
+    let codex_turn_audits = create_rw_signal(Vec::<CodexTurnConfigAudit>::new());
+    let collaboration_mode = create_rw_signal(String::from("default"));
+    let status = create_rw_signal(String::new());
+    {
+        let last_codex_generation = last_codex_generation.clone();
+        create_effect(move |_| {
+            let generation = codex_runtime.get().map(|snapshot| snapshot.config_version).unwrap_or_default();
+            let previous = std::mem::replace(&mut *last_codex_generation.borrow_mut(), generation.clone());
+            if !previous.is_empty() && !generation.is_empty() && previous != generation {
+                codex_config_needs_confirmation.set(true);
+            }
+        });
+    }
+    {
+        let last_active_codex_profile = last_active_codex_profile.clone();
+        let profile_runtime_request_nonce = codex_runtime_request_nonce.clone();
+        let profile_preview_request_nonce = codex_preview_request_nonce.clone();
+        let profile_settings_preview_nonce = codex_settings_preview_nonce.clone();
+        create_effect(move |_| {
+            let list = models.get();
+            if list.is_empty() { return; }
+            let profile = list.iter().find(|model| model.active).or_else(|| list.first())
+                .filter(|profile| matches!(profile.provider.as_str(), "codex_cli" | "codex" | "codex_local" | "codex-local"));
+            let next_profile_id = profile.map(|profile| profile.id.clone());
+            if let Some(profile) = profile {
+                codex_profile_overrides.set(codex_overrides_from_profile(profile));
+            } else {
+                codex_profile_overrides.set(CodexModeOverrides::default());
+            }
+            let previous = std::mem::replace(
+                &mut *last_active_codex_profile.borrow_mut(),
+                next_profile_id.clone(),
+            );
+            if previous == next_profile_id && next_profile_id.is_some() { return; }
+
+            // Never display or send a catalog/config snapshot resolved for the
+            // previous Profile. Increment both request epochs so late responses
+            // from that Profile are ignored as well.
+            codex_runtime.set(None);
+            codex_preview.set(None);
+            codex_preview_normal.set(None);
+            codex_preview_plan.set(None);
+            codex_session_override_conflict.set(false);
+            codex_runtime_loading.set(false);
+            profile_preview_request_nonce.set(profile_preview_request_nonce.get().wrapping_add(1));
+            profile_settings_preview_nonce.set(profile_settings_preview_nonce.get().wrapping_add(1));
+            profile_runtime_request_nonce.set(profile_runtime_request_nonce.get().wrapping_add(1));
+            if next_profile_id.is_some() {
+                codex_runtime_refresh_pending.set(false);
+                codex_config_needs_confirmation.set(true);
+                status.set(t(locale.get_untracked(), "codex.confirm_changed").into());
+                request_codex_runtime_snapshot(
+                    true, false, false, false, profile_runtime_request_nonce.clone(), models,
+                    codex_runtime, codex_runtime_error, codex_runtime_loading,
+                    codex_profile_overrides,
+                );
+            } else {
+                codex_runtime_refresh_pending.set(false);
+                codex_config_needs_confirmation.set(false);
+            }
+        });
+    }
     let send_mode_menu_open = create_rw_signal(false);
     let side_chat_input = create_rw_signal(String::new());
     let side_chat_items = create_rw_signal::<Vec<ChatItem>>(vec![]);
@@ -138,14 +680,61 @@ fn App() -> impl IntoView {
     let side_chat_model_menu_open = create_rw_signal(false);
     let settings_busy = create_rw_signal(false);
     let settings_message = create_rw_signal::<Option<(bool, String)>>(None);
-    let status = create_rw_signal(String::new());
     // Set when a send fails because no API key is configured, so the status bar
     // can offer a one-click jump to Settings instead of a dead-end message.
     let needs_api_key = create_rw_signal(false);
     let refresh_models = move || spawn_local(async move {
         let v = invoke("list_models", JsValue::UNDEFINED).await;
-        if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(v) { models.set(list); }
+        if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(v) {
+            if let Some(profile) = list.iter().find(|model| model.active).or_else(|| list.first())
+                .filter(|profile| matches!(profile.provider.as_str(), "codex_cli" | "codex" | "codex_local" | "codex-local"))
+            {
+                codex_profile_overrides.set(codex_overrides_from_profile(profile));
+            }
+            models.set(list);
+        }
     });
+    request_codex_runtime_snapshot(
+        false, false, false, true, codex_runtime_request_nonce.clone(), models,
+        codex_runtime, codex_runtime_error,
+        codex_runtime_loading, codex_profile_overrides,
+    );
+
+    // Tauri's native drag/drop event contains absolute paths (including
+    // directories). Keep those paths as references; unlike the browser File
+    // picker they must not be copied through `upload_file` first.
+    let native_drop_cb = Closure::wrap(Box::new(move |payload: JsValue| {
+        let inside = native_drop_in_composer(payload.clone());
+        let value = serde_wasm_bindgen::from_value::<serde_json::Value>(payload).unwrap_or_default();
+        let kind = value.get("kind").and_then(|item| item.as_str()).unwrap_or("").to_ascii_lowercase();
+        if matches!(kind.as_str(), "enter" | "over" | "hover" | "hovered") {
+            drag_over.set(inside);
+            return;
+        }
+        if matches!(kind.as_str(), "leave" | "cancel" | "cancelled") {
+            drag_over.set(false);
+            return;
+        }
+        if !matches!(kind.as_str(), "drop" | "dropped") { return; }
+        drag_over.set(false);
+        if !inside { return; }
+        let paths = value.get("paths").and_then(|item| item.as_array()).cloned().unwrap_or_default();
+        for path in paths.into_iter().filter_map(|item| item.as_str().map(str::to_string)) {
+            if attachments.get_untracked().iter().any(|attachment| matches!(attachment, ComposerAttachment::Ready { path: existing, .. } if existing == &path)) {
+                continue;
+            }
+            let name = path.rsplit(['/', '\\']).next().filter(|name| !name.is_empty()).unwrap_or(&path).to_string();
+            attachments.update(|items| items.push(ComposerAttachment::Ready {
+                key: format!("native:{path}"), name, path,
+            }));
+        }
+        if !active_profile_uses_local_runner(&models.get_untracked()) {
+            status.set(t(locale.get_untracked(), "composer.native_path_api_hint").into());
+        }
+    }) as Box<dyn FnMut(JsValue)>);
+    let native_drop_js = native_drop_cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
+    std::mem::forget(native_drop_cb);
+    spawn_local(async move { let _ = listen_native_file_drop(&native_drop_js).await; });
     let refresh_specialists = move || spawn_local(async move {
         let v = invoke("list_specialists", JsValue::UNDEFINED).await;
         if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<Specialist>>(v) { specialists.set(list); }
@@ -171,8 +760,125 @@ fn App() -> impl IntoView {
     let drag_session = create_rw_signal::<Option<String>>(None);
     let drop_target = create_rw_signal::<Option<String>>(None);
     let active_session = create_rw_signal::<Option<String>>(None);
+    let codex_override_ui = CodexOverrideUi {
+        active_session,
+        visible_overrides: codex_session_overrides,
+        visible_mode: collaboration_mode,
+        needs_confirmation: codex_config_needs_confirmation,
+        write_conflicted: codex_session_override_conflict,
+        status,
+        locale,
+    };
     refresh_sessions(sessions);
     refresh_folders(folders);
+
+    // Keep the selected local runtime in sync while Settings is visible.  A
+    // failed background poll never clears a good snapshot; explicit refreshes
+    // still surface their error next to the runtime card.
+    {
+        let settings_runtime_request_nonce = codex_runtime_request_nonce.clone();
+        create_effect(move |_| {
+            if show_settings.get() && settings_section.get() == "models" {
+                request_codex_runtime_snapshot(
+                    false, false, false, false, settings_runtime_request_nonce.clone(), models,
+                    codex_runtime, codex_runtime_error,
+                    codex_runtime_loading, codex_profile_overrides,
+                );
+            }
+        });
+    }
+    if let Some(window) = web_sys::window() {
+        let poll_runtime_request_nonce = codex_runtime_request_nonce.clone();
+        let poll = Closure::wrap(Box::new(move || {
+            if show_settings.get_untracked() && settings_section.get_untracked() == "models"
+                && !codex_runtime_loading.get_untracked()
+            {
+                request_codex_runtime_snapshot(
+                    true, false, false, false, poll_runtime_request_nonce.clone(), models,
+                    codex_runtime, codex_runtime_error,
+                    codex_runtime_loading, codex_profile_overrides,
+                );
+            }
+        }) as Box<dyn FnMut()>);
+        let _ = window.set_interval_with_callback_and_timeout_and_arguments_0(
+            poll.as_ref().unchecked_ref(), 10_000,
+        );
+        poll.forget();
+    }
+
+    create_effect(move |_| {
+        codex_session_override_conflict.set(false);
+        let Some(session_id) = active_session.get() else {
+            codex_session_overrides.set(CodexModeOverrides::default());
+            codex_turn_audits.set(vec![]);
+            collaboration_mode.set("default".into());
+            return;
+        };
+        // Reset immediately so a rapid session switch cannot momentarily send
+        // the previous conversation's override. Restore the persisted layer
+        // only if this is still the active session when the command resolves.
+        codex_session_overrides.set(CodexModeOverrides::default());
+        codex_turn_audits.set(vec![]);
+        collaboration_mode.set("default".into());
+        refresh_codex_turn_audits(session_id.clone(), active_session, codex_turn_audits);
+        spawn_local(async move {
+            let args = to_value(&serde_json::json!({ "sessionId": session_id })).unwrap();
+            if let Ok(value) = invoke_checked("get_session_codex_overrides", args).await {
+                if let Some(saved) = decode_session_codex_state(value) {
+                    let accepted = set_codex_override_revision(&session_id, saved.revision.clone());
+                    if accepted && active_session.get_untracked().as_deref() == Some(session_id.as_str()) {
+                        codex_session_overrides.set(saved.overrides);
+                        collaboration_mode.set(if saved.mode == "plan" { "plan".into() } else { "default".into() });
+                    }
+                }
+            }
+        });
+    });
+
+    // Preview is the composer's source of truth. It is refreshed from the same
+    // backend resolver whenever the mode/session/runtime generation or the
+    // visible session override changes.
+    {
+        let request_nonce = codex_preview_request_nonce.clone();
+        create_effect(move |_| {
+            let mode = collaboration_mode.get();
+            let session_id = active_session.get();
+            let overrides = codex_session_overrides.get();
+            let generation = codex_runtime.get().map(|snapshot| snapshot.config_version);
+            let request_id = request_nonce.get().wrapping_add(1);
+            request_nonce.set(request_id);
+            if !active_profile_uses_codex(&models.get()) {
+                codex_preview.set(None);
+                return;
+            }
+            // Never show the previous mode/session as if it described the new
+            // selection while its resolver call is still pending.
+            codex_preview.set(None);
+            let response_nonce = request_nonce.clone();
+            spawn_local(async move {
+                let args = to_value(&serde_json::json!({
+                    "sessionId": session_id.clone(),
+                    "mode": mode.clone(),
+                    "overrides": overrides.clone(),
+                    "configVersion": generation.clone(),
+                    "previewScope": "session",
+                })).unwrap();
+                if let Ok(value) = invoke_checked("preview_codex_turn_config", args).await {
+                    let still_current = response_nonce.get() == request_id
+                        && active_session.get_untracked() == session_id
+                        && collaboration_mode.get_untracked() == mode
+                        && codex_session_overrides.get_untracked() == overrides
+                        && codex_runtime.get_untracked().map(|snapshot| snapshot.config_version) == generation
+                        && active_profile_uses_codex(&models.get_untracked());
+                    if still_current {
+                        if let Some(config) = decode_resolved_turn_config(value) {
+                            codex_preview.set(Some(config));
+                        }
+                    }
+                }
+            });
+        });
+    }
 
     // `busy` is "the active session is currently streaming" — derived from the
     // per-session `running` set so it stays correct when the user switches
@@ -271,6 +977,45 @@ fn App() -> impl IntoView {
     let file_entries = create_rw_signal::<Vec<DirEntry>>(vec![]);
     let file_search_hits = create_rw_signal::<Vec<FileSearchHit>>(vec![]);
     let project_info = create_rw_signal::<Option<ProjectInfo>>(None);
+    // The backend watches the selected Codex executable/home/profile. A change
+    // during a turn is deliberately deferred there; mirror that contract in
+    // the UI by preserving the startup snapshot and requiring confirmation.
+    // Idle changes may refresh the catalog immediately, but still cannot be
+    // sent until the user confirms the new effective config.
+    let changed_runtime_request_nonce = codex_runtime_request_nonce.clone();
+    let runtime_changed_cb = Closure::wrap(Box::new(move |payload: JsValue| {
+        let Ok(value) = serde_wasm_bindgen::from_value::<serde_json::Value>(payload) else { return; };
+        let profile_id = value.get("profileId").or_else(|| value.get("profile_id"))
+            .and_then(|value| value.as_str()).unwrap_or("");
+        let project_id = value.get("projectId").or_else(|| value.get("project_id"))
+            .and_then(|value| value.as_str()).unwrap_or("");
+        let pending = value.get("pending").and_then(|value| value.as_bool()).unwrap_or(false);
+        let profiles = models.get_untracked();
+        let profile_matches = profiles.iter()
+            .find(|profile| profile.active)
+            .or_else(|| profiles.first())
+            .is_some_and(|profile| {
+                active_profile_uses_codex(std::slice::from_ref(profile))
+                    && profile.id == profile_id
+            });
+        let project_matches = project_info.get_untracked().as_ref().is_none_or(|project| {
+            project.id.is_empty() || project_id.is_empty() || project.id == project_id
+        });
+        if !profile_matches || !project_matches { return; }
+        codex_config_needs_confirmation.set(true);
+        codex_runtime_refresh_pending.set(pending);
+        status.set(t(locale.get_untracked(), "codex.confirm_changed").into());
+        if !pending {
+            request_codex_runtime_snapshot(
+                true, false, false, false, changed_runtime_request_nonce.clone(), models,
+                codex_runtime, codex_runtime_error,
+                codex_runtime_loading, codex_profile_overrides,
+            );
+        }
+    }) as Box<dyn FnMut(JsValue)>);
+    let runtime_changed_js = runtime_changed_cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
+    std::mem::forget(runtime_changed_cb);
+    spawn_local(async move { let _ = listen("codex-runtime-changed", &runtime_changed_js).await; });
     // Dedicated project window (#52): if this window was opened for a specific
     // project (`?project=<id>`), skip the landing and open it straight away.
     if let Some(pid) = url_project_param() {
@@ -459,6 +1204,7 @@ fn App() -> impl IntoView {
     let flush_scheduled = Rc::new(Cell::new(false));
     let cb_buf = delta_buf.clone();
     let cb_scheduled = flush_scheduled.clone();
+    let agent_runtime_request_nonce = codex_runtime_request_nonce.clone();
     let cb = Closure::wrap(Box::new(move |payload: JsValue| {
         let ev: AgentEvent = match serde_wasm_bindgen::from_value(payload) {
             Ok(e) => e,
@@ -542,19 +1288,32 @@ fn App() -> impl IntoView {
             AgentEvent::Stdout { frame_id, chunk } => queue(frame_id, PendingDelta::Stdout(chunk)),
             AgentEvent::Done { frame_id } => {
                 flush_now();
-                route_items(active_cb, items_cb, transcripts_cb, &frame_id, strip_approval_pending);
+                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |items| {
+                    strip_approval_pending(items);
+                    items.retain(|item| !matches!(item, ChatItem::PlanQuestion(_)));
+                });
                 approval_cb.update(|s| { s.remove(&frame_id); });
                 clear_running_if_idle(pending_cb, running_cb, &frame_id);
                 if stopping_session.get().as_deref() == Some(&frame_id) {
                     stopping_session.set(None);
                 }
                 refresh_sessions(sessions);
+                refresh_codex_turn_audits(frame_id.clone(), active_cb, codex_turn_audits);
+                if codex_runtime_refresh_pending.get_untracked() {
+                    codex_runtime_refresh_pending.set(false);
+                    request_codex_runtime_snapshot(
+                        true, false, false, false, agent_runtime_request_nonce.clone(), models_cb,
+                        codex_runtime, codex_runtime_error, codex_runtime_loading,
+                        codex_profile_overrides,
+                    );
+                }
             }
             AgentEvent::Error { frame_id, message } => {
                 flush_now();
                 let model = active_model_label(&models_cb.get());
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
                     strip_approval_pending(v);
+                    v.retain(|item| !matches!(item, ChatItem::PlanQuestion(_)));
                     v.push(ChatItem::Assistant { text: format!("Error: {message}"), model });
                 });
                 approval_cb.update(|s| { s.remove(&frame_id); });
@@ -562,6 +1321,15 @@ fn App() -> impl IntoView {
                 if stopping_session.get().as_deref() == Some(&frame_id) {
                     stopping_session.set(None);
                 }
+                if codex_runtime_refresh_pending.get_untracked() {
+                    codex_runtime_refresh_pending.set(false);
+                    request_codex_runtime_snapshot(
+                        true, false, false, false, agent_runtime_request_nonce.clone(), models_cb,
+                        codex_runtime, codex_runtime_error, codex_runtime_loading,
+                        codex_profile_overrides,
+                    );
+                }
+                refresh_codex_turn_audits(frame_id.clone(), active_cb, codex_turn_audits);
             }
             AgentEvent::ReviewStarted { frame_id } => {
                 flush_now();
@@ -587,6 +1355,87 @@ fn App() -> impl IntoView {
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| upsert_review(v, report));
                 if active_cb.get().as_deref() == Some(&frame_id) {
                     status_cb.set(t(locale_cb.get(), "status.review_done"));
+                }
+            }
+            AgentEvent::PlanDelta { frame_id, delta, native } => {
+                flush_now();
+                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |items| {
+                    let queue_start = trailing_queue_start(items);
+                    if let Some(ChatItem::Plan(plan)) = items[..queue_start].last_mut() {
+                        if !plan.complete {
+                            plan.text.push_str(&delta);
+                            plan.native &= native;
+                            return;
+                        }
+                    }
+                    for item in &mut items[..queue_start] {
+                        if let ChatItem::Plan(plan) = item { plan.actionable = false; }
+                    }
+                    items.insert(queue_start, ChatItem::Plan(PlanCard { text: delta, complete: false, native, actionable: false, plan_id: String::new(), revision: 0 }));
+                });
+            }
+            AgentEvent::PlanUpdated { frame_id, plan, native } => {
+                flush_now();
+                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |items| {
+                    let queue_start = trailing_queue_start(items);
+                    if let Some(index) = items[..queue_start].iter().rposition(|item| matches!(item, ChatItem::Plan(_))) {
+                        items[index] = ChatItem::Plan(PlanCard { text: plan.clone(), complete: false, native, actionable: false, plan_id: String::new(), revision: 0 });
+                    } else {
+                        items.insert(queue_start, ChatItem::Plan(PlanCard { text: plan.clone(), complete: false, native, actionable: false, plan_id: String::new(), revision: 0 }));
+                    }
+                });
+            }
+            AgentEvent::FinalPlan { frame_id, plan, native, plan_id, revision } => {
+                flush_now();
+                let actionable = !plan_id.is_empty() && revision > 0;
+                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |items| {
+                    let queue_start = trailing_queue_start(items);
+                    if let Some(index) = items[..queue_start].iter().rposition(|item| matches!(item, ChatItem::Plan(_))) {
+                        items[index] = ChatItem::Plan(PlanCard { text: plan.clone(), complete: true, native, actionable, plan_id: plan_id.clone(), revision });
+                    } else {
+                        items.insert(queue_start, ChatItem::Plan(PlanCard { text: plan.clone(), complete: true, native, actionable, plan_id: plan_id.clone(), revision }));
+                    }
+                });
+                if active_cb.get().as_deref() == Some(&frame_id) {
+                    status_cb.set(t(locale_cb.get(), "plan.ready"));
+                }
+            }
+            AgentEvent::RequestUserInput { frame_id, question_id, question, options, is_other, is_secret } => {
+                flush_now();
+                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |items| {
+                    let index = trailing_queue_start(items);
+                    items.insert(index, ChatItem::PlanQuestion(PlanQuestion { question_id, question, options, is_other, is_secret }));
+                });
+                if active_cb.get().as_deref() == Some(&frame_id) {
+                    status_cb.set(t(locale_cb.get(), "plan.needs_input"));
+                }
+            }
+            AgentEvent::RequestUserInputResolved { frame_id, question_id } => {
+                flush_now();
+                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |items| {
+                    items.retain(|item| !matches!(item, ChatItem::PlanQuestion(question) if question.question_id == question_id));
+                });
+            }
+            AgentEvent::ModelRerouted { frame_id, requested_model, effective_model } => {
+                flush_now();
+                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |items| {
+                    if let Some(ChatItem::Assistant { model, .. }) = items.iter_mut().rev().find(|item| matches!(item, ChatItem::Assistant { .. })) {
+                        *model = Some(if requested_model.is_empty() {
+                            effective_model.clone()
+                        } else {
+                            format!("{requested_model} → {effective_model}")
+                        });
+                    }
+                });
+                if active_cb.get().as_deref() == Some(&frame_id) {
+                    codex_preview.update(|preview| if let Some(config) = preview {
+                        config.requested_model = requested_model.clone();
+                        config.effective_model = effective_model.clone();
+                        config.sources.insert("model".into(), "codex_server_reroute".into());
+                    });
+                    status_cb.set(tf(locale_cb.get(), "codex.rerouted", &[
+                        ("requested", &requested_model), ("effective", &effective_model),
+                    ]));
                 }
             }
             AgentEvent::Diff { .. } => {}
@@ -654,26 +1503,90 @@ fn App() -> impl IntoView {
         });
     };
 
-    let send = move |action: ComposerSendAction| {
+    let composer_runtime_request_nonce = codex_runtime_request_nonce.clone();
+    let send = Callback::new(move |action: ComposerSendAction| {
         let text = input.get();
-        let paths = attachment_paths(&attachments.get());
+        let trimmed = text.trim();
+        let using_codex = active_profile_uses_codex(&models.get());
+        let using_codex_app_server = using_codex && codex_runtime.get().is_some();
+        let using_local_runner = active_profile_uses_local_runner(&models.get());
+        if action == ComposerSendAction::Normal && trimmed == "/default" {
+            collaboration_mode.set("default".into());
+            if using_local_runner {
+                persist_session_codex_overrides(
+                    active_session.get(), "default".into(),
+                    using_codex.then(|| codex_runtime.get().map(|snapshot| snapshot.config_version)).flatten(),
+                    if using_codex { codex_session_overrides.get() } else { CodexModeOverrides::default() },
+                    codex_override_ui,
+                );
+            }
+            picker_mode.set(None);
+            input.set(String::new());
+            status.set(t(locale.get(), "plan.default_enabled").into());
+            return;
+        }
+        let mut turn_text = text.clone();
+        if action == ComposerSendAction::Normal && (trimmed == "/plan" || trimmed.starts_with("/plan ")) {
+            collaboration_mode.set("plan".into());
+            picker_mode.set(None);
+            turn_text = trimmed.strip_prefix("/plan").unwrap_or("").trim_start().to_string();
+            if turn_text.trim().is_empty() {
+                if using_local_runner {
+                    persist_session_codex_overrides(
+                        active_session.get(), "plan".into(),
+                        using_codex.then(|| codex_runtime.get().map(|snapshot| snapshot.config_version)).flatten(),
+                        if using_codex { codex_session_overrides.get() } else { CodexModeOverrides::default() },
+                        codex_override_ui,
+                    );
+                }
+                input.set(String::new());
+                status.set(t(locale.get(), "plan.enabled").into());
+                return;
+            }
+        } else if action == ComposerSendAction::PlanFirst {
+            collaboration_mode.set("plan".into());
+        }
+        if using_codex && codex_config_needs_confirmation.get() {
+            codex_config_menu_open.set(true);
+            status.set(t(locale.get(), "codex.confirm_changed").into());
+            return;
+        }
+        let turn_mode = collaboration_mode.get();
+        let saved_attachments = attachments.get();
+        let paths = attachment_paths(&saved_attachments);
         let refs = composer_references.get();
+        let saved_references = refs.clone();
         let reference_args = refs.iter().map(ComposerReferenceChip::arg).collect::<Vec<_>>();
-        let mut message = message_with_references(&text, &paths, &refs);
-        if action == ComposerSendAction::PlanFirst {
+        let display_message = message_with_references(&turn_text, &paths, &refs);
+        let mut message = display_message.clone();
+        if turn_mode == "plan" && !using_local_runner {
             message = plan_first_message(&message);
         }
-        if message.trim().is_empty() || uploading.get() { return; }
+        if display_message.trim().is_empty() || uploading.get() { return; }
         let active = active_session.get();
         let branch = action == ComposerSendAction::BranchNew;
         let branch_items = items.get();
         if !branch && active.as_ref().is_some_and(|id| running.get().contains(id)) {
-            items.update(|v| v.push(ChatItem::QueuedUser(message.clone())));
+            items.update(|v| v.push(ChatItem::QueuedUser(display_message.clone())));
             force_chat_bottom();
         } else if !branch {
-            let model = active_model_label(&models.get());
+            let model = if using_codex && !using_codex_app_server {
+                let profiles = models.get();
+                let profile = profiles.iter().find(|profile| profile.active).or_else(|| profiles.first());
+                profile.and_then(|profile| {
+                    let layer = codex_session_overrides.get();
+                    let mode_layer = layer.for_mode(&turn_mode);
+                    let profile_model = if turn_mode == "plan" { &profile.plan_model } else { &profile.normal_model };
+                    mode_layer.model.clone()
+                        .or_else(|| optional_profile_value(profile_model))
+                        .or_else(|| optional_profile_value(&profile.model))
+                }).or_else(|| active_model_label(&profiles))
+            } else {
+                codex_preview.get().map(|config| config.effective_model().to_string())
+                    .filter(|model| !model.is_empty()).or_else(|| active_model_label(&models.get()))
+            };
             items.update(|v| {
-                v.push(ChatItem::User(message.clone()));
+                v.push(ChatItem::User(display_message.clone()));
                 v.push(ChatItem::Assistant { text: String::new(), model });
             });
             force_chat_bottom();
@@ -691,17 +1604,111 @@ fn App() -> impl IntoView {
         let sessions = sessions;
         let stopping_session = stopping_session;
         let pending_turns = pending_turns;
+        let config_generation = using_codex.then(|| codex_runtime.get().map(|snapshot| snapshot.config_version)).flatten();
+        let session_overrides = using_codex.then(|| codex_session_overrides.get());
+        let send_collaboration_mode = using_local_runner.then(|| turn_mode.clone());
+        let draft_for_retry = text.clone();
+        let send_runtime_request_nonce = composer_runtime_request_nonce.clone();
         spawn_local(async move {
+            let restore_failure = |target_session: Option<&str>| {
+                if !branch {
+                    rollback_optimistic_send(
+                        target_session,
+                        active_session,
+                        items,
+                        transcripts,
+                        &display_message,
+                    );
+                }
+                restore_failed_composer(
+                    input,
+                    attachments,
+                    composer_references,
+                    draft_for_retry.clone(),
+                    saved_attachments.clone(),
+                    saved_references.clone(),
+                );
+            };
+            // Resolve once more immediately before the turn. If the local
+            // runtime changed since the composer's snapshot, restore the draft
+            // and require an explicit retry rather than sending stale values.
+            if using_codex_app_server {
+                let args = to_value(&serde_json::json!({
+                    "sessionId": active.clone(),
+                    "mode": turn_mode.clone(),
+                    "overrides": session_overrides.clone(),
+                    "configVersion": config_generation.clone(),
+                    "previewScope": "session",
+                })).unwrap();
+                let resolved = match invoke_checked("preview_codex_turn_config", args).await {
+                    Ok(value) => match decode_resolved_turn_config(value) {
+                        Some(resolved) => resolved,
+                        None => {
+                            restore_failure(active.as_deref());
+                            status.set(tf(locale.get(), "status.send_failed", &[(
+                                "msg", "Codex returned an unsupported configuration preview.",
+                            )]));
+                            return;
+                        }
+                    },
+                    Err(error) => {
+                        let raw = js_error_text(error);
+                        let message = raw.to_ascii_lowercase();
+                        let changed = message.contains("configuration changed")
+                            || message.contains("config version")
+                            || (message.contains("expected version") && message.contains("current"));
+                        restore_failure(active.as_deref());
+                        if changed {
+                            request_codex_runtime_snapshot(
+                                true, false, false, false, send_runtime_request_nonce.clone(), models,
+                                codex_runtime, codex_runtime_error,
+                                codex_runtime_loading, codex_profile_overrides,
+                            );
+                            codex_config_menu_open.set(true);
+                            status.set(t(locale.get(), "codex.config_changed").into());
+                        } else {
+                            status.set(tf(locale.get(), "status.send_failed", &[(
+                                "msg", &localize_backend(locale.get(), &raw),
+                            )]));
+                        }
+                        return;
+                    }
+                };
+                let stale = config_generation.as_ref().is_some_and(|generation| {
+                    !generation.is_empty()
+                        && !resolved.config_version.is_empty()
+                        && generation != &resolved.config_version
+                });
+                let effective_model = resolved.effective_model().to_string();
+                if !effective_model.is_empty() && !branch {
+                    items.update(|rows| if let Some(ChatItem::Assistant { text, model }) = rows.last_mut() {
+                        if text.is_empty() { *model = Some(effective_model.clone()); }
+                    });
+                }
+                codex_preview.set(Some(resolved));
+                if stale {
+                    restore_failure(active.as_deref());
+                    request_codex_runtime_snapshot(
+                        true, false, false, false, send_runtime_request_nonce.clone(), models,
+                        codex_runtime, codex_runtime_error,
+                        codex_runtime_loading, codex_profile_overrides,
+                    );
+                    codex_config_menu_open.set(true);
+                    status.set(t(locale.get(), "codex.config_changed").into());
+                    return;
+                }
+            }
             // Resolve the target session: use the active one, or create a fresh
             // frame up front so streamed events can be routed before the first delta.
             let id = if branch {
                 let arg = to_value(&serde_json::json!({
                     "sessionId": active,
-                    "title": text.trim(),
+                    "title": turn_text.trim(),
                 })).unwrap();
                 match invoke("branch_session", arg).await.as_string() {
                     Some(s) => s,
                     None => {
+                        restore_failure(active.as_deref());
                         let loc = locale.get();
                         status.set(t(loc, "status.send_failed").into());
                         return;
@@ -716,6 +1723,7 @@ fn App() -> impl IntoView {
                         None => {
                             // Bridge returned no id (e.g. legacy mock); bail without
                             // flipping running so the user can retry.
+                            restore_failure(None);
                             let loc = locale.get();
                             status.set(t(loc, "status.send_failed").into());
                             return;
@@ -730,9 +1738,46 @@ fn App() -> impl IntoView {
                 items.set(branch_items);
                 force_chat_bottom();
             }
+            if using_local_runner {
+                if let Err(message) = persist_session_codex_overrides_await(
+                    Some(id.clone()),
+                    turn_mode.clone(),
+                    config_generation.clone(),
+                    session_overrides.clone().unwrap_or_default(),
+                    codex_override_ui,
+                ).await {
+                    restore_failure(active.as_deref());
+                    let lower = message.to_ascii_lowercase();
+                    if lower.contains("configuration changed")
+                        || lower.contains("config version")
+                        || lower.contains("revision")
+                        || lower.contains("conflict")
+                        || (lower.contains("expected version") && lower.contains("current"))
+                    {
+                        request_codex_runtime_snapshot(
+                            true, false, false, false, send_runtime_request_nonce.clone(), models,
+                            codex_runtime, codex_runtime_error,
+                            codex_runtime_loading, codex_profile_overrides,
+                        );
+                        codex_config_menu_open.set(true);
+                        status.set(t(locale.get(), "codex.config_changed").into());
+                    } else {
+                        status.set(tf(locale.get(), "status.send_failed", &[(
+                            "msg", &localize_backend(locale.get(), &message),
+                        )]));
+                    }
+                    return;
+                }
+            }
             active_session.set(Some(id.clone()));
             begin_pending_turn(pending_turns, running, &id);
-            let arg = to_value(&SendMessageArgs { session_id: Some(id.clone()), message, attachments: paths, references: reference_args, resume: false }).unwrap();
+            let arg = to_value(&SendMessageArgs {
+                session_id: Some(id.clone()), message, attachments: paths,
+                references: reference_args, resume: false,
+                collaboration_mode: send_collaboration_mode,
+                codex_config_generation: config_generation,
+                codex_overrides: session_overrides,
+            }).unwrap();
             match invoke_checked("send_message", arg).await {
                 Ok(_) => {
                     // send_message is awaited for the whole turn, so it resolves only
@@ -766,12 +1811,24 @@ fn App() -> impl IntoView {
                         }
                     }
                     refresh_sessions(sessions);
+                    refresh_codex_turn_audits(id.clone(), active_session, codex_turn_audits);
                 }
                 Err(err) => {
                     let loc = locale.get();
                     let raw = js_error_text(err);
-                    if raw.contains(NO_API_KEY_MARK) { needs_api_key.set(true); }
-                    status.set(tf(loc, "status.send_failed", &[("msg", &localize_backend(loc, &raw))]));
+                    let (turn_started, visible_error) = split_turn_started_error(&raw);
+                    if !turn_started {
+                        restore_failure(Some(&id));
+                    } else if !branch {
+                        route_items(active_session, items, transcripts, &id, |rows| {
+                            mark_optimistic_send_failed(rows, &display_message, visible_error)
+                        });
+                    }
+                    if turn_started {
+                        refresh_codex_turn_audits(id.clone(), active_session, codex_turn_audits);
+                    }
+                    if visible_error.contains(NO_API_KEY_MARK) { needs_api_key.set(true); }
+                    status.set(tf(loc, "status.send_failed", &[("msg", &localize_backend(loc, visible_error))]));
                     finish_pending_turn(pending_turns, running, &id);
                     if stopping_session.get().as_deref() == Some(&id) {
                         stopping_session.set(None);
@@ -779,7 +1836,7 @@ fn App() -> impl IntoView {
                 }
             }
         });
-    };
+    });
 
     let send_side_chat = move |question: String| {
         let question = question.trim().to_string();
@@ -852,7 +1909,7 @@ fn App() -> impl IntoView {
             }
             return;
         }
-        if ev.key() == "Enter" && !ev.shift_key() { ev.prevent_default(); send(ComposerSendAction::Normal); }
+        if ev.key() == "Enter" && !ev.shift_key() { ev.prevent_default(); send.call(ComposerSendAction::Normal); }
     };
 
     let edit_message = move |ui_index: usize| {
@@ -897,6 +1954,11 @@ fn App() -> impl IntoView {
             let Some(id) = active_session.get() else {
                 return;
             };
+            let use_codex = active_profile_uses_codex(&models.get());
+            let use_local_runner = active_profile_uses_local_runner(&models.get());
+            let resume_mode = use_local_runner.then(|| collaboration_mode.get());
+            let resume_generation = use_codex.then(|| codex_runtime.get().map(|snapshot| snapshot.config_version)).flatten();
+            let resume_overrides = use_codex.then(|| codex_session_overrides.get());
             let model = active_model_label(&models.get());
             items.update(|v| {
                 strip_error_at(v, error_idx);
@@ -911,6 +1973,9 @@ fn App() -> impl IntoView {
                     attachments: vec![],
                     references: vec![],
                     resume: true,
+                    collaboration_mode: resume_mode,
+                    codex_config_generation: resume_generation,
+                    codex_overrides: resume_overrides,
                 })
                 .unwrap();
                 match invoke_checked("send_message", arg).await {
@@ -1224,24 +2289,46 @@ fn App() -> impl IntoView {
             .and_then(|id| models.get().iter().find(|m| &m.id == id).map(|m| m.has_api_key))
             .unwrap_or(false);
         let cfg = model_form_to_settings(&form, has_key && key.is_empty());
-        if let Some(err_key) = settings_required_error_key(&cfg, &key) {
-            let err = t(loc, err_key);
-            let text = tf(loc, "status.save_failed", &[("msg", &err)]);
-            model_form_msg.set(Some((false, text)));
-            return;
+        let local_runner = matches!(form.provider.as_str(), "codex" | "codex_cli" | "codex_local" | "codex-local" | "claude_code" | "claude-code");
+        if !local_runner {
+            if let Some(err_key) = settings_required_error_key(&cfg, &key) {
+                let err = t(loc, err_key);
+                let text = tf(loc, "status.save_failed", &[("msg", &err)]);
+                model_form_msg.set(Some((false, text)));
+                return;
+            }
         }
         settings_busy.set(true);
         model_form_msg.set(Some((true, t(loc, "status.saving_settings").into())));
+        let provider = match form.provider.as_str() {
+            "codex" | "codex_cli" | "codex_local" | "codex-local" => "codex_cli",
+            "claude_code" | "claude-code" | "claude" => "claude_code",
+            other => provider_value(other),
+        };
         let profile = serde_json::json!({
             "id": form.id.clone().unwrap_or_default(),
             "label": form.label.trim(),
-            "provider": provider_value(&form.provider),
+            "provider": provider,
             "api_url": form.api_url.trim(),
             "model": form.model.trim(),
             "max_tokens": form.max_tokens,
             "reasoning_effort": form.reasoning_effort.trim(),
             "supports_vision": form.supports_vision,
             "use_for_vision": form.use_for_vision,
+            "runner_command": form.runner_command.trim(),
+            "runner_profile": form.runner_profile.trim(),
+            "runner_sandbox": form.runner_sandbox.trim(),
+            "runner_web_search_mode": form.runner_web_search_mode.trim(),
+            "runner_claude_command": form.runner_claude_command.trim(),
+            "runner_persistent": form.runner_persistent,
+            "normal_model": form.normal_model.trim(),
+            "normal_reasoning_effort": form.normal_reasoning_effort.trim(),
+            "plan_model": form.plan_model.trim(),
+            "plan_reasoning_effort": form.plan_reasoning_effort.trim(),
+            "service_tier": form.service_tier.trim(),
+            "personality": form.personality.trim(),
+            "reasoning_summary": form.reasoning_summary.trim(),
+            "verbosity": form.verbosity.trim(),
         });
         let key_arg = if key.is_empty() { None } else { Some(key) };
         spawn_local(async move {
@@ -1270,6 +2357,110 @@ fn App() -> impl IntoView {
             settings_busy.set(false);
         });
     };
+
+    let explicit_runtime_request_nonce = codex_runtime_request_nonce.clone();
+    let refresh_codex_runtime = Callback::new(move |_: ()| {
+        request_codex_runtime_snapshot(
+            true, true, true, true, explicit_runtime_request_nonce.clone(), models,
+            codex_runtime, codex_runtime_error,
+            codex_runtime_loading, codex_profile_overrides,
+        );
+    });
+
+    let settings_preview_nonce = codex_settings_preview_nonce.clone();
+    let preview_codex_configs = Callback::new(move |_: ()| {
+        let overrides = codex_profile_overrides.get();
+        let generation = codex_runtime.get().map(|snapshot| snapshot.config_version);
+        let request_id = settings_preview_nonce.get().wrapping_add(1);
+        settings_preview_nonce.set(request_id);
+        let response_nonce = settings_preview_nonce.clone();
+        codex_runtime_loading.set(true);
+        spawn_local(async move {
+            for (mode, output) in [("default", codex_preview_normal), ("plan", codex_preview_plan)] {
+                let args = to_value(&serde_json::json!({
+                    "sessionId": null,
+                    "mode": mode,
+                    "overrides": overrides,
+                    "configVersion": generation,
+                    "previewScope": "profile",
+                })).unwrap();
+                match invoke_checked("preview_codex_turn_config", args).await {
+                    Ok(value) => {
+                        if response_nonce.get() != request_id { return; }
+                        if let Some(config) = decode_resolved_turn_config(value) { output.set(Some(config)); }
+                    }
+                    Err(error) if response_nonce.get() == request_id => {
+                        codex_runtime_error.set(Some(js_error_text(error)))
+                    }
+                    Err(_) => return,
+                }
+            }
+            if response_nonce.get() == request_id { codex_runtime_loading.set(false); }
+        });
+    });
+
+    create_effect(move |_| {
+        let visible = show_settings.get() && settings_section.get() == "models";
+        let has_runtime = codex_runtime.get().is_some();
+        let _profile_layer = codex_profile_overrides.get();
+        if visible && has_runtime && active_profile_uses_codex(&models.get()) {
+            preview_codex_configs.call(());
+        }
+    });
+
+    let save_codex_profile = Callback::new(move |_: ()| {
+        let Some(profile) = models.get().into_iter().find(|model| model.active)
+            .or_else(|| models.get().into_iter().next())
+            .filter(|profile| matches!(profile.provider.as_str(), "codex_cli" | "codex" | "codex_local" | "codex-local"))
+        else {
+            codex_runtime_error.set(Some(t(locale.get(), "codex.no_profile").into()));
+            return;
+        };
+        let overrides = codex_profile_overrides.get();
+        codex_runtime_loading.set(true);
+        let profile_json = serde_json::json!({
+            "id": profile.id,
+            "label": profile.label,
+            "provider": "codex_cli",
+            "api_url": profile.api_url,
+            "model": profile.model,
+            "max_tokens": profile.max_tokens,
+            "reasoning_effort": profile.reasoning_effort,
+            "supports_vision": profile.supports_vision,
+            "use_for_vision": profile.use_for_vision,
+            "runner_command": profile.runner_command,
+            "runner_profile": profile.runner_profile,
+            "runner_sandbox": overrides.sandbox.clone().unwrap_or_default(),
+            "runner_web_search_mode": overrides.web_search.clone().unwrap_or_default(),
+            "runner_claude_command": profile.runner_claude_command,
+            "runner_persistent": profile.runner_persistent,
+            "normal_model": overrides.normal.model.clone().unwrap_or_default(),
+            "normal_reasoning_effort": overrides.normal.effort.clone().unwrap_or_default(),
+            "plan_model": overrides.plan.model.clone().unwrap_or_default(),
+            "plan_reasoning_effort": overrides.plan.effort.clone().unwrap_or_default(),
+            "service_tier": overrides.service_tier.clone().unwrap_or_default(),
+            "personality": overrides.personality.clone().unwrap_or_default(),
+            "reasoning_summary": overrides.summary.clone().unwrap_or_default(),
+            "verbosity": overrides.verbosity.clone().unwrap_or_default(),
+        });
+        spawn_local(async move {
+            let args = to_value(&serde_json::json!({
+                "profile": profile_json,
+                "key": null,
+                "useForVision": profile.use_for_vision,
+            })).unwrap();
+            match invoke_checked("save_model", args).await {
+                Ok(value) => {
+                    if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(value) { models.set(list); }
+                    codex_runtime_error.set(None);
+                    status.set(t(locale.get(), "status.settings_saved").into());
+                    preview_codex_configs.call(());
+                }
+                Err(error) => codex_runtime_error.set(Some(localize_backend(locale.get(), &js_error_text(error)))),
+            }
+            codex_runtime_loading.set(false);
+        });
+    });
 
     let save_specialist_form = move |_| {
         let Some(spec) = specialist_form.get() else { return; };
@@ -1306,12 +2497,20 @@ fn App() -> impl IntoView {
         let Some(form) = model_form.get() else { return; };
         let loc = locale.get();
         let key = model_form_key.get();
+        let local_provider = match form.provider.as_str() {
+            "codex_cli" | "codex" | "codex_local" | "codex-local" => Some("codex_cli"),
+            "claude_code" | "claude-code" | "claude" => Some("claude_code"),
+            _ => None,
+        };
         let has_key = models.get().iter().find(|m| Some(m.id.as_str()) == form.id.as_deref()).map(|m| m.has_api_key).unwrap_or(false);
-        let cfg = model_form_to_settings(&form, has_key);
-        if let Some(err_key) = settings_required_error_key(&cfg, &key) {
-            let err = t(loc, err_key);
-            model_form_msg.set(Some((false, tf(loc, "status.validation_failed", &[("msg", &err)]))));
-            return;
+        let mut cfg = model_form_to_settings(&form, has_key);
+        if let Some(provider) = local_provider { cfg.provider = provider.into(); }
+        if local_provider.is_none() {
+            if let Some(err_key) = settings_required_error_key(&cfg, &key) {
+                let err = t(loc, err_key);
+                model_form_msg.set(Some((false, tf(loc, "status.validation_failed", &[("msg", &err)]))));
+                return;
+            }
         }
         settings_busy.set(true);
         model_form_msg.set(Some((true, t(loc, "status.validating").into())));
@@ -1397,7 +2596,10 @@ fn App() -> impl IntoView {
                 active_session.set(Some(id.clone()));
                 running.update(|r| { r.insert(id.clone()); });
                 refresh_sessions(sessions);
-                let arg = to_value(&SendMessageArgs { session_id: Some(id.clone()), message: text, attachments: vec![], references: vec![], resume: false }).unwrap();
+                let arg = to_value(&SendMessageArgs {
+                    session_id: Some(id.clone()), message: text, attachments: vec![], references: vec![], resume: false,
+                    collaboration_mode: None, codex_config_generation: None, codex_overrides: None,
+                }).unwrap();
                 match invoke_checked("send_message", arg).await {
                     // The awaited command resolving is the reliable turn-complete
                     // signal; clear `running` here so a dropped `Done` broadcast
@@ -1426,16 +2628,37 @@ fn App() -> impl IntoView {
         let is_running = running.get().contains(&id);
         active_session.set(Some(id.clone()));
         if is_running {
-            // Mid-stream: render the cached transcript (live), no DB load needed.
+            // Mid-stream: render the cached transcript immediately, but still
+            // reconcile the separately persisted Plan claim/status. This keeps
+            // session switching and restart semantics identical.
             items.set(transcripts.with(|m| m.get(&id).cloned().unwrap_or_default()));
             force_chat_bottom();
+            let running_id = id.clone();
+            spawn_local(async move {
+                let args = to_value(&serde_json::json!({ "sessionId": running_id.clone() })).unwrap();
+                if let Ok(value) = invoke_checked("get_latest_proposed_plan", args).await {
+                    if let Some(plan) = decode_proposed_plan(value).filter(|plan| !plan.text.trim().is_empty()) {
+                        route_items(active_session, items, transcripts, &running_id, |rows| {
+                            upsert_persisted_plan(rows, plan)
+                        });
+                    }
+                }
+            });
             return;
         }
         // Idle session: load from DB and overwrite any stale cache entry.
         spawn_local(async move {
-            let v = invoke("load_session", to_value(&serde_json::json!({ "id": id })).unwrap()).await;
+            let v = invoke("load_session", to_value(&serde_json::json!({ "id": id.clone() })).unwrap()).await;
             if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<LoadedItem>>(v) {
-                let chats: Vec<ChatItem> = list.into_iter().map(LoadedItem::into_chat).collect();
+                let mut chats: Vec<ChatItem> = list.into_iter().map(LoadedItem::into_chat).collect();
+                // Proposed plans are persisted separately from ordinary chat
+                // rows. Older backends simply reject this optional command.
+                let plan_arg = to_value(&serde_json::json!({ "sessionId": id.clone() })).unwrap();
+                if let Ok(value) = invoke_checked("get_latest_proposed_plan", plan_arg).await {
+                    if let Some(plan) = decode_proposed_plan(value).filter(|plan| !plan.text.trim().is_empty()) {
+                        upsert_persisted_plan(&mut chats, plan);
+                    }
+                }
                 transcripts.update(|m| { m.insert(id.clone(), chats.clone()); });
                 // Only repaint the view if we're still on this session — a rapid
                 // switch could have moved on while the load was in flight, and an
@@ -1492,6 +2715,165 @@ fn App() -> impl IntoView {
             spawn_local(async move { let _ = invoke("confirm_response", arg).await; });
         })
     };
+
+    let on_plan_action = Callback::new(move |(action, plan_id, revision, plan_native): (String, String, i64, bool)| {
+        if action == "modify" {
+            collaboration_mode.set("plan".into());
+            if active_profile_uses_local_runner(&models.get()) {
+                let use_codex = active_profile_uses_codex(&models.get());
+                persist_session_codex_overrides(
+                    active_session.get(), "plan".into(),
+                    use_codex.then(|| codex_runtime.get().map(|snapshot| snapshot.config_version)).flatten(),
+                    if use_codex { codex_session_overrides.get() } else { CodexModeOverrides::default() },
+                    codex_override_ui,
+                );
+            }
+            input.set(String::new());
+            focus_composer();
+            status.set(t(locale.get(), "plan.modify_hint").into());
+            return;
+        }
+        // An event from an older backend has no durable claim token. Rendering
+        // should already hide its buttons, but keep the command boundary safe.
+        if plan_id.is_empty() || revision <= 0 { return; }
+        let Some(session_id) = active_session.get() else { return; };
+        let approving = action == "approve";
+        if approving {
+            begin_pending_turn(pending_turns, running, &session_id);
+            status.set(t(locale.get(), "plan.executing").into());
+        }
+        let action_for_request = action.clone();
+        // Compatibility proposals may have been produced because App Server
+        // probing failed. Do not make their approval depend on a fresh native
+        // preview; the backend validates their persisted config fingerprint.
+        let action_uses_codex = plan_native && active_profile_uses_codex(&models.get());
+        let requested_generation = codex_runtime.get().map(|snapshot| snapshot.config_version);
+        let requested_overrides = codex_session_overrides.get();
+        spawn_local(async move {
+            // Approval is an implementation turn in Default mode. Resolve that
+            // exact config now and pass the same generation/override snapshot to
+            // the backend action; never reuse the Plan-mode preview.
+            let action_config_version = if approving && action_uses_codex {
+                let preview_args = to_value(&serde_json::json!({
+                    "sessionId": session_id.clone(),
+                    "mode": "default",
+                    "overrides": requested_overrides.clone(),
+                    "configVersion": requested_generation.clone(),
+                    "previewScope": "session",
+                })).unwrap();
+                match invoke_checked("preview_codex_turn_config", preview_args).await {
+                    Ok(value) => match decode_resolved_turn_config(value) {
+                        Some(resolved) => {
+                            let version = if resolved.config_version.is_empty() {
+                                requested_generation.clone().unwrap_or_default()
+                            } else {
+                                resolved.config_version
+                            };
+                            if version.is_empty() {
+                                status.set(tf(locale.get(), "status.send_failed", &[(
+                                    "msg", "Codex did not return a configuration version for approval.",
+                                )]));
+                                finish_pending_turn(pending_turns, running, &session_id);
+                                return;
+                            }
+                            Some(version)
+                        }
+                        None => {
+                            status.set(tf(locale.get(), "status.send_failed", &[(
+                                "msg", "Codex returned an unsupported Default configuration preview.",
+                            )]));
+                            finish_pending_turn(pending_turns, running, &session_id);
+                            return;
+                        }
+                    },
+                    Err(error) => {
+                        status.set(tf(locale.get(), "status.send_failed", &[(
+                            "msg", &localize_backend(locale.get(), &js_error_text(error)),
+                        )]));
+                        finish_pending_turn(pending_turns, running, &session_id);
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            let args = to_value(&serde_json::json!({
+                "sessionId": session_id.clone(),
+                "action": action_for_request,
+                "planId": plan_id.clone(),
+                "revision": revision,
+                "configVersion": action_config_version,
+                "overrides": (approving && action_uses_codex).then_some(requested_overrides.clone()),
+            })).unwrap();
+            match invoke_checked("codex_plan_action", args).await {
+                Ok(_) => {
+                    if matches!(action.as_str(), "approve" | "save_exit") {
+                        collaboration_mode.set("default".into());
+                    }
+                    status.set(t(locale.get(), if action == "approve" { "plan.executing" } else { "plan.saved" }).into());
+                    route_items(active_session, items, transcripts, &session_id, |rows| {
+                        if let Some(card) = rows.iter_mut().filter_map(|row| match row {
+                            ChatItem::Plan(card) => Some(card),
+                            _ => None,
+                        }).find(|card| card.plan_id == plan_id && card.revision == revision) {
+                            card.actionable = false;
+                        }
+                    });
+                    let args = to_value(&serde_json::json!({ "sessionId": session_id.clone() })).unwrap();
+                    if let Ok(value) = invoke_checked("get_latest_proposed_plan", args).await {
+                        if let Some(plan) = decode_proposed_plan(value)
+                            .filter(|plan| plan.id == plan_id && plan.revision == revision)
+                        {
+                            route_items(active_session, items, transcripts, &session_id, |rows| {
+                                if let Some(index) = rows.iter().rposition(|row| matches!(
+                                    row,
+                                    ChatItem::Plan(card) if card.plan_id == plan_id && card.revision == revision
+                                )) {
+                                rows[index] = ChatItem::Plan(PlanCard {
+                                    text: plan.text,
+                                    complete: !matches!(plan.status.as_str(), "streaming" | "draft"),
+                                    native: plan.native,
+                                    actionable: plan.status == "pending" && !plan.id.is_empty(),
+                                    plan_id: plan.id,
+                                    revision: plan.revision,
+                                });
+                                }
+                            });
+                        }
+                    }
+                    refresh_codex_turn_audits(
+                        session_id.clone(), active_session, codex_turn_audits,
+                    );
+                }
+                Err(error) => status.set(tf(locale.get(), "status.send_failed", &[
+                    ("msg", &localize_backend(locale.get(), &js_error_text(error))),
+                ])),
+            }
+            if approving {
+                finish_pending_turn(pending_turns, running, &session_id);
+            }
+        });
+    });
+
+    let on_plan_answer = Callback::new(move |(question_id, answer): (String, String)| {
+        let answer = answer.trim().to_string();
+        if answer.is_empty() { return; }
+        spawn_local(async move {
+            let args = to_value(&serde_json::json!({
+                "questionId": question_id,
+                "answers": [answer],
+            })).unwrap();
+            match invoke_checked("answer_codex_user_input", args).await {
+                Ok(_) => {
+                    items.update(|rows| rows.retain(|row| !matches!(row, ChatItem::PlanQuestion(question) if question.question_id == question_id)));
+                    status.set(t(locale.get(), "plan.answer_sent").into());
+                }
+                Err(error) => status.set(tf(locale.get(), "status.send_failed", &[
+                    ("msg", &localize_backend(locale.get(), &js_error_text(error))),
+                ])),
+            }
+        });
+    });
 
     let on_sidebar_resize_start = move |ev: web_sys::MouseEvent| {
         ev.prevent_default();
@@ -1581,6 +2963,9 @@ fn App() -> impl IntoView {
                 attachments: vec![],
                 references: vec![],
                 resume: false,
+                collaboration_mode: None,
+                codex_config_generation: None,
+                codex_overrides: None,
             })
             .unwrap();
             begin_pending_turn(pending_turns, running, &id);
@@ -1916,6 +3301,11 @@ fn App() -> impl IntoView {
         if specialist_menu_open.get() {
             ev.prevent_default();
             specialist_menu_open.set(false);
+            return;
+        }
+        if codex_config_menu_open.get() {
+            ev.prevent_default();
+            codex_config_menu_open.set(false);
             return;
         }
         if model_menu_open.get() {
@@ -2373,7 +3763,11 @@ fn App() -> impl IntoView {
                                     let on_resume = Callback::new(resume_turn);
                                     view! {
                                         <div class=class_for(&item) data-ui-index=i.to_string()>
-                                            {render_item(i, &item, &arts, on_artifact_select, on_file_link, busy.read_only(), is_last, edit_message, sid, respond_confirm, on_resume)}
+                                            {render_item(
+                                                i, &item, &arts, on_artifact_select, on_file_link,
+                                                busy.read_only(), is_last, edit_message, sid,
+                                                respond_confirm, on_resume, on_plan_action, on_plan_answer,
+                                            )}
                                         </div>
                                     }.into_view()
                                 }
@@ -2478,9 +3872,15 @@ fn App() -> impl IntoView {
                             prop:value={move || input.get()}
                             on:input=move |ev| {
                                 let v = event_target_value(&ev);
-                                match active_composer_trigger(&v) {
-                                    Some((_, mode, q)) => { picker_query.set(q); picker_index.set(0); picker_mode.set(Some(mode)); }
-                                    None => picker_mode.set(None),
+                                if is_plan_command(&v) {
+                                    // Native slash commands take precedence over
+                                    // an installed skill named plan/default.
+                                    picker_mode.set(None);
+                                } else {
+                                    match active_composer_trigger(&v) {
+                                        Some((_, mode, q)) => { picker_query.set(q); picker_index.set(0); picker_mode.set(Some(mode)); }
+                                        None => picker_mode.set(None),
+                                    }
                                 }
                                 input.set(v);
                             }
@@ -2701,6 +4101,289 @@ fn App() -> impl IntoView {
                             }})}
                         </div>
                         <div class="composer-buttons">
+                            {move || (active_profile_uses_local_runner(&models.get()) && !active_profile_uses_codex(&models.get())).then(|| {
+                                let plan_mode = collaboration_mode.get() == "plan";
+                                view! {
+                                    <div class="codex-composer-config local-runner-mode" class:plan=plan_mode>
+                                        <button type="button" class="codex-mode-toggle"
+                                            title=move || t(locale.get(), if plan_mode { "plan.switch_default" } else { "plan.switch_plan" })
+                                            on:click=move |_| {
+                                                let mode = if plan_mode { "default".to_string() } else { "plan".to_string() };
+                                                collaboration_mode.set(mode.clone());
+                                                persist_session_codex_overrides(
+                                                    active_session.get(), mode, None, CodexModeOverrides::default(), codex_override_ui,
+                                                );
+                                            }>
+                                            <span class="codex-mode-dot"></span>
+                                            {move || t(locale.get(), if plan_mode { "codex.mode.plan" } else { "codex.mode.normal" })}
+                                            {plan_mode.then(|| view! { <span class="codex-compat-mark">{move || t(locale.get(), "plan.compat")}</span> })}
+                                        </button>
+                                    </div>
+                                }
+                            })}
+                            {move || (active_profile_uses_codex(&models.get()) && codex_runtime.get().is_none()).then(|| {
+                                let plan_mode = collaboration_mode.get() == "plan";
+                                let mode = if plan_mode { "plan".to_string() } else { "default".to_string() };
+                                let profile = models.get().into_iter().find(|profile| profile.active)
+                                    .or_else(|| models.get().into_iter().next()).unwrap();
+                                let session_layer = codex_session_overrides.get();
+                                let selected = session_layer.for_mode(&mode);
+                                let profile_model = if plan_mode { &profile.plan_model } else { &profile.normal_model };
+                                let profile_effort = if plan_mode { &profile.plan_reasoning_effort } else { &profile.normal_reasoning_effort };
+                                let visible_model = selected.model.clone()
+                                    .or_else(|| optional_profile_value(profile_model))
+                                    .or_else(|| optional_profile_value(&profile.model))
+                                    .unwrap_or_else(|| t(locale.get(), "codex.inherit").into());
+                                let visible_effort = selected.effort.clone()
+                                    .or_else(|| optional_profile_value(profile_effort))
+                                    .or_else(|| optional_profile_value(&profile.reasoning_effort))
+                                    .unwrap_or_else(|| t(locale.get(), "codex.inherit").into());
+                                let mode_for_toggle = mode.clone();
+                                let mode_for_model = mode.clone();
+                                let mode_for_effort = mode.clone();
+                                let mode_for_reset = mode.clone();
+                                view! {
+                                    <div class="codex-composer-config local-runner-mode" class:plan=plan_mode>
+                                        <button type="button" class="codex-mode-toggle"
+                                            title=move || t(locale.get(), if plan_mode { "plan.switch_default" } else { "plan.switch_plan" })
+                                            on:click=move |_| {
+                                                let next = if mode_for_toggle == "plan" { "default".to_string() } else { "plan".to_string() };
+                                                collaboration_mode.set(next.clone());
+                                                persist_session_codex_overrides(
+                                                    active_session.get(), next, None, codex_session_overrides.get(), codex_override_ui,
+                                                );
+                                            }>
+                                            <span class="codex-mode-dot"></span>
+                                            {move || t(locale.get(), if plan_mode { "codex.mode.plan" } else { "codex.mode.normal" })}
+                                            <span class="codex-compat-mark">{move || t(locale.get(), "plan.compat")}</span>
+                                        </button>
+                                        <button type="button" class="codex-config-toggle" class:active=move || codex_config_menu_open.get()
+                                            on:click=move |_| codex_config_menu_open.update(|open| *open = !*open)>
+                                            <span class="codex-config-model">{visible_model.clone()}</span>
+                                            <span class="codex-config-effort">{visible_effort.clone()}</span>
+                                            {move || codex_config_needs_confirmation.get().then(|| view! { <span class="codex-config-changed">"!"</span> })}
+                                            <span class="model-picker-chev">"▾"</span>
+                                        </button>
+                                        {move || {
+                                            let mode_for_model = mode_for_model.clone();
+                                            let mode_for_effort = mode_for_effort.clone();
+                                            let mode_for_reset = mode_for_reset.clone();
+                                            let visible_model = visible_model.clone();
+                                            let visible_effort = visible_effort.clone();
+                                            codex_config_menu_open.get().then(|| view! {
+                                            <div class="model-menu-backdrop" on:click=move |_| codex_config_menu_open.set(false)></div>
+                                            <div class="codex-config-menu codex-compat-config-menu">
+                                                <div class="codex-config-menu-head">
+                                                    <strong>{move || t(locale.get(), "plan.compat_full")}</strong>
+                                                    <span>"codex exec"</span>
+                                                </div>
+                                                <div class="codex-config-sources">{move || t(locale.get(), "codex.compat_profile_hint")}</div>
+                                                <label><span>{move || t(locale.get(), "codex.model")}</span>
+                                                    <input value=visible_model.clone() disabled=move || codex_session_override_conflict.get() on:change=move |event| {
+                                                        let value = dom_value(&event);
+                                                        codex_session_overrides.update(|overrides| {
+                                                            let target = if mode_for_model == "plan" { &mut overrides.plan } else { &mut overrides.normal };
+                                                            target.model = optional_profile_value(&value);
+                                                        });
+                                                        persist_session_codex_overrides(active_session.get(), mode_for_model.clone(), None, codex_session_overrides.get(), codex_override_ui);
+                                                    } />
+                                                </label>
+                                                <label><span>{move || t(locale.get(), "codex.effort")}</span>
+                                                    <input value=visible_effort.clone() disabled=move || codex_session_override_conflict.get() on:change=move |event| {
+                                                        let value = dom_value(&event);
+                                                        codex_session_overrides.update(|overrides| {
+                                                            let target = if mode_for_effort == "plan" { &mut overrides.plan } else { &mut overrides.normal };
+                                                            target.effort = optional_profile_value(&value);
+                                                        });
+                                                        persist_session_codex_overrides(active_session.get(), mode_for_effort.clone(), None, codex_session_overrides.get(), codex_override_ui);
+                                                    } />
+                                                </label>
+                                                {plan_mode.then(|| view! { <div class="codex-inline-notice">{move || t(locale.get(), "codex.plan.read_only")}</div> })}
+                                                {move || codex_config_needs_confirmation.get().then(|| view! {
+                                                    <button type="button" class="codex-confirm-config" on:click=move |_| {
+                                                        codex_config_needs_confirmation.set(false);
+                                                        codex_session_override_conflict.set(false);
+                                                        codex_config_menu_open.set(false);
+                                                        status.set(t(locale.get_untracked(), "codex.confirmed").into());
+                                                    }>{move || t(locale.get(), "codex.confirm_config")}</button>
+                                                })}
+                                                <button type="button" class="codex-reset-overrides" on:click=move |_| {
+                                                    codex_session_overrides.set(CodexModeOverrides::default());
+                                                    persist_session_codex_overrides(active_session.get(), mode_for_reset.clone(), None, codex_session_overrides.get(), codex_override_ui);
+                                                }>{move || t(locale.get(), "codex.reset_profile")}</button>
+                                            </div>
+                                            })
+                                        }}
+                                    </div>
+                                }
+                            })}
+                            {move || (active_profile_uses_codex(&models.get()) && codex_runtime.get().is_some()).then(|| {
+                                let plan_mode = collaboration_mode.get() == "plan";
+                                let native = codex_runtime.get().is_some_and(|snapshot| snapshot.provider_capabilities.native_plan);
+                                let preview = codex_preview.get();
+                                let requested = preview.as_ref().map(|config| config.requested_model().to_string()).unwrap_or_default();
+                                let effective = preview.as_ref().map(|config| config.effective_model().to_string()).unwrap_or_default();
+                                let effort = preview.as_ref().map(|config| config.effective_effort().to_string()).unwrap_or_default();
+                                let rerouted = !requested.is_empty() && !effective.is_empty() && requested != effective;
+                                let model_label = if rerouted { format!("{requested} → {effective}") } else if effective.is_empty() { t(locale.get(), "codex.inherit").into() } else { effective };
+                                view! {
+                                    <div class="codex-composer-config" class:plan=plan_mode>
+                                        <button type="button" class="codex-mode-toggle"
+                                            title=move || t(locale.get(), if plan_mode { "plan.switch_default" } else { "plan.switch_plan" })
+                                            on:click=move |_| {
+                                                let mode = if plan_mode { "default".to_string() } else { "plan".to_string() };
+                                                collaboration_mode.set(mode.clone());
+                                                persist_session_codex_overrides(
+                                                    active_session.get(), mode,
+                                                    codex_runtime.get().map(|snapshot| snapshot.config_version),
+                                                    codex_session_overrides.get(), codex_override_ui,
+                                                );
+                                            }>
+                                            <span class="codex-mode-dot"></span>
+                                            {move || t(locale.get(), if plan_mode { "codex.mode.plan" } else { "codex.mode.normal" })}
+                                            {(plan_mode && !native).then(|| view! { <span class="codex-compat-mark">{move || t(locale.get(), "plan.compat")}</span> })}
+                                        </button>
+                                        <button type="button" class="codex-config-toggle" class:active=move || codex_config_menu_open.get()
+                                            on:click=move |_| codex_config_menu_open.update(|open| *open = !*open)>
+                                            <span class="codex-config-model" class:rerouted=rerouted>{model_label}</span>
+                                            {(!effort.is_empty()).then(|| view! { <span class="codex-config-effort">{effort}</span> })}
+                                            {move || codex_config_needs_confirmation.get().then(|| view! { <span class="codex-config-changed">"!"</span> })}
+                                            <span class="model-picker-chev">"▾"</span>
+                                        </button>
+                                        {move || codex_config_menu_open.get().then(|| {
+                                            let snapshot = codex_runtime.get().unwrap_or_default();
+                                            let mode = collaboration_mode.get();
+                                            let layer = codex_session_overrides.get();
+                                            let selected = layer.for_mode(&mode);
+                                            let selected_model = selected.model.clone();
+                                            let selected_effort = selected.effort.clone();
+                                            let inherited_effective_model = codex_preview.get()
+                                                .map(|config| config.effective_model().to_string());
+                                            let efforts = composer_codex_efforts(
+                                                &snapshot,
+                                                selected_model.as_deref(),
+                                                inherited_effective_model.as_deref(),
+                                            );
+                                            let generation = snapshot.config_version.clone();
+                                            let generation_for_model = generation.clone();
+                                            let generation_for_effort = generation.clone();
+                                            let generation_for_reset = generation.clone();
+                                            let title_key = if mode == "plan" { "codex.plan_override" } else { "codex.normal_override" };
+                                            let mode_for_model = mode.clone();
+                                            let mode_for_effort = mode.clone();
+                                            let mode_for_reset = mode.clone();
+                                            let snapshot_for_model = snapshot.clone();
+                                            let inherited_for_model = inherited_effective_model.clone();
+                                            let model_rows = snapshot.models.clone();
+                                            let sources = codex_preview.get().map(|config| config.sources.into_iter()
+                                                .map(|(field, source)| format!("{field}: {source}"))
+                                                .collect::<Vec<_>>().join(" · ")).unwrap_or_default();
+                                            let audit_content = if let Some(audit) = codex_turn_audits.get().last().cloned() {
+                                                let requested = audit_json(&audit.requested);
+                                                let sent = audit_json(&audit.sent);
+                                                let actual = audit_json(&audit.actual);
+                                                let unavailable = actual_verification_unavailable(&audit.actual);
+                                                let meta = format!("{} · v{}", audit.mode, audit.config_version);
+                                                view! {
+                                                    <div class="codex-turn-audit-body">
+                                                        <div class="codex-turn-audit-meta">{meta}</div>
+                                                        <label><span>{t(locale.get(), "codex.audit.requested")}</span><pre>{requested}</pre></label>
+                                                        <label><span>{t(locale.get(), "codex.audit.sent")}</span><pre>{sent}</pre></label>
+                                                        <label><span>{t(locale.get(), "codex.audit.actual")}</span>
+                                                            {if unavailable {
+                                                                view! { <div class="codex-audit-unavailable">{t(locale.get(), "codex.audit.unavailable")}</div> }.into_view()
+                                                            } else {
+                                                                view! { <pre>{actual}</pre> }.into_view()
+                                                            }}
+                                                        </label>
+                                                    </div>
+                                                }.into_view()
+                                            } else {
+                                                view! { <div class="codex-turn-audit-empty">{t(locale.get(), "codex.audit.empty")}</div> }.into_view()
+                                            };
+                                            view! {
+                                                <div class="model-menu-backdrop" on:click=move |_| codex_config_menu_open.set(false)></div>
+                                                <div class="codex-config-menu">
+                                                    <div class="codex-config-menu-head">
+                                                        <strong>{move || t(locale.get(), title_key)}</strong>
+                                                        <span>{format!("v{generation}")}</span>
+                                                    </div>
+                                                    <label><span>{move || t(locale.get(), "codex.model")}</span>
+                                                        <select disabled=move || codex_session_override_conflict.get()
+                                                            on:change=move |event| {
+                                                                let value = dom_value(&event);
+                                                                let model = (value != "__inherit__").then_some(value);
+                                                                let supported = composer_codex_efforts(
+                                                                    &snapshot_for_model,
+                                                                    model.as_deref(),
+                                                                    inherited_for_model.as_deref(),
+                                                                );
+                                                                let mut reset_effort = false;
+                                                                codex_session_overrides.update(|overrides| {
+                                                                    let target = if mode_for_model == "plan" { &mut overrides.plan } else { &mut overrides.normal };
+                                                                    target.model = model;
+                                                                    if target.effort.as_ref().is_some_and(|value| !supported.contains(value)) {
+                                                                        target.effort = None;
+                                                                        reset_effort = true;
+                                                                    }
+                                                                });
+                                                                if reset_effort { status.set(t(locale.get_untracked(), "codex.effort_reset").into()); }
+                                                                persist_session_codex_overrides(
+                                                                    active_session.get(), mode_for_model.clone(), Some(generation_for_model.clone()), codex_session_overrides.get(), codex_override_ui,
+                                                                );
+                                                            }>
+                                                            <option value="__inherit__" selected=selected_model.is_none()>{move || t(locale.get(), "codex.inherit_profile")}</option>
+                                                            {model_rows.into_iter().map(|model| {
+                                                                let is_selected = selected_model.as_deref() == Some(model.id.as_str());
+                                                                view! { <option value=model.id.clone() selected=is_selected>{model.label()}</option> }
+                                                            }).collect_view()}
+                                                        </select>
+                                                    </label>
+                                                    <label><span>{move || t(locale.get(), "codex.effort")}</span>
+                                                        <select disabled=move || codex_session_override_conflict.get()
+                                                            on:change=move |event| {
+                                                                let value = dom_value(&event);
+                                                                let effort = (value != "__inherit__").then_some(value);
+                                                                codex_session_overrides.update(|overrides| {
+                                                                    let target = if mode_for_effort == "plan" { &mut overrides.plan } else { &mut overrides.normal };
+                                                                    target.effort = effort;
+                                                                });
+                                                                persist_session_codex_overrides(
+                                                                    active_session.get(), mode_for_effort.clone(), Some(generation_for_effort.clone()), codex_session_overrides.get(), codex_override_ui,
+                                                                );
+                                                            }>
+                                                            <option value="__inherit__" selected=selected_effort.is_none()>{move || t(locale.get(), "codex.inherit_profile")}</option>
+                                                            {efforts.into_iter().map(|effort| {
+                                                                let is_selected = selected_effort.as_deref() == Some(effort.as_str());
+                                                                view! { <option value=effort.clone() selected=is_selected>{effort}</option> }
+                                                            }).collect_view()}
+                                                        </select>
+                                                    </label>
+                                                    {(!sources.is_empty()).then(|| view! { <div class="codex-config-sources">{sources}</div> })}
+                                                    <details class="codex-turn-audit" data-testid="codex-turn-audit">
+                                                        <summary>{move || t(locale.get(), "codex.audit.title")}</summary>
+                                                        {audit_content}
+                                                    </details>
+                                                    {move || codex_config_needs_confirmation.get().then(|| view! {
+                                                        <button type="button" class="codex-confirm-config" on:click=move |_| {
+                                                            codex_config_needs_confirmation.set(false);
+                                                            codex_session_override_conflict.set(false);
+                                                            codex_config_menu_open.set(false);
+                                                            status.set(t(locale.get_untracked(), "codex.confirmed").into());
+                                                        }>{move || t(locale.get(), "codex.confirm_config")}</button>
+                                                    })}
+                                                    <button type="button" class="codex-reset-overrides" on:click=move |_| {
+                                                        codex_session_overrides.set(CodexModeOverrides::default());
+                                                        persist_session_codex_overrides(
+                                                            active_session.get(), mode_for_reset.clone(), Some(generation_for_reset.clone()), codex_session_overrides.get(), codex_override_ui,
+                                                        );
+                                                    }>{move || t(locale.get(), "codex.reset_profile")}</button>
+                                                </div>
+                                            }
+                                        })}
+                                    </div>
+                                }
+                            })}
                             {move || (!models.get().is_empty()).then(|| view! {
                                 <div class="model-picker">
                                     <button type="button" class="model-picker-btn" class:active=move || model_menu_open.get()
@@ -2782,7 +4465,7 @@ fn App() -> impl IntoView {
                                 </button>
                             })}
                             <div class="send-split">
-                                <button class="send" disabled=composer_blocked on:click=move |_| send(ComposerSendAction::Normal)>
+                                <button class="send" disabled=composer_blocked on:click=move |_| send.call(ComposerSendAction::Normal)>
                                     {move || t(locale.get(), if busy.get() { "composer.queue" } else { "composer.send" })}
                                 </button>
                                 <button type="button" class="send-menu-toggle"
@@ -2798,7 +4481,7 @@ fn App() -> impl IntoView {
                                         <button type="button" class="send-mode-item"
                                             on:click=move |_| {
                                                 send_mode_menu_open.set(false);
-                                                send(ComposerSendAction::PlanFirst);
+                                                send.call(ComposerSendAction::PlanFirst);
                                             }>
                                             <span class="compose-item-icon">{compose_icon("plan")}</span>
                                             <span>{move || t(locale.get(), "composer.plan_first")}</span>
@@ -2827,7 +4510,7 @@ fn App() -> impl IntoView {
                                         <button type="button" class="send-mode-item"
                                             on:click=move |_| {
                                                 send_mode_menu_open.set(false);
-                                                send(ComposerSendAction::BranchNew);
+                                                send.call(ComposerSendAction::BranchNew);
                                             }>
                                             <span class="compose-item-icon">{compose_icon("branch")}</span>
                                             <span>{move || t(locale.get(), "composer.branch_session")}</span>
@@ -3776,6 +5459,8 @@ fn App() -> impl IntoView {
                 skill_filter_tag, skills_search, skills_msg, cred_status, cred_inputs, cred_msg,
                 approval_grants, conns_view, conn_form_open, conn_form_kind, conn_test_msg,
                 custom_conn_tools, custom_conn_tools_loading, custom_conn_tool_errors,
+                codex_runtime, codex_runtime_error, codex_runtime_loading,
+                codex_profile_overrides, codex_preview_normal, codex_preview_plan,
             }
             go_settings_section=Callback::new(move |section: String| go_settings_section(&section))
             close_settings_subpage=Callback::new(move |_: ()| close_settings_subpage())
@@ -3794,6 +5479,9 @@ fn App() -> impl IntoView {
             set_visible_skills_enabled=set_visible_skills_enabled
             install_skill_from=Callback::new(install_skill_from)
             remove_specialist=Callback::new(remove_specialist_fn)
+            refresh_codex_runtime=refresh_codex_runtime
+            preview_codex_configs=preview_codex_configs
+            save_codex_profile=save_codex_profile
         />
 
 
@@ -3833,6 +5521,8 @@ fn class_for(item: &ChatItem) -> &'static str {
         ChatItem::Tool { .. } => "tool-wrap",
         ChatItem::ApprovalPending { .. } => "tool-wrap approval-wrap-row",
         ChatItem::Review(_) => "tool-wrap",
+        ChatItem::Plan(_) => "tool-wrap plan-wrap",
+        ChatItem::PlanQuestion(_) => "tool-wrap plan-question-wrap",
     }
 }
 
@@ -3950,6 +5640,8 @@ fn render_item(
     session_id: String,
     on_approval: Callback<(String, bool, Option<String>, String)>,
     on_resume: Callback<usize>,
+    on_plan_action: Callback<(String, String, i64, bool)>,
+    on_plan_answer: Callback<(String, String)>,
 ) -> impl IntoView {
     let locale = use_locale();
     match item {
@@ -4021,6 +5713,79 @@ fn render_item(
         ChatItem::ApprovalPending { tool, preview, message: _ } => view! {
             <ApprovalCard tool=tool.clone() preview=preview.clone() session_id=session_id.clone() on_decide=on_approval />
         }.into_view(),
+        ChatItem::Plan(plan) => {
+            let html = md_to_html(&plan.text);
+            let complete = plan.complete;
+            let native = plan.native;
+            let actionable = plan.actionable;
+            let plan_id_approve = plan.plan_id.clone();
+            let plan_id_modify = plan.plan_id.clone();
+            let plan_id_save = plan.plan_id.clone();
+            let revision = plan.revision;
+            let has_claim = !plan.plan_id.is_empty() && revision > 0;
+            view! {
+                <article class="plan-card" class:streaming=!complete class:compat=!native data-testid="plan-card">
+                    <header class="plan-card-head">
+                        <span class="plan-card-icon">{compose_icon("plan")}</span>
+                        <div><strong>{move || t(locale.get(), "plan.card.title")}</strong><span>{move || t(locale.get(), if complete { "plan.card.ready" } else { "plan.card.streaming" })}</span></div>
+                        {(!native).then(|| view! { <span class="plan-compat-badge">{move || t(locale.get(), "plan.compat_full")}</span> })}
+                    </header>
+                    <div class="plan-card-body markdown" inner_html=html></div>
+                    {(complete && actionable && has_claim).then(|| view! {
+                        <footer class="plan-card-actions">
+                            <button type="button" class="primary" disabled=move || busy.get() on:click=move |_| on_plan_action.call(("approve".into(), plan_id_approve.clone(), revision, native))>{move || t(locale.get(), "plan.approve")}</button>
+                            <button type="button" disabled=move || busy.get() on:click=move |_| on_plan_action.call(("modify".into(), plan_id_modify.clone(), revision, native))>{move || t(locale.get(), "plan.modify")}</button>
+                            <button type="button" disabled=move || busy.get() on:click=move |_| on_plan_action.call(("save_exit".into(), plan_id_save.clone(), revision, native))>{move || t(locale.get(), "plan.save_exit")}</button>
+                        </footer>
+                    })}
+                </article>
+            }.into_view()
+        }
+        ChatItem::PlanQuestion(question) => {
+            let answer = create_rw_signal(String::new());
+            let question_id = question.question_id.clone();
+            let question_id_keydown = question_id.clone();
+            let question_id_click = question_id.clone();
+            let question_text = question.question.clone();
+            let options = question.options.clone();
+            let allow_freeform = question.is_other || options.is_empty();
+            let input_type = if question.is_secret { "password" } else { "text" };
+            view! {
+                <section class="plan-question-card" data-testid="plan-question-card">
+                    <div class="plan-question-head"><span>{compose_icon("chat")}</span><strong>{move || t(locale.get(), "plan.question.title")}</strong></div>
+                    <p>{question_text}</p>
+                    {(!options.is_empty()).then(|| view! {
+                        <div class="plan-question-options">{options.into_iter().map(|option| {
+                            let value = option.label().to_string();
+                            let description = option.description().to_string();
+                            let send_value = value.clone();
+                            let id = question_id.clone();
+                            view! {
+                                <button type="button" on:click=move |_| on_plan_answer.call((id.clone(), send_value.clone()))>
+                                    <strong>{value}</strong>
+                                    {(!description.is_empty()).then(|| view! { <span>{description}</span> })}
+                                </button>
+                            }
+                        }).collect_view()}</div>
+                    })}
+                    {allow_freeform.then(|| view! {
+                        <div class="plan-question-freeform">
+                            <input type=input_type prop:value=move || answer.get()
+                                placeholder=move || t(locale.get(), "plan.question.placeholder")
+                                on:input=move |event| answer.set(event_target_value(&event))
+                                on:keydown=move |event: web_sys::KeyboardEvent| {
+                                    if event.key() == "Enter" && !event.shift_key() {
+                                        event.prevent_default();
+                                        on_plan_answer.call((question_id_keydown.clone(), answer.get()));
+                                    }
+                                } />
+                            <button type="button" class="primary" disabled=move || answer.get().trim().is_empty()
+                                on:click=move |_| on_plan_answer.call((question_id_click.clone(), answer.get()))>{move || t(locale.get(), "plan.question.send")}</button>
+                        </div>
+                    })}
+                </section>
+            }.into_view()
+        }
         ChatItem::Review(report) => {
             let report = report.clone();
             let count = report.findings.len();
@@ -4047,7 +5812,12 @@ fn render_item(
                     .collect::<Vec<_>>()
                     .join("\n")
             );
-            let model = report.reviewer_model.clone();
+            let model = match (report.reviewer_model.trim(), report.reviewer_effort.trim()) {
+                ("", "") => String::new(),
+                (model, "") => model.to_string(),
+                ("", effort) => effort.to_string(),
+                (model, effort) => format!("{model} · {effort}"),
+            };
             let summary = report.summary.clone();
             let findings = report
                 .findings
@@ -4129,4 +5899,124 @@ fn render_item(
 pub fn main() {
     console_error_panic_hook::set_once();
     mount_to_body(App);
+}
+
+#[cfg(test)]
+mod codex_ui_tests {
+    use super::*;
+
+    #[test]
+    fn native_plan_commands_beat_skill_picker_only_when_complete() {
+        assert!(is_plan_command("/plan"));
+        assert!(is_plan_command("/plan inspect this"));
+        assert!(is_plan_command(" /default"));
+        assert!(!is_plan_command("/planner"));
+        assert!(!is_plan_command("/pla"));
+    }
+
+    #[test]
+    fn failed_send_removes_only_its_empty_optimistic_pair() {
+        let mut rows = vec![
+            ChatItem::Assistant { text: "older".into(), model: None },
+            ChatItem::User("retry me".into()),
+            ChatItem::Assistant { text: String::new(), model: Some("gpt-test".into()) },
+        ];
+        remove_optimistic_send_rows(&mut rows, "retry me");
+        assert_eq!(rows.len(), 1);
+
+        let mut streamed = vec![
+            ChatItem::User("keep me".into()),
+            ChatItem::Assistant { text: "already streamed".into(), model: None },
+        ];
+        remove_optimistic_send_rows(&mut streamed, "keep me");
+        assert_eq!(streamed.len(), 2);
+        assert_eq!(
+            split_turn_started_error("[turn-started] failed"),
+            (true, "failed")
+        );
+        assert_eq!(split_turn_started_error("failed"), (false, "failed"));
+    }
+
+    #[test]
+    fn only_durable_pending_plan_is_actionable() {
+        let pending = proposed_plan_card(ProposedPlanRecord {
+            id: "plan-1".into(), revision: 2, text: "Do it".into(),
+            native: true, status: "pending".into(),
+        });
+        assert!(pending.actionable);
+        let saved = proposed_plan_card(ProposedPlanRecord {
+            id: "plan-1".into(), revision: 2, text: "Do it".into(),
+            native: true, status: "saved".into(),
+        });
+        assert!(!saved.actionable);
+        let tokenless = proposed_plan_card(ProposedPlanRecord {
+            id: String::new(), revision: 0, text: "legacy".into(),
+            native: true, status: "pending".into(),
+        });
+        assert!(!tokenless.actionable);
+    }
+
+    #[test]
+    fn runtime_adapter_payload_accepts_nullable_inherited_values() {
+        let snapshot: RuntimeSnapshot = serde_json::from_value(serde_json::json!({
+            "config_version": 7,
+            "runtime": {
+                "executable_path": "C:/tools/codex.exe",
+                "version": null,
+                "codex_home": "C:/project/.wisp/codex-home/profile",
+                "source": "path",
+                "context": "windows"
+            },
+            "models": [{
+                "id": "gpt-test",
+                "display_name": "GPT Test",
+                "supported_reasoning_efforts": ["low", "max", "ultra"]
+            }],
+            "config": {
+                "config_version": 7,
+                "mode": "plan",
+                "requested_model": null,
+                "effective_model": "gpt-test",
+                "requested_effort": null,
+                "effective_effort": "max",
+                "service_tier": null,
+                "personality": null,
+                "summary": null,
+                "verbosity": null,
+                "web_search": null,
+                "sandbox": "read-only",
+                "sources": {"model":"local_codex"},
+                "warnings": []
+            },
+            "collaboration_modes": [{"id":"plan","label":"Plan"}],
+            "provider_capabilities": {"app_server":true,"native_plan":true},
+            "warnings": [],
+            "refreshed_at": "123"
+        })).expect("runtime payload should decode");
+        assert_eq!(snapshot.config_version, "7");
+        assert_eq!(snapshot.models[0].supported_reasoning_efforts, ["low", "max", "ultra"]);
+        assert_eq!(snapshot.config.as_ref().unwrap().requested_model(), "");
+        assert_eq!(snapshot.config.as_ref().unwrap().effective_model(), "gpt-test");
+    }
+
+    #[test]
+    fn send_payload_carries_visible_codex_snapshot() {
+        let args = SendMessageArgs {
+            session_id: Some("s1".into()),
+            message: "inspect".into(),
+            attachments: vec![],
+            references: vec![],
+            resume: false,
+            collaboration_mode: Some("plan".into()),
+            codex_config_generation: Some("9007199254740993123".into()),
+            codex_overrides: Some(CodexModeOverrides {
+                plan: CodexModeOverride { model: Some("gpt-test".into()), effort: Some("ultra".into()) },
+                ..Default::default()
+            }),
+        };
+        let value = serde_json::to_value(args).unwrap();
+        assert_eq!(value["collaborationMode"], "plan");
+        assert_eq!(value["codexConfigGeneration"], "9007199254740993123");
+        assert_eq!(value["codexOverrides"]["plan"]["effort"], "ultra");
+    }
 }

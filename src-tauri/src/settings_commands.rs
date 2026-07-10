@@ -43,10 +43,11 @@ pub(super) async fn set_settings(
     let provider = normalized_provider(&settings.provider);
     let api_url = settings.api_url.trim();
     let model = settings.model.trim();
-    if api_url.is_empty() {
+    let local_runner = matches!(provider.as_str(), "codex_cli" | "claude_code");
+    if !local_runner && api_url.is_empty() {
         return Err("API URL is required.".into());
     }
-    if model.is_empty() {
+    if !local_runner && model.is_empty() {
         return Err("Model is required.".into());
     }
     tracing::info!(
@@ -225,6 +226,30 @@ pub(super) async fn validate_settings(
     key: Option<String>,
 ) -> Result<String, String> {
     let provider_name = normalized_provider(&settings.provider);
+    if provider_name == "codex_cli" {
+        let runner = models::active_runner_settings(&state.store).await;
+        let options = crate::codex_app_server::RuntimeResolveOptions {
+            explicit: (!runner.command.trim().is_empty())
+                .then(|| crate::codex_app_server::RuntimeEntrypoint::native(runner.command.trim())),
+            ..Default::default()
+        };
+        let resolved =
+            crate::codex_app_server::resolve_codex_command(&options).map_err(|e| e.to_string())?;
+        let version = crate::codex_app_server::probe_runtime_version(&resolved)
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(format!("Validated Codex local runtime {version}"));
+    }
+    if provider_name == "claude_code" {
+        // Command construction is platform-aware and does not require an API
+        // key.  A full prompt is deliberately not sent from Settings.
+        let runner = models::active_runner_settings(&state.store).await;
+        let command = crate::local_runner::build_claude_code_command(&runner, Path::new("."), None);
+        return Ok(format!(
+            "Configured Claude Code runtime {}",
+            command.program
+        ));
+    }
     let (_, _, _, stored_key) = load_settings(&state.store).await;
     let api_key = effective_api_key(key, stored_key);
     let mut cfg = build_provider_config(

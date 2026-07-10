@@ -9,6 +9,7 @@
 
 use crate::i18n::Locale;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Deserialize, Clone)]
 #[allow(dead_code)]
@@ -35,6 +36,89 @@ pub(crate) enum AgentEvent {
     ReviewStarted { frame_id: String },
     Review { frame_id: String, report: ReviewReport },
     CorrectionStarted { frame_id: String, model: String },
+    /// Native Codex plan-mode events.  These variants deliberately accept the
+    /// app-server field names rather than translating them in JavaScript so the
+    /// transcript and composer use the same payload the backend persisted.
+    #[serde(rename = "plan_delta", alias = "PlanDelta")]
+    PlanDelta {
+        frame_id: String,
+        #[serde(default, alias = "text")]
+        delta: String,
+        #[serde(default = "default_true")]
+        native: bool,
+    },
+    #[serde(rename = "final_plan", alias = "FinalPlan")]
+    FinalPlan {
+        frame_id: String,
+        #[serde(default, alias = "text", alias = "proposed_plan")]
+        plan: String,
+        #[serde(default = "default_true")]
+        native: bool,
+        #[serde(default)]
+        plan_id: String,
+        #[serde(default)]
+        revision: i64,
+    },
+    #[serde(rename = "plan_updated", alias = "PlanUpdated")]
+    PlanUpdated {
+        frame_id: String,
+        #[serde(default, alias = "text", alias = "proposed_plan")]
+        plan: String,
+        #[serde(default = "default_true")]
+        native: bool,
+    },
+    #[serde(rename = "request_user_input", alias = "RequestUserInput")]
+    RequestUserInput {
+        frame_id: String,
+        #[serde(default, alias = "id")]
+        question_id: String,
+        #[serde(default, alias = "prompt")]
+        question: String,
+        #[serde(default)]
+        options: Vec<PlanQuestionOption>,
+        #[serde(default)]
+        is_other: bool,
+        #[serde(default)]
+        is_secret: bool,
+    },
+    #[serde(rename = "request_user_input_resolved", alias = "RequestUserInputResolved")]
+    RequestUserInputResolved {
+        frame_id: String,
+        question_id: String,
+    },
+    #[serde(rename = "model_rerouted", alias = "ModelRerouted")]
+    ModelRerouted {
+        frame_id: String,
+        #[serde(default, alias = "requested")]
+        requested_model: String,
+        #[serde(default, alias = "effective")]
+        effective_model: String,
+    },
+}
+
+fn default_true() -> bool { true }
+
+fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// IPC versions are decimal strings. Accept a JSON number as a read-only
+/// compatibility path for snapshots produced by pre-v0.8 backends, but always
+/// serialize the UI value as a string so JavaScript cannot round a u64.
+fn deserialize_version_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::String(value) => value,
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::Null => String::new(),
+        other => return Err(serde::de::Error::custom(format!("invalid config version: {other}"))),
+    })
 }
 
 #[derive(Deserialize, Clone, Hash, PartialEq, Eq)]
@@ -65,6 +149,8 @@ pub(crate) struct ReviewReport {
     pub(crate) findings: Vec<ReviewFinding>,
     #[serde(default)]
     pub(crate) reviewer_model: String,
+    #[serde(default)]
+    pub(crate) reviewer_effort: String,
 }
 
 #[derive(Clone)]
@@ -86,6 +172,8 @@ pub(crate) enum ChatItem {
     /// Inline tool-approval card (replaces the old centered modal).
     ApprovalPending { tool: String, preview: String, message: String },
     Review(ReviewReport),
+    Plan(PlanCard),
+    PlanQuestion(PlanQuestion),
 }
 
 impl ChatItem {
@@ -105,9 +193,65 @@ impl ChatItem {
             }
             Self::ApprovalPending { tool, preview, message } => (6u8, tool, preview, message).hash(&mut h),
             Self::Review(report) => (5u8, report).hash(&mut h),
+            Self::Plan(plan) => (7u8, plan).hash(&mut h),
+            Self::PlanQuestion(question) => (8u8, question).hash(&mut h),
         }
         h.finish()
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Hash, PartialEq, Eq)]
+#[serde(untagged)]
+pub(crate) enum PlanQuestionOption {
+    Label(String),
+    Detail {
+        #[serde(default, alias = "value")]
+        label: String,
+        #[serde(default)]
+        description: String,
+    },
+}
+
+impl PlanQuestionOption {
+    pub(crate) fn label(&self) -> &str {
+        match self { Self::Label(label) => label, Self::Detail { label, .. } => label }
+    }
+    pub(crate) fn description(&self) -> &str {
+        match self { Self::Label(_) => "", Self::Detail { description, .. } => description }
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct PlanQuestion {
+    pub(crate) question_id: String,
+    pub(crate) question: String,
+    pub(crate) options: Vec<PlanQuestionOption>,
+    pub(crate) is_other: bool,
+    pub(crate) is_secret: bool,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct PlanCard {
+    pub(crate) text: String,
+    pub(crate) complete: bool,
+    pub(crate) native: bool,
+    pub(crate) actionable: bool,
+    pub(crate) plan_id: String,
+    pub(crate) revision: i64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct ProposedPlanRecord {
+    #[serde(default)]
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) revision: i64,
+    #[serde(default, alias = "plan", alias = "proposed_plan", alias = "content")]
+    pub(crate) text: String,
+    #[serde(default = "default_true")]
+    pub(crate) native: bool,
+    #[serde(default)]
+    pub(crate) status: String,
 }
 
 pub(crate) fn active_model_label(models: &[ModelProfile]) -> Option<String> {
@@ -241,6 +385,263 @@ pub(crate) struct SendMessageArgs {
     pub(crate) references: Vec<ComposerReferenceArg>,
     #[serde(default)]
     pub(crate) resume: bool,
+    /// Codex app-server collaboration mode (`default` or `plan`).  Kept
+    /// optional so API/Claude profiles and older backends receive exactly the
+    /// legacy payload they understand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) collaboration_mode: Option<String>,
+    /// Optimistic-concurrency token returned by the runtime snapshot/preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) codex_config_generation: Option<String>,
+    /// The per-session layer that was visible in the composer for this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) codex_overrides: Option<CodexModeOverrides>,
+}
+
+/// A model entry returned by Codex `model/list`.  Codex versions have used a
+/// few names for the effort list; aliases let the UI remain forward/backward
+/// compatible without inventing options on the frontend.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct CodexModelInfo {
+    #[serde(default, alias = "model", alias = "slug")]
+    pub(crate) id: String,
+    #[serde(default, alias = "name", alias = "displayName")]
+    pub(crate) display_name: String,
+    #[serde(
+        default,
+        alias = "supported_efforts",
+        alias = "reasoning_efforts",
+        alias = "supportedReasoningEfforts"
+    )]
+    pub(crate) supported_reasoning_efforts: Vec<String>,
+    #[serde(default, alias = "default_effort", alias = "defaultReasoningEffort")]
+    pub(crate) default_reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub(crate) description: String,
+    #[serde(default, alias = "supportsImages")]
+    pub(crate) supports_images: bool,
+    #[serde(default, alias = "supportsPersonality")]
+    pub(crate) supports_personality: bool,
+    #[serde(default, alias = "serviceTiers")]
+    pub(crate) service_tiers: Vec<String>,
+    #[serde(default, alias = "defaultServiceTier", deserialize_with = "deserialize_nullable_string")]
+    pub(crate) default_service_tier: String,
+}
+
+impl CodexModelInfo {
+    pub(crate) fn label(&self) -> String {
+        if self.display_name.trim().is_empty() { self.id.clone() } else { self.display_name.clone() }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct CodexRuntimeInfo {
+    #[serde(default, alias = "path", alias = "executable", alias = "executablePath")]
+    pub(crate) executable_path: String,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
+    pub(crate) version: String,
+    #[serde(default, alias = "home", alias = "codexHome")]
+    pub(crate) codex_home: String,
+    #[serde(default, alias = "runtime_source")]
+    pub(crate) source: String,
+    #[serde(default, alias = "execution_context")]
+    pub(crate) context: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct CodexCapabilities {
+    #[serde(default, alias = "appServer")]
+    pub(crate) app_server: bool,
+    #[serde(default, alias = "nativePlan", alias = "plan")]
+    pub(crate) native_plan: bool,
+    #[serde(default, alias = "images", alias = "imageInput")]
+    pub(crate) image_input: bool,
+    #[serde(default)]
+    pub(crate) personality: bool,
+    #[serde(default, alias = "serviceTier")]
+    pub(crate) service_tier: bool,
+    #[serde(default, alias = "reasoningSummary")]
+    pub(crate) reasoning_summary: bool,
+    #[serde(default)]
+    pub(crate) verbosity: bool,
+    #[serde(default, alias = "webSearch")]
+    pub(crate) web_search: bool,
+    #[serde(default)]
+    pub(crate) sandbox: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub(crate) enum CollaborationModeInfo {
+    Name(String),
+    Detail {
+        #[serde(default, alias = "mode")]
+        id: String,
+        #[serde(default, alias = "name", alias = "displayName")]
+        label: String,
+    },
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct CodexTurnValues {
+    #[serde(default)] pub(crate) model: String,
+    #[serde(default, alias = "reasoning_effort", alias = "reasoningEffort")]
+    pub(crate) effort: String,
+    #[serde(default)] pub(crate) service_tier: String,
+    #[serde(default)] pub(crate) personality: String,
+    #[serde(default)] pub(crate) summary: String,
+    #[serde(default)] pub(crate) verbosity: String,
+    #[serde(default)] pub(crate) web_search: String,
+    #[serde(default)] pub(crate) sandbox: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ResolvedTurnConfig {
+    #[serde(default, alias = "generation", alias = "configGeneration", deserialize_with = "deserialize_version_string")]
+    pub(crate) config_version: String,
+    #[serde(default)] pub(crate) runtime_path: String,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")] pub(crate) runtime_version: String,
+    #[serde(default)] pub(crate) codex_home: String,
+    #[serde(default, alias = "collaboration_mode", alias = "collaborationMode")]
+    pub(crate) mode: String,
+    #[serde(default)] pub(crate) requested: CodexTurnValues,
+    #[serde(default)] pub(crate) effective: CodexTurnValues,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")] pub(crate) requested_model: String,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")] pub(crate) effective_model: String,
+    #[serde(default, alias = "requested_reasoning_effort", deserialize_with = "deserialize_nullable_string")]
+    pub(crate) requested_effort: String,
+    #[serde(default, alias = "effective_reasoning_effort", deserialize_with = "deserialize_nullable_string")]
+    pub(crate) effective_effort: String,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")] pub(crate) service_tier: String,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")] pub(crate) personality: String,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")] pub(crate) summary: String,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")] pub(crate) verbosity: String,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")] pub(crate) web_search: String,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")] pub(crate) sandbox: String,
+    #[serde(default)] pub(crate) sandbox_policy: serde_json::Value,
+    #[serde(default)] pub(crate) sources: HashMap<String, String>,
+    #[serde(default)] pub(crate) effective_sources: HashMap<String, String>,
+    #[serde(default)] pub(crate) warnings: Vec<String>,
+    #[serde(default)] pub(crate) validation_errors: Vec<String>,
+}
+
+impl ResolvedTurnConfig {
+    pub(crate) fn requested_model(&self) -> &str {
+        if self.requested_model.is_empty() { &self.requested.model } else { &self.requested_model }
+    }
+    pub(crate) fn effective_model(&self) -> &str {
+        if self.effective_model.is_empty() { &self.effective.model } else { &self.effective_model }
+    }
+    pub(crate) fn requested_effort(&self) -> &str {
+        if self.requested_effort.is_empty() { &self.requested.effort } else { &self.requested_effort }
+    }
+    pub(crate) fn effective_effort(&self) -> &str {
+        if self.effective_effort.is_empty() { &self.effective.effort } else { &self.effective_effort }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RuntimeSnapshot {
+    #[serde(default, alias = "generation", alias = "configGeneration", deserialize_with = "deserialize_version_string")]
+    pub(crate) config_version: String,
+    #[serde(default, alias = "profileId")]
+    pub(crate) profile_id: String,
+    #[serde(default, alias = "projectId")]
+    pub(crate) project_id: String,
+    #[serde(default)] pub(crate) runtime: CodexRuntimeInfo,
+    // Compatibility with the original flat UI contract.
+    #[serde(default)] pub(crate) path: String,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")] pub(crate) version: String,
+    #[serde(default, alias = "codexHome")] pub(crate) codex_home: String,
+    #[serde(default)] pub(crate) models: Vec<CodexModelInfo>,
+    #[serde(default, alias = "effective_config", alias = "effectiveConfig")]
+    pub(crate) config: Option<ResolvedTurnConfig>,
+    #[serde(default, alias = "overrides", alias = "profileOverrides")]
+    pub(crate) profile_overrides: Option<CodexModeOverrides>,
+    #[serde(default, alias = "collaborationModes")]
+    pub(crate) collaboration_modes: Vec<CollaborationModeInfo>,
+    #[serde(default, alias = "capabilities", alias = "providerCapabilities")]
+    pub(crate) provider_capabilities: CodexCapabilities,
+    #[serde(default)] pub(crate) warnings: Vec<String>,
+    #[serde(default, alias = "updated_at", alias = "refreshedAt")]
+    pub(crate) refreshed_at: String,
+}
+
+impl RuntimeSnapshot {
+    pub(crate) fn executable_path(&self) -> &str {
+        if self.runtime.executable_path.is_empty() { &self.path } else { &self.runtime.executable_path }
+    }
+    pub(crate) fn version(&self) -> &str {
+        if self.runtime.version.is_empty() { &self.version } else { &self.runtime.version }
+    }
+    pub(crate) fn codex_home(&self) -> &str {
+        if self.runtime.codex_home.is_empty() { &self.codex_home } else { &self.runtime.codex_home }
+    }
+}
+
+/// One mode's profile/session layer.  Empty values mean "inherit", never a
+/// hard-coded fallback.  Custom IDs/efforts are preserved verbatim so Codex,
+/// not the UI, is the authority that accepts or rejects them.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct CodexModeOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) model: Option<String>,
+    #[serde(default, alias = "reasoning_effort", skip_serializing_if = "Option::is_none")]
+    pub(crate) effort: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct CodexModeOverrides {
+    #[serde(default)] pub(crate) normal: CodexModeOverride,
+    #[serde(default)] pub(crate) plan: CodexModeOverride,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) service_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) personality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) verbosity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) web_search: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sandbox: Option<String>,
+}
+
+impl CodexModeOverrides {
+    pub(crate) fn for_mode(&self, mode: &str) -> &CodexModeOverride {
+        if mode.eq_ignore_ascii_case("plan") { &self.plan } else { &self.normal }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct SessionCodexState {
+    #[serde(default)]
+    pub(crate) overrides: CodexModeOverrides,
+    #[serde(default)]
+    pub(crate) mode: String,
+    #[serde(default, deserialize_with = "deserialize_version_string")]
+    pub(crate) revision: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub(crate) struct CodexTurnConfigAudit {
+    #[serde(default)]
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) mode: String,
+    #[serde(default, deserialize_with = "deserialize_version_string")]
+    pub(crate) config_version: String,
+    #[serde(default)]
+    pub(crate) requested: serde_json::Value,
+    #[serde(default)]
+    pub(crate) sent: serde_json::Value,
+    #[serde(default)]
+    pub(crate) actual: serde_json::Value,
+    #[serde(default)]
+    pub(crate) created_at: i64,
+    #[serde(default)]
+    pub(crate) updated_at: i64,
 }
 
 #[derive(Deserialize, Clone)]
@@ -421,6 +822,20 @@ pub(crate) struct ModelProfile {
     #[serde(default)] pub(crate) reasoning_effort: String,
     #[serde(default)] pub(crate) supports_vision: bool,
     #[serde(default)] pub(crate) use_for_vision: bool,
+    #[serde(default)] pub(crate) runner_command: String,
+    #[serde(default)] pub(crate) runner_profile: String,
+    #[serde(default)] pub(crate) runner_sandbox: String,
+    #[serde(default, alias = "runner_web_search")] pub(crate) runner_web_search_mode: String,
+    #[serde(default)] pub(crate) runner_claude_command: String,
+    #[serde(default)] pub(crate) runner_persistent: bool,
+    #[serde(default)] pub(crate) normal_model: String,
+    #[serde(default)] pub(crate) normal_reasoning_effort: String,
+    #[serde(default)] pub(crate) plan_model: String,
+    #[serde(default)] pub(crate) plan_reasoning_effort: String,
+    #[serde(default)] pub(crate) service_tier: String,
+    #[serde(default)] pub(crate) personality: String,
+    #[serde(default)] pub(crate) reasoning_summary: String,
+    #[serde(default)] pub(crate) verbosity: String,
 }
 
 /// A user-definable agent persona (mirrors `specialists::Specialist` in src-tauri).
@@ -522,6 +937,20 @@ pub(crate) struct ModelForm {
     pub(crate) reasoning_effort: String,
     pub(crate) supports_vision: bool,
     pub(crate) use_for_vision: bool,
+    pub(crate) runner_command: String,
+    pub(crate) runner_profile: String,
+    pub(crate) runner_sandbox: String,
+    pub(crate) runner_web_search_mode: String,
+    pub(crate) runner_claude_command: String,
+    pub(crate) runner_persistent: bool,
+    pub(crate) normal_model: String,
+    pub(crate) normal_reasoning_effort: String,
+    pub(crate) plan_model: String,
+    pub(crate) plan_reasoning_effort: String,
+    pub(crate) service_tier: String,
+    pub(crate) personality: String,
+    pub(crate) reasoning_summary: String,
+    pub(crate) verbosity: String,
 }
 
 #[derive(Deserialize, Clone)]

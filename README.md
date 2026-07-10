@@ -96,6 +96,38 @@ messages are appended to the active session frame, so restarting the app
 restores the full history. The headless CLI keeps using `.wisp/session.json` for
 portability.
 
+### Local Codex runtime and Plan mode
+
+A **Codex CLI** model profile uses the executable selected in that profile (or
+the Codex Desktop/PATH runtime discovered by Wisp). When the selected runtime
+supports `codex app-server`, Wisp reads its effective `config/read`,
+`model/list`, and collaboration-mode responses instead of maintaining a
+separate hard-coded model catalog.
+
+- Settings provides independent **Normal** and **Plan** model/reasoning-effort
+  defaults. The composer can override either pair for the current session.
+- `/plan` enters persistent Plan mode, `/plan <request>` enters Plan mode and
+  sends immediately, and `/default` returns to normal turns.
+- Native Plan proposals can be revised, saved, or approved for execution in
+  the same Codex thread. Plan turns are forced to a read-only sandbox.
+- Each Codex turn records requested, serialized, and server-observed
+  configuration data. If a model is rerouted, requested and effective models
+  are displayed separately.
+- Wisp stores overrides in its own profile/session only; it does not edit the
+  user's global Codex `config.toml`. The isolated per-profile runtime home is
+  under `.wisp/codex-home/` and excludes Codex sessions, databases, logs,
+  caches, memories, plugins, and exec-policy rules.
+- If App Server or native Plan is unavailable, the UI explicitly labels the
+  `codex exec` path as compatibility mode and only exposes settings that path
+  can transmit. WSL projects resolve Codex and `CODEX_HOME` inside their own
+  distribution rather than mixing Windows configuration.
+
+Known model/effort combinations are validated before send. Custom identifiers
+remain available, but a Codex rejection is surfaced instead of silently
+substituting another value. External runtime or configuration changes
+invalidate the displayed configuration generation; Wisp refreshes it and
+requires confirmation before the next turn.
+
 ### Composer references and search
 
 In a desktop conversation, type `@` to attach a saved artifact, `#` to attach

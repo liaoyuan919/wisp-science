@@ -6,6 +6,78 @@
   /* Scale with the center pane; cap keeps prose readable on ultra-wide layouts. */
   --chat-col-max: min(100%, 920px);
 }
+
+/* ---------- Codex collaboration mode + resolved turn picker ---------- */
+.codex-composer-config { position: relative; display: inline-flex; align-items: center; height: 30px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev); }
+.codex-mode-toggle,
+.codex-config-toggle { height: 100%; border: 0; background: transparent; color: var(--text-muted); font: inherit; font-size: 10.5px; cursor: pointer; }
+.codex-mode-toggle { display: inline-flex; align-items: center; gap: 6px; padding: 0 8px; border-right: 1px solid var(--border); font-weight: 650; }
+.codex-composer-config.local-runner-mode .codex-mode-toggle { border-right: 0; }
+.codex-mode-dot { width: 6px; height: 6px; border-radius: 50%; background: #5687ac; }
+.codex-composer-config.plan .codex-mode-dot { background: var(--clay); box-shadow: 0 0 0 3px var(--clay-soft); }
+.codex-config-toggle { display: inline-flex; min-width: 0; max-width: 220px; align-items: center; gap: 6px; padding: 0 7px; }
+.codex-config-model { min-width: 0; overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
+.codex-config-model.rerouted { color: var(--clay-strong); }
+.codex-config-effort,
+.codex-compat-mark { padding: 2px 5px; border-radius: 999px; background: var(--bg-sunken); color: var(--text-faint); font-size: 9px; }
+.codex-config-changed { display: inline-flex; width: 15px; height: 15px; align-items: center; justify-content: center; border-radius: 50%; background: #c68a28; color: #fff; font-size: 9px; font-weight: 800; }
+.codex-config-toggle.active { background: var(--surface-hover); }
+.codex-config-menu { position: absolute; z-index: 55; right: 0; bottom: calc(100% + 7px); display: grid; width: min(320px, calc(100vw - 32px)); gap: 10px; padding: 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-elev); box-shadow: 0 14px 36px rgba(25, 22, 16, .18); }
+.codex-config-menu-head { display: flex; justify-content: space-between; gap: 12px; color: var(--text); font-size: 11px; }
+.codex-config-menu-head > span { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.codex-config-menu label { display: grid; grid-template-columns: 84px minmax(0, 1fr); align-items: center; gap: 8px; color: var(--text-muted); font-size: 10.5px; }
+.codex-config-menu select { width: 100%; min-width: 0; }
+.codex-config-sources { padding: 7px; border-radius: 6px; background: var(--bg-sunken); color: var(--text-faint); font-size: 9.5px; line-height: 1.45; }
+.codex-turn-audit { min-width: 0; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-sunken); }
+.codex-turn-audit > summary { padding: 7px 9px; color: var(--text-muted); font-size: 10.5px; font-weight: 600; cursor: pointer; }
+.codex-turn-audit-body { display: grid; max-height: 310px; gap: 8px; padding: 0 8px 8px; overflow: auto; }
+.codex-turn-audit-body .codex-turn-audit-meta { color: var(--text-faint); font-size: 9.5px; font-variant-numeric: tabular-nums; }
+.codex-config-menu .codex-turn-audit-body label { display: grid; grid-template-columns: 1fr; align-items: stretch; gap: 4px; }
+.codex-turn-audit pre { max-width: 100%; max-height: 150px; margin: 0; padding: 6px; overflow: auto; border-radius: 5px; background: var(--bg-elev); color: var(--text); font: 9px/1.4 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.codex-audit-unavailable, .codex-turn-audit-empty { padding: 7px 9px; color: var(--text-faint); font-size: 9.5px; line-height: 1.4; }
+.codex-audit-unavailable { color: var(--warn); }
+.codex-reset-overrides { justify-self: start; padding: 5px 8px; border: 0; background: transparent; color: var(--clay-strong); font: inherit; font-size: 10px; cursor: pointer; }
+.codex-confirm-config { width: 100%; padding: 7px 9px; border: 1px solid var(--clay); border-radius: 7px; background: var(--clay); color: #fff; font: inherit; font-size: 10.5px; font-weight: 650; cursor: pointer; }
+
+/* ---------- Native / compatibility plan cards ---------- */
+.plan-card,
+.plan-question-card { overflow: hidden; border: 1px solid color-mix(in srgb, var(--clay) 26%, var(--border)); border-radius: 12px; background: var(--bg-elev); box-shadow: 0 4px 18px rgba(29, 25, 19, .055); }
+.plan-card.streaming { border-style: dashed; }
+.plan-card.compat { border-color: var(--border-strong); }
+.plan-card-head,
+.plan-question-head { display: flex; align-items: center; gap: 9px; padding: 10px 12px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--clay-soft) 48%, var(--bg-elev)); }
+.plan-card-head .plan-card-icon,
+.plan-question-head > span { display: inline-flex; color: var(--clay-strong); }
+.plan-card-head .gi,
+.plan-question-head .gi { width: 16px; height: 16px; }
+.plan-card-head > div { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 1px; }
+.plan-card-head strong,
+.plan-question-head strong { color: var(--text); font-size: 11.5px; }
+.plan-card-head > div > span { color: var(--text-faint); font-size: 9.5px; }
+.plan-compat-badge { flex: none; padding: 3px 6px; border-radius: 999px; background: var(--bg-sunken); color: var(--text-muted); font-size: 9px; }
+.plan-card-body { padding: 14px 16px; color: var(--text); font-size: 13px; line-height: 1.62; }
+.plan-card-body > :first-child { margin-top: 0; }
+.plan-card-body > :last-child { margin-bottom: 0; }
+.plan-card-actions { display: flex; flex-wrap: wrap; gap: 7px; padding: 10px 12px; border-top: 1px solid var(--border); background: var(--bg-sunken); }
+.plan-card-actions button,
+.plan-question-freeform button { padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--bg-elev); color: var(--text); font: inherit; font-size: 10.5px; cursor: pointer; }
+.plan-card-actions button.primary,
+.plan-question-freeform button.primary { border-color: var(--clay); background: var(--clay); color: #fff; }
+.plan-question-card { padding-bottom: 11px; }
+.plan-question-card > p { margin: 12px; color: var(--text); font-size: 12.5px; line-height: 1.5; }
+.plan-question-options { display: grid; gap: 7px; margin: 0 12px 10px; }
+.plan-question-options button { display: flex; align-items: flex-start; flex-direction: column; gap: 2px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-sunken); color: var(--text); text-align: left; cursor: pointer; }
+.plan-question-options button:hover { border-color: var(--border-strong); background: var(--surface-hover); }
+.plan-question-options strong { font-size: 11px; }
+.plan-question-options span { color: var(--text-muted); font-size: 10px; line-height: 1.4; }
+.plan-question-freeform { display: flex; gap: 7px; margin: 0 12px; }
+.plan-question-freeform input { min-width: 0; flex: 1; }
+
+@container (max-width: 620px) {
+  .codex-config-toggle { max-width: 135px; }
+  .codex-config-effort { display: none; }
+  .plan-card-actions button { flex: 1 1 auto; }
+}
 .topbar {
   display: flex; align-items: center; gap: 12px;
   padding: 9px 14px; border-bottom: 1px solid var(--border);

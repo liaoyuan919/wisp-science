@@ -640,6 +640,9 @@ mod tauri_args_tests {
             attachments: vec!["a.png".into()],
             references: vec![],
             resume: false,
+            collaboration_mode: None,
+            codex_config_generation: None,
+            codex_overrides: None,
         })
         .unwrap();
         assert_eq!(v["sessionId"], "frame-1");
@@ -807,6 +810,7 @@ mod review_tests {
             summary: summary.into(),
             findings: vec![],
             reviewer_model: "review-model".into(),
+            reviewer_effort: String::new(),
         }
     }
 
@@ -1073,6 +1077,20 @@ pub(super) fn profile_to_form(m: &ModelProfile) -> ModelForm {
         reasoning_effort: m.reasoning_effort.clone(),
         supports_vision: m.supports_vision,
         use_for_vision: m.use_for_vision,
+        runner_command: m.runner_command.clone(),
+        runner_profile: m.runner_profile.clone(),
+        runner_sandbox: m.runner_sandbox.clone(),
+        runner_web_search_mode: m.runner_web_search_mode.clone(),
+        runner_claude_command: m.runner_claude_command.clone(),
+        runner_persistent: m.runner_persistent,
+        normal_model: m.normal_model.clone(),
+        normal_reasoning_effort: m.normal_reasoning_effort.clone(),
+        plan_model: m.plan_model.clone(),
+        plan_reasoning_effort: m.plan_reasoning_effort.clone(),
+        service_tier: m.service_tier.clone(),
+        personality: m.personality.clone(),
+        reasoning_summary: m.reasoning_summary.clone(),
+        verbosity: m.verbosity.clone(),
     }
 }
 

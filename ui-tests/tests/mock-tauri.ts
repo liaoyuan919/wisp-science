@@ -13,6 +13,7 @@ export function tauriMock(): void {
       /* listener may not be registered yet */
     }
   };
+  (window as any).__tauriEmit = emit;
 
   const demos = [
     { id: "manifest_crispr_screen", title: "Design a genome-wide CRISPR knockout screen targeting all kinases" },
@@ -72,7 +73,76 @@ export function tauriMock(): void {
       supports_vision: true,
       use_for_vision: false,
     },
+    {
+      id: "codex-local",
+      label: "Codex Local",
+      provider: "codex_cli",
+      api_url: "",
+      model: "",
+      has_api_key: false,
+      active: false,
+      max_tokens: 0,
+      reasoning_effort: "",
+      supports_vision: true,
+      use_for_vision: false,
+      runner_command: "codex",
+      runner_profile: "",
+      runner_sandbox: "workspace-write",
+      runner_web_search_mode: "inherit",
+      runner_claude_command: "",
+      runner_persistent: true,
+      normal_model: "gpt-test",
+      normal_reasoning_effort: "high",
+      plan_model: "inherit",
+      plan_reasoning_effort: "inherit",
+      service_tier: "inherit",
+      personality: "inherit",
+      reasoning_summary: "inherit",
+      verbosity: "inherit",
+    },
+    {
+      id: "claude-local",
+      label: "Claude Code Local",
+      provider: "claude_code",
+      api_url: "",
+      model: "",
+      has_api_key: false,
+      active: false,
+      max_tokens: 0,
+      reasoning_effort: "",
+      supports_vision: true,
+      use_for_vision: false,
+      runner_command: "",
+      runner_profile: "",
+      runner_sandbox: "workspace-write",
+      runner_web_search_mode: "inherit",
+      runner_claude_command: "claude",
+      runner_persistent: true,
+      normal_model: "",
+      normal_reasoning_effort: "",
+      plan_model: "inherit",
+      plan_reasoning_effort: "inherit",
+      service_tier: "inherit",
+      personality: "inherit",
+      reasoning_summary: "inherit",
+      verbosity: "inherit",
+    },
   ];
+  let codexRuntimeGeneration = "12";
+  let codexRuntimeUnavailable = false;
+  (window as any).__setCodexRuntimeUnavailable = (value: boolean) => { codexRuntimeUnavailable = value; };
+  const codexTurnAudits: Record<string, any[]> = {};
+  const sessionCodexStates: Record<string, { overrides: any; mode: string; revision: string }> = {};
+  let forceNextCodexRevisionConflict = false;
+  (window as any).__forceNextCodexRevisionConflict = () => { forceNextCodexRevisionConflict = true; };
+  (window as any).__bumpCodexSessionRevision = (sessionId: string) => {
+    const current = sessionCodexStates[sessionId] ?? { overrides: {}, mode: "default", revision: "0" };
+    sessionCodexStates[sessionId] = {
+      overrides: { normal: { model: "gpt-fast", effort: "low" }, plan: {} },
+      mode: current.mode,
+      revision: String(Number(current.revision) + 1),
+    };
+  };
   let mockApprovalGrants = [
     {
       scope: "global",
@@ -252,6 +322,94 @@ export function tauriMock(): void {
             };
           case "list_models":
             return mockModels;
+          case "get_codex_runtime_snapshot":
+          case "refresh_codex_runtime_snapshot":
+            if (codexRuntimeUnavailable) throw new Error("Codex App Server is unavailable");
+            if (cmd === "refresh_codex_runtime_snapshot") codexRuntimeGeneration = "13";
+            return {
+              config_version: codexRuntimeGeneration,
+              profile_id: mockModels.find((model) => model.active)?.id ?? "",
+              project_id: "default",
+              runtime: {
+                executable_path: "C:/tools/codex.exe",
+                version: "0.99.0-test",
+                codex_home: "C:/mock/.wisp/codex-home/default",
+                source: "path",
+                context: "windows",
+              },
+              models: [
+                { id: "gpt-test", display_name: "GPT Test", supported_reasoning_efforts: ["low", "high", "max", "ultra"], default_reasoning_effort: "high", supports_images: true },
+                { id: "gpt-fast", display_name: "GPT Fast", supported_reasoning_efforts: ["low", "medium"], default_reasoning_effort: "medium", supports_images: false },
+              ],
+              config: {
+                config_version: codexRuntimeGeneration, mode: "default", requested_model: null, effective_model: "gpt-test",
+                requested_effort: null, effective_effort: "high", service_tier: null, personality: null,
+                summary: null, verbosity: null, web_search: null, sandbox: "workspace-write",
+                sources: { model: "local_codex" }, warnings: [],
+              },
+              collaboration_modes: [{ id: "default", label: "Default" }, { id: "plan", label: "Plan" }],
+              provider_capabilities: {
+                app_server: true, native_plan: true, image_input: true, personality: true,
+                service_tier: true, reasoning_summary: true, verbosity: true, web_search: true, sandbox: true,
+              },
+              warnings: [], refreshed_at: "1783482300", profile_overrides: {},
+            };
+          case "preview_codex_turn_config": {
+            if (codexRuntimeUnavailable) throw new Error("Codex App Server is unavailable");
+            const overrides = plain(arg("overrides") ?? {});
+            const mode = arg("mode") === "plan" ? "plan" : "default";
+            const selected = mode === "plan" ? overrides.plan : overrides.normal;
+            return {
+              config_version: arg("configVersion") ?? "12",
+              mode,
+              requested_model: selected?.model ?? null,
+              effective_model: selected?.model ?? (mode === "plan" ? "gpt-fast" : "gpt-test"),
+              requested_effort: selected?.effort ?? null,
+              effective_effort: selected?.effort ?? (mode === "plan" ? "medium" : "high"),
+              service_tier: overrides.service_tier ?? null,
+              personality: overrides.personality ?? null,
+              summary: overrides.summary ?? null,
+              verbosity: overrides.verbosity ?? null,
+              web_search: overrides.web_search ?? null,
+              sandbox: mode === "plan" ? "read-only" : (overrides.sandbox ?? "workspace-write"),
+              sources: { model: selected?.model ? "wisp_profile" : "local_codex" }, warnings: [],
+            };
+          }
+          case "get_codex_turn_configs":
+            return codexTurnAudits[String(arg("sessionId") ?? "")] ?? [];
+          case "set_session_codex_overrides": {
+            const sessionId = String(arg("sessionId") ?? "__pending_session__");
+            const current = sessionCodexStates[sessionId] ?? { overrides: {}, mode: "default", revision: "0" };
+            if (forceNextCodexRevisionConflict) {
+              forceNextCodexRevisionConflict = false;
+              const external = {
+                overrides: { normal: { model: "gpt-fast", effort: "low" }, plan: {} },
+                mode: current.mode,
+                revision: String(Number(current.revision) + 1),
+              };
+              sessionCodexStates[sessionId] = external;
+              throw new Error(`Codex session configuration revision conflict (expected ${arg("expectedRevision")}, current ${external.revision})`);
+            }
+            const expected = arg("expectedRevision");
+            if (expected != null && String(expected) !== current.revision) {
+              throw new Error(`Codex session configuration revision conflict (expected ${expected}, current ${current.revision})`);
+            }
+            const next = {
+              overrides: plain(arg("overrides") ?? {}),
+              mode: String(arg("mode") ?? "default"),
+              revision: String(Number(current.revision) + 1),
+            };
+            sessionCodexStates[sessionId] = next;
+            return { revision: next.revision };
+          }
+          case "get_latest_proposed_plan":
+          case "codex_plan_action":
+          case "answer_codex_user_input":
+            return null;
+          case "get_session_codex_overrides": {
+            const sessionId = String(arg("sessionId") ?? "__pending_session__");
+            return sessionCodexStates[sessionId] ?? { overrides: {}, mode: "default", revision: "0" };
+          }
           case "list_ssh_hosts":
             return [];
           case "list_execution_contexts":
@@ -467,6 +625,56 @@ export function tauriMock(): void {
           case "send_message": {
             const fid = (args && (args.sessionId ?? args.session_id)) || "t1";
             const msg = (args && args.message) || "";
+            if (mockModels.find((model) => model.active)?.provider === "codex_cli") {
+              const compatibility = String(msg).includes("COMPATPLAN");
+              codexTurnAudits[fid] = [{
+                id: `audit-${fid}`,
+                mode: args?.collaborationMode ?? "default",
+                config_version: args?.codexConfigGeneration ?? codexRuntimeGeneration,
+                requested: { model: "gpt-test", effort: "high" },
+                sent: { model: "gpt-test", effort: "high", sandbox: args?.collaborationMode === "plan" ? "read-only" : "workspace-write" },
+                actual: compatibility ? { verification: "unavailable" } : { model: "gpt-test", effort: "high" },
+                created_at: 1,
+                updated_at: 1,
+              }];
+            }
+            if (String(msg).includes("PRESTARTFAIL")) {
+              throw new Error("No model profile is available");
+            }
+            if (String(msg).includes("POSTSTARTFAIL")) {
+              throw new Error("[turn-started] execution failed after turn/start");
+            }
+            if (String(msg).includes("COMPATPLAN")) {
+              setTimeout(() => {
+                emit("agent", {
+                  kind: "final_plan", frame_id: fid,
+                  plan: "1. Use the compatibility planner", native: false,
+                  plan_id: "plan-compat-1", revision: 1,
+                });
+                emit("agent", { kind: "Done", frame_id: fid });
+              }, 30);
+              return fid;
+            }
+            if (String(arg("message") ?? "").includes("NATIVEPLAN")) {
+              setTimeout(() => {
+                emit("agent", { kind: "plan_delta", frame_id: fid, delta: "1. Inspect inputs\n", native: true });
+                emit("agent", { kind: "plan_delta", frame_id: fid, delta: "2. Implement safely", native: true });
+                emit("agent", {
+                  kind: "final_plan", frame_id: fid,
+                  plan: "1. Inspect inputs\n2. Implement safely", native: true,
+                  plan_id: "plan-native-1", revision: 1,
+                });
+                emit("agent", {
+                  kind: "request_user_input", frame_id: fid, question_id: "q-1",
+                  question: "Which implementation should be used?",
+                  options: [{ label: "Safe", description: "Use the read-only path" }, { label: "Fast", description: "Use the shortest path" }],
+                });
+                // A native requestUserInput pauses the turn. The backend emits
+                // Done only after the question is answered, never immediately
+                // after presenting the card.
+              }, 30);
+              return fid;
+            }
             if (String(arg("message") ?? "").includes("PLANOTHER")) {
               const planPreview = "Plan (2 steps · 0 done · 0 in progress · 2 pending):\n[ ] Inspect confirmation protocol\n[ ] Add plan feedback UI";
               setTimeout(
@@ -526,6 +734,7 @@ export function tauriMock(): void {
                 id: "review-auto-1",
                 summary: "Checked the reported value against the tool result.",
                 reviewer_model: "claude-sonnet-5",
+                reviewer_effort: "high",
                 findings: [
                   {
                     message_index: 1,
