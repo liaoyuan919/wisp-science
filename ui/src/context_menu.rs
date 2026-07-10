@@ -6,6 +6,8 @@ use wasm_bindgen::prelude::*;
 extern "C" {
     fn isDevMode() -> bool;
     fn textareaCommand(kind: &str, id: &str);
+    #[wasm_bindgen(catch, js_name = copyImage)]
+    async fn copy_image_js(src: &str) -> Result<JsValue, JsValue>;
 }
 
 #[derive(Clone)]
@@ -24,6 +26,10 @@ pub struct CtxMenu {
 
 pub fn dev_mode() -> bool {
     isDevMode()
+}
+
+pub async fn copy_image(src: &str) -> bool {
+    copy_image_js(src).await.is_ok()
 }
 
 fn item(action: &str, label: String, payload: String) -> CtxItem {
@@ -226,6 +232,17 @@ pub fn build(ev: &web_sys::MouseEvent, locale: Locale, can_export: bool) -> Opti
                         id,
                     ),
                 ],
+            });
+        }
+    }
+
+    if let Some(image) = closest(&target, ".rp-img") {
+        let src = image.get_attribute("src").unwrap_or_default();
+        if !src.is_empty() {
+            return Some(CtxMenu {
+                x,
+                y,
+                items: vec![item("copyImage", i18n::t(locale, "ctx.copy_image"), src)],
             });
         }
     }

@@ -407,6 +407,27 @@ test("clicking a figure opens the artifact modal with provenance", async ({ page
   await expect(page.locator(".am-env")).toContainText("matplotlib");
 });
 
+test("image preview context menu copies the image", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await enterApp(page);
+  await composer(page).fill("make a volcano plot volcano.png");
+  await page.getByRole("button", { name: "Send" }).click();
+  await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.locator('.rp-tile[data-artifact-name="volcano.png"] .rp-tile-main').click();
+  const image = page.locator(".artifact-modal .rp-img");
+  await expect(image).toBeVisible();
+  await page.evaluate(() => {
+    Object.defineProperty(navigator.clipboard, "write", {
+      configurable: true,
+      value: async (items: ClipboardItem[]) => { (window as any).__copiedImageTypes = items.flatMap((item) => item.types); },
+    });
+  });
+  await image.click({ button: "right" });
+  await page.getByRole("button", { name: "Copy image" }).click();
+  await expect(page.locator(".copy-toast")).toHaveText("Copied");
+  await expect.poll(() => page.evaluate(() => (window as any).__copiedImageTypes)).toContain("image/png");
+});
+
 test("artifact panel normalizes png/pdf shorthand to the previewable image", async ({ page }) => {
   await enterApp(page);
   await page
