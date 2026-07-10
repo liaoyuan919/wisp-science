@@ -1011,6 +1011,27 @@ test("a thinking + tool run folds into one collapsible steps panel (#82)", async
   await expect(page.locator(".steps .step-name")).toContainText(["thinking", "shell", "python", "write"]);
 });
 
+test("code lives in Notebook instead of Artifacts", async ({ page }) => {
+  await enterApp(page);
+  await composer(page).fill("STEPSDEMO");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText(/60,675 genes/)).toBeVisible({ timeout: 10_000 });
+
+  await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.getByRole("button", { name: "Notebook (2)", exact: true }).click();
+
+  const cells = page.locator(".notebook-cell");
+  await expect(cells).toHaveCount(2);
+  await expect(cells.nth(0).locator(".notebook-language")).toHaveText("bash");
+  await expect(cells.nth(1).locator(".notebook-language")).toHaveText("python");
+  await expect(cells.nth(1)).toContainText("import pandas as pd");
+  await cells.nth(1).locator(".notebook-output summary").click();
+  await expect(cells.nth(1).locator(".notebook-output pre")).toContainText("col_0: ok");
+
+  await page.getByRole("button", { name: "Artifacts", exact: true }).click();
+  await expect(page.locator(".rp-badge.code")).toHaveCount(0);
+});
+
 test("a project card can open its project in a new window (#52)", async ({ page }) => {
   await page.goto("/");
   await page.locator(".proj-card:not(.proj-example) .pc-window").first().click();

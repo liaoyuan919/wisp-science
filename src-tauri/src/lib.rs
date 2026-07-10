@@ -672,6 +672,8 @@ struct UiItem {
     tool_name: Option<String>,
     ok: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    input: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     model_name: Option<String>,
 }
 
@@ -692,6 +694,19 @@ fn user_message_start(msgs: &[wisp_llm::Message], user_index: usize) -> usize {
 /// Flatten persisted messages into UI transcript items (skips system turns,
 /// splits assistant reasoning into its own row).
 fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
+    let tool_inputs: HashMap<&str, String> = msgs
+        .iter()
+        .flat_map(|message| message.tool_calls.iter())
+        .filter_map(|call| {
+            let args = call.args_value();
+            let input = match call.function.name.as_str() {
+                "python" => args.get("code").and_then(|v| v.as_str()),
+                "shell" => args.get("cmd").and_then(|v| v.as_str()),
+                _ => None,
+            }?;
+            Some((call.id.as_str(), input.to_owned()))
+        })
+        .collect();
     let mut out = vec![];
     for m in msgs {
         match m.role {
@@ -703,6 +718,7 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
                         text: t,
                         tool_name: None,
                         ok: None,
+                        input: None,
                         model_name: None,
                     });
                 }
@@ -715,6 +731,7 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
                             text: r.clone(),
                             tool_name: None,
                             ok: None,
+                            input: None,
                             model_name: None,
                         });
                     }
@@ -726,6 +743,7 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
                         text: t,
                         tool_name: None,
                         ok: None,
+                        input: None,
                         model_name: m.model_name.clone(),
                     });
                 }
@@ -739,6 +757,7 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
                             text,
                             tool_name: None,
                             ok: None,
+                            input: None,
                             model_name: m.model_name.clone(),
                         });
                     }
@@ -748,6 +767,11 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
                         text,
                         tool_name: m.tool_name.clone(),
                         ok: Some(true),
+                        input: m
+                            .tool_call_id
+                            .as_deref()
+                            .and_then(|id| tool_inputs.get(id))
+                            .cloned(),
                         model_name: None,
                     });
                 }

@@ -2,6 +2,7 @@ mod bindings;
 mod context_menu;
 mod dto;
 mod i18n;
+mod notebook;
 mod overlays;
 mod project_landing;
 mod settings_view;
@@ -15,6 +16,7 @@ use bindings::{
 use context_menu::{ContextMenuPortal, CtxMenu};
 use dto::*;
 use i18n::{empty_subtitle, empty_title, localize_backend, set_document_lang, tab_count, tf, t, use_locale, Locale, EMPTY_SUBTITLE_COUNT, EMPTY_TITLE_COUNT};
+use notebook::{collect_notebook_cells, NotebookCache, NotebookView};
 use overlays::{AddHostOverlay, CapabilitiesOverlay, OnboardingOverlay};
 use project_landing::{ProjectLanding, ProjectLandingState};
 use settings_view::{SettingsView, SettingsViewState};
@@ -224,7 +226,7 @@ fn App() -> impl IntoView {
     let composer_drag_start_y = create_rw_signal(0.0_f64);
     let composer_drag_start_h = create_rw_signal(0.0_f64);
 
-    // Artifacts (right pane): tables + CSV detected in the transcript.
+    // Artifacts and notebook cells are projections of the active transcript.
     let proto_cache = Rc::new(RefCell::new(ProtoCache::new()));
     let artifacts_all = create_memo(move |_| {
         items.with(|list| collect_artifacts(list, locale.get(), &mut proto_cache.borrow_mut()))
@@ -252,13 +254,17 @@ fn App() -> impl IntoView {
             .filter(|a| match &a.data { PreviewData::File { path, .. } => !miss.contains(path), _ => true })
             .collect::<Vec<_>>()
     });
+    let notebook_cache = Rc::new(RefCell::new(NotebookCache::new()));
+    let notebook_cells = create_memo(move |_| {
+        items.with(|list| collect_notebook_cells(list, &mut notebook_cache.borrow_mut()))
+    });
     let sel_artifact = create_rw_signal(0usize);
     let show_art_preview = create_rw_signal(false);
     let modal_artifact = create_rw_signal(None::<(String, String, String)>); // (path, name, kind)
     let artifact_menu = create_rw_signal(None::<(usize, i32, i32)>); // (open tile idx, cursor x, y) — fixed-positioned so the `.rp-tiles` overflow doesn't clip it
     let collapsed_art_groups = create_rw_signal::<HashSet<String>>(HashSet::new());
     let right_tab = create_rw_signal(RightTab::Artifacts);
-    let open_right_tabs = create_rw_signal(vec![RightTab::Artifacts]);
+    let open_right_tabs = create_rw_signal(vec![RightTab::Artifacts, RightTab::Notebook]);
     let right_tab_add_menu_open = create_rw_signal(false);
     let file_query = create_rw_signal(String::new());
     let file_cwd = create_rw_signal(".".to_string());
@@ -2138,6 +2144,7 @@ fn App() -> impl IntoView {
             "skills" => manage_skills.call(()),
             "toggle-sidebar" => show_sidebar.update(|show| *show = !*show),
             "artifacts" => ensure_right_tab(RightTab::Artifacts, show_right, open_right_tabs, right_tab),
+            "notebook" => ensure_right_tab(RightTab::Notebook, show_right, open_right_tabs, right_tab),
             "files" => { ensure_right_tab(RightTab::File, show_right, open_right_tabs, right_tab); refresh_dir(file_cwd, file_entries); }
             "provenance" => ensure_right_tab(RightTab::Provenance, show_right, open_right_tabs, right_tab),
             "contexts" => { ensure_right_tab(RightTab::Hosts, show_right, open_right_tabs, right_tab); refresh_execution_contexts(execution_contexts); refresh_runs(run_records); }
@@ -2260,7 +2267,7 @@ fn App() -> impl IntoView {
                                 *open = false;
                             } else {
                                 if open_right_tabs.get_untracked().is_empty() {
-                                    open_right_tabs.set(vec![RightTab::Artifacts]);
+                                    open_right_tabs.set(vec![RightTab::Artifacts, RightTab::Notebook]);
                                     right_tab.set(RightTab::Artifacts);
                                 }
                                 *open = true;
@@ -2827,10 +2834,12 @@ fn App() -> impl IntoView {
                         let loc = locale.get();
                         let active = right_tab.get();
                         let art_n = artifacts.get().len();
+                        let notebook_n = notebook_cells.get().len();
                         let prov_n = items.get().iter().filter(|i| matches!(i, ChatItem::Tool { .. })).count();
                         open_right_tabs.get().into_iter().map(|tab| {
                             let label = match tab {
                                 RightTab::Artifacts => tab_count(loc, "right.artifacts", art_n),
+                                RightTab::Notebook => tab_count(loc, "right.notebook", notebook_n),
                                 RightTab::Provenance => tab_count(loc, "right.provenance", prov_n),
                                 RightTab::File => t(loc, "right.file").into(),
                                 RightTab::Hosts => t(loc, "contexts.title").into(),
@@ -2873,10 +2882,12 @@ fn App() -> impl IntoView {
                                     let loc = locale.get();
                                     let open = open_right_tabs.get();
                                     let art_n = artifacts.get().len();
+                                    let notebook_n = notebook_cells.get().len();
                                     let prov_n = items.get().iter().filter(|i| matches!(i, ChatItem::Tool { .. })).count();
                                     ALL_RIGHT_TABS.iter().copied().map(|tab| {
                                         let label = match tab {
                                             RightTab::Artifacts => tab_count(loc, "right.artifacts", art_n),
+                                            RightTab::Notebook => tab_count(loc, "right.notebook", notebook_n),
                                             RightTab::Provenance => tab_count(loc, "right.provenance", prov_n),
                                             RightTab::File => t(loc, "right.file").into(),
                                             RightTab::Hosts => t(loc, "contexts.title").into(),
@@ -3089,6 +3100,11 @@ fn App() -> impl IntoView {
                                     </div>
                                 }.into_view()
                             }
+                        }
+                        RightTab::Notebook => {
+                            view! {
+                                <NotebookView cells=notebook_cells.get() locale=locale.get() />
+                            }.into_view()
                         }
                         RightTab::File => {
                             let loc = locale.get();

@@ -239,6 +239,36 @@ pub(crate) fn tool_lang(name: &str) -> &'static str {
     }
 }
 
+/// Extract non-empty fenced Markdown blocks as `(language, source)` pairs.
+pub(crate) fn fenced_blocks(text: &str) -> Vec<(String, String)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut blocks = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let fence = lines[i].trim();
+        if !fence.starts_with("```") {
+            i += 1;
+            continue;
+        }
+        let language = fence
+            .trim_start_matches('`')
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let mut j = i + 1;
+        while j < lines.len() && !lines[j].trim().starts_with("```") {
+            j += 1;
+        }
+        let source = lines[i + 1..j].join("\n");
+        if !source.is_empty() {
+            blocks.push((language, source));
+        }
+        i = j.saturating_add(1);
+    }
+    blocks
+}
+
 pub(crate) fn split_row(line: &str) -> Vec<String> {
     line.trim().trim_start_matches('|').trim_end_matches('|')
         .split('|').map(|c| c.trim().to_string()).collect()
