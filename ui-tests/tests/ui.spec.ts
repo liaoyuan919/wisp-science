@@ -30,6 +30,14 @@ async function enterApp(page: Page) {
   await expect(page.getByRole("button", { name: "New session" })).toBeVisible();
 }
 
+function composer(page: Page) {
+  return page.locator("#composer-input");
+}
+
+function commandPalette(page: Page) {
+  return page.locator("#command-palette-input");
+}
+
 async function lastInvokeArgs(page: Page, cmd: string) {
   return page.evaluate((name) => {
     const plain = (value: any): any => {
@@ -61,31 +69,34 @@ test("Example project shows bundled demos as read-only transcripts", async ({ pa
   await expect(page.getByText("Human Kinome CRISPR-KO Screen")).toBeVisible();
 });
 
-test("send streams a mocked assistant reply", async ({ page }) => {
+test("send streams a mocked assistant reply", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await enterApp(page);
-  await page.getByPlaceholder(/Ask wisp-science/i).fill("hello there");
+  await composer(page).fill("hello there");
   await page.getByRole("button", { name: "Send" }).click();
   // Deltas "Hello " + "from mock wisp-science." accumulate into one assistant bubble.
   await expect(page.getByText("Hello from mock wisp-science.")).toBeVisible({ timeout: 10_000 });
+  await page.locator(".msg.assistant").getByRole("button", { name: "Copy" }).click();
+  await expect(page.locator(".copy-toast")).toHaveText("Copied");
 });
 
 test("composer @ # and / add typed context references", async ({ page }) => {
   await enterApp(page);
-  const composer = page.locator("#composer-input");
+  const composerInput = composer(page);
 
-  await composer.fill("@");
+  await composerInput.fill("@");
   await expect(page.locator(".mention-menu")).toContainText("nif3.treefile");
   await page.locator(".mention-menu .mention-item").first().click();
 
-  await composer.fill("#");
+  await composerInput.fill("#");
   await expect(page.locator(".mention-menu")).toContainText("Older structure run");
   await page.locator(".mention-menu .mention-item").first().click();
 
-  await composer.fill("/alpha");
+  await composerInput.fill("/alpha");
   await expect(page.locator(".mention-menu")).toContainText("alphafold2");
   await page.locator(".mention-menu .mention-item").first().click();
 
-  await composer.fill("use the attached context");
+  await composerInput.fill("use the attached context");
   await page.getByRole("button", { name: "Send" }).click();
   await expect.poll(() => lastInvokeArgs(page, "send_message")).toMatchObject({
     references: [
@@ -99,8 +110,12 @@ test("composer @ # and / add typed context references", async ({ page }) => {
 test("Ctrl+K opens the unified command palette and Shift+Enter attaches", async ({ page }) => {
   await enterApp(page);
   await page.keyboard.press("Control+k");
-  const search = page.getByPlaceholder("Search this project…");
+  const search = commandPalette(page);
   await expect(search).toBeVisible();
+  const paletteRows = page.locator(".project-search-overlay .project-search-row");
+  await expect(paletteRows.first()).toBeVisible();
+  await search.press("ArrowDown");
+  await expect(paletteRows.nth(1)).toHaveClass(/active/);
   await search.fill("counts");
   await expect(page.locator(".project-search-row").filter({ hasText: "counts.csv" })).toBeVisible();
   await search.press("Shift+Enter");
@@ -148,9 +163,15 @@ test("Ctrl+P command palette runs commands and switches themes", async ({ page }
   await expect.poll(() => page.evaluate(() => ((window as any).__skillInvokeLog ?? []).filter((c: any) => c.cmd === "new_session").length)).toBeGreaterThan(before);
 });
 
+test("new session focuses the composer", async ({ page }) => {
+  await enterApp(page);
+  await page.getByRole("button", { name: "New session" }).click();
+  await expect(composer(page)).toBeFocused();
+});
+
 test("user message renders before a delayed backend User event", async ({ page }) => {
   await enterApp(page);
-  await page.getByPlaceholder(/Ask wisp-science/i).fill("DELAYUSER");
+  await composer(page).fill("DELAYUSER");
   await page.getByRole("button", { name: "Send" }).click();
 
   await expect(page.locator(".user-bubble .body", { hasText: /^DELAYUSER$/ })).toBeVisible({ timeout: 500 });
@@ -161,7 +182,7 @@ test("user message renders before a delayed backend User event", async ({ page }
 test("long unbroken user text wraps inside the chat column", async ({ page }) => {
   await enterApp(page);
   const seq = `${"MVGCHEQEAPSETTASSSSFERELVTGSSCVIDADANYSEMAVSDTAAGLTAPTARQRVSDEGKKPGPSSQHRPSPDRNYSQAVSENLQAVTSSSSEHRGISRIVQQQQPGQPFHRRHTTGATSPAMGTAEAAAVAAAASSSSAEEAALDVDCVEGHDEGLHSGREIPRCGLDNLDSSPDCGRHDASQGNSRHTCKVCKRPFSSGRALGGHMRAHGNGDPGTSSNADRKSEKQLISSSPRTQQASLHACNGVAENGIEHPGADGVARAQSLSPESRARARTREIQVRRAVGARRSKTNGKRRGSTTPKSSVEDAAALTKQQPHDEDDNAASRRQAERSSTSCSDNNSDGAHDDGAATDDAAGNICDVCREEFENEKQLNTHKKSHKPEYNLRECPRKSRRFIDQDYTEVAPPTIPTKKPPAPQEKQQSDSGCPYPGCTKKFHSSKALFGHMRCHPDRTWRGIHPPDENGASTSAAGERQHRRKKSRPNSHVPARVVSDSESEPEQKQSGKSASTEHESDTDSIEAAYIQGQEAHTNGDRQQSSTPGWWASGVTGKRSKRSRQTVRSLQAVHHGASTSSAAAPDNALEELNETAMVMMMLASNPSGAPKHEDPDEHMEDLFRNPNSADECPKDEPTEGCLEAALRAKDEEEDEEDEEEDKEEEGEDGDEKQGAAAATAAEVVEDLEQGPELVPKDEFMTAAAETAEVPMEVDEEPEASLSEDGVLQGEEAVQLEAGQQEASSSKHGQALGGHKRCHFDPTKKDAEKEGSSSNNGGKNPRSSNPAGRASYSQSRGRHESSDARGHSPRAKSDPGLQQQQQQQAAAPAESRSTGLLRPIEIDLNKPPTVTYDEEMEMAPSPASAKFSVENHEAQASASAEASSSPDDGEPMRNQPRDYQLILHLSPITLNLEDQLHAYYKRVTPA".repeat(2)} find homolog`;
-  await page.getByPlaceholder(/Ask wisp-science/i).fill(seq);
+  await composer(page).fill(seq);
   await page.getByRole("button", { name: "Send" }).click();
   const bubble = page.locator(".msg.user .body").first();
   await expect(bubble).toBeVisible({ timeout: 10_000 });
@@ -184,7 +205,7 @@ test("long unbroken user text wraps inside the chat column", async ({ page }) =>
 
 test("send menu supports plan first", async ({ page }) => {
   await enterApp(page);
-  await page.getByPlaceholder(/Ask wisp-science/i).fill("draft the analysis");
+  await composer(page).fill("draft the analysis");
   await page.getByRole("button", { name: "Message options" }).click();
   await page.getByRole("button", { name: "Plan first" }).click();
 
@@ -198,7 +219,7 @@ test("send menu supports plan first", async ({ page }) => {
 
 test("side chat answers in a temporary side panel and can switch model", async ({ page }) => {
   await enterApp(page);
-  await page.getByPlaceholder(/Ask wisp-science/i).fill("what did the main thread miss?");
+  await composer(page).fill("what did the main thread miss?");
   await page.getByRole("button", { name: "Message options" }).click();
   await page.getByRole("button", { name: "Side chat" }).click();
 
@@ -225,11 +246,11 @@ test("side chat answers in a temporary side panel and can switch model", async (
 
 test("branch in new session starts a new frame from the current session", async ({ page }) => {
   await enterApp(page);
-  await page.getByPlaceholder(/Ask wisp-science/i).fill("seed context");
+  await composer(page).fill("seed context");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("Hello from mock wisp-science.")).toBeVisible({ timeout: 10_000 });
 
-  await page.getByPlaceholder(/Ask wisp-science/i).fill("try another route");
+  await composer(page).fill("try another route");
   await page.getByRole("button", { name: "Message options" }).click();
   await page.getByRole("button", { name: "Branch in new session" }).click();
 
@@ -244,7 +265,7 @@ test("branch in new session starts a new frame from the current session", async 
 
 test("right-click export invokes active session export", async ({ page }) => {
   await enterApp(page);
-  await page.getByPlaceholder(/Ask wisp-science/i).fill("hello there");
+  await composer(page).fill("hello there");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("Hello from mock wisp-science.")).toBeVisible({ timeout: 10_000 });
 
@@ -287,9 +308,30 @@ test("uploaded file shows up in the artifacts panel after send", async ({ page }
   await expect(page.locator('.rp-tile[data-artifact-name="counts.csv"]')).toBeVisible();
 });
 
+test("dropped local file uploads and attaches to the composer", async ({ page }) => {
+  await enterApp(page);
+  await page.locator(".composer-inner").evaluate((el) => {
+    const data = new DataTransfer();
+    data.items.add(new File(["gene,value\nBRCA1,2"], "dropped.csv", { type: "text/csv" }));
+    el.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: data }));
+    el.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: data }));
+  });
+  await expect(page.locator(".composer-attachment.ready")).toHaveText("dropped.csv");
+});
+
+test("workspace file context menu attaches its path to the composer", async ({ page }) => {
+  await enterApp(page);
+  await page.getByRole("button", { name: "Files" }).click();
+  const file = page.locator('.fb-row[data-workspace-path="report.csv"]');
+  await expect(file).toBeVisible();
+  await file.click({ button: "right" });
+  await page.getByRole("button", { name: "Attach to chat" }).click();
+  await expect(composer(page)).toHaveValue(/report\.csv/);
+});
+
 test("pasted image attaches to the composer", async ({ page }) => {
   await enterApp(page);
-  await page.locator("#composer-input").evaluate((el) => {
+  await composer(page).evaluate((el) => {
     const data = new DataTransfer();
     data.items.add(new File([new Uint8Array([137, 80, 78, 71])], "clipboard.png", { type: "image/png" }));
     const event = new Event("paste", { bubbles: true, cancelable: true });
@@ -311,6 +353,11 @@ test("right panel shows execution contexts and runs", async ({ page }) => {
   await enterApp(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.getByRole("button", { name: "Add panel" }).click();
+  await expect.poll(() => page.locator(".rp-tab-add-menu").evaluate((menu) => {
+    const rect = menu.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.left + 8, rect.top + 8);
+    return hit === menu || menu.contains(hit);
+  })).toBe(true);
   await page.getByRole("button", { name: "Contexts" }).click();
 
   await expect(page.locator(".context-card", { hasText: "local" })).toContainText("Local machine");
@@ -346,7 +393,7 @@ test("clicking a figure opens the artifact modal with provenance", async ({ page
   await enterApp(page);
   // A file path in the user turn is collected as an artifact; a .png name maps
   // to the "image" kind, which opens directly in the modal viewer on click.
-  await page.getByPlaceholder(/Ask wisp-science/i).fill("make a volcano plot volcano.png");
+  await composer(page).fill("make a volcano plot volcano.png");
   await page.getByRole("button", { name: "Send" }).click();
   await page.getByRole("button", { name: "Toggle panel" }).click();
   // Clicking an image artifact opens the modal viewer directly (no expand step).
@@ -363,7 +410,7 @@ test("clicking a figure opens the artifact modal with provenance", async ({ page
 test("artifact panel normalizes png/pdf shorthand to the previewable image", async ({ page }) => {
   await enterApp(page);
   await page
-    .getByPlaceholder(/Ask wisp-science/i)
+    .locator("#composer-input")
     .fill("show `figures/panel_I_heatmap_4genes_median.png/.pdf`");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("Hello from mock wisp-science.")).toBeVisible({ timeout: 10_000 });
@@ -381,7 +428,7 @@ test("settings modal shows the saved provider", async ({ page }) => {
   await expect(providerSelect(page)).toHaveValue("openai");
   await expect(page.locator("label.settings-check", { hasText: "Supports image input" })).toHaveCSS("flex-direction", "row");
   await expect(page.locator("label.settings-check", { hasText: "Use for image analysis" })).toHaveCSS("flex-direction", "row");
-  await page.getByRole("button", { name: "Cancel" }).click();
+  await page.locator(".settings-footer").getByRole("button", { name: "Cancel" }).click();
 });
 
 test("vision assignment keeps model fields and stored key placeholder untouched", async ({ page }) => {
@@ -527,7 +574,7 @@ test("model form input keeps focus while typing (#62)", async ({ page }) => {
 
 test("inline approval card keeps its buttons reachable with a long preview (#63)", async ({ page }) => {
   await enterApp(page);
-  await page.getByPlaceholder(/Ask wisp-science/i).fill("NEEDCONFIRM");
+  await composer(page).fill("NEEDCONFIRM");
   await page.getByRole("button", { name: "Send" }).click();
   // A very long preview must not push the allow button off-screen; the card
   // scrolls the code block internally so the actions stay in view.
@@ -538,7 +585,7 @@ test("inline approval card keeps its buttons reachable with a long preview (#63)
 
 test("inline approval scope is sent with confirmation", async ({ page }) => {
   await enterApp(page);
-  await page.getByPlaceholder(/Ask wisp-science/i).fill("NEEDCONFIRM");
+  await composer(page).fill("NEEDCONFIRM");
   await page.getByRole("button", { name: "Send" }).click();
 
   await expect(page.getByRole("button", { name: "Allow once" })).toBeVisible({ timeout: 10_000 });
@@ -562,7 +609,7 @@ test("inline approval scope is sent with confirmation", async ({ page }) => {
 
 test("plan approval Other sends feedback (#121)", async ({ page }) => {
   await enterApp(page);
-  await page.getByPlaceholder(/Ask wisp-science/i).fill("PLANOTHER");
+  await composer(page).fill("PLANOTHER");
   await page.getByRole("button", { name: "Send" }).click();
 
   await expect(page.getByText("Review plan before starting?")).toBeVisible({ timeout: 10_000 });
@@ -599,7 +646,7 @@ test("settings permissions lists and revokes remembered approvals", async ({ pag
 
 test("chat stays pinned to the bottom while streaming a long reply (#61)", async ({ page }) => {
   await enterApp(page);
-  await page.getByPlaceholder(/Ask wisp-science/i).fill("SCROLLTEST");
+  await composer(page).fill("SCROLLTEST");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("line 79")).toBeVisible({ timeout: 15_000 });
   // The per-delta re-render used to clamp scrollTop toward the top and unfollow,
@@ -642,7 +689,7 @@ test("home search opens artifacts, sessions, and settings", async ({ page }) => 
   await page.locator(".settings-head-close").click();
 
   await page.getByRole("button", { name: "Search" }).click();
-  const search = page.getByPlaceholder("Search this project…");
+  const search = commandPalette(page);
   await expect(search).toBeVisible();
   await expect(page.locator(".project-search-row", { hasText: "nif3.treefile" })).toBeVisible();
   await search.fill("file");
@@ -650,7 +697,7 @@ test("home search opens artifacts, sessions, and settings", async ({ page }) => 
   await search.press("Enter");
   await expect(page.locator(".artifact-modal")).toBeVisible();
   await expect(page.locator(".am-name")).toHaveText("nif3.treefile");
-  await page.locator(".artifact-modal .icon-btn", { hasText: "×" }).click();
+  await page.locator(".artifact-modal").getByRole("button", { name: "Close panel" }).click();
 
   await page.getByRole("button", { name: "Search" }).click();
   await search.fill("Enumerate");
@@ -746,15 +793,15 @@ test("a second conversation can run in parallel without interleaving transcripts
 
   // Start conversation A. The mock streams "echo:alpha" at once but delays Done,
   // so A stays "running".
-  await page.getByPlaceholder(/Ask wisp-science/i).fill("alpha");
+  await composer(page).fill("alpha");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("echo:alpha")).toBeVisible({ timeout: 10_000 });
 
   // While A is still running, open a fresh session. The composer must be usable
   // (per-session busy: A running does NOT block B).
   await page.getByRole("button", { name: "New session" }).click();
-  await expect(page.getByPlaceholder(/Ask wisp-science/i)).toBeEmpty();
-  await page.getByPlaceholder(/Ask wisp-science/i).fill("beta");
+  await expect(composer(page)).toBeEmpty();
+  await composer(page).fill("beta");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("echo:beta")).toBeVisible({ timeout: 10_000 });
 
@@ -776,11 +823,11 @@ test("a running conversation accepts another message for queueing", async ({ pag
   await page.locator(".proj-card-main").first().click();
   await expect(page.getByRole("button", { name: "New session" })).toBeVisible();
 
-  await page.getByPlaceholder(/Ask wisp-science/i).fill("alpha");
+  await composer(page).fill("alpha");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("echo:alpha")).toBeVisible({ timeout: 10_000 });
 
-  await page.getByPlaceholder(/Ask wisp-science/i).fill("queued");
+  await composer(page).fill("queued");
   const send = page.getByRole("button", { name: "Queue" });
   await expect(send).toBeEnabled({ timeout: 500 });
   await send.click();
@@ -832,7 +879,7 @@ test("external links open in the system browser, not the app webview (#97)", asy
 
 test("assistant markdown uses normal whitespace (no phantom blank lines)", async ({ page }) => {
   await enterApp(page);
-  await page.getByPlaceholder(/Ask wisp-science/i).fill("MDLIST");
+  await composer(page).fill("MDLIST");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("FX细胞")).toBeVisible({ timeout: 10_000 });
   const whiteSpace = await page.locator(".msg.assistant .body.md").first().evaluate(
@@ -845,7 +892,7 @@ test("a thinking + tool run folds into one collapsible steps panel (#82)", async
   // Instead of a wall of separate tool cards, consecutive thinking/tool activity
   // collapses into a single foldable "Ran N steps" panel, collapsed by default.
   await enterApp(page);
-  await page.getByPlaceholder(/Ask wisp-science/i).fill("STEPSDEMO");
+  await composer(page).fill("STEPSDEMO");
   await page.getByRole("button", { name: "Send" }).click();
   // The assistant answer renders as a normal message…
   await expect(page.getByText(/60,675 genes/)).toBeVisible({ timeout: 10_000 });
@@ -919,7 +966,7 @@ test("new session can pick a specialist and it locks after the first message", a
   await page.getByRole("button", { name: "Paper hunter" }).click();
   await expect(page.locator(".session-specialist")).toHaveText("Paper hunter");
 
-  await page.getByPlaceholder(/Ask wisp-science/i).fill("hello there");
+  await composer(page).fill("hello there");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("Hello from mock wisp-science.")).toBeVisible({ timeout: 10_000 });
 
