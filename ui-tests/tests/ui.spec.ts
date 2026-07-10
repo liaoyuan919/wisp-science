@@ -79,6 +79,30 @@ test("user message renders before a delayed backend User event", async ({ page }
   await expect(page.locator(".user-bubble .body", { hasText: /^DELAYUSER$/ })).toHaveCount(1);
 });
 
+test("long unbroken user text wraps inside the chat column", async ({ page }) => {
+  await enterApp(page);
+  const seq = `${"MVGCHEQEAPSETTASSSSFERELVTGSSCVIDADANYSEMAVSDTAAGLTAPTARQRVSDEGKKPGPSSQHRPSPDRNYSQAVSENLQAVTSSSSEHRGISRIVQQQQPGQPFHRRHTTGATSPAMGTAEAAAVAAAASSSSAEEAALDVDCVEGHDEGLHSGREIPRCGLDNLDSSPDCGRHDASQGNSRHTCKVCKRPFSSGRALGGHMRAHGNGDPGTSSNADRKSEKQLISSSPRTQQASLHACNGVAENGIEHPGADGVARAQSLSPESRARARTREIQVRRAVGARRSKTNGKRRGSTTPKSSVEDAAALTKQQPHDEDDNAASRRQAERSSTSCSDNNSDGAHDDGAATDDAAGNICDVCREEFENEKQLNTHKKSHKPEYNLRECPRKSRRFIDQDYTEVAPPTIPTKKPPAPQEKQQSDSGCPYPGCTKKFHSSKALFGHMRCHPDRTWRGIHPPDENGASTSAAGERQHRRKKSRPNSHVPARVVSDSESEPEQKQSGKSASTEHESDTDSIEAAYIQGQEAHTNGDRQQSSTPGWWASGVTGKRSKRSRQTVRSLQAVHHGASTSSAAAPDNALEELNETAMVMMMLASNPSGAPKHEDPDEHMEDLFRNPNSADECPKDEPTEGCLEAALRAKDEEEDEEDEEEDKEEEGEDGDEKQGAAAATAAEVVEDLEQGPELVPKDEFMTAAAETAEVPMEVDEEPEASLSEDGVLQGEEAVQLEAGQQEASSSKHGQALGGHKRCHFDPTKKDAEKEGSSSNNGGKNPRSSNPAGRASYSQSRGRHESSDARGHSPRAKSDPGLQQQQQQQAAAPAESRSTGLLRPIEIDLNKPPTVTYDEEMEMAPSPASAKFSVENHEAQASASAEASSSPDDGEPMRNQPRDYQLILHLSPITLNLEDQLHAYYKRVTPA".repeat(2)} find homolog`;
+  await page.getByPlaceholder(/Ask wisp-science/i).fill(seq);
+  await page.getByRole("button", { name: "Send" }).click();
+  const bubble = page.locator(".msg.user .body").first();
+  await expect(bubble).toBeVisible({ timeout: 10_000 });
+  const { bubbleWidth, threadWidth, scrollWidth, clientWidth } = await page.evaluate(() => {
+    const body = document.querySelector(".msg.user .body") as HTMLElement | null;
+    const thread = document.querySelector(".thread") as HTMLElement | null;
+    const chat = document.querySelector(".chat") as HTMLElement | null;
+    return {
+      bubbleWidth: body?.getBoundingClientRect().width ?? 0,
+      threadWidth: thread?.getBoundingClientRect().width ?? 0,
+      scrollWidth: chat?.scrollWidth ?? 0,
+      clientWidth: chat?.clientWidth ?? 0,
+    };
+  });
+  expect(bubbleWidth).toBeGreaterThan(0);
+  expect(bubbleWidth).toBeLessThanOrEqual(threadWidth + 1);
+  // Column must not grow a horizontal scrollbar from the unbroken sequence.
+  expect(scrollWidth).toBeLessThanOrEqual(clientWidth + 1);
+});
+
 test("send menu supports plan first", async ({ page }) => {
   await enterApp(page);
   await page.getByPlaceholder(/Ask wisp-science/i).fill("draft the analysis");
