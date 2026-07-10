@@ -34,6 +34,25 @@ const NO_API_KEY_MARK: &str = "No API key set";
 const HOME_SEARCH_PROJECT_LIMIT: usize = 6;
 const HOME_SEARCH_ARTIFACT_LIMIT: usize = 8;
 const HOME_SEARCH_SESSION_LIMIT: usize = 6;
+const THEME_STORAGE_KEY: &str = "wisp-theme";
+
+fn load_theme_mode() -> String {
+    web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .and_then(|s| s.get_item(THEME_STORAGE_KEY).ok().flatten())
+        .filter(|mode| matches!(mode.as_str(), "light" | "dark" | "system"))
+        .unwrap_or_else(|| "system".into())
+}
+
+fn apply_theme_mode(mode: &str) {
+    let Some(window) = web_sys::window() else { return; };
+    if let Some(root) = window.document().and_then(|d| d.document_element()) {
+        let _ = root.set_attribute("data-theme", mode);
+    }
+    if let Ok(Some(storage)) = window.local_storage() {
+        let _ = storage.set_item(THEME_STORAGE_KEY, mode);
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ComposerSendAction {
@@ -69,6 +88,15 @@ enum CommandPaletteItem {
     Artifact(ArtifactInfo),
     Session(SessionSearchInfo),
     Command(&'static str),
+}
+
+#[derive(Clone, PartialEq)]
+struct CommandAction {
+    id: &'static str,
+    icon: &'static str,
+    title: String,
+    group: String,
+    shortcut: &'static str,
 }
 
 impl ComposerReferenceChip {
@@ -3275,9 +3303,113 @@ fn CommandPalette(
 }
 
 #[component]
+fn ActionPalette(open: RwSignal<bool>, on_action: Callback<&'static str>) -> impl IntoView {
+    let locale = use_locale();
+    let query = create_rw_signal(String::new());
+    let active = create_rw_signal(0usize);
+    create_effect(move |_| {
+        if !open.get() { return; }
+        query.set(String::new());
+        active.set(0);
+        let focus = Closure::once(|| {
+            let Some(doc) = web_sys::window().and_then(|w| w.document()) else { return; };
+            let Some(input) = doc.get_element_by_id("action-palette-input") else { return; };
+            let _ = input.dyn_ref::<web_sys::HtmlElement>().map(|el| el.focus());
+        });
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(focus.as_ref().unchecked_ref(), 0);
+        }
+        focus.forget();
+    });
+    let actions = create_memo(move |_| {
+        let loc = locale.get();
+        let general = t(loc, "command.group.general").to_string();
+        let navigate = t(loc, "command.group.navigate").to_string();
+        let appearance = t(loc, "command.group.appearance").to_string();
+        let entries = [
+            ("new", "plus", "command.new_session", general.clone(), "Ctrl/⌘ N"),
+            ("search", "search", "command.search", general.clone(), "Ctrl/⌘ K"),
+            ("settings", "gear", "command.settings", general.clone(), "Ctrl/⌘ ,"),
+            ("project-settings", "gear", "command.project_settings", general.clone(), ""),
+            ("skills", "grid", "command.skills", general, ""),
+            ("projects", "folder", "command.projects", navigate.clone(), ""),
+            ("toggle-sidebar", "panel", "command.toggle_sidebar", navigate.clone(), "Ctrl/⌘ B"),
+            ("artifacts", "grid", "command.artifacts", navigate.clone(), ""),
+            ("files", "doc", "command.files", navigate.clone(), ""),
+            ("provenance", "copy", "command.provenance", navigate.clone(), ""),
+            ("contexts", "server", "command.contexts", navigate.clone(), ""),
+            ("side-chat", "chat", "command.side_chat", navigate.clone(), ""),
+            ("close-panel", "panel", "command.close_panel", navigate, ""),
+            ("theme-light", "gear", "command.theme_light", appearance.clone(), ""),
+            ("theme-dark", "gear", "command.theme_dark", appearance.clone(), ""),
+            ("theme-system", "gear", "command.theme_system", appearance, ""),
+        ];
+        let q = query.get().trim().to_lowercase();
+        entries.into_iter().filter_map(|(id, icon, key, group, shortcut)| {
+            let title = t(loc, key).to_string();
+            contains_search(&q, &[id, &title, &group]).then_some(CommandAction { id, icon, title, group, shortcut })
+        }).collect::<Vec<_>>()
+    });
+    let run = Callback::new(move |index: usize| {
+        let Some(action) = actions.get().get(index).cloned() else { return; };
+        open.set(false);
+        on_action.call(action.id);
+    });
+    view! {
+        {move || open.get().then(|| {
+            let rows = actions.get();
+            view! {
+                <div class="project-search-overlay action-palette-overlay" on:click=move |_| open.set(false)>
+                    <div class="project-search-dialog action-palette" role="dialog" aria-label="Command Palette"
+                        on:click=|ev| ev.stop_propagation()>
+                        <div class="project-search-input">
+                            <span class="gi search"></span>
+                            <input id="action-palette-input" type="search" autofocus=true
+                                placeholder=move || t(locale.get(), "command.placeholder")
+                                prop:value=move || query.get()
+                                on:input=move |ev| { query.set(event_target_value(&ev)); active.set(0); }
+                                on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                    if ev.is_composing() { return; }
+                                    let n = actions.get().len();
+                                    match ev.key().as_str() {
+                                        "Escape" => { ev.prevent_default(); open.set(false); }
+                                        "ArrowDown" => { ev.prevent_default(); if n > 0 { active.update(|i| *i = (*i + 1) % n); } }
+                                        "ArrowUp" => { ev.prevent_default(); if n > 0 { active.update(|i| *i = (*i + n - 1) % n); } }
+                                        "Enter" => { ev.prevent_default(); run.call(active.get()); }
+                                        _ => {}
+                                    }
+                                } />
+                        </div>
+                        <div class="project-search-results action-palette-results">
+                            {rows.into_iter().enumerate().map(|(i, action)| {
+                                let previous_group = (i > 0).then(|| actions.get().get(i - 1).map(|a| a.group.clone())).flatten();
+                                let show_group = previous_group.as_deref() != Some(action.group.as_str());
+                                view! {
+                                    {show_group.then(|| view! { <div class="action-palette-group">{action.group.clone()}</div> })}
+                                    <button type="button" class="project-search-row action-palette-row" class:active=move || active.get() == i
+                                        on:mousemove=move |_| active.set(i)
+                                        on:click=move |_| run.call(i)>
+                                        <span class=format!("gi {}", action.icon)></span>
+                                        <span class="project-search-main"><span class="project-search-title">{action.title}</span></span>
+                                        {(!action.shortcut.is_empty()).then(|| view! { <kbd class="action-shortcut">{action.shortcut}</kbd> })}
+                                    </button>
+                                }
+                            }).collect_view()}
+                        </div>
+                        <div class="project-search-foot"><span><kbd>"↑↓"</kbd>"navigate"</span><span><kbd>"↵"</kbd>"run"</span><span><kbd>"esc"</kbd>"close"</span></div>
+                    </div>
+                </div>
+            }
+        })}
+    }
+}
+
+#[component]
 fn App() -> impl IntoView {
     let locale = create_rw_signal(Locale::detect_browser());
     provide_context(locale.read_only());
+    let theme_mode = create_rw_signal(load_theme_mode());
+    create_effect(move |_| apply_theme_mode(&theme_mode.get()));
 
     let items = create_rw_signal::<Vec<ChatItem>>(vec![]);
     let empty_title_idx = create_rw_signal(
@@ -3383,6 +3515,7 @@ fn App() -> impl IntoView {
     let show_projects = create_rw_signal(true); // app lands on the Projects screen
     let demo_mode = create_rw_signal(false); // true = the synthetic "Example project" is open
     let command_palette_open = create_rw_signal(false);
+    let action_palette_open = create_rw_signal(false);
     // Top-nav project switcher dropdown + Project Settings modal.
     let show_proj_menu = create_rw_signal(false);
     let proj_list = create_rw_signal::<Vec<ProjectSummary>>(vec![]);
@@ -4958,6 +5091,11 @@ fn App() -> impl IntoView {
         if ev.key() != "Escape" || ev.default_prevented() || ev.is_composing() {
             return;
         }
+        if action_palette_open.get() {
+            ev.prevent_default();
+            action_palette_open.set(false);
+            return;
+        }
         if command_palette_open.get() {
             ev.prevent_default();
             command_palette_open.set(false);
@@ -5281,17 +5419,58 @@ fn App() -> impl IntoView {
             composer_references.update(|items| items.push(reference));
         }
     });
+    let palette_action = {
+        let new_session = palette_new_session.clone();
+        let project_settings = palette_project_settings.clone();
+        let manage_skills = palette_manage_skills.clone();
+        Callback::new(move |action: &'static str| match action {
+            "new" => new_session.call(()),
+            "search" => command_palette_open.set(true),
+            "projects" => show_projects.set(true),
+            "settings" => { show_settings.set(true); settings_section.set("models".into()); }
+            "project-settings" => project_settings.call(()),
+            "skills" => manage_skills.call(()),
+            "toggle-sidebar" => show_sidebar.update(|show| *show = !*show),
+            "artifacts" => ensure_right_tab(RightTab::Artifacts, show_right, open_right_tabs, right_tab),
+            "files" => { ensure_right_tab(RightTab::File, show_right, open_right_tabs, right_tab); refresh_dir(file_cwd, file_entries); }
+            "provenance" => ensure_right_tab(RightTab::Provenance, show_right, open_right_tabs, right_tab),
+            "contexts" => { ensure_right_tab(RightTab::Hosts, show_right, open_right_tabs, right_tab); refresh_execution_contexts(execution_contexts); refresh_runs(run_records); }
+            "side-chat" => ensure_right_tab(RightTab::SideChat, show_right, open_right_tabs, right_tab),
+            "close-panel" => show_right.set(false),
+            "theme-light" => theme_mode.set("light".into()),
+            "theme-dark" => theme_mode.set("dark".into()),
+            "theme-system" => theme_mode.set("system".into()),
+            _ => {}
+        })
+    };
     let palette_project_id = Signal::derive(move || project_info.get().map(|p| p.id));
+    let shortcut_action = palette_action.clone();
     window_event_listener(ev::keydown, move |ev| {
         let Some(ev) = ev.dyn_ref::<web_sys::KeyboardEvent>() else { return; };
-        if ev.is_composing() || !(ev.ctrl_key() || ev.meta_key()) || !ev.key().eq_ignore_ascii_case("k") {
+        if ev.is_composing() || !(ev.ctrl_key() || ev.meta_key()) {
             return;
         }
-        ev.prevent_default();
-        command_palette_open.update(|open| *open = !*open);
+        let key = ev.key().to_lowercase();
+        match key.as_str() {
+            "p" => {
+                ev.prevent_default();
+                command_palette_open.set(false);
+                action_palette_open.update(|open| *open = !*open);
+            }
+            "k" => {
+                ev.prevent_default();
+                action_palette_open.set(false);
+                command_palette_open.update(|open| *open = !*open);
+            }
+            "n" => { ev.prevent_default(); shortcut_action.call("new"); }
+            "b" => { ev.prevent_default(); shortcut_action.call("toggle-sidebar"); }
+            "," => { ev.prevent_default(); shortcut_action.call("settings"); }
+            _ => {}
+        }
     });
 
     view! {
+        <ActionPalette open=action_palette_open on_action=palette_action />
         <CommandPalette open=command_palette_open current_project_id=palette_project_id
             on_open_project=switch_project on_open_session=palette_open_session on_open_artifact=palette_open_artifact
             on_new_session=palette_new_session on_project_settings=palette_project_settings
