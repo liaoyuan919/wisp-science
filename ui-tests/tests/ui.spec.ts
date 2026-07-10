@@ -98,6 +98,26 @@ test("automatic reviewer separates the correction and resolves its finding", asy
   await review.getByRole("button", { name: "Go to transcript" }).click();
 });
 
+test("assistant markdown table can be copied separately", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await enterApp(page);
+  await composer(page).fill("MDTABLE");
+  await page.getByRole("button", { name: "Send" }).click();
+  const copyButton = page.locator(".msg.assistant .md-table-copy").first();
+  await expect(copyButton).toBeVisible();
+  await page.evaluate(() => {
+    Object.defineProperty(navigator.clipboard, "writeText", {
+      configurable: true,
+      value: async (text: string) => { (window as any).__copiedTableText = text; },
+    });
+  });
+  await copyButton.click();
+  await expect(page.locator(".copy-toast")).toHaveText("Copied");
+  await expect.poll(() => page.evaluate(() => (window as any).__copiedTableText)).toBe(
+    "Tissue\tTPM\nVeg 0DAF\t2.62\nNotch 0DAF\t1.81",
+  );
+});
+
 test("composer @ # and / add typed context references", async ({ page }) => {
   await enterApp(page);
   const composerInput = composer(page);
@@ -130,6 +150,9 @@ test("Ctrl+K opens the unified command palette and Shift+Enter attaches", async 
   await page.keyboard.press("Control+k");
   const search = commandPalette(page);
   await expect(search).toBeVisible();
+  await expect(search).toHaveAttribute("type", "text");
+  await expect(search).toHaveAttribute("inputmode", "search");
+  await expect(search).toHaveAttribute("autocomplete", "off");
   const paletteRows = page.locator(".project-search-overlay .project-search-row");
   await expect(paletteRows.first()).toBeVisible();
   // Session glyphs use `.gi.bubble` — `.gi.chat` collides with the main `.chat` scroller
@@ -156,6 +179,9 @@ test("Ctrl+P command palette runs commands and switches themes", async ({ page }
   const input = page.locator("#action-palette-input");
   await expect(palette).toBeVisible();
   await expect(input).toBeFocused();
+  await expect(input).toHaveAttribute("type", "text");
+  await expect(input).toHaveAttribute("inputmode", "search");
+  await expect(input).toHaveAttribute("autocomplete", "off");
   await expect(palette).toContainText("New session");
 
   // Typing must keep focus in the input; otherwise arrow keys hit the page behind.
@@ -330,6 +356,35 @@ test("branch in new session starts a new frame from the current session", async 
   await expect.poll(() => lastInvokeArgs(page, "send_message")).toMatchObject({
     sessionId: expect.stringMatching(/^branch-/),
     message: "try another route",
+  });
+});
+
+test("branch on an earlier user message opens a new session from that point", async ({ page }) => {
+  await enterApp(page);
+  await composer(page).fill("first idea");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText("Hello from mock wisp-science.")).toBeVisible({ timeout: 10_000 });
+
+  await composer(page).fill("second idea");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.locator(".msg.user", { hasText: "second idea" })).toBeVisible();
+
+  const firstUser = page.locator(".msg.user", { hasText: "first idea" });
+  await firstUser.getByRole("button", { name: "Branch" }).click();
+
+  await expect.poll(() => lastInvokeArgs(page, "branch_session")).toMatchObject({
+    sessionId: expect.stringMatching(/^s-/),
+    title: "first idea",
+    userIndex: 0,
+  });
+  await expect(composer(page)).toHaveValue("first idea");
+  await expect(page.locator(".msg.user", { hasText: "second idea" })).toHaveCount(0);
+
+  await composer(page).fill("first idea, but normalize first");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect.poll(() => lastInvokeArgs(page, "send_message")).toMatchObject({
+    sessionId: expect.stringMatching(/^branch-/),
+    message: "first idea, but normalize first",
   });
 });
 
@@ -508,6 +563,31 @@ test("clicking a figure opens the artifact modal with provenance", async ({ page
   await expect(page.locator(".am-env")).toContainText("matplotlib");
 });
 
+test("artifact modal switches between images with left and right arrows", async ({ page }) => {
+  await enterApp(page);
+  await composer(page).fill("make plots first.png second.png third.png");
+  await page.getByRole("button", { name: "Send" }).click();
+  await page.getByRole("button", { name: "Toggle panel" }).click();
+  await expect(page.locator('.rp-tile[data-artifact-name="second.png"]')).toBeVisible();
+
+  await page.locator('.rp-tile[data-artifact-name="second.png"] .rp-tile-main').click();
+  const modal = page.locator(".artifact-modal");
+  await expect(modal).toBeVisible();
+  await expect(modal.locator(".am-name")).toHaveText("second.png");
+  await expect(page.getByRole("button", { name: "Previous image" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Next image" })).toBeEnabled();
+
+  await page.keyboard.press("ArrowRight");
+  await expect(modal.locator(".am-name")).toHaveText("third.png");
+  await expect(page.getByRole("button", { name: "Next image" })).toBeDisabled();
+
+  await page.keyboard.press("ArrowLeft");
+  await expect(modal.locator(".am-name")).toHaveText("second.png");
+  await page.keyboard.press("ArrowLeft");
+  await expect(modal.locator(".am-name")).toHaveText("first.png");
+  await expect(page.getByRole("button", { name: "Previous image" })).toBeDisabled();
+});
+
 test("image preview context menu copies the image", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await enterApp(page);
@@ -624,11 +704,29 @@ test("settings can validate current API config", async ({ page }) => {
   await expect(page.locator(".settings-status")).toHaveText("Validated openai with deepseek-v4-pro");
 });
 
+test("credentials settings include SCIMaster and save its key", async ({ page }) => {
+  await enterApp(page);
+  await openSettingsSection(page, "Credentials");
+  const field = page.locator("label", { hasText: "SCIMaster API key" });
+  await expect(field).toContainText("Not configured");
+  await field.locator("input").fill("sk-sci-123");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect.poll(() => lastInvokeArgs(page, "set_credential")).toMatchObject({
+    id: "scimaster_api_key",
+    value: "sk-sci-123",
+  });
+  await expect(page.locator(".settings-status")).toHaveText("Saved. Applies to new sessions.");
+  await expect(field).toContainText("Configured");
+});
+
 test("skill manager filters by tag and batch disables visible skills", async ({ page }) => {
   await enterApp(page);
   await page.getByRole("button", { name: "Add to message" }).click();
   await page.getByRole("button", { name: "Manage skills" }).click();
   await expect(page.getByRole("button", { name: "Skills" })).toBeVisible();
+  await expect(page.locator(".settings-search")).toHaveAttribute("type", "text");
+  await expect(page.locator(".settings-search")).toHaveAttribute("inputmode", "search");
+  await expect(page.locator(".settings-search")).toHaveAttribute("autocomplete", "off");
 
   await page.getByRole("button", { name: "compute", exact: true }).click();
   await expect(page.getByText("remote-compute-modal")).toBeVisible();

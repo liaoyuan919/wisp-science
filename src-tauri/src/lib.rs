@@ -2576,6 +2576,7 @@ async fn branch_session(
     window: tauri::WebviewWindow,
     session_id: Option<String>,
     title: Option<String>,
+    user_index: Option<usize>,
 ) -> Result<String, String> {
     let ap = state.active(window.label());
     let id = create_session_frame(&state.store, &ap.id).await?;
@@ -2585,7 +2586,10 @@ async fn branch_session(
             .load_messages(source)
             .await
             .map_err(|e| format!("{e}"))?;
-        for (idx, msg) in msgs.iter().enumerate() {
+        let keep = user_index
+            .map(|idx| user_message_start(&msgs, idx))
+            .unwrap_or(msgs.len());
+        for (idx, msg) in msgs.iter().take(keep).enumerate() {
             state
                 .store
                 .append_message(&id, idx as i64 + 1, msg)

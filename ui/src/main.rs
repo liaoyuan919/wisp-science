@@ -260,7 +260,7 @@ fn App() -> impl IntoView {
     });
     let sel_artifact = create_rw_signal(0usize);
     let show_art_preview = create_rw_signal(false);
-    let modal_artifact = create_rw_signal(None::<(String, String, String)>); // (path, name, kind)
+    let modal_artifact = create_rw_signal(None::<ModalArtifact>); // (path, name, kind)
     let artifact_menu = create_rw_signal(None::<(usize, i32, i32)>); // (open tile idx, cursor x, y) — fixed-positioned so the `.rp-tiles` overflow doesn't clip it
     let collapsed_art_groups = create_rw_signal::<HashSet<String>>(HashSet::new());
     let right_tab = create_rw_signal(RightTab::Artifacts);
@@ -695,10 +695,7 @@ fn App() -> impl IntoView {
             // Resolve the target session: use the active one, or create a fresh
             // frame up front so streamed events can be routed before the first delta.
             let id = if branch {
-                let arg = to_value(&serde_json::json!({
-                    "sessionId": active,
-                    "title": text.trim(),
-                })).unwrap();
+                let arg = to_value(&tauri_args::branch_session(&active, Some(text.trim()), None)).unwrap();
                 match invoke("branch_session", arg).await.as_string() {
                     Some(s) => s,
                     None => {
@@ -875,6 +872,58 @@ fn App() -> impl IntoView {
             let arg = to_value(&tauri_args::rewind_session(&sid, user_idx)).unwrap();
             let _ = invoke("rewind_session", arg).await;
         });
+    };
+    let branch_message = {
+        let locale = locale;
+        let status = status;
+        let active_session = active_session;
+        let items = items;
+        let input = input;
+        let attachments = attachments;
+        let composer_references = composer_references;
+        let transcripts = transcripts;
+        let sessions = sessions;
+        move |ui_index: usize| {
+            let list = items.get();
+            let Some(user_idx) = user_message_index(&list, ui_index) else {
+                return;
+            };
+            let Some(ChatItem::User(text)) = list.get(ui_index) else {
+                return;
+            };
+            let sid = active_session.get();
+            if sid.as_deref().is_none_or(str::is_empty) {
+                return;
+            }
+            let prefix_items = list.iter().take(ui_index).cloned().collect::<Vec<_>>();
+            let draft = composer_text_from_user_message(text);
+            attachments.set(vec![]);
+            composer_references.set(vec![]);
+            spawn_local(async move {
+                let arg = to_value(&tauri_args::branch_session(
+                    &sid,
+                    Some(draft.as_str()),
+                    Some(user_idx),
+                ))
+                .unwrap();
+                let Some(id) = invoke("branch_session", arg).await.as_string() else {
+                    let loc = locale.get();
+                    status.set(t(loc, "status.send_failed").into());
+                    return;
+                };
+                if let Some(old) = sid {
+                    transcripts.update(|m| {
+                        m.insert(old, list.clone());
+                        m.insert(id.clone(), prefix_items.clone());
+                    });
+                }
+                items.set(prefix_items);
+                input.set(draft);
+                active_session.set(Some(id));
+                refresh_sessions(sessions);
+                focus_composer();
+            });
+        }
     };
 
     let resume_turn = {
@@ -2200,6 +2249,34 @@ fn App() -> impl IntoView {
             _ => {}
         }
     });
+    window_event_listener(ev::keydown, move |ev| {
+        let Some(ev) = ev.dyn_ref::<web_sys::KeyboardEvent>() else { return; };
+        if ev.default_prevented()
+            || ev.is_composing()
+            || ev.alt_key()
+            || ev.ctrl_key()
+            || ev.meta_key()
+            || ev.shift_key()
+            || keyboard_event_targets_text_entry(ev)
+        {
+            return;
+        }
+        let Some((path, _, kind)) = modal_artifact.get() else { return; };
+        let (prev_artifact, next_artifact) = modal_image_nav_targets(&artifacts.get(), &path, &kind);
+        match ev.key().as_str() {
+            "ArrowLeft" => {
+                let Some((path, name, kind)) = prev_artifact else { return; };
+                ev.prevent_default();
+                modal_artifact.set(Some((path, name, kind)));
+            }
+            "ArrowRight" => {
+                let Some((path, name, kind)) = next_artifact else { return; };
+                ev.prevent_default();
+                modal_artifact.set(Some((path, name, kind)));
+            }
+            _ => {}
+        }
+    });
 
     view! {
         <ActionPalette open=action_palette_open on_action=palette_action />
@@ -2373,7 +2450,7 @@ fn App() -> impl IntoView {
                                     let on_resume = Callback::new(resume_turn);
                                     view! {
                                         <div class=class_for(&item) data-ui-index=i.to_string()>
-                                            {render_item(i, &item, &arts, on_artifact_select, on_file_link, busy.read_only(), is_last, edit_message, sid, respond_confirm, on_resume)}
+                                            {render_item(i, &item, &arts, on_artifact_select, on_file_link, busy.read_only(), is_last, edit_message, branch_message, sid, respond_confirm, on_resume)}
                                         </div>
                                     }.into_view()
                                 }
@@ -3758,8 +3835,24 @@ fn App() -> impl IntoView {
 
         {move || modal_artifact.get().map(|(path, name, kind)| {
             let session = active_session.get();
+            let arts_for_nav = artifacts.get();
+            let (prev_artifact, next_artifact) = modal_image_nav_targets(&arts_for_nav, &path, &kind);
+            let can_prev = prev_artifact.is_some();
+            let can_next = next_artifact.is_some();
             view! {
                 <ArtifactModal path=path name=name kind=kind session=session
+                    can_prev=can_prev
+                    can_next=can_next
+                    on_prev=Callback::new(move |_| {
+                        if let Some((path, name, kind)) = prev_artifact.clone() {
+                            modal_artifact.set(Some((path, name, kind)));
+                        }
+                    })
+                    on_next=Callback::new(move |_| {
+                        if let Some((path, name, kind)) = next_artifact.clone() {
+                            modal_artifact.set(Some((path, name, kind)));
+                        }
+                    })
                     on_close=Callback::new(move |_| modal_artifact.set(None))
                     on_open_path=Callback::new(move |(p, _k): (String, String)| {
                         reveal_in_files(&p, file_cwd, file_query, file_entries, show_right, open_right_tabs, right_tab);
@@ -3947,6 +4040,7 @@ fn render_item(
     busy: ReadSignal<bool>,
     is_last: bool,
     on_edit: impl Fn(usize) + Clone + 'static,
+    on_branch: impl Fn(usize) + Clone + 'static,
     session_id: String,
     on_approval: Callback<(String, bool, Option<String>, String)>,
     on_resume: Callback<usize>,
@@ -3960,6 +4054,7 @@ fn render_item(
                 busy=busy
                 on_copy=Callback::new(copy_text)
                 on_edit=Callback::new(on_edit)
+                on_branch=Callback::new(on_branch)
             />
         }.into_view(),
         ChatItem::QueuedUser(s) => view! {
