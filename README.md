@@ -225,8 +225,8 @@ If you use wisp-science in your research, please cite:
 ## Roadmap (post-MVP)
 
 - `FlashThinking` — phase-aware structured thinking-framework injection.
-- `loop_engine` — Implementer / Verifier / Updater multi-agent loop (the
-  upstream REVIEWER concept).
+- `loop_engine` — deeper Implementer / Verifier / Updater workflows beyond the
+  bounded automatic Reviewer pass shipped today.
 - Artifact management + inline Mol* 3D structure viewer in the UI.
 - `RoutedProvider` LLM-score tier selection (keyword tier is already wired).
 - Bundling `skills/` and `mcp-servers/` into the Tauri installer so releases
@@ -255,6 +255,11 @@ line notes what wisp ships today versus the reference behaviour.
 - **Inline tool-approval card.** Approval prompts render in the conversation
   flow with once / conversation / project / global allow scopes. Remembered
   approvals can be reviewed and revoked under **Settings -> Permissions**.
+- **Automatic independent review.** Tool-backed or substantial analysis turns
+  are checked by the tool-free Reviewer specialist. Structured findings appear
+  inline; when findings exist, the main agent gets one correction pass and the
+  Reviewer rechecks it once. Reviewer failures do not discard the original
+  answer, and manual **Request review** remains available.
 - **Artifacts gallery.** Thumbnail grid for figure artifacts (PNG/plots),
   plus figure↔caption pairing (a plot alongside a structured caption doc:
   *Panels / Artifacts / what is real vs. illustrative*). wisp today: a text
