@@ -100,10 +100,19 @@ enum AgentEvent {
         frame_id: String,
         message: String,
     },
-    /// One-shot reviewer findings (Markdown) for the current session.
+    /// An independent, tool-free reviewer is checking the completed turn.
+    ReviewStarted {
+        frame_id: String,
+    },
+    /// Structured reviewer findings for the current session.
     Review {
         frame_id: String,
-        markdown: String,
+        report: review::ReviewReport,
+    },
+    /// Findings were found; the main agent is starting one correction pass.
+    CorrectionStarted {
+        frame_id: String,
+        model: String,
     },
 }
 
@@ -899,8 +908,9 @@ struct AppState {
     /// Scoped approvals granted from the inline confirmation card.
     approval_grants: Arc<StdMutex<ApprovalGrants>>,
     bootstrap: StdMutex<BootstrapStatus>,
-    /// Guards against a second `review_session` running concurrently.
-    reviewing: Arc<AtomicBool>,
+    /// Session ids with an in-flight manual or automatic review. Reviews in
+    /// unrelated conversations remain independent.
+    reviewing: Arc<StdMutex<HashSet<String>>>,
 }
 
 impl AppState {
@@ -2221,16 +2231,33 @@ async fn send_message(
         prov: Some(prov_tx),
     };
 
+    let turn_start = agent.ctx.messages.len();
     state.running_turns.lock().await.insert(frame_id.clone());
     let result = if resume {
         agent.run_resume(&output, Some(&rt.cancel)).await
     } else {
         agent.run(&message, &output, Some(&rt.cancel)).await
     };
-    state.running_turns.lock().await.remove(&frame_id);
     if result.is_ok() {
         agent.ctx.clear_runtime_injections();
+        let is_reviewer = specialist
+            .as_ref()
+            .is_some_and(|specialist| specialist.id == "reviewer");
+        if !is_reviewer {
+            automatic_review(
+                &state,
+                &app,
+                &frame_id,
+                &model_label,
+                agent,
+                &output,
+                &rt.cancel,
+                turn_start,
+            )
+            .await;
+        }
     }
+    state.running_turns.lock().await.remove(&frame_id);
 
     // Close the persist channel and wait for the task to flush; its final seq is
     // the authoritative persisted count.
@@ -2288,8 +2315,118 @@ async fn stop_agent(state: State<'_, AppState>, session_id: Option<String>) -> R
     Ok(())
 }
 
-/// L1 session review: one read-only reviewer LLM call over the current
-/// transcript. No sub-agent, no tools — traces claims and reports findings.
+async fn generate_review(store: &Store, msgs: &[Message]) -> Result<review::ReviewReport, String> {
+    let reviewer = specialists::get(store, "reviewer")
+        .await
+        .ok_or_else(|| "Reviewer specialist missing.".to_string())?;
+    let (provider, api_url, model, api_key, max_tokens, reasoning_effort) =
+        specialists::specialist_llm(store, &reviewer).await;
+    let cfg = build_provider_config(
+        &provider,
+        &api_url,
+        &api_key,
+        &model,
+        max_tokens,
+        &reasoning_effort,
+    )?;
+    let llm = wisp_llm::build(cfg);
+    let reviewer_model = llm.model().to_string();
+    let completion = llm
+        .complete(
+            &[
+                Message::system(reviewer.instructions),
+                Message::user(review::serialize_transcript(msgs)),
+            ],
+            &[],
+        )
+        .await
+        .map_err(|e| format!("{e}"))?;
+    review::parse_report(&completion.content, &reviewer_model)
+}
+
+fn emit_review(app: &AppHandle, frame_id: &str, report: review::ReviewReport) {
+    let _ = app.emit(
+        "agent",
+        AgentEvent::Review {
+            frame_id: frame_id.to_string(),
+            report,
+        },
+    );
+}
+
+/// Review one completed analysis turn, request at most one correction, then
+/// verify the corrected transcript once. Review failures never fail the user's
+/// original turn.
+async fn automatic_review(
+    state: &AppState,
+    app: &AppHandle,
+    frame_id: &str,
+    model_label: &str,
+    agent: &mut Agent,
+    output: &TauriOutput,
+    cancel: &AtomicBool,
+    turn_start: usize,
+) {
+    // Compaction may replace the pre-turn context and make `turn_start` stale.
+    // In that case the compacted context is the only safe review window.
+    let turn = agent
+        .ctx
+        .messages
+        .get(turn_start..)
+        .unwrap_or(&agent.ctx.messages);
+    if !review::should_auto_review(turn) {
+        return;
+    }
+    if !state.reviewing.lock().unwrap().insert(frame_id.to_string()) {
+        return;
+    }
+
+    let _ = app.emit(
+        "agent",
+        AgentEvent::ReviewStarted {
+            frame_id: frame_id.to_string(),
+        },
+    );
+    match generate_review(&state.store, &agent.ctx.messages).await {
+        Err(error) => tracing::warn!("automatic review failed for {frame_id}: {error}"),
+        Ok(mut report) => {
+            emit_review(app, frame_id, report.clone());
+            if report.has_findings() {
+                agent.ctx.inject_user(review::correction_prompt(&report));
+                let _ = app.emit(
+                    "agent",
+                    AgentEvent::CorrectionStarted {
+                        frame_id: frame_id.to_string(),
+                        model: model_label.to_string(),
+                    },
+                );
+                let correction = agent.run_resume(output, Some(cancel)).await;
+                agent.ctx.clear_runtime_injections();
+                if let Err(error) = correction {
+                    tracing::warn!("automatic correction failed for {frame_id}: {error}");
+                    report.set_status("unaddressed");
+                } else {
+                    match generate_review(&state.store, &agent.ctx.messages).await {
+                        Ok(follow_up) => {
+                            report = review::reconcile_follow_up(report, follow_up);
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "automatic follow-up review failed for {frame_id}: {error}"
+                            );
+                            report.set_status("unaddressed");
+                        }
+                    }
+                }
+                emit_review(app, frame_id, report);
+            }
+        }
+    }
+    state.reviewing.lock().unwrap().remove(frame_id);
+}
+
+/// Manual session review: one read-only reviewer LLM call over the current
+/// transcript. No tools and no automatic correction.
 #[tauri::command]
 async fn review_session(
     state: State<'_, AppState>,
@@ -2297,18 +2434,18 @@ async fn review_session(
     window: tauri::WebviewWindow,
     session_id: Option<String>,
 ) -> Result<(), String> {
-    if state.reviewing.swap(true, Ordering::SeqCst) {
-        return Err("A review is already running.".into());
+    let frame_id = match session_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(id) => id.to_string(),
+        None => state
+            .active_frame(window.label())
+            .ok_or_else(|| "No active session to review.".to_string())?,
+    };
+    if !state.reviewing.lock().unwrap().insert(frame_id.clone()) {
+        return Err("A review is already running for this session.".into());
     }
     let out: Result<(), String> = async {
         // Refuse only if *that* session has a turn mid-flight — a parallel
         // conversation running elsewhere must not block the review.
-        let frame_id = match session_id.as_deref().filter(|s| !s.is_empty()) {
-            Some(id) => id.to_string(),
-            None => state
-                .active_frame(window.label())
-                .ok_or_else(|| "No active session to review.".to_string())?,
-        };
         if let Some(rt) = state.sessions.lock().await.get(&frame_id).cloned() {
             if rt.agent.try_lock().is_err() {
                 return Err("Session is busy — wait for the current turn to finish.".to_string());
@@ -2326,44 +2463,26 @@ async fn review_session(
         {
             return Err("Nothing to review yet.".into());
         }
-        let transcript = review::serialize_transcript(&msgs);
-
-        let reviewer = specialists::get(&state.store, "reviewer")
-            .await
-            .ok_or_else(|| "Reviewer specialist missing.".to_string())?;
-        let (provider, api_url, model, api_key, max_tokens, reasoning_effort) =
-            specialists::specialist_llm(&state.store, &reviewer).await;
-        let cfg = build_provider_config(
-            &provider,
-            &api_url,
-            &api_key,
-            &model,
-            max_tokens,
-            &reasoning_effort,
-        )?;
-        let llm = wisp_llm::build(cfg);
-
-        let review_msgs = vec![
-            Message::system(reviewer.instructions.clone()),
-            Message::user(transcript),
-        ];
-        let completion = llm
-            .complete(&review_msgs, &[])
-            .await
-            .map_err(|e| format!("{e}"))?;
-
+        app.emit(
+            "agent",
+            AgentEvent::ReviewStarted {
+                frame_id: frame_id.clone(),
+            },
+        )
+        .map_err(|e| format!("{e}"))?;
+        let report = generate_review(&state.store, &msgs).await?;
         app.emit(
             "agent",
             AgentEvent::Review {
-                frame_id,
-                markdown: completion.content,
+                frame_id: frame_id.clone(),
+                report,
             },
         )
         .map_err(|e| format!("{e}"))?;
         Ok(())
     }
     .await;
-    state.reviewing.store(false, Ordering::SeqCst);
+    state.reviewing.lock().unwrap().remove(&frame_id);
     out
 }
 
@@ -3821,7 +3940,7 @@ pub fn run() {
                 approvals,
                 approval_grants,
                 bootstrap,
-                reviewing: Arc::new(AtomicBool::new(false)),
+                reviewing: Arc::new(StdMutex::new(HashSet::new())),
             };
             app.manage(state);
             set_dev_flag(app.handle());

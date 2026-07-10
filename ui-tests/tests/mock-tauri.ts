@@ -521,6 +521,43 @@ export function tauriMock(): void {
               }, 1200);
               return fid;
             }
+            if (String(arg("message") ?? "").includes("AUTOREVIEW")) {
+              const openReport = {
+                id: "review-auto-1",
+                summary: "Checked the reported value against the tool result.",
+                reviewer_model: "claude-sonnet-5",
+                findings: [
+                  {
+                    message_index: 1,
+                    claim: "The analysis reports 5 significant genes.",
+                    evidence: "The tool result reports 3 significant genes.",
+                    fix: "Change the count from 5 to 3.",
+                    verdict: "warn",
+                    severity: "low",
+                    status: "open",
+                  },
+                ],
+              };
+              setTimeout(() => {
+                emit("agent", { kind: "User", frame_id: fid, text: msg });
+                emit("agent", { kind: "Text", frame_id: fid, delta: "The analysis found 5 significant genes." });
+                emit("agent", { kind: "ReviewStarted", frame_id: fid });
+                emit("agent", { kind: "Review", frame_id: fid, report: openReport });
+                emit("agent", { kind: "CorrectionStarted", frame_id: fid, model: "deepseek-v4-pro" });
+                emit("agent", { kind: "Text", frame_id: fid, delta: "Correction: the analysis found 3 significant genes." });
+                emit("agent", {
+                  kind: "Review",
+                  frame_id: fid,
+                  report: {
+                    ...openReport,
+                    summary: "The corrected value matches the tool result.",
+                    findings: openReport.findings.map((finding) => ({ ...finding, status: "resolved" })),
+                  },
+                });
+                emit("agent", { kind: "Done", frame_id: fid });
+              }, 30);
+              return fid;
+            }
             // Multi-tool path (#82): a thinking + tool-call run that must fold
             // into one collapsible "steps" panel instead of a wall of cards.
             if (String(arg("message") ?? "").includes("STEPSDEMO")) {

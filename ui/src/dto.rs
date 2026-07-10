@@ -32,7 +32,39 @@ pub(crate) enum AgentEvent {
     Stdout { frame_id: String, chunk: String },
     Done { frame_id: String },
     Error { frame_id: String, message: String },
-    Review { frame_id: String, markdown: String },
+    ReviewStarted { frame_id: String },
+    Review { frame_id: String, report: ReviewReport },
+    CorrectionStarted { frame_id: String, model: String },
+}
+
+#[derive(Deserialize, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct ReviewFinding {
+    #[serde(default)]
+    pub(crate) message_index: usize,
+    #[serde(default)]
+    pub(crate) claim: String,
+    #[serde(default)]
+    pub(crate) evidence: String,
+    #[serde(default)]
+    pub(crate) fix: String,
+    #[serde(default)]
+    pub(crate) verdict: String,
+    #[serde(default)]
+    pub(crate) severity: String,
+    #[serde(default)]
+    pub(crate) status: String,
+}
+
+#[derive(Deserialize, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct ReviewReport {
+    #[serde(default)]
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) summary: String,
+    #[serde(default)]
+    pub(crate) findings: Vec<ReviewFinding>,
+    #[serde(default)]
+    pub(crate) reviewer_model: String,
 }
 
 #[derive(Clone)]
@@ -53,7 +85,7 @@ pub(crate) enum ChatItem {
     },
     /// Inline tool-approval card (replaces the old centered modal).
     ApprovalPending { tool: String, preview: String, message: String },
-    Review(String),
+    Review(ReviewReport),
 }
 
 impl ChatItem {
@@ -72,7 +104,7 @@ impl ChatItem {
                 (4u8, name, ok, input, output, duration_ms).hash(&mut h)
             }
             Self::ApprovalPending { tool, preview, message } => (6u8, tool, preview, message).hash(&mut h),
-            Self::Review(s) => (5u8, s).hash(&mut h),
+            Self::Review(report) => (5u8, report).hash(&mut h),
         }
         h.finish()
     }

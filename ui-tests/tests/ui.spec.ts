@@ -80,6 +80,24 @@ test("send streams a mocked assistant reply", async ({ page, context }) => {
   await expect(page.locator(".copy-toast")).toHaveText("Copied");
 });
 
+test("automatic reviewer separates the correction and resolves its finding", async ({ page }) => {
+  await enterApp(page);
+  await composer(page).fill("AUTOREVIEW inspect the result");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const assistants = page.locator(".msg.assistant");
+  await expect(assistants).toHaveCount(2);
+  await expect(assistants.nth(0)).toContainText("5 significant genes");
+  await expect(assistants.nth(1)).toContainText("Correction: the analysis found 3 significant genes");
+
+  const review = page.locator(".review-card");
+  await expect(review).toContainText("Reviewer findings");
+  await expect(review).toContainText("resolved");
+  await expect(review).toContainText("All findings fixed and independently rechecked.");
+  await expect(review.locator(".review-finding")).toHaveCount(1);
+  await review.getByRole("button", { name: "Go to transcript" }).click();
+});
+
 test("composer @ # and / add typed context references", async ({ page }) => {
   await enterApp(page);
   const composerInput = composer(page);

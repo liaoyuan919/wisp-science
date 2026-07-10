@@ -481,6 +481,15 @@ pub(super) fn scroll_picker_item(selector: &str, index: usize) {
     }
 }
 
+pub(super) fn scroll_to_transcript(index: usize) {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    if let Ok(Some(row)) = document.query_selector(&format!("[data-ui-index=\"{index}\"]")) {
+        row.scroll_into_view();
+    }
+}
+
 #[cfg(test)]
 mod mention_tests {
     use super::{active_composer_trigger, ComposerPickerMode};
@@ -774,6 +783,48 @@ pub(super) fn clear_running_if_idle(pending: RwSignal<HashMap<String, usize>>, r
 
 pub(super) fn strip_approval_pending(items: &mut Vec<ChatItem>) {
     items.retain(|i| !matches!(i, ChatItem::ApprovalPending { .. }));
+}
+
+pub(super) fn upsert_review(items: &mut Vec<ChatItem>, report: ReviewReport) {
+    if let Some(existing) = items.iter_mut().find(|item| {
+        matches!(item, ChatItem::Review(current) if current.id == report.id)
+    }) {
+        *existing = ChatItem::Review(report);
+    } else {
+        let index = trailing_queue_start(items);
+        items.insert(index, ChatItem::Review(report));
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::upsert_review;
+    use crate::dto::{ChatItem, ReviewReport};
+
+    fn report(id: &str, summary: &str) -> ReviewReport {
+        ReviewReport {
+            id: id.into(),
+            summary: summary.into(),
+            findings: vec![],
+            reviewer_model: "review-model".into(),
+        }
+    }
+
+    #[test]
+    fn follow_up_review_replaces_the_original_card() {
+        let mut items = vec![ChatItem::Assistant {
+            text: "answer".into(),
+            model: None,
+        }];
+        upsert_review(&mut items, report("r1", "first"));
+        upsert_review(&mut items, report("r1", "verified"));
+
+        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            &items[1],
+            ChatItem::Review(report) if report.summary == "verified"
+        ));
+    }
 }
 
 pub(super) fn is_error_assistant(item: &ChatItem) -> bool {

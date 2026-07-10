@@ -563,9 +563,28 @@ fn App() -> impl IntoView {
                     stopping_session.set(None);
                 }
             }
-            AgentEvent::Review { frame_id, markdown } => {
+            AgentEvent::ReviewStarted { frame_id } => {
                 flush_now();
-                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| v.push(ChatItem::Review(markdown)));
+                if active_cb.get().as_deref() == Some(&frame_id) {
+                    status_cb.set(t(locale_cb.get(), "status.reviewing"));
+                }
+            }
+            AgentEvent::CorrectionStarted { frame_id, model } => {
+                flush_now();
+                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
+                    let index = trailing_queue_start(v);
+                    v.insert(index, ChatItem::Assistant {
+                        text: String::new(),
+                        model: (!model.is_empty()).then_some(model),
+                    });
+                });
+                if active_cb.get().as_deref() == Some(&frame_id) {
+                    status_cb.set(t(locale_cb.get(), "status.correcting"));
+                }
+            }
+            AgentEvent::Review { frame_id, report } => {
+                flush_now();
+                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| upsert_review(v, report));
                 if active_cb.get().as_deref() == Some(&frame_id) {
                     status_cb.set(t(locale_cb.get(), "status.review_done"));
                 }
@@ -2353,7 +2372,7 @@ fn App() -> impl IntoView {
                                     let sid = active_session.get().unwrap_or_default();
                                     let on_resume = Callback::new(resume_turn);
                                     view! {
-                                        <div class=class_for(&item)>
+                                        <div class=class_for(&item) data-ui-index=i.to_string()>
                                             {render_item(i, &item, &arts, on_artifact_select, on_file_link, busy.read_only(), is_last, edit_message, sid, respond_confirm, on_resume)}
                                         </div>
                                     }.into_view()
@@ -4002,20 +4021,105 @@ fn render_item(
         ChatItem::ApprovalPending { tool, preview, message: _ } => view! {
             <ApprovalCard tool=tool.clone() preview=preview.clone() session_id=session_id.clone() on_decide=on_approval />
         }.into_view(),
-        ChatItem::Review(md) => {
-            let copy = md.clone();
+        ChatItem::Review(report) => {
+            let report = report.clone();
+            let count = report.findings.len();
+            let count_text = count.to_string();
+            let all_resolved = count > 0
+                && report
+                    .findings
+                    .iter()
+                    .all(|finding| finding.status == "resolved");
+            let has_unaddressed = report
+                .findings
+                .iter()
+                .any(|finding| finding.status == "unaddressed");
+            let copy = format!(
+                "{}\n\n{}",
+                report.summary,
+                report
+                    .findings
+                    .iter()
+                    .map(|finding| format!(
+                        "- {}\n  Evidence: {}\n  Fix: {}",
+                        finding.claim, finding.evidence, finding.fix
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            let model = report.reviewer_model.clone();
+            let summary = report.summary.clone();
+            let findings = report
+                .findings
+                .into_iter()
+                .enumerate()
+                .map(|(index, finding)| {
+                    let resolved = finding.status == "resolved";
+                    let status_key = match finding.status.as_str() {
+                        "resolved" => "review.resolved",
+                        "unaddressed" => "review.unaddressed",
+                        _ => "review.open",
+                    };
+                    let verdict_class = format!("review-pill verdict {}", finding.verdict);
+                    let severity_class = format!("review-pill severity {}", finding.severity);
+                    let message_index = finding.message_index;
+                    view! {
+                        <div class="review-finding" class:resolved=resolved>
+                            <div class="review-finding-head">
+                                <span class="review-finding-number">{index + 1}</span>
+                                <span class=verdict_class>{finding.verdict}</span>
+                                <span class=severity_class>{finding.severity}</span>
+                                <span class="review-pill status">{move || t(locale.get(), status_key)}</span>
+                                <button type="button" class="tool-btn review-jump"
+                                    on:click=move |_| scroll_to_transcript(message_index)>
+                                    {move || t(locale.get(), "review.go_to_transcript")}
+                                </button>
+                            </div>
+                            <div class="review-claim">{finding.claim}</div>
+                            <div class="review-detail">
+                                <strong>{move || t(locale.get(), "review.evidence")}</strong>
+                                <span>{finding.evidence}</span>
+                            </div>
+                            <div class="review-detail">
+                                <strong>{move || t(locale.get(), "review.fix")}</strong>
+                                <span>{finding.fix}</span>
+                            </div>
+                        </div>
+                    }
+                })
+                .collect_view();
             view! {
                 <div class="review-card">
                     <div class="review-head">
                         <span class="review-badge">"🔍"</span>
-                        {move || t(locale.get(), "review.title")}
+                        <span>{move || t(locale.get(), "review.title")}</span>
+                        <span class="review-count">{move || tf(locale.get(), "review.findings_n", &[("n", &count_text)])}</span>
+                        {(!model.is_empty()).then(|| view! { <span class="review-model">{model}</span> })}
                         <button type="button" class="tool-btn card-copy"
                             title=move || t(locale.get(), "ctx.copy_message")
                             on:click=move |_| copy_text(copy.clone())>
                             {move || t(locale.get(), "msg.copy")}
                         </button>
                     </div>
-                    <div class="md review-md" inner_html=md_to_html(md)></div>
+                    <div class="review-summary">{summary}</div>
+                    {(count == 0).then(|| view! {
+                        <div class="review-empty">"✓ "{move || t(locale.get(), "review.no_findings")}</div>
+                    })}
+                    {findings}
+                    {(count > 0).then(|| view! {
+                        <div class="review-foot" class:resolved=all_resolved class:unaddressed=has_unaddressed>
+                            {move || {
+                                let key = if all_resolved {
+                                    "review.all_fixed"
+                                } else if has_unaddressed {
+                                    "review.needs_attention"
+                                } else {
+                                    "review.agent_correcting"
+                                };
+                                t(locale.get(), key)
+                            }}
+                        </div>
+                    })}
                 </div>
             }.into_view()
         }
