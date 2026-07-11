@@ -135,6 +135,7 @@ Wisp also injects its scientific MCP bridge into the ACP session, so the externa
 
 ## Related docs
 
+- [GitHub Pages: ACP Agent 配置](acp-agents.html) — site page for this guide
 - [Model configuration](model-configuration.md) — HTTP API profiles for the built-in agent
 - [ACP client integration plan](superpowers/plans/2026-07-11-acp-client-integration.md) — architecture notes
 - [ACP protocol](https://agentclientprotocol.com/protocol/v1/overview)
