@@ -236,14 +236,67 @@ struct RuntimeTurnLease(Arc<CodexRuntimeEntry>);
 
 impl RuntimeTurnLease {
     fn acquire(entry: Arc<CodexRuntimeEntry>) -> Self {
-        entry.active_turns.fetch_add(1, Ordering::Relaxed);
+        entry.active_turns.fetch_add(1, Ordering::SeqCst);
         Self(entry)
     }
 }
 
 impl Drop for RuntimeTurnLease {
     fn drop(&mut self) {
-        self.0.active_turns.fetch_sub(1, Ordering::Relaxed);
+        self.0.active_turns.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeAccess {
+    /// Return the existing snapshot without inspecting external Codex state.
+    Cached,
+    /// Read-only preflight used immediately before a send/CAS operation.
+    ValidateForSend,
+    /// User-requested refresh: retire the idle actor and rebuild everything.
+    ForceRefresh,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProfileSelector {
+    Active,
+    Bound(String),
+}
+
+async fn resolve_profile_selector(
+    store: &wisp_store::Store,
+    selector: &ProfileSelector,
+) -> Result<models::ModelProfile, String> {
+    match selector {
+        ProfileSelector::Active => Ok(models::active_profile(store).await),
+        ProfileSelector::Bound(id) => models::profile(store, id)
+            .await
+            .ok_or_else(|| format!("Codex Profile '{id}' no longer exists.")),
+    }
+}
+
+fn same_profile_revision(expected: &models::ModelProfile, current: &models::ModelProfile) -> bool {
+    expected.id == current.id && profile_fingerprint(expected) == profile_fingerprint(current)
+}
+
+/// An actor and its lease are checked out atomically while the manager's
+/// lifecycle lock is still held. This makes it impossible for a refresh to
+/// observe zero users in the gap between returning an Arc and acquiring the
+/// turn lease.
+struct RuntimeCheckout {
+    entry: Arc<CodexRuntimeEntry>,
+    profile: models::ModelProfile,
+    _lease: RuntimeTurnLease,
+}
+
+impl RuntimeCheckout {
+    fn new(entry: Arc<CodexRuntimeEntry>, profile: models::ModelProfile) -> Self {
+        let lease = RuntimeTurnLease::acquire(entry.clone());
+        Self {
+            entry,
+            profile,
+            _lease: lease,
+        }
     }
 }
 
@@ -329,7 +382,7 @@ impl Drop for EphemeralThreadGuard {
 }
 
 pub(crate) struct CodexRuntimeManager {
-    lifecycle: Mutex<()>,
+    pub(crate) lifecycle: Mutex<()>,
     entries: Mutex<HashMap<String, Arc<CodexRuntimeEntry>>>,
     active: Mutex<HashMap<String, ActiveCodexTurn>>,
     pending_inputs: Arc<Mutex<HashMap<String, Arc<Mutex<PendingInput>>>>>,
@@ -353,42 +406,102 @@ impl Default for CodexRuntimeManager {
 }
 
 impl CodexRuntimeManager {
-    pub(crate) async fn drop_profile(&self, store: &wisp_store::Store, profile_id: &str) {
-        let _lifecycle = self.lifecycle.lock().await;
-        let mut retired = Vec::new();
-        {
-            let mut entries = self.entries.lock().await;
-            let keys = entries
-                .iter()
-                .filter(|(_, entry)| entry.profile_id == profile_id)
-                .map(|(key, _)| key.clone())
-                .collect::<Vec<_>>();
-            for key in keys {
-                let Some(entry) = entries.get(&key).cloned() else {
-                    continue;
-                };
-                if entry.active_turns.load(Ordering::Relaxed) == 0 {
-                    if let Some(entry) = entries.remove(&key) {
-                        retired.push(entry);
-                    }
-                } else {
-                    entry.dirty.store(true, Ordering::SeqCst);
-                }
+    /// The lifecycle mutex must be held by the caller. An entry stays visible
+    /// and its isolated home stays untouched unless shutdown is confirmed.
+    async fn retire_entry_locked(&self, entry: &Arc<CodexRuntimeEntry>) -> Result<(), String> {
+        entry.dirty.store(true, Ordering::SeqCst);
+        match entry.client.shutdown().await {
+            Ok(()) | Err(codex_app_server::AppServerClientError::ActorClosed) => {}
+            Err(error) => {
+                return Err(format!(
+                    "Codex app-server shutdown failed; the existing actor and isolated CODEX_HOME were retained: {error}"
+                ));
             }
         }
-        for entry in retired {
-            let actor_id = entry.client.actor_id();
-            let _ = entry.client.shutdown().await;
-            self.handled_requests
-                .lock()
-                .await
-                .retain(|(candidate, _)| *candidate != actor_id);
-            if let Err(error) =
-                codex_runtime::remove_profile_runtime(&entry.project_root, profile_id)
-            {
-                tracing::warn!(
-                    "failed to remove isolated Codex home for profile {profile_id}: {error}"
-                );
+        self.entries
+            .lock()
+            .await
+            .retain(|_, candidate| !Arc::ptr_eq(candidate, entry));
+        let actor_id = entry.client.actor_id();
+        self.handled_requests
+            .lock()
+            .await
+            .retain(|(candidate, _)| *candidate != actor_id);
+        Ok(())
+    }
+
+    /// Retire every idle actor that can reference the same profile-isolated
+    /// home. No file may be synchronized while any such actor is alive.
+    async fn retire_profile_entries_locked(
+        &self,
+        project_root: &Path,
+        profile_id: &str,
+        force_label: &str,
+    ) -> Result<(), String> {
+        let target_home = codex_runtime::profile_runtime_home(project_root, profile_id);
+        let candidates = self
+            .entries
+            .lock()
+            .await
+            .values()
+            .filter(|entry| {
+                entry.profile_id == profile_id
+                    && same_runtime_home(&entry.isolated_home, &target_home)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if candidates
+            .iter()
+            .any(|entry| entry.active_turns.load(Ordering::SeqCst) > 0)
+        {
+            return Err(format!(
+                "Cannot {force_label} while this Codex runtime is in use. Wait for the active turn or preview to finish, then try again."
+            ));
+        }
+        for entry in candidates {
+            self.retire_entry_locked(&entry).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn drop_profile(&self, store: &wisp_store::Store, profile_id: &str) {
+        let _lifecycle = self.lifecycle.lock().await;
+        let candidates = self
+            .entries
+            .lock()
+            .await
+            .values()
+            .filter(|entry| entry.profile_id == profile_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let homes = candidates
+            .iter()
+            .map(|entry| {
+                let home = codex_runtime::profile_runtime_home(&entry.project_root, profile_id);
+                (runtime_home_identity(&home), entry.project_root.clone())
+            })
+            .collect::<HashMap<_, _>>();
+        for entry in candidates {
+            if entry.active_turns.load(Ordering::SeqCst) > 0 {
+                entry.dirty.store(true, Ordering::SeqCst);
+                continue;
+            }
+            if let Err(error) = self.retire_entry_locked(&entry).await {
+                tracing::warn!("failed to retire Codex profile actor safely: {error}");
+            }
+        }
+        for (_, root) in homes {
+            let target_home = codex_runtime::profile_runtime_home(&root, profile_id);
+            let actor_remains = self.entries.lock().await.values().any(|entry| {
+                entry.profile_id == profile_id
+                    && same_runtime_home(&entry.isolated_home, &target_home)
+            });
+            if !actor_remains {
+                if let Err(error) = codex_runtime::remove_profile_runtime(&root, profile_id) {
+                    tracing::warn!(
+                        "failed to remove isolated Codex home for profile {profile_id}: {error}"
+                    );
+                }
             }
         }
         if let Err(error) = store.delete_codex_profile_settings(profile_id).await {
@@ -460,225 +573,19 @@ impl CodexRuntimeManager {
 
     pub(crate) async fn drop_project(&self, project_id: &str) {
         let _lifecycle = self.lifecycle.lock().await;
-        let retired = {
-            let mut entries = self.entries.lock().await;
-            let keys = entries
-                .iter()
-                .filter(|(_, entry)| entry.project_id == project_id)
-                .map(|(key, _)| key.clone())
-                .collect::<Vec<_>>();
-            keys.into_iter()
-                .filter_map(|key| entries.remove(&key))
-                .collect::<Vec<_>>()
-        };
-        for entry in retired {
-            let actor_id = entry.client.actor_id();
-            let _ = entry.client.shutdown().await;
-            self.handled_requests
-                .lock()
-                .await
-                .retain(|(candidate, _)| *candidate != actor_id);
-        }
-    }
-
-    /// Poll the selected runtime/profile sources without touching an actor's
-    /// isolated CODEX_HOME. This runs even when Settings is closed. Idle
-    /// actors are retired immediately; live turns retain their startup
-    /// snapshot and expose a pending-refresh warning until completion.
-    pub(crate) async fn poll_external_changes(&self, store: &wisp_store::Store, app: &AppHandle) {
-        let entries = self
+        let candidates = self
             .entries
             .lock()
             .await
             .values()
+            .filter(|entry| entry.project_id == project_id)
             .cloned()
             .collect::<Vec<_>>();
-        let mut retire = Vec::new();
-        for entry in entries {
-            let Some(profile) = models::profile(store, &entry.profile_id).await else {
-                let pending = entry.active_turns.load(Ordering::Relaxed) > 0;
-                if pending {
-                    if entry.dirty.swap(true, Ordering::SeqCst) {
-                        continue;
-                    }
-                    let epoch = self.generation_epoch.fetch_add(1, Ordering::SeqCst) + 1;
-                    entry.generation_epoch.store(epoch, Ordering::SeqCst);
-                } else {
-                    let _lifecycle = self.lifecycle.lock().await;
-                    if entry.active_turns.load(Ordering::SeqCst) > 0 {
-                        entry.dirty.store(true, Ordering::SeqCst);
-                        continue;
-                    }
-                    let key = self
-                        .entries
-                        .lock()
-                        .await
-                        .iter()
-                        .find_map(|(key, candidate)| {
-                            Arc::ptr_eq(candidate, &entry).then(|| key.clone())
-                        });
-                    if let Some(key) = key {
-                        self.entries.lock().await.remove(&key);
-                        retire.push(entry.clone());
-                    }
-                }
-                let _ = app.emit(
-                    "codex-runtime-changed",
-                    json!({
-                        "projectId": entry.project_id,
-                        "profileId": entry.profile_id,
-                        "pending": pending,
-                        "removed": true,
-                    }),
-                );
-                continue;
-            };
-            let executable = entry.snapshot.read().await.runtime.executable.clone();
-            let current_command =
-                runtime_options(&profile, &entry.project_root, &entry.isolated_home);
-            let mut current_command =
-                match codex_app_server::resolve_codex_command(&current_command) {
-                    Ok(command) => command,
-                    Err(error) => {
-                        tracing::warn!("failed to re-resolve watched Codex runtime: {error}");
-                        entry.dirty.store(true, Ordering::SeqCst);
-                        continue;
-                    }
-                };
-            if profile.runner_command.trim().is_empty()
-                && local_runner::runner_uses_wsl(&entry.project_root)
-            {
-                if let Ok((_, _, actual_program)) = wsl_codex_homes(&entry.project_root).await {
-                    if let RuntimeEntrypoint::Wsl { program, .. } = &mut current_command.entrypoint
-                    {
-                        *program = actual_program;
-                        current_command.source = codex_app_server::RuntimeSource::Path;
-                    }
-                }
-            }
-            apply_process_profile_overrides(&mut current_command, &profile);
-            let command_fingerprint = serde_json::to_string(&current_command).unwrap_or_default();
-            let version_changed = if local_runner::runner_uses_wsl(&entry.project_root) {
-                codex_app_server::probe_runtime_version(&current_command)
-                    .await
-                    .ok()
-                    != entry.probed_version
-            } else {
-                false
-            };
-            let watch_source = entry.source_home.clone();
-            let watch_wire = entry.source_wire_home.clone();
-            let watch_executable = executable.clone();
-            let watch_project = entry.project_root.clone();
-            let watch_profile = profile.clone();
-            let current = match tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                tokio::task::spawn_blocking(move || {
-                    external_runtime_watch_stamp(
-                        watch_source.as_deref(),
-                        watch_wire.as_deref(),
-                        &watch_executable,
-                        &watch_project,
-                        &watch_profile,
-                    )
-                }),
-            )
-            .await
-            {
-                Ok(Ok(stamp)) => stamp,
-                Ok(Err(error)) => {
-                    tracing::warn!("Codex runtime watcher task failed: {error}");
-                    entry.dirty.store(true, Ordering::SeqCst);
-                    continue;
-                }
-                Err(_) => {
-                    tracing::warn!("Codex runtime watcher timed out while hashing source assets");
-                    entry.dirty.store(true, Ordering::SeqCst);
-                    let _ = app.emit(
-                        "codex-runtime-changed",
-                        json!({
-                            "projectId": entry.project_id,
-                            "profileId": entry.profile_id,
-                            "pending": entry.active_turns.load(Ordering::Relaxed) > 0,
-                            "error": "Timed out reading the selected Codex runtime/config; refresh is required."
-                        }),
-                    );
-                    continue;
-                }
-            };
-            if current == entry.external_watch_stamp
-                && entry.profile_hash == profile_fingerprint(&profile)
-                && command_fingerprint == entry.runtime_command_fingerprint
-                && !version_changed
-            {
-                continue;
-            }
-            let pending = entry.active_turns.load(Ordering::Relaxed) > 0;
-            if pending {
-                let newly_pending = !entry.dirty.swap(true, Ordering::SeqCst);
-                if newly_pending {
-                    let epoch = self.generation_epoch.fetch_add(1, Ordering::SeqCst) + 1;
-                    entry.generation_epoch.store(epoch, Ordering::SeqCst);
-                }
-                let mut snapshot = entry.snapshot.write().await;
-                if !snapshot
-                    .warnings
-                    .iter()
-                    .any(|warning| warning.contains("pending external configuration"))
-                {
-                    snapshot.warnings.push(
-                        "Codex has a pending external configuration/runtime change; the active turn keeps its startup snapshot and the next turn requires refresh."
-                            .into(),
-                    );
-                }
-                if !newly_pending {
-                    continue;
-                }
-            } else {
-                let _lifecycle = self.lifecycle.lock().await;
-                if entry.active_turns.load(Ordering::SeqCst) > 0 {
-                    entry.dirty.store(true, Ordering::SeqCst);
-                    continue;
-                }
-                let key = {
-                    self.entries
-                        .lock()
-                        .await
-                        .iter()
-                        .find_map(|(key, candidate)| {
-                            Arc::ptr_eq(candidate, &entry).then(|| key.clone())
-                        })
-                };
-                if let Some(key) = key {
-                    self.entries.lock().await.remove(&key);
-                    retire.push(entry.clone());
-                }
-            }
-            let _ = app.emit(
-                "codex-runtime-changed",
-                json!({
-                    "projectId": entry.project_id,
-                    "profileId": entry.profile_id,
-                    "pending": pending,
-                }),
-            );
-        }
-        for entry in retire {
-            let actor_id = entry.client.actor_id();
-            let _ = entry.client.shutdown().await;
-            self.handled_requests
-                .lock()
-                .await
-                .retain(|(candidate, _)| *candidate != actor_id);
-            if models::profile(store, &entry.profile_id).await.is_none() {
-                if let Err(error) =
-                    codex_runtime::remove_profile_runtime(&entry.project_root, &entry.profile_id)
-                {
-                    tracing::warn!(
-                        "failed to remove isolated Codex home for deleted profile {}: {error}",
-                        entry.profile_id
-                    );
-                }
+        for entry in candidates {
+            if entry.active_turns.load(Ordering::SeqCst) > 0 {
+                entry.dirty.store(true, Ordering::SeqCst);
+            } else if let Err(error) = self.retire_entry_locked(&entry).await {
+                tracing::warn!("failed to retire Codex project actor safely: {error}");
             }
         }
     }
@@ -690,38 +597,28 @@ impl CodexRuntimeManager {
     pub(crate) async fn invalidate_cached_actors(&self, reason: &str) {
         let _lifecycle = self.lifecycle.lock().await;
         let epoch = self.generation_epoch.fetch_add(1, Ordering::SeqCst) + 1;
-        let mut retired = Vec::new();
-        {
-            let mut entries = self.entries.lock().await;
-            let keys = entries.keys().cloned().collect::<Vec<_>>();
-            for key in keys {
-                let Some(entry) = entries.get(&key).cloned() else {
-                    continue;
-                };
-                if entry.active_turns.load(Ordering::Relaxed) == 0 {
-                    if let Some(entry) = entries.remove(&key) {
-                        retired.push(entry);
-                    }
-                } else {
-                    entry.generation_epoch.store(epoch, Ordering::SeqCst);
-                    entry.dirty.store(true, Ordering::Relaxed);
-                    let mut snapshot = entry.snapshot.write().await;
-                    let warning = format!(
-                        "Codex actor refresh is pending until the active turn finishes: {reason}"
-                    );
-                    if !snapshot.warnings.iter().any(|value| value == &warning) {
-                        snapshot.warnings.push(warning);
-                    }
+        let candidates = self
+            .entries
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for entry in candidates {
+            if entry.active_turns.load(Ordering::SeqCst) == 0 {
+                if let Err(error) = self.retire_entry_locked(&entry).await {
+                    tracing::warn!("failed to retire invalidated Codex actor safely: {error}");
                 }
+                continue;
             }
-        }
-        for entry in retired {
-            let actor_id = entry.client.actor_id();
-            let _ = entry.client.shutdown().await;
-            self.handled_requests
-                .lock()
-                .await
-                .retain(|(candidate, _)| *candidate != actor_id);
+            entry.generation_epoch.store(epoch, Ordering::SeqCst);
+            entry.dirty.store(true, Ordering::SeqCst);
+            let mut snapshot = entry.snapshot.write().await;
+            let warning =
+                format!("Codex actor refresh is pending until the active turn finishes: {reason}");
+            if !snapshot.warnings.iter().any(|value| value == &warning) {
+                snapshot.warnings.push(warning);
+            }
         }
     }
 
@@ -947,6 +844,26 @@ impl CodexRuntimeManager {
     }
 }
 
+fn runtime_home_identity(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| {
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    normalized.pop();
+                }
+                other => normalized.push(other.as_os_str()),
+            }
+        }
+        normalized
+    })
+}
+
+fn same_runtime_home(left: &Path, right: &Path) -> bool {
+    runtime_home_identity(left) == runtime_home_identity(right)
+}
+
 fn wsl_distribution(project_root: &Path) -> Option<String> {
     let value = project_root.to_string_lossy().replace('\\', "/");
     ["//wsl.localhost/", "//wsl$/"]
@@ -1006,11 +923,19 @@ fn attachment_to_wsl(path: &Path, expected_distribution: &str) -> Result<String,
     Ok(native_to_wsl(path))
 }
 
+fn native_to_wsl_for_project(path: &Path, project_root: &Path) -> Result<String, String> {
+    match wsl_distribution(project_root) {
+        Some(distribution) => attachment_to_wsl(path, &distribution),
+        None => Ok(native_to_wsl(path)),
+    }
+}
+
 pub(crate) async fn wsl_codex_homes(
     project_root: &Path,
 ) -> Result<(PathBuf, String, String), String> {
     let distribution = wsl_distribution(project_root);
     let mut command = tokio::process::Command::new("wsl.exe");
+    wisp_tools::process::hide_console_async(&mut command);
     if let Some(distribution) = distribution.as_deref() {
         command.arg("--distribution").arg(distribution);
     }
@@ -1072,14 +997,17 @@ fn runtime_options(
     profile: &models::ModelProfile,
     project_root: &Path,
     isolated_home: &Path,
-) -> RuntimeResolveOptions {
+) -> Result<RuntimeResolveOptions, String> {
     let mut options = RuntimeResolveOptions {
         codex_home: Some(isolated_home.to_string_lossy().to_string()),
         ..Default::default()
     };
     if local_runner::runner_uses_wsl(project_root) {
         let mut environment = BTreeMap::new();
-        environment.insert("CODEX_HOME".into(), native_to_wsl(isolated_home));
+        environment.insert(
+            "CODEX_HOME".into(),
+            native_to_wsl_for_project(isolated_home, project_root)?,
+        );
         let mut configured = local_runner::split_command(&profile.runner_command);
         let configured_program = (!configured.is_empty()).then(|| configured.remove(0));
         let mut distribution = wsl_distribution(project_root);
@@ -1129,7 +1057,7 @@ fn runtime_options(
             });
         }
     }
-    options
+    Ok(options)
 }
 
 fn push_runtime_arg(entrypoint: &mut RuntimeEntrypoint, value: impl Into<String>) {
@@ -1748,13 +1676,12 @@ fn external_runtime_watch_stamp(
     executable: &str,
     project_root: &Path,
     profile: &models::ModelProfile,
-) -> String {
+) -> Result<String, String> {
     let mut bytes = profile_fingerprint(profile).to_le_bytes().to_vec();
     if let Some(home) = source_home {
-        match codex_runtime::source_assets_fingerprint(home, source_wire_home) {
-            Ok(fingerprint) => bytes.extend_from_slice(fingerprint.as_bytes()),
-            Err(error) => bytes.extend_from_slice(format!("source-error:{error}").as_bytes()),
-        }
+        let fingerprint = codex_runtime::source_assets_fingerprint(home, source_wire_home)
+            .map_err(|error| format!("Failed to fingerprint the selected Codex home: {error}"))?;
+        bytes.extend_from_slice(fingerprint.as_bytes());
     }
     if let Ok(metadata) = std::fs::metadata(executable) {
         bytes.extend_from_slice(metadata.len().to_string().as_bytes());
@@ -1767,16 +1694,145 @@ fn external_runtime_watch_stamp(
         }
     }
     append_tree_stamp(&project_root.join(".codex"), &mut bytes);
-    match audit_project_exec_rules(project_root) {
-        Ok(audit) => bytes.extend_from_slice(audit.digest.as_bytes()),
-        Err(error) => bytes.extend_from_slice(format!("rule-audit-error:{error}").as_bytes()),
-    }
+    let audit = audit_project_exec_rules(project_root)
+        .map_err(|error| format!("Failed to audit project Codex rules: {error}"))?;
+    bytes.extend_from_slice(audit.digest.as_bytes());
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in bytes {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    format!("{hash:016x}")
+    Ok(format!("{hash:016x}"))
+}
+
+async fn external_runtime_watch_stamp_bounded(
+    source_home: Option<PathBuf>,
+    source_wire_home: Option<String>,
+    executable: String,
+    project_root: PathBuf,
+    profile: models::ModelProfile,
+) -> Result<String, String> {
+    let task = tokio::task::spawn_blocking(move || {
+        external_runtime_watch_stamp(
+            source_home.as_deref(),
+            source_wire_home.as_deref(),
+            &executable,
+            &project_root,
+            &profile,
+        )
+    });
+    match tokio::time::timeout(std::time::Duration::from_secs(15), task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(format!("Codex configuration fingerprint task failed: {error}")),
+        Err(_) => Err(
+            "Timed out reading the selected Codex runtime/config after 15 seconds; the existing actor was retained."
+                .into(),
+        ),
+    }
+}
+
+fn cached_runtime_requires_rebuild(
+    dirty: bool,
+    source_location_changed: bool,
+    startup_external_stamp: &str,
+    current_external_stamp: &str,
+    startup_profile_hash: u64,
+    current_profile_hash: u64,
+    startup_command_fingerprint: &str,
+    current_command_fingerprint: &str,
+    version_changed: bool,
+) -> bool {
+    dirty
+        || source_location_changed
+        || startup_external_stamp != current_external_stamp
+        || startup_profile_hash != current_profile_hash
+        || startup_command_fingerprint != current_command_fingerprint
+        || version_changed
+}
+
+fn begin_dirty_transition(dirty: &AtomicBool) -> bool {
+    !dirty.swap(true, Ordering::SeqCst)
+}
+
+struct CurrentRuntimeInputs {
+    source_home: Option<PathBuf>,
+    source_wire_home: Option<String>,
+    command: codex_app_server::ResolvedCodexCommand,
+    command_fingerprint: String,
+    external_stamp: String,
+    wsl_version: Option<String>,
+}
+
+async fn current_runtime_inputs(
+    profile: &models::ModelProfile,
+    project_root: &Path,
+    isolated_home: &Path,
+) -> Result<CurrentRuntimeInputs, String> {
+    let is_wsl = local_runner::runner_uses_wsl(project_root);
+    let wsl_homes = if is_wsl {
+        Some(wsl_codex_homes(project_root).await?)
+    } else {
+        None
+    };
+    let source_home = wsl_homes
+        .as_ref()
+        .map(|(host, _, _)| host.clone())
+        .or_else(|| {
+            (!is_wsl)
+                .then(codex_runtime::selected_codex_home_source)
+                .flatten()
+        });
+    let source_wire_home = wsl_homes.as_ref().map(|(_, wire, _)| wire.clone());
+    let options = runtime_options(profile, project_root, isolated_home)?;
+    let mut command =
+        codex_app_server::resolve_codex_command(&options).map_err(|error| error.to_string())?;
+    if profile.runner_command.trim().is_empty() {
+        if let (Some((_, _, actual_program)), RuntimeEntrypoint::Wsl { program, .. }) =
+            (wsl_homes.as_ref(), &mut command.entrypoint)
+        {
+            *program = actual_program.clone();
+            command.source = codex_app_server::RuntimeSource::Path;
+        }
+    }
+    apply_process_profile_overrides(&mut command, profile);
+    let wsl_version = if is_wsl {
+        Some(
+            codex_app_server::probe_runtime_version(&command)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "Failed to validate the selected WSL Codex runtime; the existing actor was retained: {error}"
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    let command_fingerprint = serde_json::to_string(&command).unwrap_or_default();
+    let external_stamp = external_runtime_watch_stamp_bounded(
+        source_home.clone(),
+        source_wire_home.clone(),
+        command.executable().to_string(),
+        project_root.to_path_buf(),
+        profile.clone(),
+    )
+    .await?;
+    Ok(CurrentRuntimeInputs {
+        source_home,
+        source_wire_home,
+        command,
+        command_fingerprint,
+        external_stamp,
+        wsl_version,
+    })
+}
+
+fn same_runtime_inputs(before: &CurrentRuntimeInputs, after: &CurrentRuntimeInputs) -> bool {
+    before.source_home == after.source_home
+        && before.source_wire_home == after.source_wire_home
+        && before.command_fingerprint == after.command_fingerprint
+        && before.external_stamp == after.external_stamp
+        && before.wsl_version == after.wsl_version
 }
 
 fn entry_key(
@@ -1799,262 +1855,119 @@ fn entry_key(
     )
 }
 
-async fn get_entry(
+fn active_project_matches(
     state: &AppState,
     window_label: &str,
-    refresh: bool,
-) -> Result<(Arc<CodexRuntimeEntry>, models::ModelProfile), String> {
-    let profile = models::active_profile(&state.store).await;
-    get_entry_for_profile(state, window_label, refresh, profile).await
+    expected: &crate::ActiveProject,
+) -> bool {
+    let current = state.active(window_label);
+    same_project_identity(&current.id, &current.root, &expected.id, &expected.root)
 }
 
-async fn get_entry_for_profile(
+fn same_project_identity(
+    left_id: &str,
+    left_root: &Path,
+    right_id: &str,
+    right_root: &Path,
+) -> bool {
+    left_id == right_id && runtime_home_identity(left_root) == runtime_home_identity(right_root)
+}
+
+fn entry_matches_project(entry: &CodexRuntimeEntry, expected: &crate::ActiveProject) -> bool {
+    same_project_identity(
+        &entry.project_id,
+        &entry.project_root,
+        &expected.id,
+        &expected.root,
+    )
+}
+
+async fn create_runtime_entry_locked(
     state: &AppState,
-    window_label: &str,
-    refresh: bool,
-    profile: models::ModelProfile,
-) -> Result<(Arc<CodexRuntimeEntry>, models::ModelProfile), String> {
-    // Serializes actor checkout/refresh/retirement. Callers that execute a turn
-    // acquire their RuntimeTurnLease immediately after this function returns,
-    // before their next await.
-    let _lifecycle = state.codex.lifecycle.lock().await;
-    let project = state.active(window_label);
-    if !local_runner::is_codex_cli(&profile.provider) {
-        return Err("The active model profile is not a Codex local runner.".into());
-    }
-    // Never mirror source files into a live actor home. A runtime may lazily
-    // read auth/instructions/skills during a turn, so even an eventual restart
-    // would not preserve the startup snapshot. Defer the sync/probe wholesale.
-    let active_existing = {
-        let entries = state.codex.entries.lock().await;
-        entries
-            .values()
-            .find(|entry| {
-                entry.project_id == project.id
-                    && entry.profile_id == profile.id
-                    && entry.active_turns.load(Ordering::Relaxed) > 0
-            })
-            .cloned()
-    };
-    if let Some(entry) = active_existing {
-        if refresh {
-            let source = if local_runner::runner_uses_wsl(&project.root) {
-                wsl_codex_homes(&project.root).await.ok()
-            } else {
-                codex_runtime::selected_codex_home_source()
-                    .map(|home| (home, String::new(), String::new()))
-            };
-            let executable = entry.snapshot.read().await.runtime.executable.clone();
-            let current_stamp = external_runtime_watch_stamp(
-                source.as_ref().map(|(host, _, _)| host.as_path()),
-                source
-                    .as_ref()
-                    .and_then(|(_, wire, _)| (!wire.is_empty()).then_some(wire.as_str())),
-                &executable,
-                &project.root,
-                &profile,
-            );
-            let changed = entry.profile_hash != profile_fingerprint(&profile)
-                || current_stamp != entry.external_watch_stamp;
-            if changed {
-                if !entry.dirty.swap(true, Ordering::SeqCst) {
-                    let epoch = state.codex.generation_epoch.fetch_add(1, Ordering::SeqCst) + 1;
-                    entry.generation_epoch.store(epoch, Ordering::SeqCst);
-                }
-                let mut snapshot = entry.snapshot.write().await;
-                if !snapshot
-                    .warnings
-                    .iter()
-                    .any(|warning| warning.contains("deferred until active turns finish"))
-                {
-                    snapshot.warnings.push(
-                        "A real Codex runtime/config change was detected; synchronization is deferred until active turns finish."
-                            .into(),
-                    );
-                }
-            }
-        }
-        return Ok((entry, profile));
-    }
+    project: &crate::ActiveProject,
+    profile: &models::ModelProfile,
+    selector: &ProfileSelector,
+) -> Result<Option<Arc<CodexRuntimeEntry>>, String> {
+    const MAX_SYNC_ATTEMPTS: usize = 3;
     let is_wsl = local_runner::runner_uses_wsl(&project.root);
-    let wsl_homes = if is_wsl {
-        Some(wsl_codex_homes(&project.root).await?)
-    } else {
-        None
-    };
-    let runtime = codex_runtime::prepare_codex_runtime_for_profile_from_source(
-        &project.root,
-        &profile.id,
-        None,
-        wsl_homes.as_ref().map(|(host, _, _)| host.as_path()),
-    )?;
-    if let Some((source_host, source_wire, _)) = wsl_homes.as_ref() {
-        let target_wire = native_to_wsl(&runtime.home_dir);
-        codex_runtime::rewrite_config_file_references_for_runtime(
-            &runtime.config_path,
-            source_host,
-            &runtime.home_dir,
-            Some(source_wire),
-            Some(&target_wire),
+    let expected_home = codex_runtime::profile_runtime_home(&project.root, &profile.id);
+    let mut stable = None;
+    for attempt in 1..=MAX_SYNC_ATTEMPTS {
+        // Fingerprint every CAS-relevant source before copying. auth.json is
+        // intentionally absent from this fingerprint, so credential rotation
+        // cannot cause an infinite retry while Force Refresh still copies it.
+        let before = current_runtime_inputs(profile, &project.root, &expected_home).await?;
+        let runtime = codex_runtime::prepare_codex_runtime_for_profile_from_source(
+            &project.root,
+            &profile.id,
+            None,
+            before.source_home.as_deref(),
         )?;
-    }
-    let options = runtime_options(&profile, &project.root, &runtime.home_dir);
-    let mut resolved =
-        codex_app_server::resolve_codex_command(&options).map_err(|e| e.to_string())?;
-    if profile.runner_command.trim().is_empty() {
-        if let (Some((_, _, actual_program)), RuntimeEntrypoint::Wsl { program, .. }) =
-            (wsl_homes.as_ref(), &mut resolved.entrypoint)
-        {
-            *program = actual_program.clone();
-            resolved.source = codex_app_server::RuntimeSource::Path;
+        if is_wsl {
+            let source_host = before.source_home.as_deref().ok_or_else(|| {
+                "The selected WSL Codex home has no host-accessible path.".to_string()
+            })?;
+            let source_wire = before.source_wire_home.as_deref().ok_or_else(|| {
+                "The selected WSL Codex home has no distribution-local path.".to_string()
+            })?;
+            let target_wire = native_to_wsl_for_project(&runtime.home_dir, &project.root)?;
+            codex_runtime::rewrite_config_file_references_for_runtime(
+                &runtime.config_path,
+                source_host,
+                &runtime.home_dir,
+                Some(source_wire),
+                Some(&target_wire),
+            )?;
+        }
+
+        // Re-resolve source path, command/executable, project config and WSL
+        // version after synchronization. Never compare the sanitized target
+        // config to the source; only the two bounded source snapshots decide
+        // whether this attempt was coherent.
+        let after = current_runtime_inputs(profile, &project.root, &runtime.home_dir).await?;
+        if same_runtime_inputs(&before, &after) {
+            stable = Some((runtime, after));
+            break;
+        }
+        if attempt == MAX_SYNC_ATTEMPTS {
+            return Err(format!(
+                "Codex runtime/config changed during synchronization in all {MAX_SYNC_ATTEMPTS} attempts; no app-server was started. Try Refresh again after local Codex updates finish."
+            ));
         }
     }
-    apply_process_profile_overrides(&mut resolved, &profile);
-    let probed_version = codex_app_server::probe_runtime_version(&resolved)
-        .await
-        .ok();
-    let runtime_command_fingerprint = serde_json::to_string(&resolved).unwrap_or_default();
+    let (runtime, current) = stable.expect("bounded sync loop returns a stable attempt or error");
+
+    // The selector is read again immediately before spawning. A completed
+    // set-active/save cannot leave this creation using a stale Profile clone.
+    let confirmed_profile = resolve_profile_selector(&state.store, selector).await?;
+    if !same_profile_revision(profile, &confirmed_profile) {
+        return Ok(None);
+    }
+
+    let resolved = current.command;
+    let probed_version = if is_wsl {
+        current.wsl_version
+    } else {
+        codex_app_server::probe_runtime_version(&resolved)
+            .await
+            .ok()
+    };
+    let runtime_command_fingerprint = current.command_fingerprint;
+    let external_watch_stamp = current.external_stamp;
+    let source_home = current.source_home;
+    let source_wire_home = current.source_wire_home;
     let wire_project_root = if is_wsl {
-        native_to_wsl(&project.root)
+        native_to_wsl_for_project(&project.root, &project.root)?
     } else {
         project.root.to_string_lossy().to_string()
     };
-    let key = entry_key(&project.id, &profile, &resolved, &wire_project_root);
+    let key = entry_key(&project.id, profile, &resolved, &wire_project_root);
     let sync_stamp = runtime_sync_stamp(
         &runtime.home_dir,
         resolved.executable(),
         &project.root,
         probed_version.as_deref(),
     );
-    let source_home = wsl_homes
-        .as_ref()
-        .map(|(host, _, _)| host.clone())
-        .or_else(|| {
-            (!is_wsl)
-                .then(codex_runtime::selected_codex_home_source)
-                .flatten()
-        });
-    let external_watch_stamp = external_runtime_watch_stamp(
-        source_home.as_deref(),
-        wsl_homes.as_ref().map(|(_, wire, _)| wire.as_str()),
-        resolved.executable(),
-        &project.root,
-        &profile,
-    );
-
-    // Keep the guard out of the if-let scrutinee: Rust 2021 extends that
-    // temporary through the arm and a refresh removal would deadlock itself.
-    let existing = {
-        let entries = state.codex.entries.lock().await;
-        entries.get(&key).cloned()
-    };
-    if let Some(entry) = existing {
-        if refresh
-            && (external_watch_stamp != entry.external_watch_stamp
-                || profile_fingerprint(&profile) != entry.profile_hash
-                || runtime_command_fingerprint != entry.runtime_command_fingerprint
-                || probed_version != entry.probed_version)
-        {
-            state.codex.entries.lock().await.remove(&key);
-            let actor_id = entry.client.actor_id();
-            let _ = entry.client.shutdown().await;
-            state
-                .codex
-                .handled_requests
-                .lock()
-                .await
-                .retain(|(candidate, _)| *candidate != actor_id);
-        } else if refresh
-            && entry.dirty.load(Ordering::Relaxed)
-            && entry.active_turns.load(Ordering::Relaxed) == 0
-        {
-            state.codex.entries.lock().await.remove(&key);
-            let actor_id = entry.client.actor_id();
-            let _ = entry.client.shutdown().await;
-            state
-                .codex
-                .handled_requests
-                .lock()
-                .await
-                .retain(|(candidate, _)| *candidate != actor_id);
-        } else if refresh && sync_stamp != entry.sync_stamp {
-            if entry.active_turns.load(Ordering::Relaxed) == 0 {
-                state.codex.entries.lock().await.remove(&key);
-                let _ = entry.client.shutdown().await;
-            } else {
-                entry.dirty.store(true, Ordering::Relaxed);
-                let mut snapshot = entry.snapshot.write().await;
-                if !snapshot
-                    .warnings
-                    .iter()
-                    .any(|warning| warning.contains("pending external configuration"))
-                {
-                    snapshot.warnings.push(
-                        "Codex has a pending external configuration change; it will be loaded after active turns finish."
-                            .into(),
-                    );
-                }
-                return Ok((entry.clone(), profile));
-            }
-        } else {
-            if refresh {
-                let mut refreshed = entry
-                    .client
-                    .runtime_snapshot(Some(Path::new(&wire_project_root)))
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let managed_requirements = managed_requirements_status(&entry.client).await;
-                apply_wisp_runtime_policy(
-                    &mut refreshed,
-                    runtime.diagnostics.clone(),
-                    &runtime.home_dir,
-                    &project.root,
-                    &managed_requirements,
-                );
-                let active = entry.active_turns.load(Ordering::Relaxed) > 0;
-                let changed =
-                    refreshed.config_version != entry.snapshot.read().await.config_version;
-                if active && changed {
-                    entry.dirty.store(true, Ordering::Relaxed);
-                    let mut snapshot = entry.snapshot.write().await;
-                    if !snapshot
-                        .warnings
-                        .iter()
-                        .any(|warning| warning.contains("pending external configuration"))
-                    {
-                        snapshot.warnings.push(
-                            "Codex has a pending external configuration change; it will be loaded after active turns finish."
-                                .into(),
-                        );
-                    }
-                } else {
-                    *entry.snapshot.write().await = refreshed;
-                    entry.dirty.store(false, Ordering::Relaxed);
-                }
-            }
-            return Ok((entry, profile));
-        }
-    }
-
-    let obsolete = {
-        let mut entries = state.codex.entries.lock().await;
-        let keys = entries
-            .iter()
-            .filter(|(candidate_key, entry)| {
-                candidate_key.as_str() != key
-                    && entry.project_id == project.id
-                    && entry.profile_id == profile.id
-                    && entry.active_turns.load(Ordering::Relaxed) == 0
-            })
-            .map(|(candidate_key, _)| candidate_key.clone())
-            .collect::<Vec<_>>();
-        keys.into_iter()
-            .filter_map(|candidate_key| entries.remove(&candidate_key))
-            .collect::<Vec<_>>()
-    };
-    for entry in obsolete {
-        let _ = entry.client.shutdown().await;
-    }
 
     // Project config is loaded during App Server initialization. Reject
     // endpoint/MCP/plugin/provider command launchers before spawning the actor;
@@ -2068,11 +1981,17 @@ async fn get_entry_for_profile(
         },
     )
     .await
-    .map_err(|e| e.to_string())?;
-    let mut snapshot = client
+    .map_err(|error| error.to_string())?;
+    let mut snapshot = match client
         .runtime_snapshot(Some(Path::new(&wire_project_root)))
         .await
-        .map_err(|e| e.to_string())?;
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let _ = client.shutdown().await;
+            return Err(error.to_string());
+        }
+    };
     let managed_requirements = managed_requirements_status(&client).await;
     let plan_exec_rule_startup_digest =
         audit_native_plan_exec_rules(&runtime.home_dir, &project.root)
@@ -2088,17 +2007,17 @@ async fn get_entry_for_profile(
     let entry = Arc::new(CodexRuntimeEntry {
         client,
         snapshot: RwLock::new(snapshot),
-        project_id: project.id,
+        project_id: project.id.clone(),
         profile_id: profile.id.clone(),
-        project_root: project.root,
+        project_root: project.root.clone(),
         isolated_home: runtime.home_dir,
         source_home,
-        source_wire_home: wsl_homes.as_ref().map(|(_, wire, _)| wire.clone()),
+        source_wire_home,
         wire_project_root,
         sync_stamp,
         external_watch_stamp,
         plan_exec_rule_startup_digest,
-        profile_hash: profile_fingerprint(&profile),
+        profile_hash: profile_fingerprint(profile),
         runtime_command_fingerprint,
         probed_version,
         generation_epoch: AtomicU64::new(state.codex.generation_epoch.load(Ordering::SeqCst)),
@@ -2108,7 +2027,230 @@ async fn get_entry_for_profile(
         routers: Mutex::new(HashMap::new()),
     });
     state.codex.entries.lock().await.insert(key, entry.clone());
-    Ok((entry, profile))
+    Ok(Some(entry))
+}
+
+async fn get_entry(
+    state: &AppState,
+    window_label: &str,
+    access: RuntimeAccess,
+) -> Result<RuntimeCheckout, String> {
+    get_entry_for_selector(state, window_label, access, ProfileSelector::Active).await
+}
+
+async fn get_entry_for_selector(
+    state: &AppState,
+    window_label: &str,
+    access: RuntimeAccess,
+    selector: ProfileSelector,
+) -> Result<RuntimeCheckout, String> {
+    loop {
+        let project = state.active(window_label);
+        let lifecycle = state.codex.lifecycle.lock().await;
+        if !active_project_matches(state, window_label, &project) {
+            drop(lifecycle);
+            continue;
+        }
+        // Profile mutation commands commit their Store write before awaiting
+        // invalidate_cached_actors/lifecycle; they never hold the Store across
+        // this lock. Re-reading here therefore closes the completed-save ->
+        // stale-clone actor creation race without inverting a held DB lock.
+        let profile = resolve_profile_selector(&state.store, &selector).await?;
+        if !local_runner::is_codex_cli(&profile.provider) {
+            return Err(format!(
+                "Codex runtime is unavailable because Profile '{}' uses provider '{}'.",
+                profile.id, profile.provider
+            ));
+        }
+        let selected_home = codex_runtime::profile_runtime_home(&project.root, &profile.id);
+        let existing = state
+            .codex
+            .entries
+            .lock()
+            .await
+            .values()
+            .find(|entry| {
+                entry.project_id == project.id
+                    && entry.profile_id == profile.id
+                    && same_runtime_home(&entry.isolated_home, &selected_home)
+            })
+            .cloned();
+
+        match (access, existing) {
+            (RuntimeAccess::Cached, Some(entry)) => {
+                if !active_project_matches(state, window_label, &project) {
+                    drop(lifecycle);
+                    continue;
+                }
+                return Ok(RuntimeCheckout::new(entry, profile));
+            }
+            (RuntimeAccess::ForceRefresh, _) => {
+                state
+                    .codex
+                    .retire_profile_entries_locked(
+                        &project.root,
+                        &profile.id,
+                        "refresh the Codex runtime",
+                    )
+                    .await?;
+                let Some(entry) =
+                    create_runtime_entry_locked(state, &project, &profile, &selector).await?
+                else {
+                    drop(lifecycle);
+                    continue;
+                };
+                if !active_project_matches(state, window_label, &project) {
+                    state.codex.retire_entry_locked(&entry).await?;
+                    drop(lifecycle);
+                    continue;
+                }
+                return Ok(RuntimeCheckout::new(entry, profile));
+            }
+            (RuntimeAccess::ValidateForSend, Some(entry)) => {
+                // Potentially slow UNC/skills hashing happens without holding
+                // the async lifecycle lock. The project, Profile revision, and
+                // actor pointer are all revalidated after reacquiring it.
+                drop(lifecycle);
+                let current =
+                    current_runtime_inputs(&profile, &project.root, &entry.isolated_home).await?;
+                let lifecycle = state.codex.lifecycle.lock().await;
+                if !active_project_matches(state, window_label, &project) {
+                    drop(lifecycle);
+                    continue;
+                }
+                let confirmed_profile = resolve_profile_selector(&state.store, &selector).await?;
+                if !same_profile_revision(&profile, &confirmed_profile) {
+                    drop(lifecycle);
+                    continue;
+                }
+                let profile = confirmed_profile;
+                if !local_runner::is_codex_cli(&profile.provider) {
+                    return Err(format!(
+                        "Codex runtime is unavailable because Profile '{}' uses provider '{}'.",
+                        profile.id, profile.provider
+                    ));
+                }
+                let still_current = state
+                    .codex
+                    .entries
+                    .lock()
+                    .await
+                    .values()
+                    .any(|candidate| Arc::ptr_eq(candidate, &entry));
+                if !still_current {
+                    drop(lifecycle);
+                    continue;
+                }
+
+                let source_location_changed = entry.source_home != current.source_home
+                    || entry.source_wire_home != current.source_wire_home;
+                let version_changed = current
+                    .wsl_version
+                    .as_ref()
+                    .is_some_and(|version| Some(version) != entry.probed_version.as_ref());
+                let changed = cached_runtime_requires_rebuild(
+                    entry.dirty.load(Ordering::SeqCst),
+                    source_location_changed,
+                    &entry.external_watch_stamp,
+                    &current.external_stamp,
+                    entry.profile_hash,
+                    profile_fingerprint(&profile),
+                    &entry.runtime_command_fingerprint,
+                    &current.command_fingerprint,
+                    version_changed,
+                );
+                if !changed {
+                    if !active_project_matches(state, window_label, &project) {
+                        drop(lifecycle);
+                        continue;
+                    }
+                    return Ok(RuntimeCheckout::new(entry, profile));
+                }
+
+                let target_home = codex_runtime::profile_runtime_home(&project.root, &profile.id);
+                let home_entries = state
+                    .codex
+                    .entries
+                    .lock()
+                    .await
+                    .values()
+                    .filter(|candidate| {
+                        candidate.profile_id == profile.id
+                            && same_runtime_home(&candidate.isolated_home, &target_home)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if home_entries
+                    .iter()
+                    .any(|candidate| candidate.active_turns.load(Ordering::SeqCst) > 0)
+                {
+                    let newly_dirty = home_entries
+                        .into_iter()
+                        .filter(|candidate| begin_dirty_transition(&candidate.dirty))
+                        .collect::<Vec<_>>();
+                    if !newly_dirty.is_empty() {
+                        let epoch = state.codex.generation_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+                        let warning = "Codex runtime/config changed while this actor was in use; the active turn keeps its startup snapshot and refresh is required before the next send.";
+                        for candidate in newly_dirty {
+                            candidate.generation_epoch.store(epoch, Ordering::SeqCst);
+                            let mut snapshot = candidate.snapshot.write().await;
+                            if !snapshot.warnings.iter().any(|value| value == warning) {
+                                snapshot.warnings.push(warning.into());
+                            }
+                        }
+                    }
+                    return Err(
+                        "Codex runtime/config changed while the actor is in use. The active turn keeps its startup snapshot; wait for it to finish, then refresh and confirm before sending."
+                            .into(),
+                    );
+                }
+                state
+                    .codex
+                    .retire_profile_entries_locked(
+                        &project.root,
+                        &profile.id,
+                        "reload changed Codex configuration",
+                    )
+                    .await?;
+                let Some(entry) =
+                    create_runtime_entry_locked(state, &project, &profile, &selector).await?
+                else {
+                    drop(lifecycle);
+                    continue;
+                };
+                if !active_project_matches(state, window_label, &project) {
+                    state.codex.retire_entry_locked(&entry).await?;
+                    drop(lifecycle);
+                    continue;
+                }
+                return Ok(RuntimeCheckout::new(entry, profile));
+            }
+            (_, None) => {
+                // First use has no live actor/home to protect. It performs the
+                // same full inheritance and capability load as a force refresh.
+                state
+                    .codex
+                    .retire_profile_entries_locked(
+                        &project.root,
+                        &profile.id,
+                        "initialize the Codex runtime",
+                    )
+                    .await?;
+                let Some(entry) =
+                    create_runtime_entry_locked(state, &project, &profile, &selector).await?
+                else {
+                    drop(lifecycle);
+                    continue;
+                };
+                if !active_project_matches(state, window_label, &project) {
+                    state.codex.retire_entry_locked(&entry).await?;
+                    drop(lifecycle);
+                    continue;
+                }
+                return Ok(RuntimeCheckout::new(entry, profile));
+            }
+        }
+    }
 }
 
 async fn stored_session_overrides(state: &AppState, frame_id: Option<&str>) -> UiCodexOverrides {
@@ -2823,12 +2965,21 @@ pub(crate) async fn run_codex_turn(
     // A send is also the authoritative external-change preflight. If another
     // turn is still using an actor whose files changed, reject new work until
     // that snapshot can be restarted instead of silently using stale config.
-    let (entry, profile) = get_entry(state.inner(), window.label(), true)
-        .await
-        .map_err(CodexProviderError::Unavailable)?;
-    // Acquire before any further await so a concurrent Settings refresh cannot
-    // observe zero active users and shut this actor down.
-    let _entry_lease = RuntimeTurnLease::acquire(entry.clone());
+    let checkout = get_entry(
+        state.inner(),
+        window.label(),
+        RuntimeAccess::ValidateForSend,
+    )
+    .await
+    .map_err(CodexProviderError::Unavailable)?;
+    let entry = checkout.entry.clone();
+    let profile = checkout.profile.clone();
+    if !entry_matches_project(&entry, &project) {
+        return Err(CodexProviderError::Turn(
+            "The active project changed while this turn was queued. No Codex thread or turn was started; return to the conversation's project and send again."
+                .into(),
+        ));
+    }
     if rt.cancel.load(Ordering::SeqCst) {
         return Err(CodexProviderError::Turn(
             "Codex turn was cancelled during runtime refresh.".into(),
@@ -3796,23 +3947,24 @@ async fn generate_codex_review(
     let reviewer = crate::specialists::get(&state.store, "reviewer")
         .await
         .ok_or_else(|| "Reviewer specialist missing.".to_string())?;
-    let profile = if reviewer.model_id.trim().is_empty() {
-        models::active_profile(&state.store).await
+    let selector = if reviewer.model_id.trim().is_empty() {
+        ProfileSelector::Active
     } else {
-        models::profile(&state.store, &reviewer.model_id)
-            .await
-            .ok_or_else(|| {
-                format!(
-                    "Reviewer is bound to missing Profile '{}'; choose an existing Reviewer Profile before running review.",
-                    reviewer.model_id
-                )
-            })?
+        ProfileSelector::Bound(reviewer.model_id.clone())
     };
+    let profile = resolve_profile_selector(&state.store, &selector).await?;
     if !local_runner::is_codex_cli(&profile.provider) {
         return crate::generate_review(&state.store, messages).await;
     }
-    let (entry, profile) = get_entry_for_profile(state, window_label, true, profile).await?;
-    let _entry_lease = RuntimeTurnLease::acquire(entry.clone());
+    let checkout = get_entry_for_selector(
+        state,
+        window_label,
+        RuntimeAccess::ValidateForSend,
+        selector,
+    )
+    .await?;
+    let entry = checkout.entry.clone();
+    let profile = checkout.profile.clone();
     let config = resolve_config(
         &entry,
         &profile,
@@ -4158,10 +4310,11 @@ pub(crate) async fn automatic_review_after_turn(
 async fn snapshot_command(
     state: State<'_, AppState>,
     window: WebviewWindow,
-    refresh: bool,
+    access: RuntimeAccess,
 ) -> Result<Value, String> {
-    let (entry, profile) = get_entry(state.inner(), window.label(), refresh).await?;
-    let _entry_lease = RuntimeTurnLease::acquire(entry.clone());
+    let checkout = get_entry(state.inner(), window.label(), access).await?;
+    let entry = checkout.entry.clone();
+    let profile = checkout.profile.clone();
     let preview = resolve_config(
         &entry,
         &profile,
@@ -4180,7 +4333,7 @@ pub(crate) async fn get_codex_runtime_snapshot(
     state: State<'_, AppState>,
     window: WebviewWindow,
 ) -> Result<Value, String> {
-    snapshot_command(state, window, false).await
+    snapshot_command(state, window, RuntimeAccess::Cached).await
 }
 
 #[tauri::command]
@@ -4188,7 +4341,7 @@ pub(crate) async fn refresh_codex_runtime_snapshot(
     state: State<'_, AppState>,
     window: WebviewWindow,
 ) -> Result<Value, String> {
-    snapshot_command(state, window, true).await
+    snapshot_command(state, window, RuntimeAccess::ForceRefresh).await
 }
 
 #[tauri::command]
@@ -4200,9 +4353,20 @@ pub(crate) async fn preview_codex_turn_config(
     overrides: Option<UiCodexOverrides>,
     config_version: Option<String>,
     preview_scope: Option<String>,
+    validate_runtime: Option<bool>,
 ) -> Result<Value, String> {
-    let (entry, profile) = get_entry(state.inner(), window.label(), true).await?;
-    let _entry_lease = RuntimeTurnLease::acquire(entry.clone());
+    // Preview is a cached, side-effect-free operation.  External Codex state
+    // is validated by the explicit Refresh action and once immediately before
+    // a turn is sent; merely rendering/re-rendering Composer must not churn
+    // the actor or isolated CODEX_HOME.
+    let access = if validate_runtime.unwrap_or(false) {
+        RuntimeAccess::ValidateForSend
+    } else {
+        RuntimeAccess::Cached
+    };
+    let checkout = get_entry(state.inner(), window.label(), access).await?;
+    let entry = checkout.entry.clone();
+    let profile = checkout.profile.clone();
     let profile_scope = preview_scope
         .as_deref()
         .is_some_and(|scope| scope.eq_ignore_ascii_case("profile"));
@@ -4253,9 +4417,16 @@ pub(crate) async fn set_session_codex_overrides(
                 .map_err(|_| "Invalid session configuration revision.".to_string())
         })
         .transpose()?;
-    if let Some(expected) = parse_config_version(config_version)? {
-        let (entry, profile) = get_entry(state.inner(), window.label(), true).await?;
-        let _entry_lease = RuntimeTurnLease::acquire(entry.clone());
+    let expected_config_version = parse_config_version(config_version)?;
+    if let Some(expected) = expected_config_version {
+        let checkout = get_entry(
+            state.inner(),
+            window.label(),
+            RuntimeAccess::ValidateForSend,
+        )
+        .await?;
+        let entry = checkout.entry.clone();
+        let profile = checkout.profile.clone();
         let snapshot = entry.snapshot.read().await;
         let actual = configuration_generation(&entry, &snapshot, &profile);
         if expected != actual {
@@ -4433,6 +4604,12 @@ pub(crate) async fn codex_plan_action(
         .get("runnerPersistent")
         .and_then(Value::as_bool)
         .unwrap_or(true);
+    if !active_project_matches(state.inner(), window.label(), &active_project) {
+        return Err(
+            "The active project changed while this Plan action was queued. Return to the Plan's project and try again."
+                .into(),
+        );
+    }
     match action.as_str() {
         "save_exit" => {
             if !state
@@ -4449,15 +4626,22 @@ pub(crate) async fn codex_plan_action(
                 .await
                 .map_err(|e| e.to_string())?;
             if plan.mode == "native" && !plan_runner_persistent {
-                if let (Some(thread_id), Ok((entry, profile))) = (
+                if let (Some(thread_id), Ok(checkout)) = (
                     plan.codex_thread_id.as_deref(),
-                    get_entry(state.inner(), window.label(), true).await,
+                    get_entry(
+                        state.inner(),
+                        window.label(),
+                        RuntimeAccess::ValidateForSend,
+                    )
+                    .await,
                 ) {
-                    if plan_profile_id
-                        .as_deref()
-                        .is_none_or(|creator| creator == profile.id)
+                    let entry = checkout.entry.clone();
+                    let profile = checkout.profile.clone();
+                    if entry_matches_project(&entry, &active_project)
+                        && plan_profile_id
+                            .as_deref()
+                            .is_none_or(|creator| creator == profile.id)
                     {
-                        let _lease = RuntimeTurnLease::acquire(entry.clone());
                         cleanup_ephemeral_thread_binding(
                             state.inner(),
                             &entry,
@@ -4554,8 +4738,20 @@ pub(crate) async fn codex_plan_action(
                     "The native Plan is missing its Codex thread id; execution was not started."
                         .to_string()
                 })?;
-                let (entry, profile) = get_entry(state.inner(), window.label(), true).await?;
-                let _lease = RuntimeTurnLease::acquire(entry.clone());
+                let checkout = get_entry(
+                    state.inner(),
+                    window.label(),
+                    RuntimeAccess::ValidateForSend,
+                )
+                .await?;
+                let entry = checkout.entry.clone();
+                let profile = checkout.profile.clone();
+                if !entry_matches_project(&entry, &active_project) {
+                    return Err(
+                        "The active project changed during Plan approval. No Codex thread or turn was started; return to the Plan's project and approve again."
+                            .into(),
+                    );
+                }
                 if plan_profile_id
                     .as_deref()
                     .is_some_and(|creator| creator != profile.id)
@@ -4758,9 +4954,12 @@ pub(crate) async fn codex_plan_action(
 mod tests {
     use super::{
         apply_external_process_isolation, attachment_to_wsl, audited_turn_payload,
-        is_commentary_phase, stored_tool_hash_matches, wsl_distribution,
+        begin_dirty_transition, cached_runtime_requires_rebuild, external_runtime_watch_stamp,
+        is_commentary_phase, native_to_wsl, native_to_wsl_for_project, same_profile_revision,
+        same_project_identity, same_runtime_home, same_runtime_inputs, stored_tool_hash_matches,
+        wsl_distribution, CurrentRuntimeInputs,
     };
-    use crate::codex_app_server::RuntimeEntrypoint;
+    use crate::codex_app_server::{ResolvedCodexCommand, RuntimeEntrypoint, RuntimeSource};
     use serde_json::json;
     use std::path::Path;
 
@@ -4768,6 +4967,19 @@ mod tests {
     fn app_server_wsl_paths_match_distro_case_insensitively_and_reject_cross_distro() {
         let project = Path::new(r"\\WSL.LOCALHOST\uBuNtU\home\research\project");
         assert_eq!(wsl_distribution(project).as_deref(), Some("uBuNtU"));
+        assert_eq!(native_to_wsl(project), "/home/research/project");
+        assert_eq!(
+            native_to_wsl(Path::new(
+                r"\\wsl.localhost\Ubuntu\home\research\project\.wisp\codex-home\profile"
+            )),
+            "/home/research/project/.wisp/codex-home/profile"
+        );
+        assert!(native_to_wsl_for_project(
+            Path::new(r"\\wsl.localhost\Debian\home\research\.codex"),
+            project,
+        )
+        .unwrap_err()
+        .contains("Debian"));
         assert_eq!(
             attachment_to_wsl(
                 Path::new(r"\\wsl.localhost\Ubuntu\home\research\image.png"),
@@ -4866,5 +5078,264 @@ mod tests {
                 "missing process-isolation override {value}"
             );
         }
+    }
+
+    #[test]
+    fn stable_cached_runtime_does_not_rebuild_until_a_real_input_changes() {
+        let stable = || {
+            cached_runtime_requires_rebuild(
+                false,
+                false,
+                "source-a",
+                "source-a",
+                7,
+                7,
+                "command-a",
+                "command-a",
+                false,
+            )
+        };
+        assert!(!stable());
+        assert!(cached_runtime_requires_rebuild(
+            true,
+            false,
+            "source-a",
+            "source-a",
+            7,
+            7,
+            "command-a",
+            "command-a",
+            false,
+        ));
+        assert!(cached_runtime_requires_rebuild(
+            false,
+            false,
+            "source-a",
+            "source-b",
+            7,
+            7,
+            "command-a",
+            "command-a",
+            false,
+        ));
+        assert!(cached_runtime_requires_rebuild(
+            false,
+            false,
+            "source-a",
+            "source-a",
+            7,
+            8,
+            "command-a",
+            "command-a",
+            false,
+        ));
+        assert!(cached_runtime_requires_rebuild(
+            false,
+            false,
+            "source-a",
+            "source-a",
+            7,
+            7,
+            "command-a",
+            "command-b",
+            false,
+        ));
+        assert!(cached_runtime_requires_rebuild(
+            false,
+            false,
+            "source-a",
+            "source-a",
+            7,
+            7,
+            "command-a",
+            "command-a",
+            true,
+        ));
+        assert!(cached_runtime_requires_rebuild(
+            false,
+            true,
+            "source-a",
+            "source-a",
+            7,
+            7,
+            "command-a",
+            "command-a",
+            false,
+        ));
+    }
+
+    #[test]
+    fn external_runtime_fingerprint_errors_are_not_encoded_as_a_valid_generation() {
+        let base = std::env::temp_dir().join(format!(
+            "wisp-codex-provider-fingerprint-error-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let invalid_home = base.join("not-a-directory");
+        std::fs::write(&invalid_home, "invalid").unwrap();
+        let profile: crate::models::ModelProfile = serde_json::from_value(json!({
+            "id": "codex-test",
+            "label": "Codex Test",
+            "provider": "codex_cli",
+            "api_url": "",
+            "model": ""
+        }))
+        .unwrap();
+        let error = external_runtime_watch_stamp(
+            Some(&invalid_home),
+            None,
+            "missing-codex-binary",
+            &base,
+            &profile,
+        )
+        .unwrap_err();
+        assert!(error.contains("Failed to fingerprint"), "{error}");
+        assert!(!error.contains("source-error:"), "{error}");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn dirty_generation_transition_happens_only_once() {
+        let dirty = std::sync::atomic::AtomicBool::new(false);
+        assert!(begin_dirty_transition(&dirty));
+        assert!(!begin_dirty_transition(&dirty));
+        assert!(dirty.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn profile_revision_revalidation_detects_active_or_bound_profile_edits() {
+        let baseline: crate::models::ModelProfile = serde_json::from_value(json!({
+            "id": "codex-test",
+            "label": "Codex Test",
+            "provider": "codex_cli",
+            "api_url": "",
+            "model": "gpt-a"
+        }))
+        .unwrap();
+        assert!(same_profile_revision(&baseline, &baseline.clone()));
+        let mut edited = baseline.clone();
+        edited.normal_model = "gpt-b".into();
+        assert!(!same_profile_revision(&baseline, &edited));
+        let mut switched = baseline.clone();
+        switched.id = "other-profile".into();
+        assert!(!same_profile_revision(&baseline, &switched));
+    }
+
+    #[test]
+    fn duplicate_project_paths_resolve_to_the_same_isolated_home() {
+        let base = std::env::temp_dir().join(format!(
+            "wisp-runtime-home-identity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = base.join("project");
+        let home = crate::codex_runtime::profile_runtime_home(&project, "same-profile");
+        std::fs::create_dir_all(&home).unwrap();
+        let alias_project = project.join("child").join("..");
+        std::fs::create_dir_all(project.join("child")).unwrap();
+        let alias_home = crate::codex_runtime::profile_runtime_home(&alias_project, "same-profile");
+        assert!(same_runtime_home(&home, &alias_home));
+        assert!(same_project_identity(
+            "project-a",
+            &project,
+            "project-a",
+            &alias_project,
+        ));
+        assert!(!same_project_identity(
+            "project-a",
+            &project,
+            "project-b",
+            &alias_project,
+        ));
+        let other = crate::codex_runtime::profile_runtime_home(&project, "other-profile");
+        assert!(!same_runtime_home(&home, &other));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn source_pre_post_stamp_detects_config_change_but_ignores_auth_rotation() {
+        let base = std::env::temp_dir().join(format!(
+            "wisp-source-pre-post-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = base.join("source");
+        let project = base.join("project");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(source.join("config.toml"), "model='gpt-a'").unwrap();
+        std::fs::write(source.join("auth.json"), r#"{"token":"a"}"#).unwrap();
+        let profile: crate::models::ModelProfile = serde_json::from_value(json!({
+            "id": "codex-test",
+            "label": "Codex Test",
+            "provider": "codex_cli",
+            "api_url": "",
+            "model": "gpt-a"
+        }))
+        .unwrap();
+        let before = external_runtime_watch_stamp(
+            Some(&source),
+            None,
+            "missing-codex-binary",
+            &project,
+            &profile,
+        )
+        .unwrap();
+        std::fs::write(source.join("auth.json"), r#"{"token":"b"}"#).unwrap();
+        let auth_rotated = external_runtime_watch_stamp(
+            Some(&source),
+            None,
+            "missing-codex-binary",
+            &project,
+            &profile,
+        )
+        .unwrap();
+        assert_eq!(before, auth_rotated);
+        std::fs::write(source.join("config.toml"), "model='gpt-b'").unwrap();
+        let config_changed = external_runtime_watch_stamp(
+            Some(&source),
+            None,
+            "missing-codex-binary",
+            &project,
+            &profile,
+        )
+        .unwrap();
+        assert_ne!(before, config_changed);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn synchronization_commits_only_matching_pre_and_post_runtime_inputs() {
+        let inputs = |stamp: &str| CurrentRuntimeInputs {
+            source_home: Some(std::path::PathBuf::from("source-home")),
+            source_wire_home: None,
+            command: ResolvedCodexCommand {
+                source: RuntimeSource::Explicit,
+                entrypoint: RuntimeEntrypoint::Native {
+                    program: "codex".into(),
+                    args: Vec::new(),
+                },
+                codex_home: Some("isolated-home".into()),
+                environment: Default::default(),
+            },
+            command_fingerprint: "command-a".into(),
+            external_stamp: stamp.into(),
+            wsl_version: None,
+        };
+        let before = inputs("generation-a");
+        let stable_after = inputs("generation-a");
+        assert!(same_runtime_inputs(&before, &stable_after));
+        let changed_after = inputs("generation-b");
+        assert!(!same_runtime_inputs(&before, &changed_after));
     }
 }

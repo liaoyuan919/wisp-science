@@ -61,11 +61,7 @@ pub fn prepare_codex_runtime_for_profile_from_source(
     bridge: Option<&McpBridgeLaunch>,
     source_override: Option<&Path>,
 ) -> Result<RunnerRuntime, String> {
-    let profile_dir = safe_profile_dir(profile_id);
-    let home_dir = project_root
-        .join(".wisp")
-        .join("codex-home")
-        .join(profile_dir);
+    let home_dir = profile_runtime_home(project_root, profile_id);
     prepare_runtime_dir_under_project(project_root, &home_dir)?;
     let source = source_override
         .map(Path::to_path_buf)
@@ -135,6 +131,13 @@ pub fn prepare_codex_runtime_for_profile_from_source(
         env: vec![("CODEX_HOME".into(), env_home)],
         diagnostics,
     })
+}
+
+pub(crate) fn profile_runtime_home(project_root: &Path, profile_id: &str) -> PathBuf {
+    project_root
+        .join(".wisp")
+        .join("codex-home")
+        .join(safe_profile_dir(profile_id))
 }
 
 fn strip_external_process_config(config_path: &Path, target_home: &Path) -> Result<(), String> {
@@ -642,10 +645,11 @@ fn allowed_root_file(name: &str) -> bool {
     ) || name.to_ascii_lowercase().ends_with(".config.toml")
 }
 
-/// Content fingerprint for exactly the non-volatile assets Wisp mirrors from
-/// a selected Codex home, including safe absolute `*_file` references. The
-/// runtime watcher and synchronizer intentionally share this allow-list so a
-/// copied instruction/plugin change cannot evade configuration CAS.
+/// Content fingerprint for the configuration/capability assets Wisp mirrors
+/// from a selected Codex home, including safe absolute `*_file` references.
+/// `auth.json` is intentionally synchronized on actor creation but excluded
+/// here: Codex rotates credentials independently, and a token refresh must not
+/// masquerade as a model/capability configuration change in the turn CAS.
 pub(crate) fn source_assets_fingerprint(
     source: &Path,
     source_wire_home: Option<&str>,
@@ -683,7 +687,10 @@ pub(crate) fn source_assets_fingerprint(
         if file_type.is_symlink() {
             continue;
         }
-        if file_type.is_file() && allowed_root_file(&name_string) {
+        if file_type.is_file()
+            && allowed_root_file(&name_string)
+            && !name_string.eq_ignore_ascii_case("auth.json")
+        {
             update(&mut hash, name_string.as_bytes());
             let content = fs::read(entry.path()).map_err(|error| error.to_string())?;
             update(&mut hash, &content);
@@ -1833,6 +1840,37 @@ model = "local"
         std::fs::write(&plugin, "two").unwrap();
         let after = source_assets_fingerprint(&base, None).unwrap();
         assert_eq!(before, after);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn source_fingerprint_ignores_auth_rotation_but_tracks_configuration_and_skills() {
+        let base = std::env::temp_dir().join(format!(
+            "wisp-codex-config-fingerprint-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(base.join("skills").join("demo")).unwrap();
+        std::fs::write(base.join("config.toml"), "model='gpt-a'").unwrap();
+        std::fs::write(base.join("auth.json"), r#"{"token":"old"}"#).unwrap();
+        std::fs::write(base.join("skills").join("demo").join("SKILL.md"), "one").unwrap();
+
+        let baseline = source_assets_fingerprint(&base, None).unwrap();
+        std::fs::write(base.join("auth.json"), r#"{"token":"new"}"#).unwrap();
+        assert_eq!(baseline, source_assets_fingerprint(&base, None).unwrap());
+
+        std::fs::write(base.join("config.toml"), "model='gpt-b'").unwrap();
+        let config_changed = source_assets_fingerprint(&base, None).unwrap();
+        assert_ne!(baseline, config_changed);
+
+        std::fs::write(base.join("skills").join("demo").join("SKILL.md"), "two").unwrap();
+        assert_ne!(
+            config_changed,
+            source_assets_fingerprint(&base, None).unwrap()
+        );
         let _ = std::fs::remove_dir_all(base);
     }
 

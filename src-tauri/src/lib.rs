@@ -4073,15 +4073,21 @@ async fn set_active_project(
     let root = ensure_writable(PathBuf::from(&ws), &state.app_data);
     let skills = Arc::new(SkillIndex::load(&skill_paths(&root)));
     let memory = Arc::new(MemoryManager::new(&root));
-    state.set_active(
-        label,
-        ActiveProject {
-            id: id.to_string(),
-            root: root.clone(),
-            skills,
-            memory,
-        },
-    );
+    {
+        // Serialize project-root replacement with Codex actor checkout and
+        // creation. This prevents a Force/Cached create for the old root from
+        // being returned after the window already switched projects.
+        let _runtime_lifecycle = state.codex.lifecycle.lock().await;
+        state.set_active(
+            label,
+            ActiveProject {
+                id: id.to_string(),
+                root: root.clone(),
+                skills,
+                memory,
+            },
+        );
+    }
     state.set_active_frame(label, None);
     {
         state.bootstrap.lock().unwrap().workspace = root.to_string_lossy().into_owned();
@@ -4990,22 +4996,10 @@ pub fn run() {
                 reviewing: Arc::new(StdMutex::new(HashSet::new())),
             };
             app.manage(state);
-            {
-                // Runtime/config monitoring must not depend on the Settings
-                // page being open. The poll is read-only for live actors and
-                // preserves each active turn's immutable startup snapshot.
-                let handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        let state = handle.state::<AppState>();
-                        state
-                            .codex
-                            .poll_external_changes(&state.store, &handle)
-                            .await;
-                    }
-                });
-            }
+            // Codex configuration is inherited on first use, refreshed only
+            // by the user's explicit action, and fingerprint-validated before
+            // each send.  Do not run a timer here: periodic probing used to
+            // relaunch shell/WSL helpers and invalidate an otherwise stable UI.
             set_dev_flag(app.handle());
             // Restore the project windows open when the app last quit (#52). The
             // "main" window comes from tauri.conf; these are the extra per-project

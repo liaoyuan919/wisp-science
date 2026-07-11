@@ -45,12 +45,65 @@ const HOME_SEARCH_ARTIFACT_LIMIT: usize = 8;
 const HOME_SEARCH_SESSION_LIMIT: usize = 6;
 const THEME_STORAGE_KEY: &str = "wisp-theme";
 
+#[derive(Default)]
+struct ProjectOpenGate {
+    held: bool,
+    waiters: VecDeque<oneshot::Sender<()>>,
+}
+
+struct ProjectOpenPermit(Rc<RefCell<ProjectOpenGate>>);
+
+impl Drop for ProjectOpenPermit {
+    fn drop(&mut self) {
+        let next = self.0.borrow_mut().waiters.pop_front();
+        if let Some(next) = next {
+            let _ = next.send(());
+        } else {
+            self.0.borrow_mut().held = false;
+        }
+    }
+}
+
+async fn acquire_project_open_gate(gate: Rc<RefCell<ProjectOpenGate>>) -> ProjectOpenPermit {
+    let receiver = {
+        let mut state = gate.borrow_mut();
+        if state.held {
+            let (sender, receiver) = oneshot::channel();
+            state.waiters.push_back(sender);
+            Some(receiver)
+        } else {
+            state.held = true;
+            None
+        }
+    };
+    if let Some(receiver) = receiver {
+        let _ = receiver.await;
+    }
+    ProjectOpenPermit(gate)
+}
+
+fn project_transition_is_current(
+    epoch: &Rc<Cell<u64>>,
+    target: &Rc<RefCell<Option<String>>>,
+    request_epoch: u64,
+    project_id: &str,
+) -> bool {
+    epoch.get() == request_epoch && target.borrow().as_deref() == Some(project_id)
+}
+
 fn decode_runtime_snapshot(value: JsValue) -> Option<RuntimeSnapshot> {
     serde_wasm_bindgen::from_value::<RuntimeSnapshot>(value.clone()).ok().or_else(|| {
         serde_wasm_bindgen::from_value::<serde_json::Value>(value).ok()
             .and_then(|envelope| envelope.get("snapshot").cloned())
             .and_then(|snapshot| serde_json::from_value(snapshot).ok())
     })
+}
+
+fn is_codex_config_changed_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("configuration changed")
+        || message.contains("config version")
+        || (message.contains("expected version") && message.contains("current"))
 }
 
 fn decode_resolved_turn_config(value: JsValue) -> Option<ResolvedTurnConfig> {
@@ -130,19 +183,20 @@ fn upsert_persisted_plan(items: &mut Vec<ChatItem>, plan: ProposedPlanRecord) {
     }
 }
 
-fn request_codex_runtime_snapshot(
+fn request_codex_runtime_snapshot_with_ack(
     refresh: bool,
     report_error: bool,
     show_loading: bool,
     sync_profile_overrides: bool,
     request_nonce: Rc<Cell<u64>>,
     models: RwSignal<Vec<ModelProfile>>,
+    expected_project_id: RwSignal<String>,
     runtime: RwSignal<Option<RuntimeSnapshot>>,
     runtime_error: RwSignal<Option<String>>,
     loading: RwSignal<bool>,
     profile_overrides: RwSignal<CodexModeOverrides>,
+    clear_refresh_pending_on_success: Option<RwSignal<bool>>,
 ) {
-    if show_loading && loading.get_untracked() { return; }
     if show_loading { loading.set(true); }
     let request_id = request_nonce.get().wrapping_add(1);
     request_nonce.set(request_id);
@@ -166,9 +220,17 @@ fn request_codex_runtime_snapshot(
                         loading.set(false);
                         return;
                     }
-                    // Background runtime polling must never overwrite edits that
-                    // are still sitting in the Profile form.  Only initial load
-                    // and an explicit user refresh opt into reloading this layer.
+                    let expected_project = expected_project_id.get_untracked();
+                    if !snapshot.project_id.is_empty()
+                        && !expected_project.is_empty()
+                        && snapshot.project_id != expected_project
+                    {
+                        loading.set(false);
+                        return;
+                    }
+                    // Passive reads must never overwrite edits still sitting in
+                    // the Profile form. Only initial load and an explicit user
+                    // refresh opt into reloading this layer.
                     if sync_profile_overrides {
                         if let Some(saved) = snapshot.profile_overrides.clone() {
                             profile_overrides.set(saved);
@@ -176,15 +238,47 @@ fn request_codex_runtime_snapshot(
                     }
                     runtime.set(Some(snapshot));
                     runtime_error.set(None);
+                    if let Some(pending) = clear_refresh_pending_on_success {
+                        pending.set(false);
+                    }
                 } else if report_error {
                     runtime_error.set(Some("Codex runtime returned an unsupported snapshot format.".into()));
                 }
             }
             Err(error) if report_error => runtime_error.set(Some(js_error_text(error))),
-            Err(_) => {} // polling must preserve the last usable snapshot
+            Err(_) => {} // passive reads preserve the last usable snapshot
         }
         if request_nonce.get() == request_id { loading.set(false); }
     });
+}
+
+fn request_codex_runtime_snapshot(
+    refresh: bool,
+    report_error: bool,
+    show_loading: bool,
+    sync_profile_overrides: bool,
+    request_nonce: Rc<Cell<u64>>,
+    models: RwSignal<Vec<ModelProfile>>,
+    expected_project_id: RwSignal<String>,
+    runtime: RwSignal<Option<RuntimeSnapshot>>,
+    runtime_error: RwSignal<Option<String>>,
+    loading: RwSignal<bool>,
+    profile_overrides: RwSignal<CodexModeOverrides>,
+) {
+    request_codex_runtime_snapshot_with_ack(
+        refresh,
+        report_error,
+        show_loading,
+        sync_profile_overrides,
+        request_nonce,
+        models,
+        expected_project_id,
+        runtime,
+        runtime_error,
+        loading,
+        profile_overrides,
+        None,
+    );
 }
 
 fn active_profile_uses_codex(models: &[ModelProfile]) -> bool {
@@ -593,20 +687,30 @@ fn App() -> impl IntoView {
     let settings = create_rw_signal(Settings::default());
     // Configured model profiles + the composer's bottom-right picker state.
     let models = create_rw_signal::<Vec<ModelProfile>>(vec![]);
+    let show_projects = create_rw_signal(true); // app lands on the Projects screen
+    let project_info = create_rw_signal::<Option<ProjectInfo>>(None);
+    let demo_mode = create_rw_signal(false); // true = the synthetic "Example project" is open
+    let project_open_error = create_rw_signal(None::<String>);
+    let project_transition_epoch = Rc::new(Cell::new(0u64));
+    let project_transition_target = Rc::new(RefCell::new(None::<String>));
+    let project_open_gate = Rc::new(RefCell::new(ProjectOpenGate::default()));
     let model_menu_open = create_rw_signal(false);
     let codex_config_menu_open = create_rw_signal(false);
     let codex_runtime = create_rw_signal(None::<RuntimeSnapshot>);
     let codex_runtime_error = create_rw_signal(None::<String>);
     let codex_runtime_loading = create_rw_signal(false);
+    let codex_settings_action_loading = create_rw_signal(false);
     let codex_runtime_request_nonce = Rc::new(Cell::new(0u64));
     let codex_config_needs_confirmation = create_rw_signal(false);
     let codex_session_override_conflict = create_rw_signal(false);
     let codex_runtime_refresh_pending = create_rw_signal(false);
     let last_codex_generation = Rc::new(RefCell::new(String::new()));
-    let last_active_codex_profile = Rc::new(RefCell::new(None::<String>));
+    let last_codex_runtime_scope = Rc::new(RefCell::new(None::<String>));
+    let codex_expected_project_id = create_rw_signal(String::new());
     let codex_profile_overrides = create_rw_signal(CodexModeOverrides::default());
     let codex_session_overrides = create_rw_signal(CodexModeOverrides::default());
     let codex_preview = create_rw_signal(None::<ResolvedTurnConfig>);
+    let codex_preview_loading = create_rw_signal(false);
     let codex_preview_request_nonce = Rc::new(Cell::new(0u64));
     let codex_settings_preview_nonce = Rc::new(Cell::new(0u64));
     let codex_preview_normal = create_rw_signal(None::<ResolvedTurnConfig>);
@@ -620,12 +724,13 @@ fn App() -> impl IntoView {
             let generation = codex_runtime.get().map(|snapshot| snapshot.config_version).unwrap_or_default();
             let previous = std::mem::replace(&mut *last_codex_generation.borrow_mut(), generation.clone());
             if !previous.is_empty() && !generation.is_empty() && previous != generation {
+                codex_runtime_refresh_pending.set(false);
                 codex_config_needs_confirmation.set(true);
             }
         });
     }
     {
-        let last_active_codex_profile = last_active_codex_profile.clone();
+        let last_codex_runtime_scope = last_codex_runtime_scope.clone();
         let profile_runtime_request_nonce = codex_runtime_request_nonce.clone();
         let profile_preview_request_nonce = codex_preview_request_nonce.clone();
         let profile_settings_preview_nonce = codex_settings_preview_nonce.clone();
@@ -634,17 +739,37 @@ fn App() -> impl IntoView {
             if list.is_empty() { return; }
             let profile = list.iter().find(|model| model.active).or_else(|| list.first())
                 .filter(|profile| matches!(profile.provider.as_str(), "codex_cli" | "codex" | "codex_local" | "codex-local"));
-            let next_profile_id = profile.map(|profile| profile.id.clone());
             if let Some(profile) = profile {
                 codex_profile_overrides.set(codex_overrides_from_profile(profile));
             } else {
                 codex_profile_overrides.set(CodexModeOverrides::default());
             }
+            let project = project_info.get();
+            let is_project_landing = show_projects.get();
+            let is_demo = demo_mode.get();
+            let next_scope = if is_project_landing || is_demo {
+                None
+            } else {
+                profile.zip(project.as_ref()).map(|(profile, project)| {
+                    format!("{}\u{1f}{}\u{1f}{}", profile.id, project.id, project.root)
+                })
+            };
+            let next_project_id = next_scope.as_ref()
+                .and_then(|_| project.as_ref().map(|project| project.id.clone()))
+                .unwrap_or_default();
+            let awaiting_project = !is_project_landing && !is_demo && project.is_none() && profile.is_some();
             let previous = std::mem::replace(
-                &mut *last_active_codex_profile.borrow_mut(),
-                next_profile_id.clone(),
+                &mut *last_codex_runtime_scope.borrow_mut(),
+                next_scope.clone(),
             );
-            if previous == next_profile_id && next_profile_id.is_some() { return; }
+            // `show_projects=false` is set before `get_project_info` resolves.
+            // Even when both the old and new scopes are `None`, keep Codex
+            // gated so the composer cannot briefly expose the exec fallback.
+            if awaiting_project {
+                codex_runtime_loading.set(true);
+                codex_runtime_error.set(None);
+            }
+            if previous == next_scope { return; }
 
             // Never display or send a catalog/config snapshot resolved for the
             // previous Profile. Increment both request epochs so late responses
@@ -654,16 +779,20 @@ fn App() -> impl IntoView {
             codex_preview_normal.set(None);
             codex_preview_plan.set(None);
             codex_session_override_conflict.set(false);
-            codex_runtime_loading.set(false);
+            codex_runtime_loading.set(awaiting_project);
+            codex_expected_project_id.set(next_project_id);
             profile_preview_request_nonce.set(profile_preview_request_nonce.get().wrapping_add(1));
             profile_settings_preview_nonce.set(profile_settings_preview_nonce.get().wrapping_add(1));
             profile_runtime_request_nonce.set(profile_runtime_request_nonce.get().wrapping_add(1));
-            if next_profile_id.is_some() {
+            if next_scope.is_some() {
                 codex_runtime_refresh_pending.set(false);
-                codex_config_needs_confirmation.set(true);
-                status.set(t(locale.get_untracked(), "codex.confirm_changed").into());
+                // Selecting (or initially restoring) a Codex Profile adopts its
+                // inherited snapshot as the new baseline. Confirmation is only
+                // required when that baseline subsequently changes.
+                codex_config_needs_confirmation.set(false);
+                status.set(String::new());
                 request_codex_runtime_snapshot(
-                    true, false, false, false, profile_runtime_request_nonce.clone(), models,
+                    false, false, true, false, profile_runtime_request_nonce.clone(), models, codex_expected_project_id,
                     codex_runtime, codex_runtime_error, codex_runtime_loading,
                     codex_profile_overrides,
                 );
@@ -694,12 +823,6 @@ fn App() -> impl IntoView {
             models.set(list);
         }
     });
-    request_codex_runtime_snapshot(
-        false, false, false, true, codex_runtime_request_nonce.clone(), models,
-        codex_runtime, codex_runtime_error,
-        codex_runtime_loading, codex_profile_overrides,
-    );
-
     // Tauri's native drag/drop event contains absolute paths (including
     // directories). Keep those paths as references; unlike the browser File
     // picker they must not be copied through `upload_file` first.
@@ -742,8 +865,6 @@ fn App() -> impl IntoView {
     // Per-session specialist (persona) picker, gated to before the first message.
     let session_specialist = create_rw_signal::<Option<Specialist>>(None);
     let demos = create_rw_signal::<Vec<DemoInfo>>(vec![]);
-    let show_projects = create_rw_signal(true); // app lands on the Projects screen
-    let demo_mode = create_rw_signal(false); // true = the synthetic "Example project" is open
     let command_palette_open = create_rw_signal(false);
     let action_palette_open = create_rw_signal(false);
     // Top-nav project switcher dropdown + Project Settings modal.
@@ -772,40 +893,23 @@ fn App() -> impl IntoView {
     refresh_sessions(sessions);
     refresh_folders(folders);
 
-    // Keep the selected local runtime in sync while Settings is visible.  A
-    // failed background poll never clears a good snapshot; explicit refreshes
-    // still surface their error next to the runtime card.
+    // Load the selected local runtime once when Models settings opens. Runtime
+    // changes are applied only by the explicit refresh action (or send-time
+    // validation), so merely leaving Settings open never churns the actor.
     {
         let settings_runtime_request_nonce = codex_runtime_request_nonce.clone();
         create_effect(move |_| {
-            if show_settings.get() && settings_section.get() == "models" {
+            if show_settings.get() && settings_section.get() == "models"
+                && !show_projects.get() && project_info.get().is_some()
+            {
                 request_codex_runtime_snapshot(
-                    false, false, false, false, settings_runtime_request_nonce.clone(), models,
+                    false, false, false, false, settings_runtime_request_nonce.clone(), models, codex_expected_project_id,
                     codex_runtime, codex_runtime_error,
                     codex_runtime_loading, codex_profile_overrides,
                 );
             }
         });
     }
-    if let Some(window) = web_sys::window() {
-        let poll_runtime_request_nonce = codex_runtime_request_nonce.clone();
-        let poll = Closure::wrap(Box::new(move || {
-            if show_settings.get_untracked() && settings_section.get_untracked() == "models"
-                && !codex_runtime_loading.get_untracked()
-            {
-                request_codex_runtime_snapshot(
-                    true, false, false, false, poll_runtime_request_nonce.clone(), models,
-                    codex_runtime, codex_runtime_error,
-                    codex_runtime_loading, codex_profile_overrides,
-                );
-            }
-        }) as Box<dyn FnMut()>);
-        let _ = window.set_interval_with_callback_and_timeout_and_arguments_0(
-            poll.as_ref().unchecked_ref(), 10_000,
-        );
-        poll.forget();
-    }
-
     create_effect(move |_| {
         codex_session_override_conflict.set(false);
         let Some(session_id) = active_session.get() else {
@@ -849,11 +953,18 @@ fn App() -> impl IntoView {
             request_nonce.set(request_id);
             if !active_profile_uses_codex(&models.get()) {
                 codex_preview.set(None);
+                codex_preview_loading.set(false);
+                return;
+            }
+            if generation.is_none() {
+                codex_preview.set(None);
+                codex_preview_loading.set(false);
                 return;
             }
             // Never show the previous mode/session as if it described the new
             // selection while its resolver call is still pending.
             codex_preview.set(None);
+            codex_preview_loading.set(true);
             let response_nonce = request_nonce.clone();
             spawn_local(async move {
                 let args = to_value(&serde_json::json!({
@@ -863,18 +974,18 @@ fn App() -> impl IntoView {
                     "configVersion": generation.clone(),
                     "previewScope": "session",
                 })).unwrap();
-                if let Ok(value) = invoke_checked("preview_codex_turn_config", args).await {
-                    let still_current = response_nonce.get() == request_id
-                        && active_session.get_untracked() == session_id
-                        && collaboration_mode.get_untracked() == mode
-                        && codex_session_overrides.get_untracked() == overrides
-                        && codex_runtime.get_untracked().map(|snapshot| snapshot.config_version) == generation
-                        && active_profile_uses_codex(&models.get_untracked());
-                    if still_current {
-                        if let Some(config) = decode_resolved_turn_config(value) {
-                            codex_preview.set(Some(config));
-                        }
+                let response = invoke_checked("preview_codex_turn_config", args).await;
+                let still_current = response_nonce.get() == request_id
+                    && active_session.get_untracked() == session_id
+                    && collaboration_mode.get_untracked() == mode
+                    && codex_session_overrides.get_untracked() == overrides
+                    && codex_runtime.get_untracked().map(|snapshot| snapshot.config_version) == generation
+                    && active_profile_uses_codex(&models.get_untracked());
+                if still_current {
+                    if let Ok(value) = response {
+                        codex_preview.set(decode_resolved_turn_config(value));
                     }
+                    codex_preview_loading.set(false);
                 }
             });
         });
@@ -976,20 +1087,16 @@ fn App() -> impl IntoView {
     let file_cwd = create_rw_signal(".".to_string());
     let file_entries = create_rw_signal::<Vec<DirEntry>>(vec![]);
     let file_search_hits = create_rw_signal::<Vec<FileSearchHit>>(vec![]);
-    let project_info = create_rw_signal::<Option<ProjectInfo>>(None);
-    // The backend watches the selected Codex executable/home/profile. A change
-    // during a turn is deliberately deferred there; mirror that contract in
-    // the UI by preserving the startup snapshot and requiring confirmation.
-    // Idle changes may refresh the catalog immediately, but still cannot be
-    // sent until the user confirms the new effective config.
-    let changed_runtime_request_nonce = codex_runtime_request_nonce.clone();
+    // Runtime-change events are notifications only. Preserve the turn snapshot
+    // and let the user decide when to refresh; opening Settings must never
+    // restart or continually reread the local Codex actor in the background.
     let runtime_changed_cb = Closure::wrap(Box::new(move |payload: JsValue| {
         let Ok(value) = serde_wasm_bindgen::from_value::<serde_json::Value>(payload) else { return; };
         let profile_id = value.get("profileId").or_else(|| value.get("profile_id"))
             .and_then(|value| value.as_str()).unwrap_or("");
         let project_id = value.get("projectId").or_else(|| value.get("project_id"))
             .and_then(|value| value.as_str()).unwrap_or("");
-        let pending = value.get("pending").and_then(|value| value.as_bool()).unwrap_or(false);
+        let _pending = value.get("pending").and_then(|value| value.as_bool()).unwrap_or(false);
         let profiles = models.get_untracked();
         let profile_matches = profiles.iter()
             .find(|profile| profile.active)
@@ -1003,34 +1110,15 @@ fn App() -> impl IntoView {
         });
         if !profile_matches || !project_matches { return; }
         codex_config_needs_confirmation.set(true);
-        codex_runtime_refresh_pending.set(pending);
-        status.set(t(locale.get_untracked(), "codex.confirm_changed").into());
-        if !pending {
-            request_codex_runtime_snapshot(
-                true, false, false, false, changed_runtime_request_nonce.clone(), models,
-                codex_runtime, codex_runtime_error,
-                codex_runtime_loading, codex_profile_overrides,
-            );
-        }
+        codex_runtime_refresh_pending.set(true);
+        status.set(t(locale.get_untracked(), "codex.refresh_detected").into());
     }) as Box<dyn FnMut(JsValue)>);
     let runtime_changed_js = runtime_changed_cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
     std::mem::forget(runtime_changed_cb);
     spawn_local(async move { let _ = listen("codex-runtime-changed", &runtime_changed_js).await; });
-    // Dedicated project window (#52): if this window was opened for a specific
-    // project (`?project=<id>`), skip the landing and open it straight away.
-    if let Some(pid) = url_project_param() {
-        show_projects.set(false);
-        spawn_local(async move {
-            let arg = to_value(&serde_json::json!({ "id": pid })).unwrap();
-            let _ = invoke("open_project", arg).await;
-            refresh_sessions(sessions);
-            refresh_folders(folders);
-            let v = invoke("get_project_info", JsValue::UNDEFINED).await;
-            if let Ok(p) = serde_wasm_bindgen::from_value::<ProjectInfo>(v) {
-                project_info.set(Some(p));
-            }
-        });
-    }
+    // Dedicated project windows use the same guarded transition as every
+    // interactive project-open path. The callback is built after `load_session`.
+    let dedicated_project_id = url_project_param();
     let show_capabilities = create_rw_signal(false);
     let skill_filter_tag = create_rw_signal(String::new());
     let caps = create_rw_signal::<Option<Capabilities>>(None);
@@ -1157,8 +1245,10 @@ fn App() -> impl IntoView {
 
     spawn_local(async move {
         let v = invoke("get_project_info", JsValue::UNDEFINED).await;
-        if let Ok(p) = serde_wasm_bindgen::from_value::<ProjectInfo>(v) {
-            project_info.set(Some(p));
+        if show_projects.get_untracked() {
+            if let Ok(p) = serde_wasm_bindgen::from_value::<ProjectInfo>(v) {
+                project_info.set(Some(p));
+            }
         }
         let v = invoke("get_settings", JsValue::UNDEFINED).await;
         if let Ok(cfg) = serde_wasm_bindgen::from_value::<Settings>(v) {
@@ -1204,7 +1294,6 @@ fn App() -> impl IntoView {
     let flush_scheduled = Rc::new(Cell::new(false));
     let cb_buf = delta_buf.clone();
     let cb_scheduled = flush_scheduled.clone();
-    let agent_runtime_request_nonce = codex_runtime_request_nonce.clone();
     let cb = Closure::wrap(Box::new(move |payload: JsValue| {
         let ev: AgentEvent = match serde_wasm_bindgen::from_value(payload) {
             Ok(e) => e,
@@ -1299,14 +1388,6 @@ fn App() -> impl IntoView {
                 }
                 refresh_sessions(sessions);
                 refresh_codex_turn_audits(frame_id.clone(), active_cb, codex_turn_audits);
-                if codex_runtime_refresh_pending.get_untracked() {
-                    codex_runtime_refresh_pending.set(false);
-                    request_codex_runtime_snapshot(
-                        true, false, false, false, agent_runtime_request_nonce.clone(), models_cb,
-                        codex_runtime, codex_runtime_error, codex_runtime_loading,
-                        codex_profile_overrides,
-                    );
-                }
             }
             AgentEvent::Error { frame_id, message } => {
                 flush_now();
@@ -1320,14 +1401,6 @@ fn App() -> impl IntoView {
                 clear_running_if_idle(pending_cb, running_cb, &frame_id);
                 if stopping_session.get().as_deref() == Some(&frame_id) {
                     stopping_session.set(None);
-                }
-                if codex_runtime_refresh_pending.get_untracked() {
-                    codex_runtime_refresh_pending.set(false);
-                    request_codex_runtime_snapshot(
-                        true, false, false, false, agent_runtime_request_nonce.clone(), models_cb,
-                        codex_runtime, codex_runtime_error, codex_runtime_loading,
-                        codex_profile_overrides,
-                    );
                 }
                 refresh_codex_turn_audits(frame_id.clone(), active_cb, codex_turn_audits);
             }
@@ -1527,7 +1600,9 @@ fn App() -> impl IntoView {
         }
         let mut turn_text = text.clone();
         if action == ComposerSendAction::Normal && (trimmed == "/plan" || trimmed.starts_with("/plan ")) {
-            collaboration_mode.set("plan".into());
+            if collaboration_mode.get_untracked() != "plan" {
+                collaboration_mode.set("plan".into());
+            }
             picker_mode.set(None);
             turn_text = trimmed.strip_prefix("/plan").unwrap_or("").trim_start().to_string();
             if turn_text.trim().is_empty() {
@@ -1544,11 +1619,29 @@ fn App() -> impl IntoView {
                 return;
             }
         } else if action == ComposerSendAction::PlanFirst {
-            collaboration_mode.set("plan".into());
+            if collaboration_mode.get_untracked() != "plan" {
+                collaboration_mode.set("plan".into());
+            }
+        }
+        if using_codex && codex_runtime_loading.get() {
+            status.set(t(locale.get(), "codex.runtime.wait").into());
+            return;
         }
         if using_codex && codex_config_needs_confirmation.get() {
             codex_config_menu_open.set(true);
-            status.set(t(locale.get(), "codex.confirm_changed").into());
+            let key = if codex_runtime_refresh_pending.get() {
+                "codex.refresh_detected"
+            } else {
+                "codex.confirm_changed"
+            };
+            status.set(t(locale.get(), key).into());
+            return;
+        }
+        let preview_matches_mode = codex_preview.get().is_some_and(|config| {
+            (collaboration_mode.get() == "plan") == (config.mode == "plan")
+        });
+        if using_codex_app_server && (codex_preview_loading.get() || !preview_matches_mode) {
+            status.set(t(locale.get(), "codex.preview.wait").into());
             return;
         }
         let turn_mode = collaboration_mode.get();
@@ -1639,6 +1732,7 @@ fn App() -> impl IntoView {
                     "overrides": session_overrides.clone(),
                     "configVersion": config_generation.clone(),
                     "previewScope": "session",
+                    "validateRuntime": true,
                 })).unwrap();
                 let resolved = match invoke_checked("preview_codex_turn_config", args).await {
                     Ok(value) => match decode_resolved_turn_config(value) {
@@ -1653,16 +1747,16 @@ fn App() -> impl IntoView {
                     },
                     Err(error) => {
                         let raw = js_error_text(error);
-                        let message = raw.to_ascii_lowercase();
-                        let changed = message.contains("configuration changed")
-                            || message.contains("config version")
-                            || (message.contains("expected version") && message.contains("current"));
+                        let changed = is_codex_config_changed_error(&raw);
                         restore_failure(active.as_deref());
                         if changed {
-                            request_codex_runtime_snapshot(
-                                true, false, false, false, send_runtime_request_nonce.clone(), models,
+                            codex_config_needs_confirmation.set(true);
+                            codex_runtime_refresh_pending.set(true);
+                            request_codex_runtime_snapshot_with_ack(
+                                false, false, true, false, send_runtime_request_nonce.clone(), models, codex_expected_project_id,
                                 codex_runtime, codex_runtime_error,
                                 codex_runtime_loading, codex_profile_overrides,
+                                Some(codex_runtime_refresh_pending),
                             );
                             codex_config_menu_open.set(true);
                             status.set(t(locale.get(), "codex.config_changed").into());
@@ -1688,10 +1782,13 @@ fn App() -> impl IntoView {
                 codex_preview.set(Some(resolved));
                 if stale {
                     restore_failure(active.as_deref());
-                    request_codex_runtime_snapshot(
-                        true, false, false, false, send_runtime_request_nonce.clone(), models,
+                    codex_config_needs_confirmation.set(true);
+                    codex_runtime_refresh_pending.set(true);
+                    request_codex_runtime_snapshot_with_ack(
+                        false, false, true, false, send_runtime_request_nonce.clone(), models, codex_expected_project_id,
                         codex_runtime, codex_runtime_error,
                         codex_runtime_loading, codex_profile_overrides,
+                        Some(codex_runtime_refresh_pending),
                     );
                     codex_config_menu_open.set(true);
                     status.set(t(locale.get(), "codex.config_changed").into());
@@ -1748,19 +1845,26 @@ fn App() -> impl IntoView {
                 ).await {
                     restore_failure(active.as_deref());
                     let lower = message.to_ascii_lowercase();
-                    if lower.contains("configuration changed")
-                        || lower.contains("config version")
-                        || lower.contains("revision")
-                        || lower.contains("conflict")
-                        || (lower.contains("expected version") && lower.contains("current"))
-                    {
-                        request_codex_runtime_snapshot(
-                            true, false, false, false, send_runtime_request_nonce.clone(), models,
+                    if is_codex_config_changed_error(&message) {
+                        codex_config_needs_confirmation.set(true);
+                        codex_runtime_refresh_pending.set(true);
+                        request_codex_runtime_snapshot_with_ack(
+                            false, false, true, false, send_runtime_request_nonce.clone(), models, codex_expected_project_id,
                             codex_runtime, codex_runtime_error,
                             codex_runtime_loading, codex_profile_overrides,
+                            Some(codex_runtime_refresh_pending),
                         );
                         codex_config_menu_open.set(true);
                         status.set(t(locale.get(), "codex.config_changed").into());
+                    } else if lower.contains("revision") || lower.contains("conflict") {
+                        // The serialized override writer already reread the
+                        // session layer/revision. Do not restart or refresh the
+                        // Codex runtime for a session-only compare-and-swap.
+                        codex_config_needs_confirmation.set(true);
+                        codex_config_menu_open.set(true);
+                        status.set(tf(locale.get(), "codex.override_failed", &[(
+                            "msg", &localize_backend(locale.get(), &message),
+                        )]));
                     } else {
                         status.set(tf(locale.get(), "status.send_failed", &[(
                             "msg", &localize_backend(locale.get(), &message),
@@ -2360,10 +2464,12 @@ fn App() -> impl IntoView {
 
     let explicit_runtime_request_nonce = codex_runtime_request_nonce.clone();
     let refresh_codex_runtime = Callback::new(move |_: ()| {
-        request_codex_runtime_snapshot(
-            true, true, true, true, explicit_runtime_request_nonce.clone(), models,
+        if show_projects.get_untracked() || project_info.get_untracked().is_none() { return; }
+        request_codex_runtime_snapshot_with_ack(
+            true, true, true, true, explicit_runtime_request_nonce.clone(), models, codex_expected_project_id,
             codex_runtime, codex_runtime_error,
             codex_runtime_loading, codex_profile_overrides,
+            Some(codex_runtime_refresh_pending),
         );
     });
 
@@ -2374,7 +2480,9 @@ fn App() -> impl IntoView {
         let request_id = settings_preview_nonce.get().wrapping_add(1);
         settings_preview_nonce.set(request_id);
         let response_nonce = settings_preview_nonce.clone();
-        codex_runtime_loading.set(true);
+        codex_preview_normal.set(None);
+        codex_preview_plan.set(None);
+        codex_settings_action_loading.set(true);
         spawn_local(async move {
             for (mode, output) in [("default", codex_preview_normal), ("plan", codex_preview_plan)] {
                 let args = to_value(&serde_json::json!({
@@ -2395,7 +2503,7 @@ fn App() -> impl IntoView {
                     Err(_) => return,
                 }
             }
-            if response_nonce.get() == request_id { codex_runtime_loading.set(false); }
+            if response_nonce.get() == request_id { codex_settings_action_loading.set(false); }
         });
     });
 
@@ -2417,7 +2525,7 @@ fn App() -> impl IntoView {
             return;
         };
         let overrides = codex_profile_overrides.get();
-        codex_runtime_loading.set(true);
+        codex_settings_action_loading.set(true);
         let profile_json = serde_json::json!({
             "id": profile.id,
             "label": profile.label,
@@ -2454,11 +2562,14 @@ fn App() -> impl IntoView {
                     if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(value) { models.set(list); }
                     codex_runtime_error.set(None);
                     status.set(t(locale.get(), "status.settings_saved").into());
+                    codex_settings_action_loading.set(false);
                     preview_codex_configs.call(());
                 }
-                Err(error) => codex_runtime_error.set(Some(localize_backend(locale.get(), &js_error_text(error)))),
+                Err(error) => {
+                    codex_runtime_error.set(Some(localize_backend(locale.get(), &js_error_text(error))));
+                    codex_settings_action_loading.set(false);
+                }
             }
-            codex_runtime_loading.set(false);
         });
     });
 
@@ -2716,6 +2827,7 @@ fn App() -> impl IntoView {
         })
     };
 
+    let plan_runtime_request_nonce = codex_runtime_request_nonce.clone();
     let on_plan_action = Callback::new(move |(action, plan_id, revision, plan_native): (String, String, i64, bool)| {
         if action == "modify" {
             collaboration_mode.set("plan".into());
@@ -2738,6 +2850,22 @@ fn App() -> impl IntoView {
         if plan_id.is_empty() || revision <= 0 { return; }
         let Some(session_id) = active_session.get() else { return; };
         let approving = action == "approve";
+        if plan_native && active_profile_uses_codex(&models.get()) && codex_runtime_loading.get() {
+            status.set(t(locale.get(), "codex.runtime.wait").into());
+            return;
+        }
+        if approving && plan_native && active_profile_uses_codex(&models.get())
+            && codex_config_needs_confirmation.get()
+        {
+            codex_config_menu_open.set(true);
+            let key = if codex_runtime_refresh_pending.get() {
+                "codex.refresh_detected"
+            } else {
+                "codex.confirm_changed"
+            };
+            status.set(t(locale.get(), key).into());
+            return;
+        }
         if approving {
             begin_pending_turn(pending_turns, running, &session_id);
             status.set(t(locale.get(), "plan.executing").into());
@@ -2749,6 +2877,7 @@ fn App() -> impl IntoView {
         let action_uses_codex = plan_native && active_profile_uses_codex(&models.get());
         let requested_generation = codex_runtime.get().map(|snapshot| snapshot.config_version);
         let requested_overrides = codex_session_overrides.get();
+        let action_runtime_request_nonce = plan_runtime_request_nonce.clone();
         spawn_local(async move {
             // Approval is an implementation turn in Default mode. Resolve that
             // exact config now and pass the same generation/override snapshot to
@@ -2760,6 +2889,7 @@ fn App() -> impl IntoView {
                     "overrides": requested_overrides.clone(),
                     "configVersion": requested_generation.clone(),
                     "previewScope": "session",
+                    "validateRuntime": true,
                 })).unwrap();
                 match invoke_checked("preview_codex_turn_config", preview_args).await {
                     Ok(value) => match decode_resolved_turn_config(value) {
@@ -2776,6 +2906,22 @@ fn App() -> impl IntoView {
                                 finish_pending_turn(pending_turns, running, &session_id);
                                 return;
                             }
+                            let stale = requested_generation.as_ref().is_some_and(|generation| {
+                                !generation.is_empty() && generation != &version
+                            });
+                            if stale {
+                                finish_pending_turn(pending_turns, running, &session_id);
+                                codex_config_needs_confirmation.set(true);
+                                codex_runtime_refresh_pending.set(true);
+                                request_codex_runtime_snapshot_with_ack(
+                                    false, false, true, false, action_runtime_request_nonce.clone(), models, codex_expected_project_id,
+                                    codex_runtime, codex_runtime_error, codex_runtime_loading,
+                                    codex_profile_overrides, Some(codex_runtime_refresh_pending),
+                                );
+                                codex_config_menu_open.set(true);
+                                status.set(t(locale.get(), "codex.config_changed").into());
+                                return;
+                            }
                             Some(version)
                         }
                         None => {
@@ -2787,10 +2933,23 @@ fn App() -> impl IntoView {
                         }
                     },
                     Err(error) => {
-                        status.set(tf(locale.get(), "status.send_failed", &[(
-                            "msg", &localize_backend(locale.get(), &js_error_text(error)),
-                        )]));
+                        let raw = js_error_text(error);
                         finish_pending_turn(pending_turns, running, &session_id);
+                        if is_codex_config_changed_error(&raw) {
+                            codex_config_needs_confirmation.set(true);
+                            codex_runtime_refresh_pending.set(true);
+                            request_codex_runtime_snapshot_with_ack(
+                                false, false, true, false, action_runtime_request_nonce.clone(), models, codex_expected_project_id,
+                                codex_runtime, codex_runtime_error, codex_runtime_loading,
+                                codex_profile_overrides, Some(codex_runtime_refresh_pending),
+                            );
+                            codex_config_menu_open.set(true);
+                            status.set(t(locale.get(), "codex.config_changed").into());
+                        } else {
+                            status.set(tf(locale.get(), "status.send_failed", &[(
+                                "msg", &localize_backend(locale.get(), &raw),
+                            )]));
+                        }
                         return;
                     }
                 }
@@ -3387,23 +3546,136 @@ fn App() -> impl IntoView {
     });
 
     // --- Top-nav project switcher + Project Settings ---
-    // Switch the active project inline (same flow as the Projects screen).
-    let switch_project = Callback::new(move |id: String| {
-        show_proj_menu.set(false);
-        show_projects.set(false);
-        demo_mode.set(false);
-        spawn_local(async move {
-            let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
-            let _ = invoke("open_project", arg).await;
+    // Every project-open entry point shares one epoch/target guard and one
+    // serialized gate. A rapid A -> B switch can therefore never let A's late
+    // response load a session, refresh lists, or publish project metadata after
+    // B has become the requested target.
+    let open_project_transition = {
+        let transition_epoch = project_transition_epoch.clone();
+        let transition_target = project_transition_target.clone();
+        let open_gate = project_open_gate.clone();
+        let load_session = load_session.clone();
+        Callback::new(move |(project_id, session_id): (String, Option<String>)| {
+            let request_epoch = transition_epoch.get().wrapping_add(1);
+            transition_epoch.set(request_epoch);
+            *transition_target.borrow_mut() = Some(project_id.clone());
+
+            project_open_error.set(None);
+            codex_runtime_error.set(None);
+            status.set(String::new());
+            show_proj_menu.set(false);
+            demo_mode.set(false);
             items.set(vec![]);
             active_session.set(None);
             collapsed_folders.set(HashSet::new());
-            refresh_sessions(sessions);
-            refresh_folders(folders);
-            let v = invoke("get_project_info", JsValue::UNDEFINED).await;
-            if let Ok(p) = serde_wasm_bindgen::from_value::<ProjectInfo>(v) { project_info.set(Some(p)); }
-        });
-    });
+            project_info.set(None);
+            show_projects.set(false);
+
+            let transition_epoch = transition_epoch.clone();
+            let transition_target = transition_target.clone();
+            let open_gate = open_gate.clone();
+            let load_session = load_session.clone();
+            spawn_local(async move {
+                let _permit = acquire_project_open_gate(open_gate).await;
+                if !project_transition_is_current(
+                    &transition_epoch,
+                    &transition_target,
+                    request_epoch,
+                    &project_id,
+                ) {
+                    return;
+                }
+
+                let args = to_value(&serde_json::json!({ "id": project_id.clone() })).unwrap();
+                let open_result = invoke_checked("open_project", args).await;
+                if !project_transition_is_current(
+                    &transition_epoch,
+                    &transition_target,
+                    request_epoch,
+                    &project_id,
+                ) {
+                    return;
+                }
+
+                let project_result = match open_result {
+                    Ok(_) => invoke_checked("get_project_info", JsValue::UNDEFINED).await,
+                    Err(error) => Err(error),
+                };
+                if !project_transition_is_current(
+                    &transition_epoch,
+                    &transition_target,
+                    request_epoch,
+                    &project_id,
+                ) {
+                    return;
+                }
+
+                let result = project_result
+                    .map_err(js_error_text)
+                    .and_then(|value| {
+                        serde_wasm_bindgen::from_value::<ProjectInfo>(value)
+                            .map_err(|_| "The project returned invalid metadata.".to_string())
+                    })
+                    .and_then(|project| {
+                        if project.id == project_id {
+                            Ok(project)
+                        } else {
+                            Err(format!(
+                                "The project response did not match the requested project ({project_id})."
+                            ))
+                        }
+                    });
+
+                let project = match result {
+                    Ok(project) => project,
+                    Err(raw_error) => {
+                        let loc = locale.get_untracked();
+                        let detail = localize_backend(loc, &raw_error);
+                        let message = tf(loc, "projects.open_failed", &[("msg", &detail)]);
+                        project_open_error.set(Some(message.clone()));
+                        codex_runtime_error.set(Some(message.clone()));
+                        status.set(message);
+                        project_info.set(None);
+                        *transition_target.borrow_mut() = None;
+                        show_projects.set(true);
+                        // Set this last so any effect triggered by returning to
+                        // the landing cannot leave the pre-info send gate stuck.
+                        codex_runtime_loading.set(false);
+                        return;
+                    }
+                };
+
+                // No await occurs after this final guard, so a newer transition
+                // cannot interleave before these current-project actions run.
+                if !project_transition_is_current(
+                    &transition_epoch,
+                    &transition_target,
+                    request_epoch,
+                    &project_id,
+                ) {
+                    return;
+                }
+                project_info.set(Some(project));
+                if let Some(session_id) = session_id {
+                    load_session.call(session_id);
+                }
+                refresh_sessions(sessions);
+                refresh_folders(folders);
+            });
+        })
+    };
+    // Switch the active project inline (same guarded flow as the Projects screen).
+    let switch_project = {
+        let open_project_transition = open_project_transition;
+        Callback::new(move |id: String| {
+            open_project_transition.call((id, None));
+        })
+    };
+    // Dedicated project window (#52): enter through the same serialized,
+    // target-validated transition instead of maintaining a second startup path.
+    if let Some(project_id) = dedicated_project_id {
+        switch_project.call(project_id);
+    }
     let toggle_proj_menu = move |_| {
         let opening = !show_proj_menu.get();
         show_proj_menu.set(opening);
@@ -3485,18 +3757,12 @@ fn App() -> impl IntoView {
         }
     };
 
-    let palette_open_session = Callback::new(move |(project_id, session_id): (String, String)| {
-        show_projects.set(false);
-        demo_mode.set(false);
-        let load = load_session.clone();
-        spawn_local(async move {
-            let _ = invoke("open_project", to_value(&serde_json::json!({ "id": project_id })).unwrap()).await;
-            load.call(session_id);
-            refresh_sessions(sessions);
-            let v = invoke("get_project_info", JsValue::UNDEFINED).await;
-            if let Ok(p) = serde_wasm_bindgen::from_value::<ProjectInfo>(v) { project_info.set(Some(p)); }
-        });
-    });
+    let palette_open_session = {
+        let open_project_transition = open_project_transition;
+        Callback::new(move |(project_id, session_id): (String, String)| {
+            open_project_transition.call((project_id, Some(session_id)));
+        })
+    };
     let palette_open_artifact = Callback::new(move |(path, name, kind): (String, String, String)| {
         modal_artifact.set(Some((path, name, kind)));
     });
@@ -3599,11 +3865,12 @@ fn App() -> impl IntoView {
             on_manage_skills=palette_manage_skills on_attach=palette_attach />
         <ProjectLanding
             state=ProjectLandingState {
-                show_projects, demo_mode, items, active_session, collapsed_folders, sessions, folders,
-                project_info, demos, modal_artifact, locale, running, approval_pending,
+                show_projects, demo_mode, items, active_session, project_open_error,
+                demos, modal_artifact, locale, running, approval_pending,
                 command_palette_open,
             }
-            load_session=load_session
+            open_project=switch_project
+            open_project_session=palette_open_session
             open_settings=Callback::new(move |section: Option<String>| open_settings_fn(section))
         />
         <div class="app"
@@ -4121,7 +4388,12 @@ fn App() -> impl IntoView {
                                     </div>
                                 }
                             })}
-                            {move || (active_profile_uses_codex(&models.get()) && codex_runtime.get().is_none()).then(|| {
+                            {move || (active_profile_uses_codex(&models.get()) && codex_runtime_loading.get()).then(|| view! {
+                                <div class="codex-composer-config codex-runtime-loading" aria-live="polite">
+                                    <span class="codex-runtime-loading-label"><span class="codex-mode-dot"></span>{t(locale.get(), "codex.runtime.loading_short")}</span>
+                                </div>
+                            })}
+                            {move || (active_profile_uses_codex(&models.get()) && codex_runtime.get().is_none() && !codex_runtime_loading.get()).then(|| {
                                 let plan_mode = collaboration_mode.get() == "plan";
                                 let mode = if plan_mode { "plan".to_string() } else { "default".to_string() };
                                 let profile = models.get().into_iter().find(|profile| profile.active)
@@ -4200,12 +4472,16 @@ fn App() -> impl IntoView {
                                                 </label>
                                                 {plan_mode.then(|| view! { <div class="codex-inline-notice">{move || t(locale.get(), "codex.plan.read_only")}</div> })}
                                                 {move || codex_config_needs_confirmation.get().then(|| view! {
-                                                    <button type="button" class="codex-confirm-config" on:click=move |_| {
-                                                        codex_config_needs_confirmation.set(false);
-                                                        codex_session_override_conflict.set(false);
-                                                        codex_config_menu_open.set(false);
-                                                        status.set(t(locale.get_untracked(), "codex.confirmed").into());
-                                                    }>{move || t(locale.get(), "codex.confirm_config")}</button>
+                                                    {if codex_runtime_refresh_pending.get() {
+                                                        view! { <div class="codex-refresh-required">{t(locale.get(), "codex.refresh_detected")}</div> }.into_view()
+                                                    } else {
+                                                        view! { <button type="button" class="codex-confirm-config" on:click=move |_| {
+                                                            codex_config_needs_confirmation.set(false);
+                                                            codex_session_override_conflict.set(false);
+                                                            codex_config_menu_open.set(false);
+                                                            status.set(t(locale.get_untracked(), "codex.confirmed").into());
+                                                        }>{move || t(locale.get(), "codex.confirm_config")}</button> }.into_view()
+                                                    }}
                                                 })}
                                                 <button type="button" class="codex-reset-overrides" on:click=move |_| {
                                                     codex_session_overrides.set(CodexModeOverrides::default());
@@ -4217,15 +4493,26 @@ fn App() -> impl IntoView {
                                     </div>
                                 }
                             })}
-                            {move || (active_profile_uses_codex(&models.get()) && codex_runtime.get().is_some()).then(|| {
+                            {move || (active_profile_uses_codex(&models.get()) && codex_runtime.get().is_some() && !codex_runtime_loading.get()).then(|| {
                                 let plan_mode = collaboration_mode.get() == "plan";
                                 let native = codex_runtime.get().is_some_and(|snapshot| snapshot.provider_capabilities.native_plan);
                                 let preview = codex_preview.get();
+                                let preview_pending = codex_preview_loading.get() || preview.as_ref().is_none_or(|config| {
+                                    plan_mode != (config.mode == "plan")
+                                });
                                 let requested = preview.as_ref().map(|config| config.requested_model().to_string()).unwrap_or_default();
                                 let effective = preview.as_ref().map(|config| config.effective_model().to_string()).unwrap_or_default();
-                                let effort = preview.as_ref().map(|config| config.effective_effort().to_string()).unwrap_or_default();
+                                let effort = (!preview_pending).then(|| preview.as_ref().map(|config| config.effective_effort().to_string()).unwrap_or_default()).unwrap_or_default();
                                 let rerouted = !requested.is_empty() && !effective.is_empty() && requested != effective;
-                                let model_label = if rerouted { format!("{requested} → {effective}") } else if effective.is_empty() { t(locale.get(), "codex.inherit").into() } else { effective };
+                                let model_label = if preview_pending {
+                                    t(locale.get(), "codex.preview.loading_short").into()
+                                } else if rerouted {
+                                    format!("{requested} → {effective}")
+                                } else if effective.is_empty() {
+                                    t(locale.get(), "codex.inherit").into()
+                                } else {
+                                    effective
+                                };
                                 view! {
                                     <div class="codex-composer-config" class:plan=plan_mode>
                                         <button type="button" class="codex-mode-toggle"
@@ -4365,12 +4652,16 @@ fn App() -> impl IntoView {
                                                         {audit_content}
                                                     </details>
                                                     {move || codex_config_needs_confirmation.get().then(|| view! {
-                                                        <button type="button" class="codex-confirm-config" on:click=move |_| {
-                                                            codex_config_needs_confirmation.set(false);
-                                                            codex_session_override_conflict.set(false);
-                                                            codex_config_menu_open.set(false);
-                                                            status.set(t(locale.get_untracked(), "codex.confirmed").into());
-                                                        }>{move || t(locale.get(), "codex.confirm_config")}</button>
+                                                        {if codex_runtime_refresh_pending.get() {
+                                                            view! { <div class="codex-refresh-required">{t(locale.get(), "codex.refresh_detected")}</div> }.into_view()
+                                                        } else {
+                                                            view! { <button type="button" class="codex-confirm-config" on:click=move |_| {
+                                                                codex_config_needs_confirmation.set(false);
+                                                                codex_session_override_conflict.set(false);
+                                                                codex_config_menu_open.set(false);
+                                                                status.set(t(locale.get_untracked(), "codex.confirmed").into());
+                                                            }>{move || t(locale.get(), "codex.confirm_config")}</button> }.into_view()
+                                                        }}
                                                     })}
                                                     <button type="button" class="codex-reset-overrides" on:click=move |_| {
                                                         codex_session_overrides.set(CodexModeOverrides::default());
@@ -5459,7 +5750,7 @@ fn App() -> impl IntoView {
                 skill_filter_tag, skills_search, skills_msg, cred_status, cred_inputs, cred_msg,
                 approval_grants, conns_view, conn_form_open, conn_form_kind, conn_test_msg,
                 custom_conn_tools, custom_conn_tools_loading, custom_conn_tool_errors,
-                codex_runtime, codex_runtime_error, codex_runtime_loading,
+                codex_runtime, codex_runtime_error, codex_runtime_loading, codex_settings_action_loading,
                 codex_profile_overrides, codex_preview_normal, codex_preview_plan,
             }
             go_settings_section=Callback::new(move |section: String| go_settings_section(&section))

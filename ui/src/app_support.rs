@@ -2741,6 +2741,7 @@ pub(super) fn ProjectsScreen(
     locale: RwSignal<Locale>,
     running: RwSignal<HashSet<String>>,
     approval_pending: ReadSignal<HashSet<String>>,
+    open_error: RwSignal<Option<String>>,
     on_open: Callback<String>,
     on_open_session: Callback<(String, String)>,
     on_open_artifact: Callback<(String, String, String)>,
@@ -2958,6 +2959,9 @@ pub(super) fn ProjectsScreen(
                     </button>
                 </div>
             </div>
+            {move || open_error.get().map(|message| view! {
+                <div class="project-open-error" role="alert">{message}</div>
+            })}
             {move || search_open.get().then(|| view! {
                 <div class="project-search-overlay" on:click=move |_| search_open.set(false)>
                     <div class="project-search-dialog" role="dialog" aria-label=move || t(locale.get(), "projects.search")

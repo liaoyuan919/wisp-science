@@ -168,6 +168,10 @@ impl ResolvedCodexCommand {
 
     fn process_for(&self, tail: &[&str]) -> Command {
         let mut command = Command::new(self.entrypoint.launcher_program());
+        // Wisp is a GUI application on Windows.  Codex may be a native
+        // executable, a PowerShell/cmd wrapper, or wsl.exe; none of those
+        // background transports should allocate a visible console window.
+        wisp_tools::process::hide_console_async(&mut command);
         self.entrypoint.append_to_command(&mut command, tail);
         command.envs(&self.environment);
         if let Some(home) = &self.codex_home {

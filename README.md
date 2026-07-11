@@ -124,9 +124,11 @@ separate hard-coded model catalog.
 
 Known model/effort combinations are validated before send. Custom identifiers
 remain available, but a Codex rejection is surfaced instead of silently
-substituting another value. External runtime or configuration changes
-invalidate the displayed configuration generation; Wisp refreshes it and
-requires confirmation before the next turn.
+substituting another value. Wisp inherits the selected Codex configuration on
+first use and does not poll or rewrite it in the background. External runtime
+or configuration changes are checked by the explicit **Refresh runtime** action
+and again at the send boundary; a real generation change requires confirmation
+before that turn is retried.
 
 ### Composer references and search
 

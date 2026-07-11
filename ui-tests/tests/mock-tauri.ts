@@ -28,12 +28,22 @@ export function tauriMock(): void {
   };
 
   const project = {
+    id: "default",
     name: "wisp-science",
     root: "/mock/root",
     skill_count: 12,
     mcp_server_count: 8,
     memory_file_count: 2,
     has_api_key: true,
+  };
+  let activeProjectId = "default";
+  const nextProjectOpenDelayMs: Record<string, number> = {};
+  let failNextProjectOpenId: string | null = null;
+  (window as any).__delayNextProjectOpen = (projectId: string, milliseconds: number) => {
+    nextProjectOpenDelayMs[String(projectId)] = Math.max(0, Number(milliseconds) || 0);
+  };
+  (window as any).__failNextProjectOpen = (projectId: string) => {
+    failNextProjectOpenId = String(projectId);
   };
   let skills = [
     { name: "remote-compute-modal", description: "Run jobs on Modal", tags: ["compute"], enabled: true, builtin: true, dir: "/skills/remote-compute-modal" },
@@ -128,9 +138,31 @@ export function tauriMock(): void {
       verbosity: "inherit",
     },
   ];
+  const initialModel = new URLSearchParams(window.location.search).get("initialModel");
+  if (initialModel && mockModels.some((model) => model.id === initialModel)) {
+    mockModels = mockModels.map((model) => ({ ...model, active: model.id === initialModel }));
+  }
   let codexRuntimeGeneration = "12";
   let codexRuntimeUnavailable = false;
   (window as any).__setCodexRuntimeUnavailable = (value: boolean) => { codexRuntimeUnavailable = value; };
+  let forceNextCodexValidationChange = false;
+  (window as any).__forceNextCodexValidationChange = () => { forceNextCodexValidationChange = true; };
+  let nextCodexRuntimeDelayMs = 0;
+  (window as any).__delayNextCodexRuntime = (milliseconds: number) => {
+    nextCodexRuntimeDelayMs = Math.max(0, Number(milliseconds) || 0);
+  };
+  let nextCodexSessionPreviewDelayMs = 0;
+  (window as any).__delayNextCodexPreview = (milliseconds: number) => {
+    nextCodexSessionPreviewDelayMs = Math.max(0, Number(milliseconds) || 0);
+  };
+  let nextCodexSettingsPreviewDelayMs = 0;
+  (window as any).__delayNextCodexSettingsPreview = (milliseconds: number) => {
+    nextCodexSettingsPreviewDelayMs = Math.max(0, Number(milliseconds) || 0);
+  };
+  let failNextCodexSettingsPreviews = 0;
+  (window as any).__failNextCodexSettingsPreviews = (count = 2) => {
+    failNextCodexSettingsPreviews = Math.max(0, Number(count) || 0);
+  };
   const codexTurnAudits: Record<string, any[]> = {};
   const sessionCodexStates: Record<string, { overrides: any; mode: string; revision: string }> = {};
   let forceNextCodexRevisionConflict = false;
@@ -270,8 +302,10 @@ export function tauriMock(): void {
           case "load_session":
             return [];
           case "list_sessions":
+            ((window as any).__projectSessionRefreshes ??= []).push(activeProjectId);
             return [];
           case "list_folders":
+            ((window as any).__projectFolderRefreshes ??= []).push(activeProjectId);
             return [];
           case "create_folder":
           case "rename_folder":
@@ -302,8 +336,21 @@ export function tauriMock(): void {
             ];
           case "pick_directory":
             return "/mock/root/new-project";
-          case "open_project":
+          case "open_project": {
+            const openingProjectId = String(arg("id") ?? "default");
+            const delay = nextProjectOpenDelayMs[openingProjectId] ?? 0;
+            delete nextProjectOpenDelayMs[openingProjectId];
+            if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+            if (failNextProjectOpenId === openingProjectId) {
+              failNextProjectOpenId = null;
+              throw new Error(`mock failed to open ${openingProjectId}`);
+            }
+            activeProjectId = openingProjectId;
+            ((window as any).__projectOpenCompletions ??= []).push(activeProjectId);
+            return { id: activeProjectId, name: activeProjectId === "other" ? "Other project" : project.name, workspace_dir: activeProjectId === "other" ? "/mock/other" : project.root, session_count: 0, updated_at: 1, running_count: 0, needs_you_count: 0 };
+          }
           case "create_project":
+            activeProjectId = "default";
             return { id: "default", name: project.name, workspace_dir: project.root, session_count: 0, updated_at: 1, running_count: 0, needs_you_count: 0 };
           case "delete_project":
             return null;
@@ -324,12 +371,19 @@ export function tauriMock(): void {
             return mockModels;
           case "get_codex_runtime_snapshot":
           case "refresh_codex_runtime_snapshot":
+            if (nextCodexRuntimeDelayMs > 0) {
+              const delay = nextCodexRuntimeDelayMs;
+              nextCodexRuntimeDelayMs = 0;
+              await new Promise((resolve) => setTimeout(resolve, delay));
+            }
             if (codexRuntimeUnavailable) throw new Error("Codex App Server is unavailable");
             if (cmd === "refresh_codex_runtime_snapshot") codexRuntimeGeneration = "13";
+            ((window as any).__codexRuntimeGetProjects ??= []).push(activeProjectId);
+            const snapshotGeneration = activeProjectId === "other" ? "22" : codexRuntimeGeneration;
             return {
-              config_version: codexRuntimeGeneration,
+              config_version: snapshotGeneration,
               profile_id: mockModels.find((model) => model.active)?.id ?? "",
-              project_id: "default",
+              project_id: activeProjectId,
               runtime: {
                 executable_path: "C:/tools/codex.exe",
                 version: "0.99.0-test",
@@ -342,7 +396,7 @@ export function tauriMock(): void {
                 { id: "gpt-fast", display_name: "GPT Fast", supported_reasoning_efforts: ["low", "medium"], default_reasoning_effort: "medium", supports_images: false },
               ],
               config: {
-                config_version: codexRuntimeGeneration, mode: "default", requested_model: null, effective_model: "gpt-test",
+                config_version: snapshotGeneration, mode: "default", requested_model: null, effective_model: "gpt-test",
                 requested_effort: null, effective_effort: "high", service_tier: null, personality: null,
                 summary: null, verbosity: null, web_search: null, sandbox: "workspace-write",
                 sources: { model: "local_codex" }, warnings: [],
@@ -356,6 +410,25 @@ export function tauriMock(): void {
             };
           case "preview_codex_turn_config": {
             if (codexRuntimeUnavailable) throw new Error("Codex App Server is unavailable");
+            const previewScope = String(arg("previewScope") ?? "session");
+            const previewDelay = previewScope === "profile"
+              ? nextCodexSettingsPreviewDelayMs
+              : nextCodexSessionPreviewDelayMs;
+            if (previewDelay > 0) {
+              if (previewScope === "profile") nextCodexSettingsPreviewDelayMs = 0;
+              else nextCodexSessionPreviewDelayMs = 0;
+              await new Promise((resolve) => setTimeout(resolve, previewDelay));
+            }
+            if (previewScope === "profile" && failNextCodexSettingsPreviews > 0) {
+              failNextCodexSettingsPreviews -= 1;
+              throw new Error("Codex settings preview failed");
+            }
+            if (arg("validateRuntime") === true && forceNextCodexValidationChange) {
+              forceNextCodexValidationChange = false;
+              const previous = codexRuntimeGeneration;
+              codexRuntimeGeneration = String(Number(codexRuntimeGeneration) + 1);
+              throw new Error(`Codex configuration changed: expected version ${previous}, current ${codexRuntimeGeneration}`);
+            }
             const overrides = plain(arg("overrides") ?? {});
             const mode = arg("mode") === "plan" ? "plan" : "default";
             const selected = mode === "plan" ? overrides.plan : overrides.normal;
@@ -445,7 +518,10 @@ export function tauriMock(): void {
             return mockModels;
           }
           case "get_project_info":
-            return project;
+            ((window as any).__projectInfoReads ??= []).push(activeProjectId);
+            return activeProjectId === "other"
+              ? { ...project, id: "other", name: "Other project", root: "/mock/other" }
+              : project;
           case "get_onboarding_state":
             return { show: false, has_api_key: true };
           case "get_capabilities":
@@ -863,7 +939,7 @@ export function parallelMock(): void {
   const sessions: { id: string; title: string; ts: number }[] = [];
   const queues: Record<string, Promise<void>> = {};
 
-  const project = { name: "wisp-science", root: "/mock/root", skill_count: 12, mcp_server_count: 8, memory_file_count: 2, has_api_key: true };
+  const project = { id: "default", name: "wisp-science", root: "/mock/root", skill_count: 12, mcp_server_count: 8, memory_file_count: 2, has_api_key: true };
 
   (window as any).__TAURI__ = {
     core: {
