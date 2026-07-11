@@ -83,98 +83,13 @@ export function tauriMock(): void {
       supports_vision: true,
       use_for_vision: false,
     },
-    {
-      id: "codex-local",
-      label: "Codex Local",
-      provider: "codex_cli",
-      api_url: "",
-      model: "",
-      has_api_key: false,
-      active: false,
-      max_tokens: 0,
-      reasoning_effort: "",
-      supports_vision: true,
-      use_for_vision: false,
-      runner_command: "codex",
-      runner_profile: "",
-      runner_sandbox: "workspace-write",
-      runner_web_search_mode: "inherit",
-      runner_claude_command: "",
-      runner_persistent: true,
-      normal_model: "gpt-test",
-      normal_reasoning_effort: "high",
-      plan_model: "inherit",
-      plan_reasoning_effort: "inherit",
-      service_tier: "inherit",
-      personality: "inherit",
-      reasoning_summary: "inherit",
-      verbosity: "inherit",
-    },
-    {
-      id: "claude-local",
-      label: "Claude Code Local",
-      provider: "claude_code",
-      api_url: "",
-      model: "",
-      has_api_key: false,
-      active: false,
-      max_tokens: 0,
-      reasoning_effort: "",
-      supports_vision: true,
-      use_for_vision: false,
-      runner_command: "",
-      runner_profile: "",
-      runner_sandbox: "workspace-write",
-      runner_web_search_mode: "inherit",
-      runner_claude_command: "claude",
-      runner_persistent: true,
-      normal_model: "",
-      normal_reasoning_effort: "",
-      plan_model: "inherit",
-      plan_reasoning_effort: "inherit",
-      service_tier: "inherit",
-      personality: "inherit",
-      reasoning_summary: "inherit",
-      verbosity: "inherit",
-    },
   ];
-  const initialModel = new URLSearchParams(window.location.search).get("initialModel");
-  if (initialModel && mockModels.some((model) => model.id === initialModel)) {
-    mockModels = mockModels.map((model) => ({ ...model, active: model.id === initialModel }));
-  }
-  let codexRuntimeGeneration = "12";
-  let codexRuntimeUnavailable = false;
-  (window as any).__setCodexRuntimeUnavailable = (value: boolean) => { codexRuntimeUnavailable = value; };
-  let forceNextCodexValidationChange = false;
-  (window as any).__forceNextCodexValidationChange = () => { forceNextCodexValidationChange = true; };
-  let nextCodexRuntimeDelayMs = 0;
-  (window as any).__delayNextCodexRuntime = (milliseconds: number) => {
-    nextCodexRuntimeDelayMs = Math.max(0, Number(milliseconds) || 0);
-  };
-  let nextCodexSessionPreviewDelayMs = 0;
-  (window as any).__delayNextCodexPreview = (milliseconds: number) => {
-    nextCodexSessionPreviewDelayMs = Math.max(0, Number(milliseconds) || 0);
-  };
-  let nextCodexSettingsPreviewDelayMs = 0;
-  (window as any).__delayNextCodexSettingsPreview = (milliseconds: number) => {
-    nextCodexSettingsPreviewDelayMs = Math.max(0, Number(milliseconds) || 0);
-  };
-  let failNextCodexSettingsPreviews = 0;
-  (window as any).__failNextCodexSettingsPreviews = (count = 2) => {
-    failNextCodexSettingsPreviews = Math.max(0, Number(count) || 0);
-  };
-  const codexTurnAudits: Record<string, any[]> = {};
-  const sessionCodexStates: Record<string, { overrides: any; mode: string; revision: string }> = {};
-  let forceNextCodexRevisionConflict = false;
-  (window as any).__forceNextCodexRevisionConflict = () => { forceNextCodexRevisionConflict = true; };
-  (window as any).__bumpCodexSessionRevision = (sessionId: string) => {
-    const current = sessionCodexStates[sessionId] ?? { overrides: {}, mode: "default", revision: "0" };
-    sessionCodexStates[sessionId] = {
-      overrides: { normal: { model: "gpt-fast", effort: "low" }, plan: {} },
-      mode: current.mode,
-      revision: String(Number(current.revision) + 1),
-    };
-  };
+  let mockAcpAgents = [
+    { id: "acp-test", label: "Test ACP Agent", command: "fake-acp", args: ["--stdio"] },
+  ];
+  const acpBindings: Record<string, string> = {};
+  const acpPermissionFrames: Record<string, string> = {};
+  const acpLongResolvers: Record<string, (value: string) => void> = {};
   let mockCredentials: Record<string, boolean> = {
     openalex_api_key: false,
     infinisynapse_api_key: false,
@@ -376,120 +291,41 @@ export function tauriMock(): void {
             };
           case "list_models":
             return mockModels;
-          case "get_codex_runtime_snapshot":
-          case "refresh_codex_runtime_snapshot":
-            if (nextCodexRuntimeDelayMs > 0) {
-              const delay = nextCodexRuntimeDelayMs;
-              nextCodexRuntimeDelayMs = 0;
-              await new Promise((resolve) => setTimeout(resolve, delay));
-            }
-            if (codexRuntimeUnavailable) throw new Error("Codex App Server is unavailable");
-            if (cmd === "refresh_codex_runtime_snapshot") codexRuntimeGeneration = "13";
-            ((window as any).__codexRuntimeGetProjects ??= []).push(activeProjectId);
-            const snapshotGeneration = activeProjectId === "other" ? "22" : codexRuntimeGeneration;
-            return {
-              config_version: snapshotGeneration,
-              profile_id: mockModels.find((model) => model.active)?.id ?? "",
-              project_id: activeProjectId,
-              runtime: {
-                executable_path: "C:/tools/codex.exe",
-                version: "0.99.0-test",
-                codex_home: "C:/mock/.wisp/codex-home/default",
-                source: "path",
-                context: "windows",
-              },
-              models: [
-                { id: "gpt-test", display_name: "GPT Test", supported_reasoning_efforts: ["low", "high", "max", "ultra"], default_reasoning_effort: "high", supports_images: true },
-                { id: "gpt-fast", display_name: "GPT Fast", supported_reasoning_efforts: ["low", "medium"], default_reasoning_effort: "medium", supports_images: false },
-              ],
-              config: {
-                config_version: snapshotGeneration, mode: "default", requested_model: null, effective_model: "gpt-test",
-                requested_effort: null, effective_effort: "high", service_tier: null, personality: null,
-                summary: null, verbosity: null, web_search: null, sandbox: "workspace-write",
-                sources: { model: "local_codex" }, warnings: [],
-              },
-              collaboration_modes: [{ id: "default", label: "Default" }, { id: "plan", label: "Plan" }],
-              provider_capabilities: {
-                app_server: true, native_plan: true, image_input: true, personality: true,
-                service_tier: true, reasoning_summary: true, verbosity: true, web_search: true, sandbox: true,
-              },
-              warnings: [], refreshed_at: "1783482300", profile_overrides: {},
-            };
-          case "preview_codex_turn_config": {
-            if (codexRuntimeUnavailable) throw new Error("Codex App Server is unavailable");
-            const previewScope = String(arg("previewScope") ?? "session");
-            const previewDelay = previewScope === "profile"
-              ? nextCodexSettingsPreviewDelayMs
-              : nextCodexSessionPreviewDelayMs;
-            if (previewDelay > 0) {
-              if (previewScope === "profile") nextCodexSettingsPreviewDelayMs = 0;
-              else nextCodexSessionPreviewDelayMs = 0;
-              await new Promise((resolve) => setTimeout(resolve, previewDelay));
-            }
-            if (previewScope === "profile" && failNextCodexSettingsPreviews > 0) {
-              failNextCodexSettingsPreviews -= 1;
-              throw new Error("Codex settings preview failed");
-            }
-            if (arg("validateRuntime") === true && forceNextCodexValidationChange) {
-              forceNextCodexValidationChange = false;
-              const previous = codexRuntimeGeneration;
-              codexRuntimeGeneration = String(Number(codexRuntimeGeneration) + 1);
-              throw new Error(`Codex configuration changed: expected version ${previous}, current ${codexRuntimeGeneration}`);
-            }
-            const overrides = plain(arg("overrides") ?? {});
-            const mode = arg("mode") === "plan" ? "plan" : "default";
-            const selected = mode === "plan" ? overrides.plan : overrides.normal;
-            return {
-              config_version: arg("configVersion") ?? "12",
-              mode,
-              requested_model: selected?.model ?? null,
-              effective_model: selected?.model ?? (mode === "plan" ? "gpt-fast" : "gpt-test"),
-              requested_effort: selected?.effort ?? null,
-              effective_effort: selected?.effort ?? (mode === "plan" ? "medium" : "high"),
-              service_tier: overrides.service_tier ?? null,
-              personality: overrides.personality ?? null,
-              summary: overrides.summary ?? null,
-              verbosity: overrides.verbosity ?? null,
-              web_search: overrides.web_search ?? null,
-              sandbox: mode === "plan" ? "read-only" : (overrides.sandbox ?? "workspace-write"),
-              sources: { model: selected?.model ? "wisp_profile" : "local_codex" }, warnings: [],
-            };
+          case "list_acp_agents":
+            return mockAcpAgents;
+          case "get_acp_session_agent":
+            return acpBindings[String(arg("frameId") ?? "")] ?? null;
+          case "save_acp_agent": {
+            const profile = { ...(plain(arg("profile")) ?? {}) };
+            if (!profile.id) profile.id = `acp-${mockAcpAgents.length + 1}`;
+            const index = mockAcpAgents.findIndex((agent) => agent.id === profile.id);
+            if (index >= 0) mockAcpAgents[index] = profile;
+            else mockAcpAgents.push(profile);
+            return mockAcpAgents;
           }
-          case "get_codex_turn_configs":
-            return codexTurnAudits[String(arg("sessionId") ?? "")] ?? [];
-          case "set_session_codex_overrides": {
-            const sessionId = String(arg("sessionId") ?? "__pending_session__");
-            const current = sessionCodexStates[sessionId] ?? { overrides: {}, mode: "default", revision: "0" };
-            if (forceNextCodexRevisionConflict) {
-              forceNextCodexRevisionConflict = false;
-              const external = {
-                overrides: { normal: { model: "gpt-fast", effort: "low" }, plan: {} },
-                mode: current.mode,
-                revision: String(Number(current.revision) + 1),
-              };
-              sessionCodexStates[sessionId] = external;
-              throw new Error(`Codex session configuration revision conflict (expected ${arg("expectedRevision")}, current ${external.revision})`);
-            }
-            const expected = arg("expectedRevision");
-            if (expected != null && String(expected) !== current.revision) {
-              throw new Error(`Codex session configuration revision conflict (expected ${expected}, current ${current.revision})`);
-            }
-            const next = {
-              overrides: plain(arg("overrides") ?? {}),
-              mode: String(arg("mode") ?? "default"),
-              revision: String(Number(current.revision) + 1),
+          case "remove_acp_agent":
+            mockAcpAgents = mockAcpAgents.filter((agent) => agent.id !== arg("id"));
+            return mockAcpAgents;
+          case "test_acp_agent":
+            return {
+              protocolVersion: 1,
+              implementation: { name: "fake-acp", title: "Fake ACP", version: "1.0" },
+              capabilities: { loadSession: true, sessionCapabilities: { configOptions: true } },
+              authMethods: [{ id: "browser", name: "Sign in", description: "Authenticate in browser" }],
             };
-            sessionCodexStates[sessionId] = next;
-            return { revision: next.revision };
-          }
-          case "get_latest_proposed_plan":
-          case "codex_plan_action":
-          case "answer_codex_user_input":
+          case "authenticate_acp_agent":
             return null;
-          case "get_session_codex_overrides": {
-            const sessionId = String(arg("sessionId") ?? "__pending_session__");
-            return sessionCodexStates[sessionId] ?? { overrides: {}, mode: "default", revision: "0" };
-          }
+          case "set_acp_session_config":
+            return [{ id: "model", name: "Model", type: "select", currentValue: arg("value")?.value ?? "fast", options: [{ value: "fast", name: "Fast" }, { value: "smart", name: "Smart" }] }];
+          case "respond_acp_permission":
+            setTimeout(() => {
+              const requestId = String(arg("requestId"));
+              const frameId = acpPermissionFrames[requestId] ?? "";
+              emit("permission-resolved", { frameId, requestId });
+              emit("agent", { kind: "Done", frame_id: frameId, stop_reason: "end_turn" });
+              delete acpPermissionFrames[requestId];
+            }, 0);
+            return null;
           case "credential_status":
             return Object.entries(mockCredentials);
           case "list_ssh_hosts":
@@ -712,72 +548,49 @@ export function tauriMock(): void {
           case "confirm_response":
           case "dismiss_onboarding":
             return null;
+          case "stop_session":
+          case "stop_agent":
+            setTimeout(() => {
+              const frameId = String(arg("id") ?? arg("sessionId") ?? "");
+              emit("agent", { kind: "Done", frame_id: frameId, stop_reason: "cancelled" });
+              acpLongResolvers[frameId]?.(frameId);
+              delete acpLongResolvers[frameId];
+            }, 0);
+            return null;
           case "send_message": {
             const fid = (args && (args.sessionId ?? args.session_id)) || "t1";
             const msg = (args && args.message) || "";
-            if (mockModels.find((model) => model.active)?.provider === "codex_cli") {
-              const compatibility = String(msg).includes("COMPATPLAN");
-              codexTurnAudits[fid] = [{
-                id: `audit-${fid}`,
-                mode: args?.collaborationMode ?? "default",
-                config_version: args?.codexConfigGeneration ?? codexRuntimeGeneration,
-                requested: { model: "gpt-test", effort: "high" },
-                sent: { model: "gpt-test", effort: "high", sandbox: args?.collaborationMode === "plan" ? "read-only" : "workspace-write" },
-                actual: compatibility ? { verification: "unavailable" } : { model: "gpt-test", effort: "high" },
-                created_at: 1,
-                updated_at: 1,
-              }];
+            const acpAgentId = args?.acpAgentId ?? acpBindings[fid];
+            if (acpAgentId) {
+              acpBindings[fid] = acpAgentId;
+              setTimeout(() => {
+                emit("agent", { kind: "User", frame_id: fid, text: msg });
+                emit("acp-session-state", {
+                  frameId: fid,
+                  modes: { currentModeId: "code", availableModes: [{ id: "code", name: "Code" }] },
+                  configOptions: [{ id: "model", name: "Model", type: "select", currentValue: "fast", options: [{ value: "fast", name: "Fast" }, { value: "smart", name: "Smart" }] }],
+                });
+                emit("acp-session-update", { frameId: fid, kind: "ToolCall", payload: { toolCallId: "tool-a", title: "Read files", kind: "read", status: "in_progress" } });
+                emit("acp-session-update", { frameId: fid, kind: "ToolCall", payload: { toolCallId: "tool-b", title: "Run checks", kind: "execute", status: "in_progress" } });
+                emit("acp-session-update", { frameId: fid, kind: "ToolCallUpdate", payload: { toolCallId: "tool-a", status: "completed", content: [{ type: "content", content: { type: "text", text: "read complete" } }] } });
+                emit("acp-session-update", { frameId: fid, kind: "Plan", payload: { entries: [{ content: "Inspect", priority: "high", status: "completed" }, { content: "Implement", priority: "medium", status: "in_progress" }] } });
+                emit("acp-session-update", { frameId: fid, kind: "ConfigOptions", payload: { configOptions: [{ id: "model", name: "Model", type: "select", currentValue: "smart", options: [{ value: "fast", name: "Fast" }, { value: "smart", name: "Smart" }] }] } });
+                emit("acp-session-update", { frameId: fid, kind: "Usage", payload: { used: 1200, size: 8000 } });
+                if (String(msg).includes("PERMISSION")) {
+                  acpPermissionFrames["permission-1"] = fid;
+                  emit("permission-request", { requestId: "permission-1", frameId: fid, toolCall: { toolCallId: "tool-b", title: "Run checks" }, options: [{ id: "allow", name: "Allow once", kind: "allowonce" }, { id: "reject", name: "Reject", kind: "rejectonce" }] });
+                }
+                emit("agent", { kind: "Text", frame_id: fid, delta: "Hello from ACP." });
+                if (!String(msg).includes("LONG") && !String(msg).includes("PERMISSION")) emit("agent", { kind: "Done", frame_id: fid, stop_reason: "end_turn" });
+              }, 30);
+              if (String(msg).includes("LONG")) return await new Promise<string>((resolve) => { acpLongResolvers[fid] = resolve; });
+              return fid;
             }
             if (String(msg).includes("PRESTARTFAIL")) {
               throw new Error("No model profile is available");
             }
             if (String(msg).includes("POSTSTARTFAIL")) {
               throw new Error("[turn-started] execution failed after turn/start");
-            }
-            if (String(msg).includes("COMPATPLAN")) {
-              setTimeout(() => {
-                emit("agent", {
-                  kind: "final_plan", frame_id: fid,
-                  plan: "1. Use the compatibility planner", native: false,
-                  plan_id: "plan-compat-1", revision: 1,
-                });
-                emit("agent", { kind: "Done", frame_id: fid });
-              }, 30);
-              return fid;
-            }
-            if (String(arg("message") ?? "").includes("NATIVEPLAN")) {
-              setTimeout(() => {
-                emit("agent", { kind: "plan_delta", frame_id: fid, delta: "1. Inspect inputs\n", native: true });
-                emit("agent", { kind: "plan_delta", frame_id: fid, delta: "2. Implement safely", native: true });
-                emit("agent", {
-                  kind: "final_plan", frame_id: fid,
-                  plan: "1. Inspect inputs\n2. Implement safely", native: true,
-                  plan_id: "plan-native-1", revision: 1,
-                });
-                emit("agent", {
-                  kind: "request_user_input", frame_id: fid, question_id: "q-1",
-                  question: "Which implementation should be used?",
-                  options: [{ label: "Safe", description: "Use the read-only path" }, { label: "Fast", description: "Use the shortest path" }],
-                });
-                // A native requestUserInput pauses the turn. The backend emits
-                // Done only after the question is answered, never immediately
-                // after presenting the card.
-              }, 30);
-              return fid;
-            }
-            if (String(arg("message") ?? "").includes("PLANOTHER")) {
-              const planPreview = "Plan (2 steps · 0 done · 0 in progress · 2 pending):\n[ ] Inspect confirmation protocol\n[ ] Add plan feedback UI";
-              setTimeout(
-                () =>
-                  emit("confirm-request", {
-                    frame_id: fid,
-                    message: `[plan-approval]\n${planPreview}`,
-                    tool: "update_plan",
-                    preview: planPreview,
-                  }),
-                50,
-              );
-              return fid;
             }
             // Long-approval path (#63 regression test): emit a confirm-request
             // whose body is far taller than the viewport.

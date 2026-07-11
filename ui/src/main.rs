@@ -29,7 +29,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use text::{
-    dom_value, event_target_value, format_bytes,
+    dom_value, event_target_checked, event_target_value, format_bytes,
     format_duration_ms, group_artifact_indices, join_path, md_to_html, opens_in_system_browser,
     parent_path, provider_defaults, provider_value,
 };
@@ -93,516 +93,209 @@ fn project_transition_is_current(
     epoch.get() == request_epoch && target.borrow().as_deref() == Some(project_id)
 }
 
-fn decode_runtime_snapshot(value: JsValue) -> Option<RuntimeSnapshot> {
-    serde_wasm_bindgen::from_value::<RuntimeSnapshot>(value.clone()).ok().or_else(|| {
-        serde_wasm_bindgen::from_value::<serde_json::Value>(value).ok()
-            .and_then(|envelope| envelope.get("snapshot").cloned())
-            .and_then(|snapshot| serde_json::from_value(snapshot).ok())
-    })
-}
 
-fn is_codex_config_changed_error(message: &str) -> bool {
-    let message = message.to_ascii_lowercase();
-    message.contains("configuration changed")
-        || message.contains("config version")
-        || (message.contains("expected version") && message.contains("current"))
-}
-
-fn decode_resolved_turn_config(value: JsValue) -> Option<ResolvedTurnConfig> {
-    serde_wasm_bindgen::from_value::<ResolvedTurnConfig>(value.clone()).ok().or_else(|| {
-        serde_wasm_bindgen::from_value::<serde_json::Value>(value).ok()
-            .and_then(|envelope| envelope.get("config").or_else(|| envelope.get("resolved")).cloned())
-            .and_then(|config| serde_json::from_value(config).ok())
-    })
-}
-
-fn decode_session_codex_state(value: JsValue) -> Option<SessionCodexState> {
-    serde_wasm_bindgen::from_value::<SessionCodexState>(value.clone()).ok().or_else(|| {
-        serde_wasm_bindgen::from_value::<serde_json::Value>(value).ok()
-            .and_then(|value| serde_json::from_value(value).ok())
-    })
-}
-
-fn decode_proposed_plan(value: JsValue) -> Option<ProposedPlanRecord> {
-    serde_wasm_bindgen::from_value::<Option<ProposedPlanRecord>>(value.clone()).ok().flatten().or_else(|| {
-        serde_wasm_bindgen::from_value::<serde_json::Value>(value).ok()
-            .and_then(|envelope| envelope.get("plan").cloned())
-            .and_then(|plan| serde_json::from_value(plan).ok())
-    })
-}
-
-fn refresh_codex_turn_audits(
-    session_id: String,
-    active_session: RwSignal<Option<String>>,
-    audits: RwSignal<Vec<CodexTurnConfigAudit>>,
-) {
-    spawn_local(async move {
-        let args = to_value(&serde_json::json!({ "sessionId": session_id.clone() })).unwrap();
-        if let Ok(value) = invoke_checked("get_codex_turn_configs", args).await {
-            if let Ok(records) = serde_wasm_bindgen::from_value::<Vec<CodexTurnConfigAudit>>(value) {
-                if active_session.get_untracked().as_deref() == Some(session_id.as_str()) {
-                    audits.set(records);
-                }
-            }
-        }
-    });
-}
-
-fn audit_json(value: &serde_json::Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-}
-
-fn actual_verification_unavailable(value: &serde_json::Value) -> bool {
-    value.is_null()
-        || value.as_object().is_some_and(|object| {
-            object.is_empty()
-                || object.get("verification").and_then(|value| value.as_str()) == Some("unavailable")
-                || object.get("verified").and_then(|value| value.as_bool()) == Some(false)
-        })
-}
-
-fn proposed_plan_card(plan: ProposedPlanRecord) -> PlanCard {
-    PlanCard {
-        complete: !matches!(plan.status.as_str(), "streaming" | "draft"),
-        actionable: plan.status == "pending" && !plan.id.is_empty() && plan.revision > 0,
-        text: plan.text,
-        native: plan.native,
-        plan_id: plan.id,
-        revision: plan.revision,
+fn acp_value_text(value: Option<&serde_json::Value>) -> String {
+    let Some(value) = value else { return String::new(); };
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(text) => text.clone(),
+        value => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
     }
 }
 
-fn upsert_persisted_plan(items: &mut Vec<ChatItem>, plan: ProposedPlanRecord) {
-    let card = proposed_plan_card(plan);
-    if let Some(index) = items.iter().rposition(|item| matches!(
-        item,
-        ChatItem::Plan(existing) if existing.plan_id == card.plan_id && existing.revision == card.revision
-    )) {
-        items[index] = ChatItem::Plan(card);
+fn upsert_acp_tool(items: &mut Vec<ChatItem>, payload: &serde_json::Value) {
+    let Some(call_id) = payload.get("toolCallId").and_then(serde_json::Value::as_str) else { return; };
+    let index = items.iter().position(|item| matches!(item, ChatItem::AcpTool { call_id: id, .. } if id == call_id));
+    if let Some(index) = index {
+        if let ChatItem::AcpTool { title, kind, status, content, locations, .. } = &mut items[index] {
+            if let Some(value) = payload.get("title").and_then(serde_json::Value::as_str) { *title = value.into(); }
+            if let Some(value) = payload.get("kind").and_then(serde_json::Value::as_str) { *kind = value.into(); }
+            if let Some(value) = payload.get("status").and_then(serde_json::Value::as_str) { *status = value.into(); }
+            if payload.get("content").is_some() { *content = acp_value_text(payload.get("content")); }
+            if payload.get("locations").is_some() { *locations = acp_value_text(payload.get("locations")); }
+        }
     } else {
+        let row = ChatItem::AcpTool {
+            call_id: call_id.into(),
+            title: payload.get("title").and_then(serde_json::Value::as_str).unwrap_or("ACP tool").into(),
+            kind: payload.get("kind").and_then(serde_json::Value::as_str).unwrap_or_default().into(),
+            status: payload.get("status").and_then(serde_json::Value::as_str).unwrap_or("pending").into(),
+            content: acp_value_text(payload.get("content")),
+            locations: acp_value_text(payload.get("locations")),
+        };
         let index = trailing_queue_start(items);
-        items.insert(index, ChatItem::Plan(card));
+        items.insert(index, row);
     }
 }
 
-fn request_codex_runtime_snapshot_with_ack(
-    refresh: bool,
-    report_error: bool,
-    show_loading: bool,
-    sync_profile_overrides: bool,
-    request_nonce: Rc<Cell<u64>>,
-    models: RwSignal<Vec<ModelProfile>>,
-    expected_project_id: RwSignal<String>,
-    runtime: RwSignal<Option<RuntimeSnapshot>>,
-    runtime_error: RwSignal<Option<String>>,
-    loading: RwSignal<bool>,
-    profile_overrides: RwSignal<CodexModeOverrides>,
-    clear_refresh_pending_on_success: Option<RwSignal<bool>>,
-) {
-    if show_loading { loading.set(true); }
-    let request_id = request_nonce.get().wrapping_add(1);
-    request_nonce.set(request_id);
-    spawn_local(async move {
-        let command = if refresh { "refresh_codex_runtime_snapshot" } else { "get_codex_runtime_snapshot" };
-        let response = invoke_checked(command, JsValue::UNDEFINED).await;
-        if request_nonce.get() != request_id { return; }
-        match response {
-            Ok(value) => {
-                if let Some(snapshot) = decode_runtime_snapshot(value) {
-                    let profiles = models.get_untracked();
-                    let active_codex_id = profiles.iter()
-                        .find(|profile| profile.active)
-                        .or_else(|| profiles.first())
-                        .filter(|profile| active_profile_uses_codex(std::slice::from_ref(*profile)))
-                        .map(|profile| profile.id.as_str());
-                    if !snapshot.profile_id.is_empty()
-                        && !profiles.is_empty()
-                        && active_codex_id != Some(snapshot.profile_id.as_str())
-                    {
-                        loading.set(false);
-                        return;
-                    }
-                    let expected_project = expected_project_id.get_untracked();
-                    if !snapshot.project_id.is_empty()
-                        && !expected_project.is_empty()
-                        && snapshot.project_id != expected_project
-                    {
-                        loading.set(false);
-                        return;
-                    }
-                    // Passive reads must never overwrite edits still sitting in
-                    // the Profile form. Only initial load and an explicit user
-                    // refresh opt into reloading this layer.
-                    if sync_profile_overrides {
-                        if let Some(saved) = snapshot.profile_overrides.clone() {
-                            profile_overrides.set(saved);
-                        }
-                    }
-                    runtime.set(Some(snapshot));
-                    runtime_error.set(None);
-                    if let Some(pending) = clear_refresh_pending_on_success {
-                        pending.set(false);
-                    }
-                } else if report_error {
-                    runtime_error.set(Some("Codex runtime returned an unsupported snapshot format.".into()));
+fn acp_plan_text(payload: &serde_json::Value) -> String {
+    payload.get("entries").and_then(serde_json::Value::as_array).map(|entries| {
+        entries.iter().map(|entry| {
+            let status = entry.get("status").and_then(serde_json::Value::as_str).unwrap_or("pending");
+            let mark = if status == "completed" { "x" } else { " " };
+            let content = entry.get("content").and_then(serde_json::Value::as_str).unwrap_or_default();
+            format!("- [{mark}] {content}")
+        }).collect::<Vec<_>>().join("\n")
+    }).unwrap_or_default()
+}
+
+fn acp_select_options(option: &serde_json::Value) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    for row in option.get("options").and_then(serde_json::Value::as_array).into_iter().flatten() {
+        if let Some(value) = row.get("value").and_then(serde_json::Value::as_str) {
+            result.push((value.into(), row.get("name").and_then(serde_json::Value::as_str).unwrap_or(value).into()));
+        } else if let Some(options) = row.get("options").and_then(serde_json::Value::as_array) {
+            for choice in options {
+                if let Some(value) = choice.get("value").and_then(serde_json::Value::as_str) {
+                    result.push((value.into(), choice.get("name").and_then(serde_json::Value::as_str).unwrap_or(value).into()));
                 }
             }
-            Err(error) if report_error => runtime_error.set(Some(js_error_text(error))),
-            Err(_) => {} // passive reads preserve the last usable snapshot
         }
-        if request_nonce.get() == request_id { loading.set(false); }
-    });
-}
-
-fn request_codex_runtime_snapshot(
-    refresh: bool,
-    report_error: bool,
-    show_loading: bool,
-    sync_profile_overrides: bool,
-    request_nonce: Rc<Cell<u64>>,
-    models: RwSignal<Vec<ModelProfile>>,
-    expected_project_id: RwSignal<String>,
-    runtime: RwSignal<Option<RuntimeSnapshot>>,
-    runtime_error: RwSignal<Option<String>>,
-    loading: RwSignal<bool>,
-    profile_overrides: RwSignal<CodexModeOverrides>,
-) {
-    request_codex_runtime_snapshot_with_ack(
-        refresh,
-        report_error,
-        show_loading,
-        sync_profile_overrides,
-        request_nonce,
-        models,
-        expected_project_id,
-        runtime,
-        runtime_error,
-        loading,
-        profile_overrides,
-        None,
-    );
-}
-
-fn active_profile_uses_codex(models: &[ModelProfile]) -> bool {
-    models.iter().find(|model| model.active).or_else(|| models.first())
-        .is_some_and(|model| matches!(model.provider.as_str(), "codex" | "codex_cli" | "codex_local" | "codex-local"))
-}
-
-fn active_profile_uses_local_runner(models: &[ModelProfile]) -> bool {
-    models.iter().find(|model| model.active).or_else(|| models.first())
-        .is_some_and(|model| matches!(
-            model.provider.as_str(),
-            "codex" | "codex_cli" | "codex_local" | "codex-local" | "claude" | "claude_code" | "claude-code"
-        ))
-}
-
-fn optional_profile_value(value: &str) -> Option<String> {
-    let value = value.trim();
-    (!value.is_empty()
-        && !matches!(
-            value.to_ascii_lowercase().as_str(),
-            "inherit" | "default" | "codex-default" | "inherit_local_codex_default"
-        ))
-    .then(|| value.to_string())
-}
-
-fn codex_overrides_from_profile(profile: &ModelProfile) -> CodexModeOverrides {
-    CodexModeOverrides {
-        normal: CodexModeOverride {
-            model: optional_profile_value(&profile.normal_model),
-            effort: optional_profile_value(&profile.normal_reasoning_effort),
-        },
-        plan: CodexModeOverride {
-            model: optional_profile_value(&profile.plan_model),
-            effort: optional_profile_value(&profile.plan_reasoning_effort),
-        },
-        service_tier: optional_profile_value(&profile.service_tier),
-        personality: optional_profile_value(&profile.personality),
-        summary: optional_profile_value(&profile.reasoning_summary),
-        verbosity: optional_profile_value(&profile.verbosity),
-        web_search: optional_profile_value(&profile.runner_web_search_mode),
-        sandbox: optional_profile_value(&profile.runner_sandbox),
     }
+    result
 }
 
-fn composer_codex_efforts(
-    snapshot: &RuntimeSnapshot,
-    model: Option<&str>,
-    inherited_effective_model: Option<&str>,
-) -> Vec<String> {
-    if let Some(model_id) = model {
-        if let Some(model) = snapshot.models.iter().find(|item| item.id == model_id) {
-            return model.supported_reasoning_efforts.clone();
-        }
-        return vec!["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
-            .into_iter().map(str::to_string).collect();
-    }
-    if let Some(model) = inherited_effective_model
-        .and_then(|value| snapshot.models.iter().find(|item| item.id == value))
-    {
-        return model.supported_reasoning_efforts.clone();
-    }
-    vec!["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
-        .into_iter().map(str::to_string).collect()
-}
-
-/// Remove only the rows this send inserted optimistically.  Matching the
-/// adjacent empty assistant placeholder avoids deleting streamed/persisted
-/// content if the turn actually began before a later transport error.
 fn remove_optimistic_send_rows(rows: &mut Vec<ChatItem>, display_message: &str) {
-    let Some(index) = rows.iter().rposition(|item| matches!(
-        item,
-        ChatItem::User(value) | ChatItem::QueuedUser(value) if value == display_message
-    )) else { return; };
-    if matches!(rows.get(index), Some(ChatItem::QueuedUser(_))) {
-        rows.remove(index);
+    let Some(index) = rows.iter().rposition(
+        |item| matches!(item, ChatItem::User(value) if value == display_message),
+    ) else {
         return;
-    }
+    };
     if matches!(rows.get(index + 1), Some(ChatItem::Assistant { text, .. }) if text.is_empty()) {
         rows.drain(index..=index + 1);
     }
 }
 
-fn rollback_optimistic_send(
-    target_session: Option<&str>,
-    active_session: RwSignal<Option<String>>,
-    items: RwSignal<Vec<ChatItem>>,
-    transcripts: RwSignal<HashMap<String, Vec<ChatItem>>>,
-    display_message: &str,
-) {
-    if let Some(session_id) = target_session {
-        route_items(active_session, items, transcripts, session_id, |rows| {
-            remove_optimistic_send_rows(rows, display_message)
-        });
-    } else {
-        items.update(|rows| remove_optimistic_send_rows(rows, display_message));
-    }
-}
-
-fn mark_optimistic_send_failed(rows: &mut Vec<ChatItem>, display_message: &str, error: &str) {
-    let Some(index) = rows.iter().rposition(|item| matches!(
-        item,
-        ChatItem::User(value) if value == display_message
-    )) else { return; };
+fn mark_optimistic_send_failed(rows: &mut [ChatItem], display_message: &str, error: &str) {
+    let Some(index) = rows.iter().rposition(
+        |item| matches!(item, ChatItem::User(value) if value == display_message),
+    ) else {
+        return;
+    };
     if let Some(ChatItem::Assistant { text, .. }) = rows.get_mut(index + 1) {
-        if text.is_empty() { *text = format!("Error: {error}"); }
+        if text.is_empty() {
+            *text = format!("Error: {error}");
+        }
     }
 }
 
 fn split_turn_started_error(error: &str) -> (bool, &str) {
-    error.strip_prefix("[turn-started] ")
+    error
+        .strip_prefix("[turn-started] ")
         .map_or((false, error), |message| (true, message))
-}
-
-fn restore_failed_composer(
-    input: RwSignal<String>,
-    attachments: RwSignal<Vec<ComposerAttachment>>,
-    references: RwSignal<Vec<ComposerReferenceChip>>,
-    draft: String,
-    saved_attachments: Vec<ComposerAttachment>,
-    saved_references: Vec<ComposerReferenceChip>,
-) {
-    // Do not trample text/files the user may already have started adding for
-    // their next turn while the failed request was in flight.
-    if input.get_untracked().is_empty() { input.set(draft); }
-    if attachments.get_untracked().is_empty() { attachments.set(saved_attachments); }
-    if references.get_untracked().is_empty() { references.set(saved_references); }
-}
-
-#[derive(Clone, Copy)]
-struct CodexOverrideUi {
-    active_session: RwSignal<Option<String>>,
-    visible_overrides: RwSignal<CodexModeOverrides>,
-    visible_mode: RwSignal<String>,
-    needs_confirmation: RwSignal<bool>,
-    write_conflicted: RwSignal<bool>,
-    status: RwSignal<String>,
-    locale: RwSignal<Locale>,
-}
-
-struct PendingCodexOverrideWrite {
-    session_id: Option<String>,
-    mode: String,
-    generation: Option<String>,
-    overrides: CodexModeOverrides,
-    ui: CodexOverrideUi,
-    completion: Option<oneshot::Sender<Result<(), String>>>,
-}
-
-#[derive(Default)]
-struct CodexOverrideWriteQueue {
-    running: HashSet<String>,
-    pending: HashMap<String, VecDeque<PendingCodexOverrideWrite>>,
-    revisions: HashMap<String, String>,
-}
-
-thread_local! {
-    static CODEX_OVERRIDE_WRITES: RefCell<CodexOverrideWriteQueue> = RefCell::new(CodexOverrideWriteQueue::default());
-}
-
-fn set_codex_override_revision(session_id: &str, revision: String) -> bool {
-    if revision.is_empty() { return false; }
-    CODEX_OVERRIDE_WRITES.with(|queue| {
-        let mut queue = queue.borrow_mut();
-        let is_stale = queue.revisions.get(session_id).is_some_and(|current| {
-            match (current.parse::<u64>(), revision.parse::<u64>()) {
-                (Ok(current), Ok(candidate)) => candidate < current,
-                _ => false,
-            }
-        });
-        if is_stale { return false; }
-        queue.revisions.insert(session_id.to_string(), revision);
-        true
-    })
-}
-
-fn enqueue_session_codex_overrides(
-    session_id: Option<String>,
-    mode: String,
-    generation: Option<String>,
-    overrides: CodexModeOverrides,
-    ui: CodexOverrideUi,
-    completion: Option<oneshot::Sender<Result<(), String>>>,
-) {
-    if ui.write_conflicted.get_untracked() {
-        if let Some(completion) = completion {
-            let _ = completion.send(Err("Codex session configuration must be confirmed after a revision conflict.".into()));
-        }
-        return;
-    }
-    let key = session_id.clone().unwrap_or_else(|| "__pending_session__".into());
-    let should_start = CODEX_OVERRIDE_WRITES.with(|queue| {
-        let mut queue = queue.borrow_mut();
-        queue.pending.entry(key.clone()).or_default().push_back(PendingCodexOverrideWrite {
-            session_id, mode, generation, overrides, ui, completion,
-        });
-        queue.running.insert(key.clone())
-    });
-    if !should_start { return; }
-    spawn_local(async move {
-        loop {
-            let request = CODEX_OVERRIDE_WRITES.with(|queue| {
-                queue.borrow_mut().pending.get_mut(&key).and_then(VecDeque::pop_front)
-            });
-            let Some(request) = request else {
-                CODEX_OVERRIDE_WRITES.with(|queue| {
-                    let mut queue = queue.borrow_mut();
-                    queue.pending.remove(&key);
-                    queue.running.remove(&key);
-                });
-                break;
-            };
-            let mut expected_revision = CODEX_OVERRIDE_WRITES.with(|queue| {
-                queue.borrow().revisions.get(&key).cloned()
-            });
-            if expected_revision.is_none() {
-                if let Some(session_id) = request.session_id.as_ref() {
-                    let args = to_value(&serde_json::json!({ "sessionId": session_id })).unwrap();
-                    match invoke_checked("get_session_codex_overrides", args).await {
-                        Ok(value) => if let Some(saved) = decode_session_codex_state(value) {
-                            if !saved.revision.is_empty() {
-                                set_codex_override_revision(session_id, saved.revision);
-                                expected_revision = CODEX_OVERRIDE_WRITES.with(|queue| {
-                                    queue.borrow().revisions.get(&key).cloned()
-                                });
-                            }
-                        },
-                        Err(error) => {
-                            let message = js_error_text(error);
-                            if let Some(completion) = request.completion { let _ = completion.send(Err(message.clone())); }
-                            request.ui.status.set(tf(request.ui.locale.get_untracked(), "codex.override_failed", &[
-                                ("msg", &localize_backend(request.ui.locale.get_untracked(), &message)),
-                            ]));
-                            continue;
-                        }
-                    }
-                }
-            }
-            let args = to_value(&serde_json::json!({
-                "sessionId": request.session_id.clone(),
-                "mode": request.mode.clone(),
-                "configVersion": request.generation.clone(),
-                "overrides": request.overrides.clone(),
-                "expectedRevision": expected_revision,
-            })).unwrap();
-            match invoke_checked("set_session_codex_overrides", args).await {
-                Ok(value) => {
-                    if let Some(saved) = decode_session_codex_state(value) {
-                        if let Some(session_id) = request.session_id.as_ref() {
-                            set_codex_override_revision(session_id, saved.revision);
-                        }
-                    }
-                    if let Some(completion) = request.completion { let _ = completion.send(Ok(())); }
-                }
-                Err(error) => {
-                    let message = js_error_text(error);
-                    let conflict = {
-                        let lower = message.to_ascii_lowercase();
-                        lower.contains("revision") || lower.contains("conflict") || lower.contains("changed")
-                    };
-                    if let Some(completion) = request.completion { let _ = completion.send(Err(message.clone())); }
-                    let abandoned = CODEX_OVERRIDE_WRITES.with(|queue| {
-                        queue.borrow_mut().pending.remove(&key).unwrap_or_default()
-                    });
-                    for abandoned in abandoned {
-                        if let Some(completion) = abandoned.completion {
-                            let _ = completion.send(Err(message.clone()));
-                        }
-                    }
-                    if conflict {
-                        request.ui.needs_confirmation.set(true);
-                        request.ui.write_conflicted.set(true);
-                        if let Some(session_id) = request.session_id.as_ref() {
-                            let args = to_value(&serde_json::json!({ "sessionId": session_id })).unwrap();
-                            if let Ok(value) = invoke_checked("get_session_codex_overrides", args).await {
-                                if let Some(saved) = decode_session_codex_state(value) {
-                                    let accepted = set_codex_override_revision(session_id, saved.revision);
-                                    if accepted && request.ui.active_session.get_untracked().as_deref() == Some(session_id.as_str()) {
-                                        request.ui.visible_overrides.set(saved.overrides);
-                                        request.ui.visible_mode.set(if saved.mode == "plan" { "plan".into() } else { "default".into() });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    request.ui.status.set(tf(request.ui.locale.get_untracked(), "codex.override_failed", &[
-                        ("msg", &localize_backend(request.ui.locale.get_untracked(), &message)),
-                    ]));
-                }
-            }
-        }
-    });
-}
-
-fn persist_session_codex_overrides(
-    session_id: Option<String>,
-    mode: String,
-    generation: Option<String>,
-    overrides: CodexModeOverrides,
-    ui: CodexOverrideUi,
-) {
-    enqueue_session_codex_overrides(session_id, mode, generation, overrides, ui, None);
-}
-
-async fn persist_session_codex_overrides_await(
-    session_id: Option<String>,
-    mode: String,
-    generation: Option<String>,
-    overrides: CodexModeOverrides,
-    ui: CodexOverrideUi,
-) -> Result<(), String> {
-    let (sender, receiver) = oneshot::channel();
-    enqueue_session_codex_overrides(session_id, mode, generation, overrides, ui, Some(sender));
-    receiver.await.unwrap_or_else(|_| Err("Codex session configuration write was cancelled.".into()))
-}
-
-fn is_plan_command(text: &str) -> bool {
-    let command = text.trim_start();
-    command == "/plan" || command.starts_with("/plan ") || command == "/default"
 }
 
 mod app_support;
 use app_support::*;
+
+#[component]
+fn AcpAgentsOverlay(
+    show: RwSignal<bool>,
+    agents: RwSignal<Vec<AcpAgentProfile>>,
+    active_agent_id: RwSignal<Option<String>>,
+) -> impl IntoView {
+    let edit_id = create_rw_signal(String::new());
+    let label = create_rw_signal(String::new());
+    let command = create_rw_signal(String::new());
+    let args_text = create_rw_signal(String::new());
+    let message = create_rw_signal(None::<(bool, String)>);
+    let infos = create_rw_signal(HashMap::<String, AcpAgentInfo>::new());
+    let reset = move || {
+        edit_id.set(String::new()); label.set(String::new()); command.set(String::new());
+        args_text.set(String::new()); message.set(None);
+    };
+    view! {
+        {move || show.get().then(|| view! {
+            <div class="overlay" data-testid="acp-agents-settings" on:click=move |_| show.set(false)>
+                <section class="modal acp-agents-settings" on:click=|event| event.stop_propagation()>
+                    <header class="modal-head"><div><h2>"ACP Agents"</h2><p>"Configure an installed ACP v1 agent. Each argument uses one line."</p></div>
+                        <button type="button" aria-label="Close" on:click=move |_| show.set(false)>"×"</button>
+                    </header>
+                    <div class="acp-agent-list">
+                        {move || agents.get().into_iter().map(|agent| {
+                            let edit = agent.clone();
+                            let test_id = agent.id.clone();
+                            let delete_id = agent.id.clone();
+                            let active = active_agent_id.get().as_deref() == Some(agent.id.as_str());
+                            let agent_info = infos.get().get(&agent.id).cloned();
+                            view! {
+                                <article class="settings-list-row" data-testid="acp-agent-row">
+                                    <div class="settings-list-main"><strong>{agent.label.clone()}</strong><code>{agent.command.clone()}</code></div>
+                                    <div class="settings-list-actions">
+                                        <button type="button" on:click=move |_| {
+                                            edit_id.set(edit.id.clone()); label.set(edit.label.clone()); command.set(edit.command.clone()); args_text.set(edit.args.join("\n"));
+                                        }>"Edit"</button>
+                                        <button type="button" data-testid="test-acp-agent" on:click=move |_| {
+                                            let id = test_id.clone();
+                                            spawn_local(async move {
+                                                let args = to_value(&serde_json::json!({ "id": id.clone() })).unwrap();
+                                                match invoke_checked("test_acp_agent", args).await {
+                                                    Ok(value) => match serde_wasm_bindgen::from_value::<AcpAgentInfo>(value) {
+                                                        Ok(value) => { infos.update(|all| { all.insert(id, value); }); message.set(Some((true, "Connection succeeded".into()))); }
+                                                        Err(error) => message.set(Some((false, error.to_string()))),
+                                                    },
+                                                    Err(error) => message.set(Some((false, js_error_text(error)))),
+                                                }
+                                            });
+                                        }>"Test Connection"</button>
+                                        <button type="button" disabled=active on:click=move |_| {
+                                            let id = delete_id.clone();
+                                            spawn_local(async move {
+                                                let args = to_value(&serde_json::json!({ "id": id })).unwrap();
+                                                if let Ok(value) = invoke_checked("remove_acp_agent", args).await {
+                                                    if let Ok(value) = serde_wasm_bindgen::from_value::<Vec<AcpAgentProfile>>(value) { agents.set(value); }
+                                                }
+                                            });
+                                        }>"Delete"</button>
+                                    </div>
+                                    {agent_info.map(|agent_info| view! {
+                                        <div class="acp-agent-info" data-testid="acp-agent-info">
+                                            <span>{format!("ACP v{}", agent_info.protocol_version)}</span>
+                                            {agent_info.auth_methods.into_iter().map(|method| {
+                                                let id = agent.id.clone(); let method_id = method.id.clone();
+                                                view! { <button type="button" data-testid="authenticate-acp-agent" title=method.description on:click=move |_| {
+                                                    let args = to_value(&serde_json::json!({ "id": id, "methodId": method_id })).unwrap();
+                                                    spawn_local(async move { message.set(Some(match invoke_checked("authenticate_acp_agent", args).await {
+                                                        Ok(_) => (true, "Authentication completed".into()), Err(error) => (false, js_error_text(error)),
+                                                    })); });
+                                                }>{method.name}</button> }
+                                            }).collect_view()}
+                                        </div>
+                                    })}
+                                </article>
+                            }
+                        }).collect_view()}
+                    </div>
+                    <form class="settings-form" on:submit=move |event| {
+                        event.prevent_default();
+                        let raw_args = args_text.get();
+                        let profile = AcpAgentProfile {
+                            id: edit_id.get(), label: label.get().trim().into(), command: command.get().trim().into(),
+                            args: if raw_args.is_empty() { Vec::new() } else { raw_args.split('\n').map(|arg| arg.strip_suffix('\r').unwrap_or(arg).to_string()).collect() },
+                        };
+                        if profile.label.is_empty() || profile.command.is_empty() { message.set(Some((false, "Label and command are required".into()))); return; }
+                        spawn_local(async move {
+                            let args = to_value(&serde_json::json!({ "profile": profile })).unwrap();
+                            match invoke_checked("save_acp_agent", args).await {
+                                Ok(value) => match serde_wasm_bindgen::from_value::<Vec<AcpAgentProfile>>(value) {
+                                    Ok(value) => { agents.set(value); reset(); message.set(Some((true, "Agent saved".into()))); }
+                                    Err(error) => message.set(Some((false, error.to_string()))),
+                                },
+                                Err(error) => message.set(Some((false, js_error_text(error)))),
+                            }
+                        });
+                    }>
+                        <label><span>"Label"</span><input data-testid="acp-agent-label" prop:value=move || label.get() on:input=move |event| label.set(dom_value(&event))/></label>
+                        <label><span>"Command"</span><input data-testid="acp-agent-command" prop:value=move || command.get() on:input=move |event| command.set(dom_value(&event))/></label>
+                        <label><span>"Arguments (one per line)"</span><textarea data-testid="acp-agent-args" prop:value=move || args_text.get() on:input=move |event| args_text.set(dom_value(&event))></textarea></label>
+                        <div class="row"><button type="button" on:click=move |_| reset()>"New"</button><button type="submit" class="primary" data-testid="save-acp-agent">"Save Agent"</button></div>
+                    </form>
+                    {move || message.get().map(|(ok, text)| view! { <p class="form-msg" class:ok=ok class:err=!ok>{text}</p> })}
+                </section>
+            </div>
+        })}
+    }
+}
 
 #[component]
 fn App() -> impl IntoView {
@@ -689,6 +382,11 @@ fn App() -> impl IntoView {
     let settings = create_rw_signal(Settings::default());
     // Configured model profiles + the composer's bottom-right picker state.
     let models = create_rw_signal::<Vec<ModelProfile>>(vec![]);
+    let acp_agents = create_rw_signal::<Vec<AcpAgentProfile>>(vec![]);
+    let active_acp_agent_id = create_rw_signal::<Option<String>>(None);
+    let show_acp_agents = create_rw_signal(false);
+    let acp_session_configs = create_rw_signal::<HashMap<String, Vec<serde_json::Value>>>(HashMap::new());
+    let acp_session_modes = create_rw_signal::<HashMap<String, serde_json::Value>>(HashMap::new());
     let show_projects = create_rw_signal(true); // app lands on the Projects screen
     let project_info = create_rw_signal::<Option<ProjectInfo>>(None);
     let demo_mode = create_rw_signal(false); // true = the synthetic "Example project" is open
@@ -697,113 +395,7 @@ fn App() -> impl IntoView {
     let project_transition_target = Rc::new(RefCell::new(None::<String>));
     let project_open_gate = Rc::new(RefCell::new(ProjectOpenGate::default()));
     let model_menu_open = create_rw_signal(false);
-    let codex_config_menu_open = create_rw_signal(false);
-    let codex_runtime = create_rw_signal(None::<RuntimeSnapshot>);
-    let codex_runtime_error = create_rw_signal(None::<String>);
-    let codex_runtime_loading = create_rw_signal(false);
-    let codex_settings_action_loading = create_rw_signal(false);
-    let codex_runtime_request_nonce = Rc::new(Cell::new(0u64));
-    let codex_config_needs_confirmation = create_rw_signal(false);
-    let codex_session_override_conflict = create_rw_signal(false);
-    let codex_runtime_refresh_pending = create_rw_signal(false);
-    let last_codex_generation = Rc::new(RefCell::new(String::new()));
-    let last_codex_runtime_scope = Rc::new(RefCell::new(None::<String>));
-    let codex_expected_project_id = create_rw_signal(String::new());
-    let codex_profile_overrides = create_rw_signal(CodexModeOverrides::default());
-    let codex_session_overrides = create_rw_signal(CodexModeOverrides::default());
-    let codex_preview = create_rw_signal(None::<ResolvedTurnConfig>);
-    let codex_preview_loading = create_rw_signal(false);
-    let codex_preview_request_nonce = Rc::new(Cell::new(0u64));
-    let codex_settings_preview_nonce = Rc::new(Cell::new(0u64));
-    let codex_preview_normal = create_rw_signal(None::<ResolvedTurnConfig>);
-    let codex_preview_plan = create_rw_signal(None::<ResolvedTurnConfig>);
-    let codex_turn_audits = create_rw_signal(Vec::<CodexTurnConfigAudit>::new());
-    let collaboration_mode = create_rw_signal(String::from("default"));
     let status = create_rw_signal(String::new());
-    {
-        let last_codex_generation = last_codex_generation.clone();
-        create_effect(move |_| {
-            let generation = codex_runtime.get().map(|snapshot| snapshot.config_version).unwrap_or_default();
-            let previous = std::mem::replace(&mut *last_codex_generation.borrow_mut(), generation.clone());
-            if !previous.is_empty() && !generation.is_empty() && previous != generation {
-                codex_runtime_refresh_pending.set(false);
-                codex_config_needs_confirmation.set(true);
-            }
-        });
-    }
-    {
-        let last_codex_runtime_scope = last_codex_runtime_scope.clone();
-        let profile_runtime_request_nonce = codex_runtime_request_nonce.clone();
-        let profile_preview_request_nonce = codex_preview_request_nonce.clone();
-        let profile_settings_preview_nonce = codex_settings_preview_nonce.clone();
-        create_effect(move |_| {
-            let list = models.get();
-            if list.is_empty() { return; }
-            let profile = list.iter().find(|model| model.active).or_else(|| list.first())
-                .filter(|profile| matches!(profile.provider.as_str(), "codex_cli" | "codex" | "codex_local" | "codex-local"));
-            if let Some(profile) = profile {
-                codex_profile_overrides.set(codex_overrides_from_profile(profile));
-            } else {
-                codex_profile_overrides.set(CodexModeOverrides::default());
-            }
-            let project = project_info.get();
-            let is_project_landing = show_projects.get();
-            let is_demo = demo_mode.get();
-            let next_scope = if is_project_landing || is_demo {
-                None
-            } else {
-                profile.zip(project.as_ref()).map(|(profile, project)| {
-                    format!("{}\u{1f}{}\u{1f}{}", profile.id, project.id, project.root)
-                })
-            };
-            let next_project_id = next_scope.as_ref()
-                .and_then(|_| project.as_ref().map(|project| project.id.clone()))
-                .unwrap_or_default();
-            let awaiting_project = !is_project_landing && !is_demo && project.is_none() && profile.is_some();
-            let previous = std::mem::replace(
-                &mut *last_codex_runtime_scope.borrow_mut(),
-                next_scope.clone(),
-            );
-            // `show_projects=false` is set before `get_project_info` resolves.
-            // Even when both the old and new scopes are `None`, keep Codex
-            // gated so the composer cannot briefly expose the exec fallback.
-            if awaiting_project {
-                codex_runtime_loading.set(true);
-                codex_runtime_error.set(None);
-            }
-            if previous == next_scope { return; }
-
-            // Never display or send a catalog/config snapshot resolved for the
-            // previous Profile. Increment both request epochs so late responses
-            // from that Profile are ignored as well.
-            codex_runtime.set(None);
-            codex_preview.set(None);
-            codex_preview_normal.set(None);
-            codex_preview_plan.set(None);
-            codex_session_override_conflict.set(false);
-            codex_runtime_loading.set(awaiting_project);
-            codex_expected_project_id.set(next_project_id);
-            profile_preview_request_nonce.set(profile_preview_request_nonce.get().wrapping_add(1));
-            profile_settings_preview_nonce.set(profile_settings_preview_nonce.get().wrapping_add(1));
-            profile_runtime_request_nonce.set(profile_runtime_request_nonce.get().wrapping_add(1));
-            if next_scope.is_some() {
-                codex_runtime_refresh_pending.set(false);
-                // Selecting (or initially restoring) a Codex Profile adopts its
-                // inherited snapshot as the new baseline. Confirmation is only
-                // required when that baseline subsequently changes.
-                codex_config_needs_confirmation.set(false);
-                status.set(String::new());
-                request_codex_runtime_snapshot(
-                    false, false, true, false, profile_runtime_request_nonce.clone(), models, codex_expected_project_id,
-                    codex_runtime, codex_runtime_error, codex_runtime_loading,
-                    codex_profile_overrides,
-                );
-            } else {
-                codex_runtime_refresh_pending.set(false);
-                codex_config_needs_confirmation.set(false);
-            }
-        });
-    }
     let send_mode_menu_open = create_rw_signal(false);
     let side_chat_input = create_rw_signal(String::new());
     let side_chat_items = create_rw_signal::<Vec<ChatItem>>(vec![]);
@@ -817,12 +409,11 @@ fn App() -> impl IntoView {
     let refresh_models = move || spawn_local(async move {
         let v = invoke("list_models", JsValue::UNDEFINED).await;
         if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(v) {
-            if let Some(profile) = list.iter().find(|model| model.active).or_else(|| list.first())
-                .filter(|profile| matches!(profile.provider.as_str(), "codex_cli" | "codex" | "codex_local" | "codex-local"))
-            {
-                codex_profile_overrides.set(codex_overrides_from_profile(profile));
-            }
             models.set(list);
+        }
+        let v = invoke("list_acp_agents", JsValue::UNDEFINED).await;
+        if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<AcpAgentProfile>>(v) {
+            acp_agents.set(list);
         }
     });
     // Tauri's native drag/drop event contains absolute paths (including
@@ -853,7 +444,7 @@ fn App() -> impl IntoView {
                 key: format!("native:{path}"), name, path,
             }));
         }
-        if !active_profile_uses_local_runner(&models.get_untracked()) {
+        if active_acp_agent_id.get_untracked().is_none() {
             status.set(t(locale.get_untracked(), "composer.native_path_api_hint").into());
         }
     }) as Box<dyn FnMut(JsValue)>);
@@ -883,115 +474,23 @@ fn App() -> impl IntoView {
     let drag_session = create_rw_signal::<Option<String>>(None);
     let drop_target = create_rw_signal::<Option<String>>(None);
     let active_session = create_rw_signal::<Option<String>>(None);
-    let codex_override_ui = CodexOverrideUi {
-        active_session,
-        visible_overrides: codex_session_overrides,
-        visible_mode: collaboration_mode,
-        needs_confirmation: codex_config_needs_confirmation,
-        write_conflicted: codex_session_override_conflict,
-        status,
-        locale,
-    };
-    refresh_sessions(sessions);
-    refresh_folders(folders);
-
-    // Load the selected local runtime once when Models settings opens. Runtime
-    // changes are applied only by the explicit refresh action (or send-time
-    // validation), so merely leaving Settings open never churns the actor.
-    {
-        let settings_runtime_request_nonce = codex_runtime_request_nonce.clone();
-        create_effect(move |_| {
-            if show_settings.get() && settings_section.get() == "models"
-                && !show_projects.get() && project_info.get().is_some()
-            {
-                request_codex_runtime_snapshot(
-                    false, false, false, false, settings_runtime_request_nonce.clone(), models, codex_expected_project_id,
-                    codex_runtime, codex_runtime_error,
-                    codex_runtime_loading, codex_profile_overrides,
-                );
-            }
-        });
-    }
     create_effect(move |_| {
-        codex_session_override_conflict.set(false);
         let Some(session_id) = active_session.get() else {
-            codex_session_overrides.set(CodexModeOverrides::default());
-            codex_turn_audits.set(vec![]);
-            collaboration_mode.set("default".into());
+            active_acp_agent_id.set(None);
             return;
         };
-        // Reset immediately so a rapid session switch cannot momentarily send
-        // the previous conversation's override. Restore the persisted layer
-        // only if this is still the active session when the command resolves.
-        codex_session_overrides.set(CodexModeOverrides::default());
-        codex_turn_audits.set(vec![]);
-        collaboration_mode.set("default".into());
-        refresh_codex_turn_audits(session_id.clone(), active_session, codex_turn_audits);
         spawn_local(async move {
-            let args = to_value(&serde_json::json!({ "sessionId": session_id })).unwrap();
-            if let Ok(value) = invoke_checked("get_session_codex_overrides", args).await {
-                if let Some(saved) = decode_session_codex_state(value) {
-                    let accepted = set_codex_override_revision(&session_id, saved.revision.clone());
-                    if accepted && active_session.get_untracked().as_deref() == Some(session_id.as_str()) {
-                        codex_session_overrides.set(saved.overrides);
-                        collaboration_mode.set(if saved.mode == "plan" { "plan".into() } else { "default".into() });
-                    }
-                }
+            let args = to_value(&serde_json::json!({ "frameId": session_id.clone() })).unwrap();
+            let Ok(value) = invoke_checked("get_acp_session_agent", args).await else { return; };
+            let Ok(agent_id) = serde_wasm_bindgen::from_value::<Option<String>>(value) else { return; };
+            if active_session.get_untracked().as_deref() == Some(session_id.as_str()) {
+                active_acp_agent_id.set(agent_id);
             }
         });
     });
+    refresh_sessions(sessions);
+    refresh_folders(folders);
 
-    // Preview is the composer's source of truth. It is refreshed from the same
-    // backend resolver whenever the mode/session/runtime generation or the
-    // visible session override changes.
-    {
-        let request_nonce = codex_preview_request_nonce.clone();
-        create_effect(move |_| {
-            let mode = collaboration_mode.get();
-            let session_id = active_session.get();
-            let overrides = codex_session_overrides.get();
-            let generation = codex_runtime.get().map(|snapshot| snapshot.config_version);
-            let request_id = request_nonce.get().wrapping_add(1);
-            request_nonce.set(request_id);
-            if !active_profile_uses_codex(&models.get()) {
-                codex_preview.set(None);
-                codex_preview_loading.set(false);
-                return;
-            }
-            if generation.is_none() {
-                codex_preview.set(None);
-                codex_preview_loading.set(false);
-                return;
-            }
-            // Never show the previous mode/session as if it described the new
-            // selection while its resolver call is still pending.
-            codex_preview.set(None);
-            codex_preview_loading.set(true);
-            let response_nonce = request_nonce.clone();
-            spawn_local(async move {
-                let args = to_value(&serde_json::json!({
-                    "sessionId": session_id.clone(),
-                    "mode": mode.clone(),
-                    "overrides": overrides.clone(),
-                    "configVersion": generation.clone(),
-                    "previewScope": "session",
-                })).unwrap();
-                let response = invoke_checked("preview_codex_turn_config", args).await;
-                let still_current = response_nonce.get() == request_id
-                    && active_session.get_untracked() == session_id
-                    && collaboration_mode.get_untracked() == mode
-                    && codex_session_overrides.get_untracked() == overrides
-                    && codex_runtime.get_untracked().map(|snapshot| snapshot.config_version) == generation
-                    && active_profile_uses_codex(&models.get_untracked());
-                if still_current {
-                    if let Ok(value) = response {
-                        codex_preview.set(decode_resolved_turn_config(value));
-                    }
-                    codex_preview_loading.set(false);
-                }
-            });
-        });
-    }
 
     // `busy` is "the active session is currently streaming" — derived from the
     // per-session `running` set so it stays correct when the user switches
@@ -1090,35 +589,6 @@ fn App() -> impl IntoView {
     let file_cwd = create_rw_signal(".".to_string());
     let file_entries = create_rw_signal::<Vec<DirEntry>>(vec![]);
     let file_search_hits = create_rw_signal::<Vec<FileSearchHit>>(vec![]);
-    // Runtime-change events are notifications only. Preserve the turn snapshot
-    // and let the user decide when to refresh; opening Settings must never
-    // restart or continually reread the local Codex actor in the background.
-    let runtime_changed_cb = Closure::wrap(Box::new(move |payload: JsValue| {
-        let Ok(value) = serde_wasm_bindgen::from_value::<serde_json::Value>(payload) else { return; };
-        let profile_id = value.get("profileId").or_else(|| value.get("profile_id"))
-            .and_then(|value| value.as_str()).unwrap_or("");
-        let project_id = value.get("projectId").or_else(|| value.get("project_id"))
-            .and_then(|value| value.as_str()).unwrap_or("");
-        let _pending = value.get("pending").and_then(|value| value.as_bool()).unwrap_or(false);
-        let profiles = models.get_untracked();
-        let profile_matches = profiles.iter()
-            .find(|profile| profile.active)
-            .or_else(|| profiles.first())
-            .is_some_and(|profile| {
-                active_profile_uses_codex(std::slice::from_ref(profile))
-                    && profile.id == profile_id
-            });
-        let project_matches = project_info.get_untracked().as_ref().is_none_or(|project| {
-            project.id.is_empty() || project_id.is_empty() || project.id == project_id
-        });
-        if !profile_matches || !project_matches { return; }
-        codex_config_needs_confirmation.set(true);
-        codex_runtime_refresh_pending.set(true);
-        status.set(t(locale.get_untracked(), "codex.refresh_detected").into());
-    }) as Box<dyn FnMut(JsValue)>);
-    let runtime_changed_js = runtime_changed_cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
-    std::mem::forget(runtime_changed_cb);
-    spawn_local(async move { let _ = listen("codex-runtime-changed", &runtime_changed_js).await; });
     // Dedicated project windows use the same guarded transition as every
     // interactive project-open path. The callback is built after `load_session`.
     let dedicated_project_id = url_project_param();
@@ -1380,11 +850,10 @@ fn App() -> impl IntoView {
                 }
             }
             AgentEvent::Stdout { frame_id, chunk } => queue(frame_id, PendingDelta::Stdout(chunk)),
-            AgentEvent::Done { frame_id } => {
+            AgentEvent::Done { frame_id, stop_reason: _ } => {
                 flush_now();
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |items| {
                     strip_approval_pending(items);
-                    items.retain(|item| !matches!(item, ChatItem::PlanQuestion(_)));
                 });
                 approval_cb.update(|s| { s.remove(&frame_id); });
                 clear_running_if_idle(pending_cb, running_cb, &frame_id);
@@ -1392,14 +861,12 @@ fn App() -> impl IntoView {
                     stopping_session.set(None);
                 }
                 refresh_sessions(sessions);
-                refresh_codex_turn_audits(frame_id.clone(), active_cb, codex_turn_audits);
             }
             AgentEvent::Error { frame_id, message } => {
                 flush_now();
                 let model = active_model_label(&models_cb.get());
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
                     strip_approval_pending(v);
-                    v.retain(|item| !matches!(item, ChatItem::PlanQuestion(_)));
                     v.push(ChatItem::Assistant { text: format!("Error: {message}"), model });
                 });
                 approval_cb.update(|s| { s.remove(&frame_id); });
@@ -1407,7 +874,6 @@ fn App() -> impl IntoView {
                 if stopping_session.get().as_deref() == Some(&frame_id) {
                     stopping_session.set(None);
                 }
-                refresh_codex_turn_audits(frame_id.clone(), active_cb, codex_turn_audits);
             }
             AgentEvent::ReviewStarted { frame_id } => {
                 flush_now();
@@ -1433,87 +899,6 @@ fn App() -> impl IntoView {
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| upsert_review(v, report));
                 if active_cb.get().as_deref() == Some(&frame_id) {
                     status_cb.set(t(locale_cb.get(), "status.review_done"));
-                }
-            }
-            AgentEvent::PlanDelta { frame_id, delta, native } => {
-                flush_now();
-                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |items| {
-                    let queue_start = trailing_queue_start(items);
-                    if let Some(ChatItem::Plan(plan)) = items[..queue_start].last_mut() {
-                        if !plan.complete {
-                            plan.text.push_str(&delta);
-                            plan.native &= native;
-                            return;
-                        }
-                    }
-                    for item in &mut items[..queue_start] {
-                        if let ChatItem::Plan(plan) = item { plan.actionable = false; }
-                    }
-                    items.insert(queue_start, ChatItem::Plan(PlanCard { text: delta, complete: false, native, actionable: false, plan_id: String::new(), revision: 0 }));
-                });
-            }
-            AgentEvent::PlanUpdated { frame_id, plan, native } => {
-                flush_now();
-                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |items| {
-                    let queue_start = trailing_queue_start(items);
-                    if let Some(index) = items[..queue_start].iter().rposition(|item| matches!(item, ChatItem::Plan(_))) {
-                        items[index] = ChatItem::Plan(PlanCard { text: plan.clone(), complete: false, native, actionable: false, plan_id: String::new(), revision: 0 });
-                    } else {
-                        items.insert(queue_start, ChatItem::Plan(PlanCard { text: plan.clone(), complete: false, native, actionable: false, plan_id: String::new(), revision: 0 }));
-                    }
-                });
-            }
-            AgentEvent::FinalPlan { frame_id, plan, native, plan_id, revision } => {
-                flush_now();
-                let actionable = !plan_id.is_empty() && revision > 0;
-                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |items| {
-                    let queue_start = trailing_queue_start(items);
-                    if let Some(index) = items[..queue_start].iter().rposition(|item| matches!(item, ChatItem::Plan(_))) {
-                        items[index] = ChatItem::Plan(PlanCard { text: plan.clone(), complete: true, native, actionable, plan_id: plan_id.clone(), revision });
-                    } else {
-                        items.insert(queue_start, ChatItem::Plan(PlanCard { text: plan.clone(), complete: true, native, actionable, plan_id: plan_id.clone(), revision }));
-                    }
-                });
-                if active_cb.get().as_deref() == Some(&frame_id) {
-                    status_cb.set(t(locale_cb.get(), "plan.ready"));
-                }
-            }
-            AgentEvent::RequestUserInput { frame_id, question_id, question, options, is_other, is_secret } => {
-                flush_now();
-                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |items| {
-                    let index = trailing_queue_start(items);
-                    items.insert(index, ChatItem::PlanQuestion(PlanQuestion { question_id, question, options, is_other, is_secret }));
-                });
-                if active_cb.get().as_deref() == Some(&frame_id) {
-                    status_cb.set(t(locale_cb.get(), "plan.needs_input"));
-                }
-            }
-            AgentEvent::RequestUserInputResolved { frame_id, question_id } => {
-                flush_now();
-                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |items| {
-                    items.retain(|item| !matches!(item, ChatItem::PlanQuestion(question) if question.question_id == question_id));
-                });
-            }
-            AgentEvent::ModelRerouted { frame_id, requested_model, effective_model } => {
-                flush_now();
-                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |items| {
-                    if let Some(ChatItem::Assistant { model, .. }) = items.iter_mut().rev().find(|item| matches!(item, ChatItem::Assistant { .. })) {
-                        *model = Some(if requested_model.is_empty() {
-                            effective_model.clone()
-                        } else {
-                            format!("{requested_model} → {effective_model}")
-                        });
-                    }
-                });
-                if active_cb.get().as_deref() == Some(&frame_id) {
-                    codex_preview.update(|preview| if let Some(config) = preview {
-                        config.requested_model = requested_model.clone();
-                        config.effective_model = effective_model.clone();
-                        config.sources.insert("model".into(), "codex_server_reroute".into());
-                    });
-                    status_cb.set(tf(locale_cb.get(), "codex.rerouted", &[
-                        ("requested", &requested_model), ("effective", &effective_model),
-                    ]));
                 }
             }
             AgentEvent::Diff { .. } => {}
@@ -1569,6 +954,90 @@ fn App() -> impl IntoView {
     let confirm_js = confirm_cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
     std::mem::forget(confirm_cb);
     spawn_local(async move { let _ = listen("confirm-request", &confirm_js).await; });
+    let acp_permission_items = items;
+    let acp_permission_active = active_session;
+    let acp_permission_transcripts = transcripts;
+    let acp_permission_cb = Closure::wrap(Box::new(move |payload: JsValue| {
+        let Ok(request) = serde_wasm_bindgen::from_value::<AcpPermissionRequest>(payload) else { return; };
+        let tool = request.tool_call.get("title").and_then(serde_json::Value::as_str)
+            .or_else(|| request.tool_call.get("name").and_then(serde_json::Value::as_str))
+            .unwrap_or("ACP tool request").to_string();
+        route_items(acp_permission_active, acp_permission_items, acp_permission_transcripts, &request.frame_id, |items| {
+            items.push(ChatItem::AcpPermission { request_id: request.request_id, tool, options: request.options });
+        });
+    }) as Box<dyn FnMut(JsValue)>);
+    let acp_permission_js: js_sys::Function = acp_permission_cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
+    acp_permission_cb.forget();
+    spawn_local(async move { let _ = listen("permission-request", &acp_permission_js).await; });
+
+    let acp_update_cb = Closure::wrap(Box::new(move |payload: JsValue| {
+        let Ok(update) = serde_wasm_bindgen::from_value::<AcpSessionUpdate>(payload) else { return; };
+        match update.kind.as_str() {
+            "ToolCall" | "ToolCallUpdate" => route_items(active_session, items, transcripts, &update.frame_id, |rows| {
+                upsert_acp_tool(rows, &update.payload);
+            }),
+            "Plan" => {
+                let text = acp_plan_text(&update.payload);
+                route_items(active_session, items, transcripts, &update.frame_id, |rows| {
+                    let card = PlanCard { text };
+                    if let Some(index) = rows.iter().rposition(|row| matches!(row, ChatItem::Plan(_))) {
+                        rows[index] = ChatItem::Plan(card);
+                    } else {
+                        let index = trailing_queue_start(rows);
+                        rows.insert(index, ChatItem::Plan(card));
+                    }
+                });
+            }
+            "ConfigOptions" => {
+                if let Some(options) = update.payload.get("configOptions").and_then(serde_json::Value::as_array) {
+                    acp_session_configs.update(|all| { all.insert(update.frame_id, options.clone()); });
+                }
+            }
+            "CurrentMode" => {
+                acp_session_modes.update(|all| { all.insert(update.frame_id, update.payload); });
+            }
+            "Usage" => if active_session.get_untracked().as_deref() == Some(update.frame_id.as_str()) {
+                let used = update.payload.get("used").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                let size = update.payload.get("size").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                status.set(if size == 0 { format!("ACP context: {used} tokens") } else { format!("ACP context: {used} / {size} tokens") });
+            },
+            "SessionInfo" => if active_session.get_untracked().as_deref() == Some(update.frame_id.as_str()) {
+                if let Some(title) = update.payload.get("title").and_then(serde_json::Value::as_str) {
+                    status.set(title.into());
+                }
+            },
+            "AvailableCommands" => if active_session.get_untracked().as_deref() == Some(update.frame_id.as_str()) {
+                status.set("ACP commands updated".into());
+            },
+            _ => {}
+        }
+    }) as Box<dyn FnMut(JsValue)>);
+    let acp_update_js: js_sys::Function = acp_update_cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
+    acp_update_cb.forget();
+    spawn_local(async move { let _ = listen("acp-session-update", &acp_update_js).await; });
+
+    let acp_state_cb = Closure::wrap(Box::new(move |payload: JsValue| {
+        let Ok(state) = serde_wasm_bindgen::from_value::<AcpSessionState>(payload) else { return; };
+        if let Some(options) = state.config_options {
+            acp_session_configs.update(|all| { all.insert(state.frame_id.clone(), options); });
+        }
+        if let Some(modes) = state.modes {
+            acp_session_modes.update(|all| { all.insert(state.frame_id, modes); });
+        }
+    }) as Box<dyn FnMut(JsValue)>);
+    let acp_state_js: js_sys::Function = acp_state_cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
+    acp_state_cb.forget();
+    spawn_local(async move { let _ = listen("acp-session-state", &acp_state_js).await; });
+
+    let acp_resolved_cb = Closure::wrap(Box::new(move |payload: JsValue| {
+        let Ok(resolved) = serde_wasm_bindgen::from_value::<AcpPermissionResolved>(payload) else { return; };
+        route_items(active_session, items, transcripts, &resolved.frame_id, |rows| {
+            rows.retain(|row| !matches!(row, ChatItem::AcpPermission { request_id, .. } if request_id == &resolved.request_id));
+        });
+    }) as Box<dyn FnMut(JsValue)>);
+    let acp_resolved_js: js_sys::Function = acp_resolved_cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
+    acp_resolved_cb.forget();
+    spawn_local(async move { let _ = listen("permission-resolved", &acp_resolved_js).await; });
 
     let stop = move |_| {
         if stopping_session.get().is_some() { return; }
@@ -1581,369 +1050,101 @@ fn App() -> impl IntoView {
         });
     };
 
-    let composer_runtime_request_nonce = codex_runtime_request_nonce.clone();
     let send = Callback::new(move |action: ComposerSendAction| {
-        let text = input.get();
-        let trimmed = text.trim();
-        let using_codex = active_profile_uses_codex(&models.get());
-        let using_codex_app_server = using_codex && codex_runtime.get().is_some();
-        let using_local_runner = active_profile_uses_local_runner(&models.get());
-        if action == ComposerSendAction::Normal && trimmed == "/default" {
-            collaboration_mode.set("default".into());
-            if using_local_runner {
-                persist_session_codex_overrides(
-                    active_session.get(), "default".into(),
-                    using_codex.then(|| codex_runtime.get().map(|snapshot| snapshot.config_version)).flatten(),
-                    if using_codex { codex_session_overrides.get() } else { CodexModeOverrides::default() },
-                    codex_override_ui,
-                );
-            }
-            picker_mode.set(None);
-            input.set(String::new());
-            status.set(t(locale.get(), "plan.default_enabled").into());
-            return;
-        }
-        let mut turn_text = text.clone();
-        if action == ComposerSendAction::Normal && (trimmed == "/plan" || trimmed.starts_with("/plan ")) {
-            if collaboration_mode.get_untracked() != "plan" {
-                collaboration_mode.set("plan".into());
-            }
-            picker_mode.set(None);
-            turn_text = trimmed.strip_prefix("/plan").unwrap_or("").trim_start().to_string();
-            if turn_text.trim().is_empty() {
-                if using_local_runner {
-                    persist_session_codex_overrides(
-                        active_session.get(), "plan".into(),
-                        using_codex.then(|| codex_runtime.get().map(|snapshot| snapshot.config_version)).flatten(),
-                        if using_codex { codex_session_overrides.get() } else { CodexModeOverrides::default() },
-                        codex_override_ui,
-                    );
-                }
-                input.set(String::new());
-                status.set(t(locale.get(), "plan.enabled").into());
-                return;
-            }
-        } else if action == ComposerSendAction::PlanFirst {
-            if collaboration_mode.get_untracked() != "plan" {
-                collaboration_mode.set("plan".into());
-            }
-        }
-        if using_codex && codex_runtime_loading.get() {
-            status.set(t(locale.get(), "codex.runtime.wait").into());
-            return;
-        }
-        if using_codex && codex_config_needs_confirmation.get() {
-            codex_config_menu_open.set(true);
-            let key = if codex_runtime_refresh_pending.get() {
-                "codex.refresh_detected"
-            } else {
-                "codex.confirm_changed"
-            };
-            status.set(t(locale.get(), key).into());
-            return;
-        }
-        let preview_matches_mode = codex_preview.get().is_some_and(|config| {
-            (collaboration_mode.get() == "plan") == (config.mode == "plan")
-        });
-        if using_codex_app_server && (codex_preview_loading.get() || !preview_matches_mode) {
-            status.set(t(locale.get(), "codex.preview.wait").into());
-            return;
-        }
-        let turn_mode = collaboration_mode.get();
+        let message = input.get();
         let saved_attachments = attachments.get();
-        let paths = attachment_paths(&saved_attachments);
         let refs = composer_references.get();
-        let saved_references = refs.clone();
+        let paths = attachment_paths(&saved_attachments);
+        let display_message = message_with_attachments(&message, &paths);
         let reference_args = refs.iter().map(ComposerReferenceChip::arg).collect::<Vec<_>>();
-        let display_message = message_with_references(&turn_text, &paths, &refs);
-        let mut message = display_message.clone();
-        if turn_mode == "plan" && !using_local_runner {
-            message = plan_first_message(&message);
+        if message.trim().is_empty() && paths.is_empty() && reference_args.is_empty() {
+            return;
         }
-        if display_message.trim().is_empty() || uploading.get() { return; }
+        if active_acp_agent_id.get().is_some() && action == ComposerSendAction::BranchNew {
+            status.set("ACP protocol v1 does not support branching a bound session.".into());
+            return;
+        }
+        if active_acp_agent_id.get().is_some() && !reference_args.is_empty() {
+            status.set("ACP sessions currently support text and file attachments, not Wisp references.".into());
+            return;
+        }
         let active = active_session.get();
         let branch = action == ComposerSendAction::BranchNew;
-        let branch_items = items.get();
-        if !branch && active.as_ref().is_some_and(|id| running.get().contains(id)) {
-            items.update(|v| v.push(ChatItem::QueuedUser(display_message.clone())));
-            force_chat_bottom();
-        } else if !branch {
-            let model = if using_codex && !using_codex_app_server {
-                let profiles = models.get();
-                let profile = profiles.iter().find(|profile| profile.active).or_else(|| profiles.first());
-                profile.and_then(|profile| {
-                    let layer = codex_session_overrides.get();
-                    let mode_layer = layer.for_mode(&turn_mode);
-                    let profile_model = if turn_mode == "plan" { &profile.plan_model } else { &profile.normal_model };
-                    mode_layer.model.clone()
-                        .or_else(|| optional_profile_value(profile_model))
-                        .or_else(|| optional_profile_value(&profile.model))
-                }).or_else(|| active_model_label(&profiles))
-            } else {
-                codex_preview.get().map(|config| config.effective_model().to_string())
-                    .filter(|model| !model.is_empty()).or_else(|| active_model_label(&models.get()))
-            };
-            items.update(|v| {
-                v.push(ChatItem::User(display_message.clone()));
-                v.push(ChatItem::Assistant { text: String::new(), model });
-            });
-            force_chat_bottom();
-        }
-        needs_api_key.set(false);
+        let agent_id = active_acp_agent_id.get();
+        let turn_model = active_model_label(&models.get());
         input.set(String::new());
         attachments.set(vec![]);
         composer_references.set(vec![]);
-        let locale = locale;
-        let status = status;
-        let running = running;
-        let active_session = active_session;
-        let items = items;
-        let transcripts = transcripts;
-        let sessions = sessions;
-        let stopping_session = stopping_session;
-        let pending_turns = pending_turns;
-        let config_generation = using_codex.then(|| codex_runtime.get().map(|snapshot| snapshot.config_version)).flatten();
-        let session_overrides = using_codex.then(|| codex_session_overrides.get());
-        let send_collaboration_mode = using_local_runner.then(|| turn_mode.clone());
-        let draft_for_retry = text.clone();
-        let send_runtime_request_nonce = composer_runtime_request_nonce.clone();
+        picker_mode.set(None);
         spawn_local(async move {
-            let restore_failure = |target_session: Option<&str>| {
-                if !branch {
-                    rollback_optimistic_send(
-                        target_session,
-                        active_session,
-                        items,
-                        transcripts,
-                        &display_message,
-                    );
-                }
-                restore_failed_composer(
-                    input,
-                    attachments,
-                    composer_references,
-                    draft_for_retry.clone(),
-                    saved_attachments.clone(),
-                    saved_references.clone(),
-                );
-            };
-            // Resolve once more immediately before the turn. If the local
-            // runtime changed since the composer's snapshot, restore the draft
-            // and require an explicit retry rather than sending stale values.
-            if using_codex_app_server {
-                let args = to_value(&serde_json::json!({
-                    "sessionId": active.clone(),
-                    "mode": turn_mode.clone(),
-                    "overrides": session_overrides.clone(),
-                    "configVersion": config_generation.clone(),
-                    "previewScope": "session",
-                    "validateRuntime": true,
-                })).unwrap();
-                let resolved = match invoke_checked("preview_codex_turn_config", args).await {
-                    Ok(value) => match decode_resolved_turn_config(value) {
-                        Some(resolved) => resolved,
-                        None => {
-                            restore_failure(active.as_deref());
-                            status.set(tf(locale.get(), "status.send_failed", &[(
-                                "msg", "Codex returned an unsupported configuration preview.",
-                            )]));
-                            return;
-                        }
-                    },
-                    Err(error) => {
-                        let raw = js_error_text(error);
-                        let changed = is_codex_config_changed_error(&raw);
-                        restore_failure(active.as_deref());
-                        if changed {
-                            codex_config_needs_confirmation.set(true);
-                            codex_runtime_refresh_pending.set(true);
-                            request_codex_runtime_snapshot_with_ack(
-                                false, false, true, false, send_runtime_request_nonce.clone(), models, codex_expected_project_id,
-                                codex_runtime, codex_runtime_error,
-                                codex_runtime_loading, codex_profile_overrides,
-                                Some(codex_runtime_refresh_pending),
-                            );
-                            codex_config_menu_open.set(true);
-                            status.set(t(locale.get(), "codex.config_changed").into());
-                        } else {
-                            status.set(tf(locale.get(), "status.send_failed", &[(
-                                "msg", &localize_backend(locale.get(), &raw),
-                            )]));
-                        }
-                        return;
-                    }
-                };
-                let stale = config_generation.as_ref().is_some_and(|generation| {
-                    !generation.is_empty()
-                        && !resolved.config_version.is_empty()
-                        && generation != &resolved.config_version
-                });
-                let effective_model = resolved.effective_model().to_string();
-                if !effective_model.is_empty() && !branch {
-                    items.update(|rows| if let Some(ChatItem::Assistant { text, model }) = rows.last_mut() {
-                        if text.is_empty() { *model = Some(effective_model.clone()); }
-                    });
-                }
-                codex_preview.set(Some(resolved));
-                if stale {
-                    restore_failure(active.as_deref());
-                    codex_config_needs_confirmation.set(true);
-                    codex_runtime_refresh_pending.set(true);
-                    request_codex_runtime_snapshot_with_ack(
-                        false, false, true, false, send_runtime_request_nonce.clone(), models, codex_expected_project_id,
-                        codex_runtime, codex_runtime_error,
-                        codex_runtime_loading, codex_profile_overrides,
-                        Some(codex_runtime_refresh_pending),
-                    );
-                    codex_config_menu_open.set(true);
-                    status.set(t(locale.get(), "codex.config_changed").into());
-                    return;
-                }
-            }
-            // Resolve the target session: use the active one, or create a fresh
-            // frame up front so streamed events can be routed before the first delta.
             let id = if branch {
-                let arg = to_value(&tauri_args::branch_session(&active, Some(turn_text.trim()), None)).unwrap();
-                match invoke("branch_session", arg).await.as_string() {
-                    Some(s) => s,
+                let args = to_value(&tauri_args::branch_session(&active, Some(message.trim()), None)).unwrap();
+                match invoke("branch_session", args).await.as_string() {
+                    Some(id) => id,
                     None => {
-                        restore_failure(active.as_deref());
-                        let loc = locale.get();
-                        status.set(t(loc, "status.send_failed").into());
+                        input.set(message);
+                        attachments.set(saved_attachments);
+                        composer_references.set(refs);
+                        status.set(t(locale.get(), "status.send_failed").into());
                         return;
                     }
                 }
-            } else { match active.clone() {
-                Some(id) => id,
-                None => {
-                    let v = invoke("new_session", JsValue::UNDEFINED).await;
-                    match v.as_string() {
-                        Some(s) => s,
-                        None => {
-                            // Bridge returned no id (e.g. legacy mock); bail without
-                            // flipping running so the user can retry.
-                            restore_failure(None);
-                            let loc = locale.get();
-                            status.set(t(loc, "status.send_failed").into());
-                            return;
-                        }
+            } else if let Some(id) = active {
+                id
+            } else {
+                match invoke("new_session", JsValue::UNDEFINED).await.as_string() {
+                    Some(id) => id,
+                    None => {
+                        input.set(message);
+                        attachments.set(saved_attachments);
+                        composer_references.set(refs);
+                        status.set(t(locale.get(), "status.send_failed").into());
+                        return;
                     }
                 }
-            }};
-            if branch {
-                if let Some(old) = active.clone() {
-                    transcripts.update(|m| { m.insert(old, branch_items.clone()); });
-                }
-                items.set(branch_items);
-                force_chat_bottom();
-            }
-            if using_local_runner {
-                if let Err(message) = persist_session_codex_overrides_await(
-                    Some(id.clone()),
-                    turn_mode.clone(),
-                    config_generation.clone(),
-                    session_overrides.clone().unwrap_or_default(),
-                    codex_override_ui,
-                ).await {
-                    restore_failure(active.as_deref());
-                    let lower = message.to_ascii_lowercase();
-                    if is_codex_config_changed_error(&message) {
-                        codex_config_needs_confirmation.set(true);
-                        codex_runtime_refresh_pending.set(true);
-                        request_codex_runtime_snapshot_with_ack(
-                            false, false, true, false, send_runtime_request_nonce.clone(), models, codex_expected_project_id,
-                            codex_runtime, codex_runtime_error,
-                            codex_runtime_loading, codex_profile_overrides,
-                            Some(codex_runtime_refresh_pending),
-                        );
-                        codex_config_menu_open.set(true);
-                        status.set(t(locale.get(), "codex.config_changed").into());
-                    } else if lower.contains("revision") || lower.contains("conflict") {
-                        // The serialized override writer already reread the
-                        // session layer/revision. Do not restart or refresh the
-                        // Codex runtime for a session-only compare-and-swap.
-                        codex_config_needs_confirmation.set(true);
-                        codex_config_menu_open.set(true);
-                        status.set(tf(locale.get(), "codex.override_failed", &[(
-                            "msg", &localize_backend(locale.get(), &message),
-                        )]));
-                    } else {
-                        status.set(tf(locale.get(), "status.send_failed", &[(
-                            "msg", &localize_backend(locale.get(), &message),
-                        )]));
-                    }
-                    return;
-                }
-            }
+            };
             active_session.set(Some(id.clone()));
+            route_items(active_session, items, transcripts, &id, |rows| {
+                rows.push(ChatItem::User(display_message.clone()));
+                rows.push(ChatItem::Assistant {
+                    text: String::new(),
+                    model: turn_model.clone(),
+                });
+            });
+            force_chat_bottom();
             begin_pending_turn(pending_turns, running, &id);
-            let arg = to_value(&SendMessageArgs {
-                session_id: Some(id.clone()), message, attachments: paths,
-                references: reference_args, resume: false,
-                collaboration_mode: send_collaboration_mode,
-                codex_config_generation: config_generation,
-                codex_overrides: session_overrides,
+            let args = to_value(&SendMessageArgs {
+                session_id: Some(id.clone()),
+                message: message.clone(),
+                attachments: paths,
+                references: reference_args,
+                resume: false,
+                acp_agent_id: agent_id,
             }).unwrap();
-            match invoke_checked("send_message", arg).await {
-                Ok(_) => {
-                    // send_message is awaited for the whole turn, so it resolves only
-                    // once the turn has finished AND been persisted. Clear `running`
-                    // here rather than trusting the separate `Done` broadcast — a
-                    // dropped broadcast used to pin the session on "运行中" until an
-                    // app restart (#34).
-                    finish_pending_turn(pending_turns, running, &id);
-                    if stopping_session.get().as_deref() == Some(&id) {
-                        stopping_session.set(None);
-                    }
-                    // If the live view desynced (a tool row left unresolved by a
-                    // missed event), reconcile it from the authoritative DB so the
-                    // completed result shows without a restart. Healthy turns keep
-                    // their richer streamed view (incl. tool inputs) untouched.
-                    let is_active = active_session.get().as_deref() == Some(&id);
-                    let stranded = if is_active {
-                        items.with(|v| v.iter().any(|c| matches!(c, ChatItem::Tool { ok: None, .. })))
-                    } else {
-                        transcripts.with(|m| m.get(&id).map_or(false, |v| v.iter().any(|c| matches!(c, ChatItem::Tool { ok: None, .. }))))
-                    };
-                    if stranded {
-                        let v = invoke("load_session", to_value(&serde_json::json!({ "id": id })).unwrap()).await;
-                        if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<LoadedItem>>(v) {
-                            let chats: Vec<ChatItem> = list.into_iter().map(LoadedItem::into_chat).collect();
-                            transcripts.update(|m| { m.insert(id.clone(), chats.clone()); });
-                            if active_session.get().as_deref() == Some(&id) {
-                                items.set(chats);
-                                force_chat_bottom();
-                            }
+            match invoke_checked("send_message", args).await {
+                Ok(_) => refresh_sessions(sessions),
+                Err(error) => {
+                    let raw = js_error_text(error);
+                    let (started, message_text) = split_turn_started_error(&raw);
+                    route_items(active_session, items, transcripts, &id, |rows| {
+                        if started {
+                            mark_optimistic_send_failed(rows, &display_message, message_text);
+                        } else {
+                            remove_optimistic_send_rows(rows, &display_message);
                         }
+                    });
+                    if !started {
+                        if input.get_untracked().is_empty() { input.set(message); }
+                        if attachments.get_untracked().is_empty() { attachments.set(saved_attachments); }
+                        if composer_references.get_untracked().is_empty() { composer_references.set(refs); }
                     }
-                    refresh_sessions(sessions);
-                    refresh_codex_turn_audits(id.clone(), active_session, codex_turn_audits);
-                }
-                Err(err) => {
-                    let loc = locale.get();
-                    let raw = js_error_text(err);
-                    let (turn_started, visible_error) = split_turn_started_error(&raw);
-                    if !turn_started {
-                        restore_failure(Some(&id));
-                    } else if !branch {
-                        route_items(active_session, items, transcripts, &id, |rows| {
-                            mark_optimistic_send_failed(rows, &display_message, visible_error)
-                        });
-                    }
-                    if turn_started {
-                        refresh_codex_turn_audits(id.clone(), active_session, codex_turn_audits);
-                    }
-                    if visible_error.contains(NO_API_KEY_MARK) { needs_api_key.set(true); }
-                    status.set(tf(loc, "status.send_failed", &[("msg", &localize_backend(loc, visible_error))]));
-                    finish_pending_turn(pending_turns, running, &id);
-                    if stopping_session.get().as_deref() == Some(&id) {
-                        stopping_session.set(None);
-                    }
+                    if raw.contains(NO_API_KEY_MARK) { needs_api_key.set(true); }
+                    status.set(tf(locale.get(), "status.send_failed", &[("msg", &localize_backend(locale.get(), message_text))]));
                 }
             }
+            finish_pending_turn(pending_turns, running, &id);
         });
     });
-
     let send_side_chat = move |question: String| {
         let question = question.trim().to_string();
         if question.is_empty() || side_chat_busy.get() {
@@ -2112,11 +1313,10 @@ fn App() -> impl IntoView {
             let Some(id) = active_session.get() else {
                 return;
             };
-            let use_codex = active_profile_uses_codex(&models.get());
-            let use_local_runner = active_profile_uses_local_runner(&models.get());
-            let resume_mode = use_local_runner.then(|| collaboration_mode.get());
-            let resume_generation = use_codex.then(|| codex_runtime.get().map(|snapshot| snapshot.config_version)).flatten();
-            let resume_overrides = use_codex.then(|| codex_session_overrides.get());
+            if active_acp_agent_id.get().is_some() {
+                status.set("ACP protocol v1 cannot replay a Wisp transcript.".into());
+                return;
+            }
             let model = active_model_label(&models.get());
             items.update(|v| {
                 strip_error_at(v, error_idx);
@@ -2131,9 +1331,7 @@ fn App() -> impl IntoView {
                     attachments: vec![],
                     references: vec![],
                     resume: true,
-                    collaboration_mode: resume_mode,
-                    codex_config_generation: resume_generation,
-                    codex_overrides: resume_overrides,
+                    acp_agent_id: None,
                 })
                 .unwrap();
                 match invoke_checked("send_message", arg).await {
@@ -2447,22 +1645,15 @@ fn App() -> impl IntoView {
             .and_then(|id| models.get().iter().find(|m| &m.id == id).map(|m| m.has_api_key))
             .unwrap_or(false);
         let cfg = model_form_to_settings(&form, has_key && key.is_empty());
-        let local_runner = matches!(form.provider.as_str(), "codex" | "codex_cli" | "codex_local" | "codex-local" | "claude_code" | "claude-code");
-        if !local_runner {
-            if let Some(err_key) = settings_required_error_key(&cfg, &key) {
-                let err = t(loc, err_key);
-                let text = tf(loc, "status.save_failed", &[("msg", &err)]);
-                model_form_msg.set(Some((false, text)));
-                return;
-            }
+        if let Some(err_key) = settings_required_error_key(&cfg, &key) {
+            let err = t(loc, err_key);
+            let text = tf(loc, "status.save_failed", &[("msg", &err)]);
+            model_form_msg.set(Some((false, text)));
+            return;
         }
         settings_busy.set(true);
         model_form_msg.set(Some((true, t(loc, "status.saving_settings").into())));
-        let provider = match form.provider.as_str() {
-            "codex" | "codex_cli" | "codex_local" | "codex-local" => "codex_cli",
-            "claude_code" | "claude-code" | "claude" => "claude_code",
-            other => provider_value(other),
-        };
+        let provider = provider_value(&form.provider);
         let profile = serde_json::json!({
             "id": form.id.clone().unwrap_or_default(),
             "label": form.label.trim(),
@@ -2473,20 +1664,6 @@ fn App() -> impl IntoView {
             "reasoning_effort": form.reasoning_effort.trim(),
             "supports_vision": form.supports_vision,
             "use_for_vision": form.use_for_vision,
-            "runner_command": form.runner_command.trim(),
-            "runner_profile": form.runner_profile.trim(),
-            "runner_sandbox": form.runner_sandbox.trim(),
-            "runner_web_search_mode": form.runner_web_search_mode.trim(),
-            "runner_claude_command": form.runner_claude_command.trim(),
-            "runner_persistent": form.runner_persistent,
-            "normal_model": form.normal_model.trim(),
-            "normal_reasoning_effort": form.normal_reasoning_effort.trim(),
-            "plan_model": form.plan_model.trim(),
-            "plan_reasoning_effort": form.plan_reasoning_effort.trim(),
-            "service_tier": form.service_tier.trim(),
-            "personality": form.personality.trim(),
-            "reasoning_summary": form.reasoning_summary.trim(),
-            "verbosity": form.verbosity.trim(),
         });
         let key_arg = if key.is_empty() { None } else { Some(key) };
         spawn_local(async move {
@@ -2516,166 +1693,18 @@ fn App() -> impl IntoView {
         });
     };
 
-    let explicit_runtime_request_nonce = codex_runtime_request_nonce.clone();
-    let refresh_codex_runtime = Callback::new(move |_: ()| {
-        if show_projects.get_untracked() || project_info.get_untracked().is_none() { return; }
-        request_codex_runtime_snapshot_with_ack(
-            true, true, true, true, explicit_runtime_request_nonce.clone(), models, codex_expected_project_id,
-            codex_runtime, codex_runtime_error,
-            codex_runtime_loading, codex_profile_overrides,
-            Some(codex_runtime_refresh_pending),
-        );
-    });
-
-    let settings_preview_nonce = codex_settings_preview_nonce.clone();
-    let preview_codex_configs = Callback::new(move |_: ()| {
-        let overrides = codex_profile_overrides.get();
-        let generation = codex_runtime.get().map(|snapshot| snapshot.config_version);
-        let request_id = settings_preview_nonce.get().wrapping_add(1);
-        settings_preview_nonce.set(request_id);
-        let response_nonce = settings_preview_nonce.clone();
-        codex_preview_normal.set(None);
-        codex_preview_plan.set(None);
-        codex_settings_action_loading.set(true);
-        spawn_local(async move {
-            for (mode, output) in [("default", codex_preview_normal), ("plan", codex_preview_plan)] {
-                let args = to_value(&serde_json::json!({
-                    "sessionId": null,
-                    "mode": mode,
-                    "overrides": overrides,
-                    "configVersion": generation,
-                    "previewScope": "profile",
-                })).unwrap();
-                match invoke_checked("preview_codex_turn_config", args).await {
-                    Ok(value) => {
-                        if response_nonce.get() != request_id { return; }
-                        if let Some(config) = decode_resolved_turn_config(value) { output.set(Some(config)); }
-                    }
-                    Err(error) if response_nonce.get() == request_id => {
-                        codex_runtime_error.set(Some(js_error_text(error)))
-                    }
-                    Err(_) => return,
-                }
-            }
-            if response_nonce.get() == request_id { codex_settings_action_loading.set(false); }
-        });
-    });
-
-    create_effect(move |_| {
-        let visible = show_settings.get() && settings_section.get() == "models";
-        let has_runtime = codex_runtime.get().is_some();
-        let _profile_layer = codex_profile_overrides.get();
-        if visible && has_runtime && active_profile_uses_codex(&models.get()) {
-            preview_codex_configs.call(());
-        }
-    });
-
-    let save_codex_profile = Callback::new(move |_: ()| {
-        let Some(profile) = models.get().into_iter().find(|model| model.active)
-            .or_else(|| models.get().into_iter().next())
-            .filter(|profile| matches!(profile.provider.as_str(), "codex_cli" | "codex" | "codex_local" | "codex-local"))
-        else {
-            codex_runtime_error.set(Some(t(locale.get(), "codex.no_profile").into()));
-            return;
-        };
-        let overrides = codex_profile_overrides.get();
-        codex_settings_action_loading.set(true);
-        let profile_json = serde_json::json!({
-            "id": profile.id,
-            "label": profile.label,
-            "provider": "codex_cli",
-            "api_url": profile.api_url,
-            "model": profile.model,
-            "max_tokens": profile.max_tokens,
-            "reasoning_effort": profile.reasoning_effort,
-            "supports_vision": profile.supports_vision,
-            "use_for_vision": profile.use_for_vision,
-            "runner_command": profile.runner_command,
-            "runner_profile": profile.runner_profile,
-            "runner_sandbox": overrides.sandbox.clone().unwrap_or_default(),
-            "runner_web_search_mode": overrides.web_search.clone().unwrap_or_default(),
-            "runner_claude_command": profile.runner_claude_command,
-            "runner_persistent": profile.runner_persistent,
-            "normal_model": overrides.normal.model.clone().unwrap_or_default(),
-            "normal_reasoning_effort": overrides.normal.effort.clone().unwrap_or_default(),
-            "plan_model": overrides.plan.model.clone().unwrap_or_default(),
-            "plan_reasoning_effort": overrides.plan.effort.clone().unwrap_or_default(),
-            "service_tier": overrides.service_tier.clone().unwrap_or_default(),
-            "personality": overrides.personality.clone().unwrap_or_default(),
-            "reasoning_summary": overrides.summary.clone().unwrap_or_default(),
-            "verbosity": overrides.verbosity.clone().unwrap_or_default(),
-        });
-        spawn_local(async move {
-            let args = to_value(&serde_json::json!({
-                "profile": profile_json,
-                "key": null,
-                "useForVision": profile.use_for_vision,
-            })).unwrap();
-            match invoke_checked("save_model", args).await {
-                Ok(value) => {
-                    if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(value) { models.set(list); }
-                    codex_runtime_error.set(None);
-                    status.set(t(locale.get(), "status.settings_saved").into());
-                    codex_settings_action_loading.set(false);
-                    preview_codex_configs.call(());
-                }
-                Err(error) => {
-                    codex_runtime_error.set(Some(localize_backend(locale.get(), &js_error_text(error))));
-                    codex_settings_action_loading.set(false);
-                }
-            }
-        });
-    });
-
-    let save_specialist_form = move |_| {
-        let Some(spec) = specialist_form.get() else { return; };
-        spawn_local(async move {
-            let arg = to_value(&serde_json::json!({ "spec": spec })).unwrap();
-            match invoke_checked("save_specialist_cmd", arg).await {
-                Ok(v) => {
-                    if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<Specialist>>(v) {
-                        specialists.set(list);
-                    }
-                    specialist_form.set(None);
-                }
-                Err(err) => {
-                    // Same surface the model form uses for its failures.
-                    model_form_msg.set(Some((false, localize_backend(locale.get_untracked(), &js_error_text(err)))));
-                }
-            }
-        });
-    };
-
-    let remove_specialist_fn = move |id: String| {
-        spawn_local(async move {
-            let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
-            if let Ok(v) = invoke_checked("remove_specialist", arg).await {
-                if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<Specialist>>(v) {
-                    specialists.set(list);
-                }
-            }
-        });
-    };
 
     let validate_model_form = move |_| {
         if settings_busy.get() { return; }
         let Some(form) = model_form.get() else { return; };
         let loc = locale.get();
         let key = model_form_key.get();
-        let local_provider = match form.provider.as_str() {
-            "codex_cli" | "codex" | "codex_local" | "codex-local" => Some("codex_cli"),
-            "claude_code" | "claude-code" | "claude" => Some("claude_code"),
-            _ => None,
-        };
         let has_key = models.get().iter().find(|m| Some(m.id.as_str()) == form.id.as_deref()).map(|m| m.has_api_key).unwrap_or(false);
-        let mut cfg = model_form_to_settings(&form, has_key);
-        if let Some(provider) = local_provider { cfg.provider = provider.into(); }
-        if local_provider.is_none() {
-            if let Some(err_key) = settings_required_error_key(&cfg, &key) {
-                let err = t(loc, err_key);
-                model_form_msg.set(Some((false, tf(loc, "status.validation_failed", &[("msg", &err)]))));
-                return;
-            }
+        let cfg = model_form_to_settings(&form, has_key);
+        if let Some(err_key) = settings_required_error_key(&cfg, &key) {
+            let err = t(loc, err_key);
+            model_form_msg.set(Some((false, tf(loc, "status.validation_failed", &[("msg", &err)]))));
+            return;
         }
         settings_busy.set(true);
         model_form_msg.set(Some((true, t(loc, "status.validating").into())));
@@ -2695,6 +1724,43 @@ fn App() -> impl IntoView {
                 }
             }
             settings_busy.set(false);
+        });
+    };
+
+    let save_specialist_form = move |_| {
+        let Some(spec) = specialist_form.get() else { return; };
+        if spec.name.trim().is_empty() {
+            settings_message.set(Some((false, "Specialist name is required.".into())));
+            return;
+        }
+        settings_busy.set(true);
+        spawn_local(async move {
+            let args = to_value(&serde_json::json!({ "spec": spec })).unwrap();
+            match invoke_checked("save_specialist_cmd", args).await {
+                Ok(value) => match serde_wasm_bindgen::from_value::<Vec<Specialist>>(value) {
+                    Ok(value) => {
+                        specialists.set(value);
+                        specialist_form.set(None);
+                        settings_message.set(Some((true, "Specialist saved.".into())));
+                    }
+                    Err(error) => settings_message.set(Some((false, error.to_string()))),
+                },
+                Err(error) => settings_message.set(Some((false, js_error_text(error)))),
+            }
+            settings_busy.set(false);
+        });
+    };
+
+    let remove_specialist_fn = move |id: String| {
+        spawn_local(async move {
+            let args = to_value(&serde_json::json!({ "id": id })).unwrap();
+            match invoke_checked("remove_specialist", args).await {
+                Ok(value) => match serde_wasm_bindgen::from_value::<Vec<Specialist>>(value) {
+                    Ok(value) => specialists.set(value),
+                    Err(error) => settings_message.set(Some((false, error.to_string()))),
+                },
+                Err(error) => settings_message.set(Some((false, js_error_text(error)))),
+            }
         });
     };
 
@@ -2763,7 +1829,7 @@ fn App() -> impl IntoView {
                 refresh_sessions(sessions);
                 let arg = to_value(&SendMessageArgs {
                     session_id: Some(id.clone()), message: text, attachments: vec![], references: vec![], resume: false,
-                    collaboration_mode: None, codex_config_generation: None, codex_overrides: None,
+                    acp_agent_id: None,
                 }).unwrap();
                 match invoke_checked("send_message", arg).await {
                     // The awaited command resolving is the reliable turn-complete
@@ -2798,32 +1864,13 @@ fn App() -> impl IntoView {
             // session switching and restart semantics identical.
             items.set(transcripts.with(|m| m.get(&id).cloned().unwrap_or_default()));
             force_chat_bottom();
-            let running_id = id.clone();
-            spawn_local(async move {
-                let args = to_value(&serde_json::json!({ "sessionId": running_id.clone() })).unwrap();
-                if let Ok(value) = invoke_checked("get_latest_proposed_plan", args).await {
-                    if let Some(plan) = decode_proposed_plan(value).filter(|plan| !plan.text.trim().is_empty()) {
-                        route_items(active_session, items, transcripts, &running_id, |rows| {
-                            upsert_persisted_plan(rows, plan)
-                        });
-                    }
-                }
-            });
             return;
         }
         // Idle session: load from DB and overwrite any stale cache entry.
         spawn_local(async move {
             let v = invoke("load_session", to_value(&serde_json::json!({ "id": id.clone() })).unwrap()).await;
             if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<LoadedItem>>(v) {
-                let mut chats: Vec<ChatItem> = list.into_iter().map(LoadedItem::into_chat).collect();
-                // Proposed plans are persisted separately from ordinary chat
-                // rows. Older backends simply reject this optional command.
-                let plan_arg = to_value(&serde_json::json!({ "sessionId": id.clone() })).unwrap();
-                if let Ok(value) = invoke_checked("get_latest_proposed_plan", plan_arg).await {
-                    if let Some(plan) = decode_proposed_plan(value).filter(|plan| !plan.text.trim().is_empty()) {
-                        upsert_persisted_plan(&mut chats, plan);
-                    }
-                }
+                let chats: Vec<ChatItem> = list.into_iter().map(LoadedItem::into_chat).collect();
                 transcripts.update(|m| { m.insert(id.clone(), chats.clone()); });
                 // Only repaint the view if we're still on this session — a rapid
                 // switch could have moved on while the load was in flight, and an
@@ -2881,212 +1928,6 @@ fn App() -> impl IntoView {
         })
     };
 
-    let plan_runtime_request_nonce = codex_runtime_request_nonce.clone();
-    let on_plan_action = Callback::new(move |(action, plan_id, revision, plan_native): (String, String, i64, bool)| {
-        if action == "modify" {
-            collaboration_mode.set("plan".into());
-            if active_profile_uses_local_runner(&models.get()) {
-                let use_codex = active_profile_uses_codex(&models.get());
-                persist_session_codex_overrides(
-                    active_session.get(), "plan".into(),
-                    use_codex.then(|| codex_runtime.get().map(|snapshot| snapshot.config_version)).flatten(),
-                    if use_codex { codex_session_overrides.get() } else { CodexModeOverrides::default() },
-                    codex_override_ui,
-                );
-            }
-            input.set(String::new());
-            focus_composer();
-            status.set(t(locale.get(), "plan.modify_hint").into());
-            return;
-        }
-        // An event from an older backend has no durable claim token. Rendering
-        // should already hide its buttons, but keep the command boundary safe.
-        if plan_id.is_empty() || revision <= 0 { return; }
-        let Some(session_id) = active_session.get() else { return; };
-        let approving = action == "approve";
-        if plan_native && active_profile_uses_codex(&models.get()) && codex_runtime_loading.get() {
-            status.set(t(locale.get(), "codex.runtime.wait").into());
-            return;
-        }
-        if approving && plan_native && active_profile_uses_codex(&models.get())
-            && codex_config_needs_confirmation.get()
-        {
-            codex_config_menu_open.set(true);
-            let key = if codex_runtime_refresh_pending.get() {
-                "codex.refresh_detected"
-            } else {
-                "codex.confirm_changed"
-            };
-            status.set(t(locale.get(), key).into());
-            return;
-        }
-        if approving {
-            begin_pending_turn(pending_turns, running, &session_id);
-            status.set(t(locale.get(), "plan.executing").into());
-        }
-        let action_for_request = action.clone();
-        // Compatibility proposals may have been produced because App Server
-        // probing failed. Do not make their approval depend on a fresh native
-        // preview; the backend validates their persisted config fingerprint.
-        let action_uses_codex = plan_native && active_profile_uses_codex(&models.get());
-        let requested_generation = codex_runtime.get().map(|snapshot| snapshot.config_version);
-        let requested_overrides = codex_session_overrides.get();
-        let action_runtime_request_nonce = plan_runtime_request_nonce.clone();
-        spawn_local(async move {
-            // Approval is an implementation turn in Default mode. Resolve that
-            // exact config now and pass the same generation/override snapshot to
-            // the backend action; never reuse the Plan-mode preview.
-            let action_config_version = if approving && action_uses_codex {
-                let preview_args = to_value(&serde_json::json!({
-                    "sessionId": session_id.clone(),
-                    "mode": "default",
-                    "overrides": requested_overrides.clone(),
-                    "configVersion": requested_generation.clone(),
-                    "previewScope": "session",
-                    "validateRuntime": true,
-                })).unwrap();
-                match invoke_checked("preview_codex_turn_config", preview_args).await {
-                    Ok(value) => match decode_resolved_turn_config(value) {
-                        Some(resolved) => {
-                            let version = if resolved.config_version.is_empty() {
-                                requested_generation.clone().unwrap_or_default()
-                            } else {
-                                resolved.config_version
-                            };
-                            if version.is_empty() {
-                                status.set(tf(locale.get(), "status.send_failed", &[(
-                                    "msg", "Codex did not return a configuration version for approval.",
-                                )]));
-                                finish_pending_turn(pending_turns, running, &session_id);
-                                return;
-                            }
-                            let stale = requested_generation.as_ref().is_some_and(|generation| {
-                                !generation.is_empty() && generation != &version
-                            });
-                            if stale {
-                                finish_pending_turn(pending_turns, running, &session_id);
-                                codex_config_needs_confirmation.set(true);
-                                codex_runtime_refresh_pending.set(true);
-                                request_codex_runtime_snapshot_with_ack(
-                                    false, false, true, false, action_runtime_request_nonce.clone(), models, codex_expected_project_id,
-                                    codex_runtime, codex_runtime_error, codex_runtime_loading,
-                                    codex_profile_overrides, Some(codex_runtime_refresh_pending),
-                                );
-                                codex_config_menu_open.set(true);
-                                status.set(t(locale.get(), "codex.config_changed").into());
-                                return;
-                            }
-                            Some(version)
-                        }
-                        None => {
-                            status.set(tf(locale.get(), "status.send_failed", &[(
-                                "msg", "Codex returned an unsupported Default configuration preview.",
-                            )]));
-                            finish_pending_turn(pending_turns, running, &session_id);
-                            return;
-                        }
-                    },
-                    Err(error) => {
-                        let raw = js_error_text(error);
-                        finish_pending_turn(pending_turns, running, &session_id);
-                        if is_codex_config_changed_error(&raw) {
-                            codex_config_needs_confirmation.set(true);
-                            codex_runtime_refresh_pending.set(true);
-                            request_codex_runtime_snapshot_with_ack(
-                                false, false, true, false, action_runtime_request_nonce.clone(), models, codex_expected_project_id,
-                                codex_runtime, codex_runtime_error, codex_runtime_loading,
-                                codex_profile_overrides, Some(codex_runtime_refresh_pending),
-                            );
-                            codex_config_menu_open.set(true);
-                            status.set(t(locale.get(), "codex.config_changed").into());
-                        } else {
-                            status.set(tf(locale.get(), "status.send_failed", &[(
-                                "msg", &localize_backend(locale.get(), &raw),
-                            )]));
-                        }
-                        return;
-                    }
-                }
-            } else {
-                None
-            };
-            let args = to_value(&serde_json::json!({
-                "sessionId": session_id.clone(),
-                "action": action_for_request,
-                "planId": plan_id.clone(),
-                "revision": revision,
-                "configVersion": action_config_version,
-                "overrides": (approving && action_uses_codex).then_some(requested_overrides.clone()),
-            })).unwrap();
-            match invoke_checked("codex_plan_action", args).await {
-                Ok(_) => {
-                    if matches!(action.as_str(), "approve" | "save_exit") {
-                        collaboration_mode.set("default".into());
-                    }
-                    status.set(t(locale.get(), if action == "approve" { "plan.executing" } else { "plan.saved" }).into());
-                    route_items(active_session, items, transcripts, &session_id, |rows| {
-                        if let Some(card) = rows.iter_mut().filter_map(|row| match row {
-                            ChatItem::Plan(card) => Some(card),
-                            _ => None,
-                        }).find(|card| card.plan_id == plan_id && card.revision == revision) {
-                            card.actionable = false;
-                        }
-                    });
-                    let args = to_value(&serde_json::json!({ "sessionId": session_id.clone() })).unwrap();
-                    if let Ok(value) = invoke_checked("get_latest_proposed_plan", args).await {
-                        if let Some(plan) = decode_proposed_plan(value)
-                            .filter(|plan| plan.id == plan_id && plan.revision == revision)
-                        {
-                            route_items(active_session, items, transcripts, &session_id, |rows| {
-                                if let Some(index) = rows.iter().rposition(|row| matches!(
-                                    row,
-                                    ChatItem::Plan(card) if card.plan_id == plan_id && card.revision == revision
-                                )) {
-                                rows[index] = ChatItem::Plan(PlanCard {
-                                    text: plan.text,
-                                    complete: !matches!(plan.status.as_str(), "streaming" | "draft"),
-                                    native: plan.native,
-                                    actionable: plan.status == "pending" && !plan.id.is_empty(),
-                                    plan_id: plan.id,
-                                    revision: plan.revision,
-                                });
-                                }
-                            });
-                        }
-                    }
-                    refresh_codex_turn_audits(
-                        session_id.clone(), active_session, codex_turn_audits,
-                    );
-                }
-                Err(error) => status.set(tf(locale.get(), "status.send_failed", &[
-                    ("msg", &localize_backend(locale.get(), &js_error_text(error))),
-                ])),
-            }
-            if approving {
-                finish_pending_turn(pending_turns, running, &session_id);
-            }
-        });
-    });
-
-    let on_plan_answer = Callback::new(move |(question_id, answer): (String, String)| {
-        let answer = answer.trim().to_string();
-        if answer.is_empty() { return; }
-        spawn_local(async move {
-            let args = to_value(&serde_json::json!({
-                "questionId": question_id,
-                "answers": [answer],
-            })).unwrap();
-            match invoke_checked("answer_codex_user_input", args).await {
-                Ok(_) => {
-                    items.update(|rows| rows.retain(|row| !matches!(row, ChatItem::PlanQuestion(question) if question.question_id == question_id)));
-                    status.set(t(locale.get(), "plan.answer_sent").into());
-                }
-                Err(error) => status.set(tf(locale.get(), "status.send_failed", &[
-                    ("msg", &localize_backend(locale.get(), &js_error_text(error))),
-                ])),
-            }
-        });
-    });
 
     let on_sidebar_resize_start = move |ev: web_sys::MouseEvent| {
         ev.prevent_default();
@@ -3176,9 +2017,7 @@ fn App() -> impl IntoView {
                 attachments: vec![],
                 references: vec![],
                 resume: false,
-                collaboration_mode: None,
-                codex_config_generation: None,
-                codex_overrides: None,
+                acp_agent_id: None,
             })
             .unwrap();
             begin_pending_turn(pending_turns, running, &id);
@@ -3558,11 +2397,6 @@ fn App() -> impl IntoView {
             specialist_menu_open.set(false);
             return;
         }
-        if codex_config_menu_open.get() {
-            ev.prevent_default();
-            codex_config_menu_open.set(false);
-            return;
-        }
         if model_menu_open.get() {
             ev.prevent_default();
             model_menu_open.set(false);
@@ -3659,7 +2493,6 @@ fn App() -> impl IntoView {
             *transition_target.borrow_mut() = Some(project_id.clone());
 
             project_open_error.set(None);
-            codex_runtime_error.set(None);
             status.set(String::new());
             show_proj_menu.set(false);
             demo_mode.set(false);
@@ -3731,14 +2564,10 @@ fn App() -> impl IntoView {
                         let detail = localize_backend(loc, &raw_error);
                         let message = tf(loc, "projects.open_failed", &[("msg", &detail)]);
                         project_open_error.set(Some(message.clone()));
-                        codex_runtime_error.set(Some(message.clone()));
                         status.set(message);
                         project_info.set(None);
                         *transition_target.borrow_mut() = None;
                         show_projects.set(true);
-                        // Set this last so any effect triggered by returning to
-                        // the landing cannot leave the pre-info send gate stuck.
-                        codex_runtime_loading.set(false);
                         return;
                     }
                 };
@@ -4162,8 +2991,8 @@ fn App() -> impl IntoView {
                                         <div class=class_for(&item) data-ui-index=i.to_string()>
                                             {render_item(
                                                 i, &item, &arts, on_artifact_select, on_file_link,
-                                                busy.read_only(), is_last, edit_message, branch_message, sid,
-                                                respond_confirm, on_resume, on_plan_action, on_plan_answer,
+                                                busy.read_only(), is_last, active_acp_agent_id.get().is_none(), edit_message, branch_message, sid,
+                                                respond_confirm, on_resume,
                                             )}
                                         </div>
                                     }.into_view()
@@ -4269,15 +3098,9 @@ fn App() -> impl IntoView {
                             prop:value={move || input.get()}
                             on:input=move |ev| {
                                 let v = event_target_value(&ev);
-                                if is_plan_command(&v) {
-                                    // Native slash commands take precedence over
-                                    // an installed skill named plan/default.
-                                    picker_mode.set(None);
-                                } else {
-                                    match active_composer_trigger(&v) {
-                                        Some((_, mode, q)) => { picker_query.set(q); picker_index.set(0); picker_mode.set(Some(mode)); }
-                                        None => picker_mode.set(None),
-                                    }
+                                match active_composer_trigger(&v) {
+                                    Some((_, mode, q)) => { picker_query.set(q); picker_index.set(0); picker_mode.set(Some(mode)); }
+                                    None => picker_mode.set(None),
                                 }
                                 input.set(v);
                             }
@@ -4498,320 +3321,65 @@ fn App() -> impl IntoView {
                             }})}
                         </div>
                         <div class="composer-buttons">
-                            {move || (active_profile_uses_local_runner(&models.get()) && !active_profile_uses_codex(&models.get())).then(|| {
-                                let plan_mode = collaboration_mode.get() == "plan";
-                                view! {
-                                    <div class="codex-composer-config local-runner-mode" class:plan=plan_mode>
-                                        <button type="button" class="codex-mode-toggle"
-                                            title=move || t(locale.get(), if plan_mode { "plan.switch_default" } else { "plan.switch_plan" })
-                                            on:click=move |_| {
-                                                let mode = if plan_mode { "default".to_string() } else { "plan".to_string() };
-                                                collaboration_mode.set(mode.clone());
-                                                persist_session_codex_overrides(
-                                                    active_session.get(), mode, None, CodexModeOverrides::default(), codex_override_ui,
-                                                );
-                                            }>
-                                            <span class="codex-mode-dot"></span>
-                                            {move || t(locale.get(), if plan_mode { "codex.mode.plan" } else { "codex.mode.normal" })}
-                                            {plan_mode.then(|| view! { <span class="codex-compat-mark">{move || t(locale.get(), "plan.compat")}</span> })}
-                                        </button>
-                                    </div>
-                                }
-                            })}
-                            {move || (active_profile_uses_codex(&models.get()) && codex_runtime_loading.get()).then(|| view! {
-                                <div class="codex-composer-config codex-runtime-loading" aria-live="polite">
-                                    <span class="codex-runtime-loading-label"><span class="codex-mode-dot"></span>{t(locale.get(), "codex.runtime.loading_short")}</span>
-                                </div>
-                            })}
-                            {move || (active_profile_uses_codex(&models.get()) && codex_runtime.get().is_none() && !codex_runtime_loading.get()).then(|| {
-                                let plan_mode = collaboration_mode.get() == "plan";
-                                let mode = if plan_mode { "plan".to_string() } else { "default".to_string() };
-                                let profile = models.get().into_iter().find(|profile| profile.active)
-                                    .or_else(|| models.get().into_iter().next()).unwrap();
-                                let session_layer = codex_session_overrides.get();
-                                let selected = session_layer.for_mode(&mode);
-                                let profile_model = if plan_mode { &profile.plan_model } else { &profile.normal_model };
-                                let profile_effort = if plan_mode { &profile.plan_reasoning_effort } else { &profile.normal_reasoning_effort };
-                                let visible_model = selected.model.clone()
-                                    .or_else(|| optional_profile_value(profile_model))
-                                    .or_else(|| optional_profile_value(&profile.model))
-                                    .unwrap_or_else(|| t(locale.get(), "codex.inherit").into());
-                                let visible_effort = selected.effort.clone()
-                                    .or_else(|| optional_profile_value(profile_effort))
-                                    .or_else(|| optional_profile_value(&profile.reasoning_effort))
-                                    .unwrap_or_else(|| t(locale.get(), "codex.inherit").into());
-                                let mode_for_toggle = mode.clone();
-                                let mode_for_model = mode.clone();
-                                let mode_for_effort = mode.clone();
-                                let mode_for_reset = mode.clone();
-                                view! {
-                                    <div class="codex-composer-config local-runner-mode" class:plan=plan_mode>
-                                        <button type="button" class="codex-mode-toggle"
-                                            title=move || t(locale.get(), if plan_mode { "plan.switch_default" } else { "plan.switch_plan" })
-                                            on:click=move |_| {
-                                                let next = if mode_for_toggle == "plan" { "default".to_string() } else { "plan".to_string() };
-                                                collaboration_mode.set(next.clone());
-                                                persist_session_codex_overrides(
-                                                    active_session.get(), next, None, codex_session_overrides.get(), codex_override_ui,
-                                                );
-                                            }>
-                                            <span class="codex-mode-dot"></span>
-                                            {move || t(locale.get(), if plan_mode { "codex.mode.plan" } else { "codex.mode.normal" })}
-                                            <span class="codex-compat-mark">{move || t(locale.get(), "plan.compat")}</span>
-                                        </button>
-                                        <button type="button" class="codex-config-toggle" class:active=move || codex_config_menu_open.get()
-                                            on:click=move |_| codex_config_menu_open.update(|open| *open = !*open)>
-                                            <span class="codex-config-model">{visible_model.clone()}</span>
-                                            <span class="codex-config-effort">{visible_effort.clone()}</span>
-                                            {move || codex_config_needs_confirmation.get().then(|| view! { <span class="codex-config-changed">"!"</span> })}
-                                            <span class="model-picker-chev">"▾"</span>
-                                        </button>
-                                        {move || {
-                                            let mode_for_model = mode_for_model.clone();
-                                            let mode_for_effort = mode_for_effort.clone();
-                                            let mode_for_reset = mode_for_reset.clone();
-                                            let visible_model = visible_model.clone();
-                                            let visible_effort = visible_effort.clone();
-                                            codex_config_menu_open.get().then(|| view! {
-                                            <div class="model-menu-backdrop" on:click=move |_| codex_config_menu_open.set(false)></div>
-                                            <div class="codex-config-menu codex-compat-config-menu">
-                                                <div class="codex-config-menu-head">
-                                                    <strong>{move || t(locale.get(), "plan.compat_full")}</strong>
-                                                    <span>"codex exec"</span>
-                                                </div>
-                                                <div class="codex-config-sources">{move || t(locale.get(), "codex.compat_profile_hint")}</div>
-                                                <label><span>{move || t(locale.get(), "codex.model")}</span>
-                                                    <input value=visible_model.clone() disabled=move || codex_session_override_conflict.get() on:change=move |event| {
-                                                        let value = dom_value(&event);
-                                                        codex_session_overrides.update(|overrides| {
-                                                            let target = if mode_for_model == "plan" { &mut overrides.plan } else { &mut overrides.normal };
-                                                            target.model = optional_profile_value(&value);
-                                                        });
-                                                        persist_session_codex_overrides(active_session.get(), mode_for_model.clone(), None, codex_session_overrides.get(), codex_override_ui);
-                                                    } />
-                                                </label>
-                                                <label><span>{move || t(locale.get(), "codex.effort")}</span>
-                                                    <input value=visible_effort.clone() disabled=move || codex_session_override_conflict.get() on:change=move |event| {
-                                                        let value = dom_value(&event);
-                                                        codex_session_overrides.update(|overrides| {
-                                                            let target = if mode_for_effort == "plan" { &mut overrides.plan } else { &mut overrides.normal };
-                                                            target.effort = optional_profile_value(&value);
-                                                        });
-                                                        persist_session_codex_overrides(active_session.get(), mode_for_effort.clone(), None, codex_session_overrides.get(), codex_override_ui);
-                                                    } />
-                                                </label>
-                                                {plan_mode.then(|| view! { <div class="codex-inline-notice">{move || t(locale.get(), "codex.plan.read_only")}</div> })}
-                                                {move || codex_config_needs_confirmation.get().then(|| view! {
-                                                    {if codex_runtime_refresh_pending.get() {
-                                                        view! { <div class="codex-refresh-required">{t(locale.get(), "codex.refresh_detected")}</div> }.into_view()
-                                                    } else {
-                                                        view! { <button type="button" class="codex-confirm-config" on:click=move |_| {
-                                                            codex_config_needs_confirmation.set(false);
-                                                            codex_session_override_conflict.set(false);
-                                                            codex_config_menu_open.set(false);
-                                                            status.set(t(locale.get_untracked(), "codex.confirmed").into());
-                                                        }>{move || t(locale.get(), "codex.confirm_config")}</button> }.into_view()
-                                                    }}
-                                                })}
-                                                <button type="button" class="codex-reset-overrides" on:click=move |_| {
-                                                    codex_session_overrides.set(CodexModeOverrides::default());
-                                                    persist_session_codex_overrides(active_session.get(), mode_for_reset.clone(), None, codex_session_overrides.get(), codex_override_ui);
-                                                }>{move || t(locale.get(), "codex.reset_profile")}</button>
-                                            </div>
-                                            })
-                                        }}
-                                    </div>
-                                }
-                            })}
-                            {move || (active_profile_uses_codex(&models.get()) && codex_runtime.get().is_some() && !codex_runtime_loading.get()).then(|| {
-                                let plan_mode = collaboration_mode.get() == "plan";
-                                let native = codex_runtime.get().is_some_and(|snapshot| snapshot.provider_capabilities.native_plan);
-                                let preview = codex_preview.get();
-                                let preview_pending = codex_preview_loading.get() || preview.as_ref().is_none_or(|config| {
-                                    plan_mode != (config.mode == "plan")
-                                });
-                                let requested = preview.as_ref().map(|config| config.requested_model().to_string()).unwrap_or_default();
-                                let effective = preview.as_ref().map(|config| config.effective_model().to_string()).unwrap_or_default();
-                                let effort = (!preview_pending).then(|| preview.as_ref().map(|config| config.effective_effort().to_string()).unwrap_or_default()).unwrap_or_default();
-                                let rerouted = !requested.is_empty() && !effective.is_empty() && requested != effective;
-                                let model_label = if preview_pending {
-                                    t(locale.get(), "codex.preview.loading_short").into()
-                                } else if rerouted {
-                                    format!("{requested} → {effective}")
-                                } else if effective.is_empty() {
-                                    t(locale.get(), "codex.inherit").into()
-                                } else {
-                                    effective
-                                };
-                                view! {
-                                    <div class="codex-composer-config" class:plan=plan_mode>
-                                        <button type="button" class="codex-mode-toggle"
-                                            title=move || t(locale.get(), if plan_mode { "plan.switch_default" } else { "plan.switch_plan" })
-                                            on:click=move |_| {
-                                                let mode = if plan_mode { "default".to_string() } else { "plan".to_string() };
-                                                collaboration_mode.set(mode.clone());
-                                                persist_session_codex_overrides(
-                                                    active_session.get(), mode,
-                                                    codex_runtime.get().map(|snapshot| snapshot.config_version),
-                                                    codex_session_overrides.get(), codex_override_ui,
-                                                );
-                                            }>
-                                            <span class="codex-mode-dot"></span>
-                                            {move || t(locale.get(), if plan_mode { "codex.mode.plan" } else { "codex.mode.normal" })}
-                                            {(plan_mode && !native).then(|| view! { <span class="codex-compat-mark">{move || t(locale.get(), "plan.compat")}</span> })}
-                                        </button>
-                                        <button type="button" class="codex-config-toggle" class:active=move || codex_config_menu_open.get()
-                                            on:click=move |_| codex_config_menu_open.update(|open| *open = !*open)>
-                                            <span class="codex-config-model" class:rerouted=rerouted>{model_label}</span>
-                                            {(!effort.is_empty()).then(|| view! { <span class="codex-config-effort">{effort}</span> })}
-                                            {move || codex_config_needs_confirmation.get().then(|| view! { <span class="codex-config-changed">"!"</span> })}
-                                            <span class="model-picker-chev">"▾"</span>
-                                        </button>
-                                        {move || codex_config_menu_open.get().then(|| {
-                                            let snapshot = codex_runtime.get().unwrap_or_default();
-                                            let mode = collaboration_mode.get();
-                                            let layer = codex_session_overrides.get();
-                                            let selected = layer.for_mode(&mode);
-                                            let selected_model = selected.model.clone();
-                                            let selected_effort = selected.effort.clone();
-                                            let inherited_effective_model = codex_preview.get()
-                                                .map(|config| config.effective_model().to_string());
-                                            let efforts = composer_codex_efforts(
-                                                &snapshot,
-                                                selected_model.as_deref(),
-                                                inherited_effective_model.as_deref(),
-                                            );
-                                            let generation = snapshot.config_version.clone();
-                                            let generation_for_model = generation.clone();
-                                            let generation_for_effort = generation.clone();
-                                            let generation_for_reset = generation.clone();
-                                            let title_key = if mode == "plan" { "codex.plan_override" } else { "codex.normal_override" };
-                                            let mode_for_model = mode.clone();
-                                            let mode_for_effort = mode.clone();
-                                            let mode_for_reset = mode.clone();
-                                            let snapshot_for_model = snapshot.clone();
-                                            let inherited_for_model = inherited_effective_model.clone();
-                                            let model_rows = snapshot.models.clone();
-                                            let sources = codex_preview.get().map(|config| config.sources.into_iter()
-                                                .map(|(field, source)| format!("{field}: {source}"))
-                                                .collect::<Vec<_>>().join(" · ")).unwrap_or_default();
-                                            let audit_content = if let Some(audit) = codex_turn_audits.get().last().cloned() {
-                                                let requested = audit_json(&audit.requested);
-                                                let sent = audit_json(&audit.sent);
-                                                let actual = audit_json(&audit.actual);
-                                                let unavailable = actual_verification_unavailable(&audit.actual);
-                                                let meta = format!("{} · v{}", audit.mode, audit.config_version);
+                            {move || active_session.get().and_then(|session_id| {
+                                active_acp_agent_id.get()?;
+                                let options = acp_session_configs.get().get(&session_id).cloned().unwrap_or_default();
+                                let mode = acp_session_modes.get().get(&session_id)
+                                    .and_then(|state| state.get("currentModeId"))
+                                    .and_then(serde_json::Value::as_str).map(str::to_string);
+                                (!options.is_empty() || mode.is_some()).then(|| view! {
+                                    <div class="acp-composer-config" data-testid="acp-session-config">
+                                        {mode.map(|mode| view! { <span class="acp-mode">{mode}</span> })}
+                                        {options.into_iter().map(|option| {
+                                            let config_id = option.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+                                            let name = option.get("name").and_then(serde_json::Value::as_str).unwrap_or(&config_id).to_string();
+                                            let description = option.get("description").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+                                            if option.get("type").and_then(serde_json::Value::as_str) == Some("boolean") {
+                                                let checked = option.get("currentValue").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                                                let session_id = session_id.clone();
                                                 view! {
-                                                    <div class="codex-turn-audit-body">
-                                                        <div class="codex-turn-audit-meta">{meta}</div>
-                                                        <label><span>{t(locale.get(), "codex.audit.requested")}</span><pre>{requested}</pre></label>
-                                                        <label><span>{t(locale.get(), "codex.audit.sent")}</span><pre>{sent}</pre></label>
-                                                        <label><span>{t(locale.get(), "codex.audit.actual")}</span>
-                                                            {if unavailable {
-                                                                view! { <div class="codex-audit-unavailable">{t(locale.get(), "codex.audit.unavailable")}</div> }.into_view()
-                                                            } else {
-                                                                view! { <pre>{actual}</pre> }.into_view()
-                                                            }}
-                                                        </label>
-                                                    </div>
+                                                    <label title=description><input type="checkbox" checked=checked on:change=move |event| {
+                                                        let checked = event_target_checked(&event);
+                                                        let frame_id = session_id.clone();
+                                                        let args = to_value(&serde_json::json!({ "frameId": frame_id, "configId": config_id, "value": { "type": "boolean", "value": checked } })).unwrap();
+                                                        spawn_local(async move { if let Ok(value) = invoke_checked("set_acp_session_config", args).await {
+                                                            if let Ok(options) = serde_wasm_bindgen::from_value::<Vec<serde_json::Value>>(value) { acp_session_configs.update(|all| { all.insert(frame_id, options); }); }
+                                                        }});
+                                                    }/>{name}</label>
                                                 }.into_view()
                                             } else {
-                                                view! { <div class="codex-turn-audit-empty">{t(locale.get(), "codex.audit.empty")}</div> }.into_view()
-                                            };
-                                            view! {
-                                                <div class="model-menu-backdrop" on:click=move |_| codex_config_menu_open.set(false)></div>
-                                                <div class="codex-config-menu">
-                                                    <div class="codex-config-menu-head">
-                                                        <strong>{move || t(locale.get(), title_key)}</strong>
-                                                        <span>{format!("v{generation}")}</span>
-                                                    </div>
-                                                    <label><span>{move || t(locale.get(), "codex.model")}</span>
-                                                        <select disabled=move || codex_session_override_conflict.get()
-                                                            on:change=move |event| {
-                                                                let value = dom_value(&event);
-                                                                let model = (value != "__inherit__").then_some(value);
-                                                                let supported = composer_codex_efforts(
-                                                                    &snapshot_for_model,
-                                                                    model.as_deref(),
-                                                                    inherited_for_model.as_deref(),
-                                                                );
-                                                                let mut reset_effort = false;
-                                                                codex_session_overrides.update(|overrides| {
-                                                                    let target = if mode_for_model == "plan" { &mut overrides.plan } else { &mut overrides.normal };
-                                                                    target.model = model;
-                                                                    if target.effort.as_ref().is_some_and(|value| !supported.contains(value)) {
-                                                                        target.effort = None;
-                                                                        reset_effort = true;
-                                                                    }
-                                                                });
-                                                                if reset_effort { status.set(t(locale.get_untracked(), "codex.effort_reset").into()); }
-                                                                persist_session_codex_overrides(
-                                                                    active_session.get(), mode_for_model.clone(), Some(generation_for_model.clone()), codex_session_overrides.get(), codex_override_ui,
-                                                                );
-                                                            }>
-                                                            <option value="__inherit__" selected=selected_model.is_none()>{move || t(locale.get(), "codex.inherit_profile")}</option>
-                                                            {model_rows.into_iter().map(|model| {
-                                                                let is_selected = selected_model.as_deref() == Some(model.id.as_str());
-                                                                view! { <option value=model.id.clone() selected=is_selected>{model.label()}</option> }
-                                                            }).collect_view()}
-                                                        </select>
-                                                    </label>
-                                                    <label><span>{move || t(locale.get(), "codex.effort")}</span>
-                                                        <select disabled=move || codex_session_override_conflict.get()
-                                                            on:change=move |event| {
-                                                                let value = dom_value(&event);
-                                                                let effort = (value != "__inherit__").then_some(value);
-                                                                codex_session_overrides.update(|overrides| {
-                                                                    let target = if mode_for_effort == "plan" { &mut overrides.plan } else { &mut overrides.normal };
-                                                                    target.effort = effort;
-                                                                });
-                                                                persist_session_codex_overrides(
-                                                                    active_session.get(), mode_for_effort.clone(), Some(generation_for_effort.clone()), codex_session_overrides.get(), codex_override_ui,
-                                                                );
-                                                            }>
-                                                            <option value="__inherit__" selected=selected_effort.is_none()>{move || t(locale.get(), "codex.inherit_profile")}</option>
-                                                            {efforts.into_iter().map(|effort| {
-                                                                let is_selected = selected_effort.as_deref() == Some(effort.as_str());
-                                                                view! { <option value=effort.clone() selected=is_selected>{effort}</option> }
-                                                            }).collect_view()}
-                                                        </select>
-                                                    </label>
-                                                    {(!sources.is_empty()).then(|| view! { <div class="codex-config-sources">{sources}</div> })}
-                                                    <details class="codex-turn-audit" data-testid="codex-turn-audit">
-                                                        <summary>{move || t(locale.get(), "codex.audit.title")}</summary>
-                                                        {audit_content}
-                                                    </details>
-                                                    {move || codex_config_needs_confirmation.get().then(|| view! {
-                                                        {if codex_runtime_refresh_pending.get() {
-                                                            view! { <div class="codex-refresh-required">{t(locale.get(), "codex.refresh_detected")}</div> }.into_view()
-                                                        } else {
-                                                            view! { <button type="button" class="codex-confirm-config" on:click=move |_| {
-                                                                codex_config_needs_confirmation.set(false);
-                                                                codex_session_override_conflict.set(false);
-                                                                codex_config_menu_open.set(false);
-                                                                status.set(t(locale.get_untracked(), "codex.confirmed").into());
-                                                            }>{move || t(locale.get(), "codex.confirm_config")}</button> }.into_view()
-                                                        }}
-                                                    })}
-                                                    <button type="button" class="codex-reset-overrides" on:click=move |_| {
-                                                        codex_session_overrides.set(CodexModeOverrides::default());
-                                                        persist_session_codex_overrides(
-                                                            active_session.get(), mode_for_reset.clone(), Some(generation_for_reset.clone()), codex_session_overrides.get(), codex_override_ui,
-                                                        );
-                                                    }>{move || t(locale.get(), "codex.reset_profile")}</button>
-                                                </div>
+                                                let current = option.get("currentValue").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+                                                let choices = acp_select_options(&option);
+                                                let session_id = session_id.clone();
+                                                view! {
+                                                    <label title=description><span>{name}</span><select on:change=move |event| {
+                                                        let value = dom_value(&event);
+                                                        let frame_id = session_id.clone();
+                                                        let args = to_value(&serde_json::json!({ "frameId": frame_id, "configId": config_id, "value": { "value": value } })).unwrap();
+                                                        spawn_local(async move { if let Ok(value) = invoke_checked("set_acp_session_config", args).await {
+                                                            if let Ok(options) = serde_wasm_bindgen::from_value::<Vec<serde_json::Value>>(value) { acp_session_configs.update(|all| { all.insert(frame_id, options); }); }
+                                                        }});
+                                                    }>{choices.into_iter().map(|(value, label)| {
+                                                        let selected = value == current;
+                                                        view! { <option value=value selected=selected>{label}</option> }
+                                                    }).collect_view()}</select></label>
+                                                }.into_view()
                                             }
-                                        })}
+                                        }).collect_view()}
                                     </div>
-                                }
+                                })
                             })}
-                            {move || (!models.get().is_empty()).then(|| view! {
+                            {move || (!models.get().is_empty() || !acp_agents.get().is_empty()).then(|| view! {
                                 <div class="model-picker">
                                     <button type="button" class="model-picker-btn" class:active=move || model_menu_open.get()
                                         on:click=move |_| model_menu_open.update(|o| *o = !*o)>
                                         <span class="model-picker-label">{move || {
-                                            let l = models.get();
-                                            l.iter().find(|m| m.active).or_else(|| l.first()).map(|m| m.label.clone()).unwrap_or_default()
+                                            if let Some(id) = active_acp_agent_id.get() {
+                                                acp_agents.get().into_iter().find(|agent| agent.id == id).map(|agent| agent.label).unwrap_or_else(|| "ACP Agent".into())
+                                            } else {
+                                                let l = models.get();
+                                                l.iter().find(|m| m.active).or_else(|| l.first()).map(|m| m.label.clone()).unwrap_or_default()
+                                            }
                                         }}</span>
                                         <span class="model-picker-chev">"▾"</span>
                                     </button>
@@ -4821,6 +3389,7 @@ fn App() -> impl IntoView {
                                             {move || {
                                                 let list = models.get();
                                                 let can_delete = list.len() > 1;
+                                                let acp_locked = active_acp_agent_id.get().is_some() && items.with(|rows| !rows.is_empty());
                                                 list.into_iter().map(|m| {
                                                     let pick_id = m.id.clone();
                                                     let del_id = m.id.clone();
@@ -4828,8 +3397,10 @@ fn App() -> impl IntoView {
                                                     let show_sub = !m.model.is_empty() && m.model != m.label;
                                                     view! {
                                                         <div class="model-menu-row" class:active=is_active>
-                                                            <button type="button" class="model-menu-pick" on:click=move |_| {
+                                                            <button type="button" class="model-menu-pick" disabled=acp_locked
+                                                                title=acp_locked.then_some("ACP Agent selection is locked after the first prompt") on:click=move |_| {
                                                                 model_menu_open.set(false);
+                                                                active_acp_agent_id.set(None);
                                                                 let id = pick_id.clone();
                                                                 spawn_local(async move {
                                                                     let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
@@ -4867,6 +3438,53 @@ fn App() -> impl IntoView {
                                                     }
                                                 }).collect_view()
                                             }}
+                                            {move || (!acp_agents.get().is_empty()).then(|| view! {
+                                                <div class="compose-group-label">"ACP Agents"</div>
+                                                {acp_agents.get().into_iter().map(|agent| {
+                                                    let id = agent.id.clone();
+                                                    let test_id = agent.id.clone();
+                                                    let delete_id = agent.id.clone();
+                                                    let active = active_acp_agent_id.get().as_deref() == Some(agent.id.as_str());
+                                                    let locked = items.with(|rows| !rows.is_empty()) && !active;
+                                                    view! {
+                                                        <div class="model-menu-row" class:active=active>
+                                                            <button type="button" class="model-menu-pick" disabled=locked
+                                                                title=locked.then_some("ACP Agent selection is locked after the first prompt")
+                                                                on:click=move |_| {
+                                                                    model_menu_open.set(false);
+                                                                    active_acp_agent_id.set(Some(id.clone()));
+                                                                }>
+                                                                <span class="model-menu-text">
+                                                                    <span class="model-menu-label">{agent.label.clone()}</span>
+                                                                    <span class="model-menu-sub">"ACP · local stdio"</span>
+                                                                </span>
+                                                                {active.then(|| view! { <span class="model-menu-check">"✓"</span> })}
+                                                            </button>
+                                                            <button type="button" class="model-menu-del" title="Test ACP connection"
+                                                                on:click=move |_| {
+                                                                    let id = test_id.clone();
+                                                                    spawn_local(async move {
+                                                                        let args = to_value(&serde_json::json!({ "id": id })).unwrap();
+                                                                        status.set(match invoke_checked("test_acp_agent", args).await {
+                                                                            Ok(_) => "ACP connection succeeded".into(),
+                                                                            Err(error) => format!("ACP connection failed: {}", js_error_text(error)),
+                                                                        });
+                                                                    });
+                                                                }>{compose_icon("refresh")}</button>
+                                                            <button type="button" class="model-menu-del" title="Remove ACP Agent" disabled=active
+                                                                on:click=move |_| {
+                                                                    let id = delete_id.clone();
+                                                                    spawn_local(async move {
+                                                                        let args = to_value(&serde_json::json!({ "id": id })).unwrap();
+                                                                        if let Ok(value) = invoke_checked("remove_acp_agent", args).await {
+                                                                            if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<AcpAgentProfile>>(value) { acp_agents.set(list); }
+                                                                        }
+                                                                    });
+                                                                }>{compose_icon("close")}</button>
+                                                        </div>
+                                                    }
+                                                }).collect_view()}
+                                            })}
                                             <button type="button" class="model-menu-add" on:click=move |_| {
                                                 model_menu_open.set(false);
                                                 model_form.set(Some(new_model_form()));
@@ -4874,6 +3492,10 @@ fn App() -> impl IntoView {
                                                 model_form_msg.set(None);
                                                 open_settings_fn(Some("models".into()));
                                             }>{move || t(locale.get(), "models.add")}</button>
+                                            <button type="button" class="model-menu-add" data-testid="add-acp-agent" on:click=move |_| {
+                                                model_menu_open.set(false);
+                                                show_acp_agents.set(true);
+                                            }>"Add ACP Agent"</button>
                                         </div>
                                     })}
                                 </div>
@@ -4899,14 +3521,6 @@ fn App() -> impl IntoView {
                                 {move || send_mode_menu_open.get().then(|| view! {
                                     <div class="send-menu-backdrop" on:click=move |_| send_mode_menu_open.set(false)></div>
                                     <div class="send-mode-menu">
-                                        <button type="button" class="send-mode-item"
-                                            on:click=move |_| {
-                                                send_mode_menu_open.set(false);
-                                                send.call(ComposerSendAction::PlanFirst);
-                                            }>
-                                            <span class="compose-item-icon">{compose_icon("plan")}</span>
-                                            <span>{move || t(locale.get(), "composer.plan_first")}</span>
-                                        </button>
                                         <button type="button" class="send-mode-item"
                                             disabled=move || side_chat_busy.get()
                                             on:click=move |_| {
@@ -5899,6 +4513,7 @@ fn App() -> impl IntoView {
                     }) />
             }
         })}
+        <AcpAgentsOverlay show=show_acp_agents agents=acp_agents active_agent_id=active_acp_agent_id />
         <SettingsView
             state=SettingsViewState {
                 locale, show_settings, settings_section, open_conn_key, connectors, model_form,
@@ -5908,8 +4523,6 @@ fn App() -> impl IntoView {
                 skill_filter_tag, skills_search, skills_msg, cred_status, cred_inputs, cred_msg,
                 approval_grants, conns_view, conn_form_open, conn_form_kind, conn_test_msg,
                 custom_conn_tools, custom_conn_tools_loading, custom_conn_tool_errors,
-                codex_runtime, codex_runtime_error, codex_runtime_loading, codex_settings_action_loading,
-                codex_profile_overrides, codex_preview_normal, codex_preview_plan,
             }
             go_settings_section=Callback::new(move |section: String| go_settings_section(&section))
             close_settings_subpage=Callback::new(move |_: ()| close_settings_subpage())
@@ -5928,9 +4541,6 @@ fn App() -> impl IntoView {
             set_visible_skills_enabled=set_visible_skills_enabled
             install_skill_from=Callback::new(install_skill_from)
             remove_specialist=Callback::new(remove_specialist_fn)
-            refresh_codex_runtime=refresh_codex_runtime
-            preview_codex_configs=preview_codex_configs
-            save_codex_profile=save_codex_profile
         />
 
 
@@ -5965,15 +4575,15 @@ fn renders_nothing(item: &ChatItem) -> bool {
 fn class_for(item: &ChatItem) -> &'static str {
     match item {
         ChatItem::User(_) => "msg user",
-        ChatItem::QueuedUser(_) => "msg user queued",
         ChatItem::Assistant { text, .. } if text.starts_with("Error: ") => "tool-wrap",
         ChatItem::Assistant { .. } => "msg assistant",
         ChatItem::Reasoning(_) => "msg reasoning",
         ChatItem::Tool { .. } => "tool-wrap",
         ChatItem::ApprovalPending { .. } => "tool-wrap approval-wrap-row",
+        ChatItem::AcpPermission { .. } => "tool-wrap approval-wrap-row",
+        ChatItem::AcpTool { .. } => "tool-wrap",
         ChatItem::Review(_) => "tool-wrap",
         ChatItem::Plan(_) => "tool-wrap plan-wrap",
-        ChatItem::PlanQuestion(_) => "tool-wrap plan-question-wrap",
     }
 }
 
@@ -5985,6 +4595,7 @@ fn is_process_item(item: &ChatItem) -> bool {
     match item {
         ChatItem::Reasoning(_) => true,
         ChatItem::Tool { name, .. } => name != "attempt_completion",
+        ChatItem::AcpTool { .. } => true,
         _ => false,
     }
 }
@@ -6065,6 +4676,20 @@ fn render_steps_group(items: Vec<ChatItem>, live: bool) -> impl IntoView {
                 </div>
             }.into_view()
         }
+        ChatItem::AcpTool { title, status, content, locations, .. } => {
+            let done = matches!(status.as_str(), "completed" | "failed");
+            let detail = [content.as_str(), locations.as_str()].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("\n");
+            view! {
+                <div class="step acp-tool" data-testid="acp-tool" data-status=status.clone()>
+                    <div class="step-head">
+                        <span class="step-icon" class:ok=done></span>
+                        <span class="step-name">{title.clone()}</span>
+                        <span class="step-meta">{status.clone()}</span>
+                    </div>
+                    {(!detail.is_empty()).then(|| view! { <pre class="tool-output">{detail}</pre> })}
+                </div>
+            }.into_view()
+        }
         _ => view! {}.into_view(),
     }).collect_view();
     view! {
@@ -6087,13 +4712,12 @@ fn render_item(
     on_file: Callback<(String, String)>,
     busy: ReadSignal<bool>,
     is_last: bool,
+    can_modify: bool,
     on_edit: impl Fn(usize) + Clone + 'static,
     on_branch: impl Fn(usize) + Clone + 'static,
     session_id: String,
     on_approval: Callback<(String, bool, Option<String>, String)>,
     on_resume: Callback<usize>,
-    on_plan_action: Callback<(String, String, i64, bool)>,
-    on_plan_answer: Callback<(String, String)>,
 ) -> impl IntoView {
     let locale = use_locale();
     match item {
@@ -6102,16 +4726,11 @@ fn render_item(
                 text=s.clone()
                 ui_index=ui_index
                 busy=busy
+                can_modify=can_modify
                 on_copy=Callback::new(copy_text)
                 on_edit=Callback::new(on_edit)
                 on_branch=Callback::new(on_branch)
             />
-        }.into_view(),
-        ChatItem::QueuedUser(s) => view! {
-            <div class="role">{move || t(locale.get(), "composer.queued")}</div>
-            <div class="user-bubble queued-bubble">
-                <div class="body">{s.clone()}</div>
-            </div>
         }.into_view(),
         ChatItem::Assistant { text, .. } if text.trim().is_empty() => view! {}.into_view(),
         ChatItem::Assistant { text, .. } if text.starts_with("Error: ") => {
@@ -6122,11 +4741,13 @@ fn render_item(
                     <div class="finding-head">
                         <span class="finding-tag">{move || format!("● {}", t(locale.get(), "chat.error"))}</span>
                         <span class="finding-title">{msg}</span>
-                        <button type="button" class="tool-btn"
-                            disabled=move || busy.get()
-                            on:click=move |_| on_resume.call(ui_index)>
-                            {move || t(locale.get(), "chat.resume")}
-                        </button>
+                        {can_modify.then(|| view! {
+                            <button type="button" class="tool-btn"
+                                disabled=move || busy.get()
+                                on:click=move |_| on_resume.call(ui_index)>
+                                {move || t(locale.get(), "chat.resume")}
+                            </button>
+                        })}
                         <button type="button" class="tool-btn card-copy"
                             title=move || t(locale.get(), "ctx.copy_message")
                             on:click=move |_| copy_text(copy.clone())>
@@ -6164,80 +4785,51 @@ fn render_item(
         ChatItem::Tool { name, ok, input, output, .. } => view! {
             <ToolBlock name=name.clone() ok=*ok input=input.clone() output=output.clone() />
         }.into_view(),
+        ChatItem::AcpTool { title, status, content, locations, .. } => view! {
+            <article class="tool-card" data-testid="acp-tool" data-status=status.clone()>
+                <header><strong>{title.clone()}</strong><span>{status.clone()}</span></header>
+                {(!content.is_empty()).then(|| view! { <pre>{content.clone()}</pre> })}
+                {(!locations.is_empty()).then(|| view! { <pre>{locations.clone()}</pre> })}
+            </article>
+        }.into_view(),
         ChatItem::ApprovalPending { tool, preview, message: _ } => view! {
             <ApprovalCard tool=tool.clone() preview=preview.clone() session_id=session_id.clone() on_decide=on_approval />
         }.into_view(),
-        ChatItem::Plan(plan) => {
-            let html = md_to_html(&plan.text);
-            let complete = plan.complete;
-            let native = plan.native;
-            let actionable = plan.actionable;
-            let plan_id_approve = plan.plan_id.clone();
-            let plan_id_modify = plan.plan_id.clone();
-            let plan_id_save = plan.plan_id.clone();
-            let revision = plan.revision;
-            let has_claim = !plan.plan_id.is_empty() && revision > 0;
+        ChatItem::AcpPermission { request_id, tool, options } => {
+            let request_id = request_id.clone();
             view! {
-                <article class="plan-card" class:streaming=!complete class:compat=!native data-testid="plan-card">
-                    <header class="plan-card-head">
-                        <span class="plan-card-icon">{compose_icon("plan")}</span>
-                        <div><strong>{move || t(locale.get(), "plan.card.title")}</strong><span>{move || t(locale.get(), if complete { "plan.card.ready" } else { "plan.card.streaming" })}</span></div>
-                        {(!native).then(|| view! { <span class="plan-compat-badge">{move || t(locale.get(), "plan.compat_full")}</span> })}
-                    </header>
-                    <div class="plan-card-body markdown" inner_html=html></div>
-                    {(complete && actionable && has_claim).then(|| view! {
-                        <footer class="plan-card-actions">
-                            <button type="button" class="primary" disabled=move || busy.get() on:click=move |_| on_plan_action.call(("approve".into(), plan_id_approve.clone(), revision, native))>{move || t(locale.get(), "plan.approve")}</button>
-                            <button type="button" disabled=move || busy.get() on:click=move |_| on_plan_action.call(("modify".into(), plan_id_modify.clone(), revision, native))>{move || t(locale.get(), "plan.modify")}</button>
-                            <button type="button" disabled=move || busy.get() on:click=move |_| on_plan_action.call(("save_exit".into(), plan_id_save.clone(), revision, native))>{move || t(locale.get(), "plan.save_exit")}</button>
-                        </footer>
-                    })}
+                <article class="approval-card" data-testid="acp-permission-card">
+                    <header><strong>{tool.clone()}</strong><span>"ACP permission"</span></header>
+                    <footer class="approval-actions">
+                        {options.clone().into_iter().map(|option| {
+                            let request_id = request_id.clone();
+                            let option_id = option.id.clone();
+                            let class = if option.kind.starts_with("allow") { "primary" } else { "" };
+                            view! {
+                                <button type="button" class=class on:click=move |_| {
+                                    let request_id = request_id.clone();
+                                    let option_id = option_id.clone();
+                                    spawn_local(async move {
+                                        let args = to_value(&serde_json::json!({ "requestId": request_id, "optionId": option_id })).unwrap();
+                                        let _ = invoke_checked("respond_acp_permission", args).await;
+                                    });
+                                }>{option.name}</button>
+                            }
+                        }).collect_view()}
+                    </footer>
                 </article>
             }.into_view()
         }
-        ChatItem::PlanQuestion(question) => {
-            let answer = create_rw_signal(String::new());
-            let question_id = question.question_id.clone();
-            let question_id_keydown = question_id.clone();
-            let question_id_click = question_id.clone();
-            let question_text = question.question.clone();
-            let options = question.options.clone();
-            let allow_freeform = question.is_other || options.is_empty();
-            let input_type = if question.is_secret { "password" } else { "text" };
+        ChatItem::Plan(plan) => {
+            let html = md_to_html(&plan.text);
             view! {
-                <section class="plan-question-card" data-testid="plan-question-card">
-                    <div class="plan-question-head"><span>{compose_icon("chat")}</span><strong>{move || t(locale.get(), "plan.question.title")}</strong></div>
-                    <p>{question_text}</p>
-                    {(!options.is_empty()).then(|| view! {
-                        <div class="plan-question-options">{options.into_iter().map(|option| {
-                            let value = option.label().to_string();
-                            let description = option.description().to_string();
-                            let send_value = value.clone();
-                            let id = question_id.clone();
-                            view! {
-                                <button type="button" on:click=move |_| on_plan_answer.call((id.clone(), send_value.clone()))>
-                                    <strong>{value}</strong>
-                                    {(!description.is_empty()).then(|| view! { <span>{description}</span> })}
-                                </button>
-                            }
-                        }).collect_view()}</div>
-                    })}
-                    {allow_freeform.then(|| view! {
-                        <div class="plan-question-freeform">
-                            <input type=input_type prop:value=move || answer.get()
-                                placeholder=move || t(locale.get(), "plan.question.placeholder")
-                                on:input=move |event| answer.set(event_target_value(&event))
-                                on:keydown=move |event: web_sys::KeyboardEvent| {
-                                    if event.key() == "Enter" && !event.shift_key() {
-                                        event.prevent_default();
-                                        on_plan_answer.call((question_id_keydown.clone(), answer.get()));
-                                    }
-                                } />
-                            <button type="button" class="primary" disabled=move || answer.get().trim().is_empty()
-                                on:click=move |_| on_plan_answer.call((question_id_click.clone(), answer.get()))>{move || t(locale.get(), "plan.question.send")}</button>
-                        </div>
-                    })}
-                </section>
+                <article class="plan-card" data-testid="plan-card">
+                    <header class="plan-card-head">
+                        <span class="plan-card-icon">{compose_icon("plan")}</span>
+                        <div><strong>{move || t(locale.get(), "plan.card.title")}</strong></div>
+                    </header>
+                    <div class="plan-card-body markdown" inner_html=html></div>
+                </article>
             }.into_view()
         }
         ChatItem::Review(report) => {
@@ -6353,124 +4945,4 @@ fn render_item(
 pub fn main() {
     console_error_panic_hook::set_once();
     mount_to_body(App);
-}
-
-#[cfg(test)]
-mod codex_ui_tests {
-    use super::*;
-
-    #[test]
-    fn native_plan_commands_beat_skill_picker_only_when_complete() {
-        assert!(is_plan_command("/plan"));
-        assert!(is_plan_command("/plan inspect this"));
-        assert!(is_plan_command(" /default"));
-        assert!(!is_plan_command("/planner"));
-        assert!(!is_plan_command("/pla"));
-    }
-
-    #[test]
-    fn failed_send_removes_only_its_empty_optimistic_pair() {
-        let mut rows = vec![
-            ChatItem::Assistant { text: "older".into(), model: None },
-            ChatItem::User("retry me".into()),
-            ChatItem::Assistant { text: String::new(), model: Some("gpt-test".into()) },
-        ];
-        remove_optimistic_send_rows(&mut rows, "retry me");
-        assert_eq!(rows.len(), 1);
-
-        let mut streamed = vec![
-            ChatItem::User("keep me".into()),
-            ChatItem::Assistant { text: "already streamed".into(), model: None },
-        ];
-        remove_optimistic_send_rows(&mut streamed, "keep me");
-        assert_eq!(streamed.len(), 2);
-        assert_eq!(
-            split_turn_started_error("[turn-started] failed"),
-            (true, "failed")
-        );
-        assert_eq!(split_turn_started_error("failed"), (false, "failed"));
-    }
-
-    #[test]
-    fn only_durable_pending_plan_is_actionable() {
-        let pending = proposed_plan_card(ProposedPlanRecord {
-            id: "plan-1".into(), revision: 2, text: "Do it".into(),
-            native: true, status: "pending".into(),
-        });
-        assert!(pending.actionable);
-        let saved = proposed_plan_card(ProposedPlanRecord {
-            id: "plan-1".into(), revision: 2, text: "Do it".into(),
-            native: true, status: "saved".into(),
-        });
-        assert!(!saved.actionable);
-        let tokenless = proposed_plan_card(ProposedPlanRecord {
-            id: String::new(), revision: 0, text: "legacy".into(),
-            native: true, status: "pending".into(),
-        });
-        assert!(!tokenless.actionable);
-    }
-
-    #[test]
-    fn runtime_adapter_payload_accepts_nullable_inherited_values() {
-        let snapshot: RuntimeSnapshot = serde_json::from_value(serde_json::json!({
-            "config_version": 7,
-            "runtime": {
-                "executable_path": "C:/tools/codex.exe",
-                "version": null,
-                "codex_home": "C:/project/.wisp/codex-home/profile",
-                "source": "path",
-                "context": "windows"
-            },
-            "models": [{
-                "id": "gpt-test",
-                "display_name": "GPT Test",
-                "supported_reasoning_efforts": ["low", "max", "ultra"]
-            }],
-            "config": {
-                "config_version": 7,
-                "mode": "plan",
-                "requested_model": null,
-                "effective_model": "gpt-test",
-                "requested_effort": null,
-                "effective_effort": "max",
-                "service_tier": null,
-                "personality": null,
-                "summary": null,
-                "verbosity": null,
-                "web_search": null,
-                "sandbox": "read-only",
-                "sources": {"model":"local_codex"},
-                "warnings": []
-            },
-            "collaboration_modes": [{"id":"plan","label":"Plan"}],
-            "provider_capabilities": {"app_server":true,"native_plan":true},
-            "warnings": [],
-            "refreshed_at": "123"
-        })).expect("runtime payload should decode");
-        assert_eq!(snapshot.config_version, "7");
-        assert_eq!(snapshot.models[0].supported_reasoning_efforts, ["low", "max", "ultra"]);
-        assert_eq!(snapshot.config.as_ref().unwrap().requested_model(), "");
-        assert_eq!(snapshot.config.as_ref().unwrap().effective_model(), "gpt-test");
-    }
-
-    #[test]
-    fn send_payload_carries_visible_codex_snapshot() {
-        let args = SendMessageArgs {
-            session_id: Some("s1".into()),
-            message: "inspect".into(),
-            attachments: vec![],
-            references: vec![],
-            resume: false,
-            collaboration_mode: Some("plan".into()),
-            codex_config_generation: Some("9007199254740993123".into()),
-            codex_overrides: Some(CodexModeOverrides {
-                plan: CodexModeOverride { model: Some("gpt-test".into()), effort: Some("ultra".into()) },
-                ..Default::default()
-            }),
-        };
-        let value = serde_json::to_value(args).unwrap();
-        assert_eq!(value["collaborationMode"], "plan");
-        assert_eq!(value["codexConfigGeneration"], "9007199254740993123");
-        assert_eq!(value["codexOverrides"]["plan"]["effort"], "ultra");
-    }
 }

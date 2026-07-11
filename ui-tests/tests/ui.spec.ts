@@ -34,13 +34,6 @@ function composer(page: Page) {
   return page.locator("#composer-input");
 }
 
-async function submitNativePlan(page: Page) {
-  await composer(page).fill("/plan NATIVEPLAN");
-  await composer(page).press("Enter");
-  await expect(page.locator(".codex-config-model")).toHaveText("gpt-fast");
-  await composer(page).press("Enter");
-}
-
 function commandPalette(page: Page) {
   return page.locator("#command-palette-input");
 }
@@ -99,6 +92,73 @@ test("send streams a mocked assistant reply", async ({ page, context }) => {
   await expect(page.getByText("Hello from mock wisp-science.")).toBeVisible({ timeout: 10_000 });
   await page.locator(".msg.assistant").getByRole("button", { name: "Copy" }).click();
   await expect(page.locator(".copy-toast")).toHaveText("Copied");
+});
+
+test("ACP Agent settings create, test, and authenticate an installed agent", async ({ page }) => {
+  await enterApp(page);
+  await page.locator(".model-picker-btn").click();
+  await page.getByTestId("add-acp-agent").click();
+  const settings = page.getByTestId("acp-agents-settings");
+  await expect(settings).toBeVisible();
+  await settings.getByTestId("acp-agent-label").fill("My ACP");
+  await settings.getByTestId("acp-agent-command").fill("my-acp");
+  await settings.getByTestId("acp-agent-args").fill("--stdio\n  spaced  \n\n--safe");
+  await settings.getByTestId("save-acp-agent").click();
+  const row = settings.getByTestId("acp-agent-row").filter({ hasText: "My ACP" });
+  await expect(row).toBeVisible();
+  await row.getByTestId("test-acp-agent").click();
+  await expect(row.getByTestId("acp-agent-info")).toContainText("ACP v1");
+  await row.getByTestId("authenticate-acp-agent").click();
+  await expect(settings).toContainText("Authentication completed");
+  await expect.poll(() => lastInvokeArgs(page, "save_acp_agent")).toMatchObject({
+    profile: { label: "My ACP", command: "my-acp", args: ["--stdio", "  spaced  ", "", "--safe"] },
+  });
+  await expect.poll(() => lastInvokeArgs(page, "authenticate_acp_agent")).toMatchObject({ methodId: "browser" });
+});
+
+test("ACP turn maps config, overlapping tools, plan, usage, and exact permission response", async ({ page }) => {
+  await enterApp(page);
+  await page.getByRole("button", { name: "New session" }).click();
+  await page.locator(".model-picker-btn").click();
+  await page.getByRole("button", { name: /Test ACP Agent/ }).click();
+  await composer(page).fill("ACP PERMISSION");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await expect(page.getByText("Hello from ACP.")).toBeVisible();
+  await expect(page.getByTestId("acp-tool")).toHaveCount(2);
+  await expect(page.getByText("Inspect")).toBeVisible();
+  const config = page.getByTestId("acp-session-config");
+  await expect(config).toContainText("code");
+  await expect(config.locator("select")).toHaveValue("smart");
+  await config.locator("select").selectOption("fast");
+  await expect.poll(() => lastInvokeArgs(page, "set_acp_session_config")).toMatchObject({
+    configId: "model", value: { value: "fast" },
+  });
+
+  const permission = page.getByTestId("acp-permission-card");
+  await expect(permission).toBeVisible();
+  await permission.getByRole("button", { name: "Allow once" }).click();
+  await expect.poll(() => lastInvokeArgs(page, "respond_acp_permission")).toMatchObject({
+    requestId: "permission-1", optionId: "allow",
+  });
+  await expect(permission).toHaveCount(0);
+  await expect(page.getByText("ACP context: 1200 / 8000 tokens")).toBeVisible();
+
+  await page.locator(".model-picker-btn").click();
+  await expect(page.getByRole("button", { name: /deepseek-v4-pro/ })).toBeDisabled();
+});
+
+test("ACP cancellation is scoped to the active bound frame", async ({ page }) => {
+  await enterApp(page);
+  await page.getByRole("button", { name: "New session" }).click();
+  await page.locator(".model-picker-btn").click();
+  await page.getByRole("button", { name: /Test ACP Agent/ }).click();
+  await composer(page).fill("ACP LONG");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
+  await page.getByRole("button", { name: "Stop" }).click();
+  await expect.poll(() => lastInvokeArgs(page, "stop_agent")).toMatchObject({ sessionId: expect.any(String) });
+  await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
 });
 
 test("pre-start send failures roll back optimistic rows and restore the draft", async ({ page }) => {
@@ -348,588 +408,6 @@ test("long unbroken user text wraps inside the chat column", async ({ page }) =>
   expect(bubbleWidth).toBeLessThanOrEqual(threadWidth + 1);
   // Column must not grow a horizontal scrollbar from the unbroken sequence.
   expect(scrollWidth).toBeLessThanOrEqual(clientWidth + 1);
-});
-
-test("send menu supports plan first", async ({ page }) => {
-  await enterApp(page);
-  await composer(page).fill("draft the analysis");
-  await page.getByRole("button", { name: "Message options" }).click();
-  await page.getByRole("button", { name: "Plan first" }).click();
-
-  await expect.poll(() => lastInvokeArgs(page, "send_message")).toMatchObject({
-    message: expect.stringContaining("Plan first before executing"),
-  });
-  await expect.poll(() => lastInvokeArgs(page, "send_message")).toMatchObject({
-    message: expect.stringContaining("draft the analysis"),
-  });
-});
-
-test("Claude Code Plan sends original text and collaboration mode for backend compatibility", async ({ page }) => {
-  await enterApp(page);
-  await page.locator(".model-picker-btn").click();
-  await page.locator(".model-menu-pick", { hasText: "Claude Code Local" }).click();
-  await expect(page.locator(".local-runner-mode")).toBeVisible();
-
-  await composer(page).fill("draft with Claude Code");
-  await page.getByRole("button", { name: "Message options" }).click();
-  await page.getByRole("button", { name: "Plan first" }).click();
-  await expect.poll(() => lastInvokeArgs(page, "send_message")).not.toBeNull();
-  const sent = await lastInvokeArgs(page, "send_message");
-  expect(sent).toMatchObject({
-    message: "draft with Claude Code",
-    collaborationMode: "plan",
-  });
-  expect(sent.codexConfigGeneration).toBeUndefined();
-  expect(sent.codexOverrides).toBeUndefined();
-});
-
-test("a startup Claude profile does not probe the Codex runtime", async ({ page }) => {
-  await page.goto("/?initialModel=claude-local");
-  await page.locator(".proj-card-main").first().click();
-  await expect(page.getByRole("button", { name: "New session" })).toBeVisible();
-  await expect(page.locator(".model-picker-btn")).toContainText("Claude Code Local");
-  await page.waitForTimeout(150);
-  await expect.poll(async () => (await invokeArgsList(page, "get_codex_runtime_snapshot")).length).toBe(0);
-  await expect.poll(async () => (await invokeArgsList(page, "refresh_codex_runtime_snapshot")).length).toBe(0);
-});
-
-test("switching projects replaces the Codex runtime scope with one cached read", async ({ page }) => {
-  await page.goto("/?initialModel=codex-local");
-  await page.waitForTimeout(100);
-  await expect.poll(async () => (await invokeArgsList(page, "get_codex_runtime_snapshot")).length).toBe(0);
-  await page.locator(".proj-card-main").first().click();
-  await expect(page.getByRole("button", { name: "New session" })).toBeVisible();
-  await expect(page.locator(".codex-config-model")).toHaveText("gpt-test");
-  await expect.poll(() => page.evaluate(() => (window as any).__codexRuntimeGetProjects ?? [])).toEqual(["default"]);
-
-  await page.locator(".proj-switch").click();
-  await page.evaluate(() => (window as any).__delayNextCodexRuntime(300));
-  await page.locator(".proj-menu-row", { hasText: "Other project" }).click();
-  await expect(page.locator(".codex-runtime-loading")).toBeVisible();
-  await expect(page.locator(".codex-config-model")).toHaveText("gpt-test");
-  await expect.poll(() => page.evaluate(() => (window as any).__codexRuntimeGetProjects ?? [])).toEqual(["default", "other"]);
-  await expect.poll(async () => (await invokeArgsList(page, "refresh_codex_runtime_snapshot")).length).toBe(0);
-  await expect.poll(async () => (await invokeArgsList(page, "preview_codex_turn_config")).some((args) =>
-    args.previewScope === "session" && args.configVersion === "22",
-  )).toBe(true);
-
-  await composer(page).fill("use project B config");
-  await page.getByRole("button", { name: "Send" }).click();
-  await expect.poll(() => lastInvokeArgs(page, "send_message")).toMatchObject({
-    codexConfigGeneration: "22",
-    message: "use project B config",
-  });
-});
-
-test("rapid project switches ignore the stale open before reading project state", async ({ page }) => {
-  await page.goto("/?initialModel=codex-local");
-  await page.locator(".proj-card-main").first().click();
-  await expect(page.locator(".codex-config-model")).toHaveText("gpt-test");
-  await page.evaluate(() => {
-    (window as any).__projectOpenCompletions = [];
-    (window as any).__projectInfoReads = [];
-    (window as any).__projectSessionRefreshes = [];
-    (window as any).__projectFolderRefreshes = [];
-    (window as any).__codexRuntimeGetProjects = [];
-    (window as any).__delayNextProjectOpen("other", 300);
-  });
-
-  await page.locator(".proj-switch").click();
-  await page.locator(".proj-menu-row", { hasText: "Other project" }).click();
-  await expect(page.locator(".codex-runtime-loading")).toBeVisible();
-  await page.locator(".proj-switch").click();
-  await page.locator(".proj-menu-row", { hasText: "wisp-science" }).click();
-
-  await expect(page.locator(".codex-config-model")).toHaveText("gpt-test");
-  await expect.poll(() => page.evaluate(() => (window as any).__projectOpenCompletions ?? [])).toEqual(["other", "default"]);
-  await expect.poll(() => page.evaluate(() => (window as any).__projectInfoReads ?? [])).toEqual(["default"]);
-  await expect.poll(() => page.evaluate(() => (window as any).__projectSessionRefreshes ?? [])).toEqual(["default"]);
-  await expect.poll(() => page.evaluate(() => (window as any).__projectFolderRefreshes ?? [])).toEqual(["default"]);
-  await expect.poll(() => page.evaluate(() => (window as any).__codexRuntimeGetProjects ?? [])).toEqual(["default"]);
-});
-
-test("a failed project open leaves Codex gated and recovers on the landing", async ({ page }) => {
-  await page.goto("/?initialModel=codex-local");
-  await page.evaluate(() => {
-    (window as any).__delayNextProjectOpen("other", 250);
-    (window as any).__failNextProjectOpen("other");
-  });
-  await page.locator(".proj-card-main").nth(1).click();
-  await expect(page.locator(".codex-runtime-loading")).toBeVisible();
-  await expect(page.locator(".project-open-error")).toContainText("Could not open the project");
-  await expect(page.locator(".codex-runtime-loading")).toHaveCount(0);
-  await expect.poll(async () => (await invokeArgsList(page, "get_codex_runtime_snapshot")).length).toBe(0);
-
-  await page.locator(".proj-card-main").first().click();
-  await expect(page.locator(".codex-config-model")).toHaveText("gpt-test");
-  await expect(page.locator(".project-open-error")).toHaveCount(0);
-});
-
-test("/plan and /default take priority over the skill picker", async ({ page }) => {
-  await enterApp(page);
-  const input = composer(page);
-
-  await input.fill("/plan");
-  await expect(page.locator(".mention-menu")).toHaveCount(0);
-  await input.press("Enter");
-  await expect(input).toHaveValue("");
-  await expect(page.getByText("Plan mode enabled")).toBeVisible();
-
-  await input.fill("/plan inspect the result");
-  await expect(page.locator(".mention-menu")).toHaveCount(0);
-  await input.press("Enter");
-  await expect.poll(() => lastInvokeArgs(page, "send_message")).toMatchObject({
-    message: expect.stringContaining("inspect the result"),
-  });
-
-  await input.fill("/default");
-  await input.press("Enter");
-  await expect(input).toHaveValue("");
-  await expect(page.getByText("Default mode enabled")).toBeVisible();
-});
-
-test("Codex composer sends the visible Plan model, effort, and config version", async ({ page }) => {
-  await enterApp(page);
-  await page.locator(".model-picker-btn").click();
-  await page.locator(".model-menu-pick", { hasText: "Codex Local" }).click();
-
-  const config = page.locator(".codex-composer-config");
-  await expect(config).toBeVisible();
-  await config.locator(".codex-mode-toggle").click();
-  await expect(config).toHaveClass(/plan/);
-  await config.locator(".codex-config-toggle").click();
-  await expect(page.getByRole("button", { name: "Confirm refreshed configuration" })).toHaveCount(0);
-  const selects = page.locator(".codex-config-menu select");
-  await selects.nth(0).selectOption("gpt-test");
-  await selects.nth(1).selectOption("ultra");
-  await page.locator(".model-menu-backdrop").click({ force: true });
-
-  await composer(page).fill("inspect the native plan");
-  await page.getByRole("button", { name: "Send" }).click();
-  await expect.poll(() => lastInvokeArgs(page, "send_message")).toMatchObject({
-    collaborationMode: "plan",
-    codexConfigGeneration: "12",
-    codexOverrides: {
-      plan: { model: "gpt-test", effort: "ultra" },
-    },
-    message: "inspect the native plan",
-  });
-  await expect.poll(async () => (await invokeArgsList(page, "preview_codex_turn_config")).some((args) =>
-    args.previewScope === "session" && args.validateRuntime === true,
-  )).toBe(true);
-});
-
-test("send-time Codex validation refreshes the cached runtime and restores the draft", async ({ page }) => {
-  await enterApp(page);
-  await page.locator(".model-picker-btn").click();
-  await page.locator(".model-menu-pick", { hasText: "Codex Local" }).click();
-  await expect(page.locator(".codex-composer-config")).toBeVisible();
-
-  const sendsBefore = (await invokeArgsList(page, "send_message")).length;
-  const getsBefore = (await invokeArgsList(page, "get_codex_runtime_snapshot")).length;
-  const refreshesBefore = (await invokeArgsList(page, "refresh_codex_runtime_snapshot")).length;
-  await page.evaluate(() => (window as any).__forceNextCodexValidationChange());
-  await composer(page).fill("keep this draft across validation");
-  await page.getByRole("button", { name: "Send" }).click();
-
-  await expect(composer(page)).toHaveValue("keep this draft across validation");
-  await expect.poll(async () => (await invokeArgsList(page, "send_message")).length).toBe(sendsBefore);
-  await expect(page.locator(".codex-config-menu")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Confirm refreshed configuration" })).toBeVisible();
-  await expect.poll(async () => (await invokeArgsList(page, "get_codex_runtime_snapshot")).length).toBeGreaterThan(getsBefore);
-  await expect.poll(async () => (await invokeArgsList(page, "refresh_codex_runtime_snapshot")).length).toBe(refreshesBefore);
-  await expect.poll(async () => (await invokeArgsList(page, "preview_codex_turn_config")).some((args) =>
-    args.validateRuntime === true && args.configVersion === "12",
-  )).toBe(true);
-
-  await page.getByRole("button", { name: "Confirm refreshed configuration" }).click();
-  await page.getByRole("button", { name: "Send" }).click();
-  await expect.poll(() => lastInvokeArgs(page, "send_message")).toMatchObject({
-    codexConfigGeneration: "13",
-    message: "keep this draft across validation",
-  });
-});
-
-test("a Plan task waits for the Codex snapshot instead of using exec fallback", async ({ page }) => {
-  await enterApp(page);
-  await page.evaluate(() => (window as any).__delayNextCodexRuntime(500));
-  await page.locator(".model-picker-btn").click();
-  await page.locator(".model-menu-pick", { hasText: "Codex Local" }).click();
-  await expect(page.locator(".codex-runtime-loading")).toBeVisible();
-  await expect(page.locator(".codex-composer-config.local-runner-mode")).toHaveCount(0);
-
-  await composer(page).fill("/plan");
-  await composer(page).press("Enter");
-  await expect(composer(page)).toHaveValue("");
-  await expect(page.getByText("Plan mode enabled")).toBeVisible();
-
-  await composer(page).fill("/plan wait for native mode");
-  await composer(page).press("Enter");
-  await expect(composer(page)).toHaveValue("/plan wait for native mode");
-  await expect(page.getByText(/Codex is still loading/)).toBeVisible();
-  await expect.poll(async () => (await invokeArgsList(page, "send_message")).length).toBe(0);
-
-  await expect(page.locator(".codex-runtime-loading")).toHaveCount(0);
-  await expect(page.locator(".codex-config-model")).toHaveText("gpt-fast");
-  await composer(page).press("Enter");
-  await expect.poll(() => lastInvokeArgs(page, "send_message")).toMatchObject({
-    collaborationMode: "plan",
-    codexConfigGeneration: "12",
-    message: "wait for native mode",
-  });
-});
-
-test("a turn waits for the mode-specific Codex preview and sends the displayed config", async ({ page }) => {
-  await enterApp(page);
-  await page.locator(".model-picker-btn").click();
-  await page.locator(".model-menu-pick", { hasText: "Codex Local" }).click();
-  const config = page.locator(".codex-composer-config").filter({ has: page.locator(".codex-config-toggle") });
-  await expect(config.locator(".codex-config-model")).toHaveText("gpt-test");
-
-  await page.evaluate(() => (window as any).__delayNextCodexPreview(500));
-  await config.locator(".codex-mode-toggle").click();
-  await expect(config).toHaveClass(/plan/);
-  await expect(config.locator(".codex-config-model")).toHaveText("Loading config…");
-
-  const sendsBefore = (await invokeArgsList(page, "send_message")).length;
-  await composer(page).fill("use the resolved Plan config");
-  await page.getByRole("button", { name: "Send" }).click();
-  await expect(composer(page)).toHaveValue("use the resolved Plan config");
-  await expect(page.getByText(/configuration is still resolving/)).toBeVisible();
-  await expect.poll(async () => (await invokeArgsList(page, "send_message")).length).toBe(sendsBefore);
-
-  await expect(config.locator(".codex-config-model")).toHaveText("gpt-fast");
-  await expect(config.locator(".codex-config-effort")).toHaveText("medium");
-  await page.getByRole("button", { name: "Send" }).click();
-  await expect.poll(() => lastInvokeArgs(page, "send_message")).toMatchObject({
-    collaborationMode: "plan",
-    codexConfigGeneration: "12",
-    message: "use the resolved Plan config",
-  });
-});
-
-test("changed Codex runtime config blocks send until the refreshed snapshot is confirmed", async ({ page }) => {
-  await enterApp(page);
-  await page.locator(".model-picker-btn").click();
-  await page.locator(".model-menu-pick", { hasText: "Codex Local" }).click();
-
-  await openSettingsSection(page, "Models");
-  const runtime = page.getByTestId("codex-runtime-settings");
-  await runtime.getByRole("button", { name: "Refresh runtime" }).click();
-  await expect(runtime.getByRole("button", { name: "Refresh runtime" })).toBeEnabled();
-  await page.locator(".settings-head-close").click();
-
-  await composer(page).fill("do not send stale config");
-  await page.getByRole("button", { name: "Send" }).click();
-  await expect(page.getByText(/Review and confirm the refreshed values/)).toBeVisible();
-  await expect(page.locator(".codex-config-menu")).toBeVisible();
-  await page.getByRole("button", { name: "Confirm refreshed configuration" }).click();
-  await page.getByRole("button", { name: "Send" }).click();
-
-  await expect.poll(() => lastInvokeArgs(page, "send_message")).toMatchObject({
-    codexConfigGeneration: "13",
-    message: "do not send stale config",
-  });
-});
-
-test("native Plan events render an actionable plan card and user question", async ({ page }) => {
-  await enterApp(page);
-  await page.locator(".model-picker-btn").click();
-  await page.locator(".model-menu-pick", { hasText: "Codex Local" }).click();
-
-  await expect(page.locator(".codex-composer-config")).toBeVisible();
-
-  await submitNativePlan(page);
-  const plan = page.getByTestId("plan-card");
-  await expect(plan).toContainText("Inspect inputs");
-  await expect(plan).toContainText("Implement safely");
-  await expect(plan.getByRole("button", { name: "Approve and execute" })).toBeVisible();
-  await expect(plan).not.toContainText("not native Codex");
-
-  const question = page.getByTestId("plan-question-card");
-  await expect(question).toContainText("Which implementation should be used?");
-  await question.getByRole("button", { name: /Safe/ }).click();
-  await expect.poll(() => lastInvokeArgs(page, "answer_codex_user_input")).toMatchObject({
-    questionId: "q-1",
-    answers: ["Safe"],
-  });
-
-  await plan.getByRole("button", { name: "Approve and execute" }).click();
-  await expect.poll(async () => (await invokeArgsList(page, "preview_codex_turn_config")).some((args) =>
-    args.mode === "default" && args.validateRuntime === true,
-  )).toBe(true);
-  await expect.poll(() => lastInvokeArgs(page, "codex_plan_action")).toMatchObject({
-    action: "approve",
-    planId: "plan-native-1",
-    revision: 1,
-    configVersion: "12",
-    overrides: {},
-  });
-});
-
-test("Plan approval stops and refreshes when Codex changes at validation time", async ({ page }) => {
-  await enterApp(page);
-  await page.locator(".model-picker-btn").click();
-  await page.locator(".model-menu-pick", { hasText: "Codex Local" }).click();
-  await submitNativePlan(page);
-  const plan = page.getByTestId("plan-card");
-  await expect(plan.getByRole("button", { name: "Approve and execute" })).toBeVisible();
-
-  const actionsBefore = (await invokeArgsList(page, "codex_plan_action")).length;
-  const getsBefore = (await invokeArgsList(page, "get_codex_runtime_snapshot")).length;
-  const refreshesBefore = (await invokeArgsList(page, "refresh_codex_runtime_snapshot")).length;
-  await page.evaluate(() => (window as any).__forceNextCodexValidationChange());
-  await plan.getByRole("button", { name: "Approve and execute" }).click();
-  await expect.poll(async () => (await invokeArgsList(page, "codex_plan_action")).length).toBe(actionsBefore);
-  await expect(plan.getByRole("button", { name: "Approve and execute" })).toBeEnabled();
-  await expect(page.locator(".codex-config-menu")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Confirm refreshed configuration" })).toBeVisible();
-  await expect.poll(async () => (await invokeArgsList(page, "get_codex_runtime_snapshot")).length).toBeGreaterThan(getsBefore);
-  await expect.poll(async () => (await invokeArgsList(page, "refresh_codex_runtime_snapshot")).length).toBe(refreshesBefore);
-
-  await page.getByRole("button", { name: "Confirm refreshed configuration" }).click();
-  await plan.getByRole("button", { name: "Approve and execute" }).click();
-  await expect.poll(() => lastInvokeArgs(page, "codex_plan_action")).toMatchObject({
-    action: "approve",
-    planId: "plan-native-1",
-    revision: 1,
-    configVersion: "13",
-  });
-});
-
-test("native Plan approval cannot bypass an unconfirmed Codex snapshot", async ({ page }) => {
-  await enterApp(page);
-  await page.locator(".model-picker-btn").click();
-  await page.locator(".model-menu-pick", { hasText: "Codex Local" }).click();
-  await submitNativePlan(page);
-  const plan = page.getByTestId("plan-card");
-  await expect(plan.getByRole("button", { name: "Approve and execute" })).toBeVisible();
-
-  await openSettingsSection(page, "Models");
-  const runtime = page.getByTestId("codex-runtime-settings");
-  await runtime.getByRole("button", { name: "Refresh runtime" }).click();
-  await expect(runtime.getByRole("button", { name: "Refresh runtime" })).toBeEnabled();
-  await page.locator(".settings-head-close").click();
-
-  const actionsBefore = (await invokeArgsList(page, "codex_plan_action")).length;
-  await plan.getByRole("button", { name: "Approve and execute" }).click();
-  await expect.poll(async () => (await invokeArgsList(page, "codex_plan_action")).length).toBe(actionsBefore);
-  await expect(plan.getByRole("button", { name: "Approve and execute" })).toBeEnabled();
-  await expect(page.locator(".codex-config-menu")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Confirm refreshed configuration" })).toBeVisible();
-
-  await page.getByRole("button", { name: "Confirm refreshed configuration" }).click();
-  await plan.getByRole("button", { name: "Approve and execute" }).click();
-  await expect.poll(() => lastInvokeArgs(page, "codex_plan_action")).toMatchObject({
-    action: "approve",
-    configVersion: "13",
-  });
-});
-
-test("compatibility Plan approval does not require native App Server config", async ({ page }) => {
-  await enterApp(page);
-  await page.locator(".model-picker-btn").click();
-  await page.locator(".model-menu-pick", { hasText: "Codex Local" }).click();
-  await expect(page.locator(".codex-composer-config")).toBeVisible();
-
-  await composer(page).fill("/plan COMPATPLAN");
-  await composer(page).press("Enter");
-  await expect(page.locator(".codex-config-model")).toHaveText("gpt-fast");
-  await composer(page).press("Enter");
-  const plan = page.getByTestId("plan-card");
-  await expect(plan).toContainText("not native Codex");
-  await page.locator(".codex-config-toggle").click();
-  const audit = page.getByTestId("codex-turn-audit");
-  await audit.locator("summary").click();
-  await expect(audit).toContainText("Actual verification unavailable (compatibility mode).");
-  await page.locator(".model-menu-backdrop").click({ force: true });
-  await plan.getByRole("button", { name: "Approve and execute" }).click();
-  await expect.poll(() => lastInvokeArgs(page, "codex_plan_action")).toMatchObject({
-    action: "approve",
-    planId: "plan-compat-1",
-    revision: 1,
-  });
-  const actionArgs = await lastInvokeArgs(page, "codex_plan_action");
-  expect(actionArgs.configVersion).toBeUndefined();
-  expect(actionArgs.overrides).toBeUndefined();
-});
-
-test("Codex exec fallback keeps model, effort, and compatibility Plan controls usable", async ({ page }) => {
-  await enterApp(page);
-  await page.evaluate(() => (window as any).__setCodexRuntimeUnavailable(true));
-  await page.locator(".model-picker-btn").click();
-  await page.locator(".model-menu-pick", { hasText: "Codex Local" }).click();
-
-  const fallback = page.locator(".codex-composer-config.local-runner-mode");
-  await expect(fallback).toBeVisible();
-  await expect(fallback.locator(".codex-config-model")).toHaveText("gpt-test");
-  await expect(fallback.locator(".codex-config-effort")).toHaveText("high");
-  await fallback.locator(".codex-config-toggle").click();
-  await expect(page.locator(".codex-compat-config-menu")).toContainText("codex exec");
-  await page.locator(".model-menu-backdrop").click({ force: true });
-
-  await openSettingsSection(page, "Models");
-  const runtime = page.getByTestId("codex-runtime-settings");
-  await expect(runtime).toContainText("Codex runtime is not available");
-  await expect(page.getByTestId("codex-fallback-normal-model")).toHaveValue("gpt-test");
-  await page.getByTestId("codex-fallback-plan-model").fill("gpt-compat-plan");
-  await page.getByTestId("codex-fallback-plan-effort").fill("ultra");
-  await runtime.getByRole("button", { name: "Save to profile" }).click();
-  await page.locator(".settings-head-close").click();
-
-  await fallback.locator(".codex-mode-toggle").click();
-  await expect(fallback).toHaveClass(/plan/);
-  await expect(fallback).toContainText("compat");
-  await expect(fallback.locator(".codex-config-model")).toHaveText("gpt-compat-plan");
-  await expect(fallback.locator(".codex-config-effort")).toHaveText("ultra");
-  await composer(page).fill("COMPATPLAN fallback task");
-  await page.getByRole("button", { name: "Send" }).click();
-  await expect(page.getByTestId("plan-card")).toContainText("compatibility planner");
-  await expect.poll(() => lastInvokeArgs(page, "send_message")).toMatchObject({
-    collaborationMode: "plan",
-    message: "COMPATPLAN fallback task",
-  });
-  const sent = await lastInvokeArgs(page, "send_message");
-  expect(sent.codexConfigGeneration).toBeUndefined();
-});
-
-test("Codex composer exposes the latest requested, sent, and actual turn config", async ({ page }) => {
-  await enterApp(page);
-  await page.locator(".model-picker-btn").click();
-  await page.locator(".model-menu-pick", { hasText: "Codex Local" }).click();
-  await expect(page.locator(".codex-composer-config")).toBeVisible();
-
-  await composer(page).fill("AUDIT verify config");
-  await page.getByRole("button", { name: "Send" }).click();
-  await expect(page.getByText("Hello from mock wisp-science.")).toBeVisible();
-  await page.locator(".codex-config-toggle").click();
-  const audit = page.getByTestId("codex-turn-audit");
-  await audit.locator("summary").click();
-  await expect(audit).toContainText("Requested");
-  await expect(audit).toContainText("Sent to Codex");
-  await expect(audit).toContainText("Actual");
-  await expect(audit).toContainText("gpt-test");
-});
-
-test("session Codex override revision conflicts reread session state without refreshing runtime", async ({ page }) => {
-  await enterApp(page);
-  await page.locator(".model-picker-btn").click();
-  await page.locator(".model-menu-pick", { hasText: "Codex Local" }).click();
-  await expect(page.locator(".codex-composer-config")).toBeVisible();
-  await composer(page).fill("establish revision state");
-  await page.getByRole("button", { name: "Send" }).click();
-  await expect(page.getByText("Hello from mock wisp-science.")).toBeVisible();
-
-  const runtimeRefreshesBefore = (await invokeArgsList(page, "refresh_codex_runtime_snapshot")).length;
-  await page.locator(".codex-config-toggle").click();
-  await page.evaluate(() => (window as any).__forceNextCodexRevisionConflict());
-  const selects = page.locator(".codex-config-menu select");
-  await selects.nth(0).selectOption("gpt-fast");
-
-  await expect(page.locator(".codex-config-changed")).toBeVisible();
-  await page.locator(".model-menu-backdrop").click({ force: true });
-  await page.locator(".codex-config-toggle").click();
-  await expect(selects.nth(0)).toHaveValue("gpt-fast");
-  await expect(selects.nth(1)).toHaveValue("low");
-  await expect(page.getByText(/revision conflict/)).toBeVisible();
-  await expect.poll(async () => (await invokeArgsList(page, "refresh_codex_runtime_snapshot")).length).toBe(runtimeRefreshesBefore);
-});
-
-test("external Codex runtime changes wait for an explicit user refresh", async ({ page }) => {
-  await enterApp(page);
-  await page.locator(".model-picker-btn").click();
-  await page.locator(".model-menu-pick", { hasText: "Codex Local" }).click();
-
-  const refreshesBefore = await page.evaluate(() =>
-    ((window as any).__skillInvokeLog ?? []).filter((call: any) =>
-      call.cmd === "refresh_codex_runtime_snapshot").length,
-  );
-  await page.evaluate(() => (window as any).__tauriEmit("codex-runtime-changed", {
-    projectId: "default",
-    profileId: "codex-local",
-    pending: true,
-  }));
-  await expect(page.locator(".codex-config-changed")).toBeVisible();
-  await expect(page.getByText(/Open Models settings and refresh the runtime/)).toBeVisible();
-  await page.waitForTimeout(100);
-  await expect.poll(async () => page.evaluate(() =>
-    ((window as any).__skillInvokeLog ?? []).filter((call: any) =>
-      call.cmd === "refresh_codex_runtime_snapshot").length,
-  )).toBe(refreshesBefore);
-
-  await page.evaluate(() => (window as any).__tauriEmit("agent", {
-    kind: "Done",
-    frame_id: "runtime-change-turn",
-  }));
-  await page.waitForTimeout(100);
-  await expect.poll(async () => page.evaluate(() =>
-    ((window as any).__skillInvokeLog ?? []).filter((call: any) =>
-      call.cmd === "refresh_codex_runtime_snapshot").length,
-  )).toBe(refreshesBefore);
-
-  await page.evaluate(() => (window as any).__tauriEmit("codex-runtime-changed", {
-    projectId: "default",
-    profileId: "codex-local",
-    pending: false,
-  }));
-
-  await page.waitForTimeout(100);
-  await expect.poll(async () => page.evaluate(() =>
-    ((window as any).__skillInvokeLog ?? []).filter((call: any) =>
-      call.cmd === "refresh_codex_runtime_snapshot").length,
-  )).toBe(refreshesBefore);
-
-  await openSettingsSection(page, "Models");
-  await page.getByTestId("codex-runtime-settings").getByRole("button", { name: "Refresh runtime" }).click();
-  await expect.poll(async () => page.evaluate(() =>
-    ((window as any).__skillInvokeLog ?? []).filter((call: any) =>
-      call.cmd === "refresh_codex_runtime_snapshot").length,
-  )).toBeGreaterThan(refreshesBefore);
-});
-
-test("a failed explicit Codex refresh cannot be confirmed as current", async ({ page }) => {
-  await enterApp(page);
-  await page.locator(".model-picker-btn").click();
-  await page.locator(".model-menu-pick", { hasText: "Codex Local" }).click();
-  await page.evaluate(() => (window as any).__tauriEmit("codex-runtime-changed", {
-    projectId: "default",
-    profileId: "codex-local",
-    pending: false,
-  }));
-  await page.evaluate(() => (window as any).__setCodexRuntimeUnavailable(true));
-
-  await openSettingsSection(page, "Models");
-  const runtime = page.getByTestId("codex-runtime-settings");
-  await runtime.getByRole("button", { name: "Refresh runtime" }).click();
-  await expect(runtime.locator(".codex-runtime-error")).toContainText("Codex App Server is unavailable");
-  await page.locator(".settings-head-close").click();
-
-  await page.locator(".codex-config-toggle").click();
-  await expect(page.locator(".codex-refresh-required")).toContainText("refresh the runtime");
-  await expect(page.getByRole("button", { name: "Confirm refreshed configuration" })).toHaveCount(0);
-});
-
-test("a Settings preview cannot clear an in-flight runtime loading gate", async ({ page }) => {
-  await enterApp(page);
-  await page.locator(".model-picker-btn").click();
-  await page.locator(".model-menu-pick", { hasText: "Codex Local" }).click();
-  await expect(page.locator(".codex-composer-config")).toBeVisible();
-  await openSettingsSection(page, "Models");
-  const runtime = page.getByTestId("codex-runtime-settings");
-  const preview = runtime.getByRole("button", { name: "Preview actual config" });
-  await expect(preview).toBeEnabled();
-
-  await page.evaluate(() => (window as any).__delayNextCodexSettingsPreview(300));
-  await preview.click();
-  await page.evaluate(() => (window as any).__delayNextCodexRuntime(900));
-  await runtime.getByRole("button", { name: "Refresh runtime" }).click();
-  await page.locator(".settings-head-close").click();
-
-  await page.waitForTimeout(500);
-  await expect(page.locator(".codex-runtime-loading")).toBeVisible();
-  await expect(page.locator(".codex-composer-config.local-runner-mode")).toHaveCount(0);
-  await expect(page.locator(".codex-runtime-loading")).toHaveCount(0, { timeout: 2_000 });
-  await expect(page.locator(".codex-config-toggle")).toBeVisible();
 });
 
 test("side chat answers in a temporary side panel and can switch model", async ({ page }) => {
@@ -1307,72 +785,6 @@ test("settings normalizes a blank stored provider to openai", async ({ page }) =
   await expect(page.locator(".settings-status")).toHaveText("Validated openai with deepseek-v4-pro");
 });
 
-test("Codex runtime settings use catalog models and dynamic efforts", async ({ page }) => {
-  await enterApp(page);
-  await page.locator(".model-picker-btn").click();
-  await page.locator(".model-menu-pick", { hasText: "Codex Local" }).click();
-  await openSettingsSection(page, "Models");
-
-  const runtime = page.getByTestId("codex-runtime-settings");
-  await expect(runtime).toContainText("C:/tools/codex.exe");
-  await expect(runtime).toContainText("0.99.0-test");
-  await expect(runtime).toContainText("Native Plan");
-  await expect(page.getByTestId("codex-plan-effort").locator("option")).toHaveText([
-    "Inherit from Codex", "low", "medium", "Custom…",
-  ]);
-
-  await page.getByTestId("codex-normal-model").selectOption("gpt-test");
-  await expect(page.getByTestId("codex-normal-effort").locator("option")).toHaveText([
-    "Inherit from Codex", "low", "high", "max", "ultra", "Custom…",
-  ]);
-  await page.getByTestId("codex-normal-effort").selectOption("ultra");
-  await runtime.getByRole("button", { name: "Preview actual config" }).click();
-
-  await expect.poll(async () => (await invokeArgsList(page, "preview_codex_turn_config")).some((args) =>
-    args.previewScope === "profile"
-      && args.configVersion === "12"
-      && args.overrides?.normal?.model === "gpt-test"
-      && args.overrides?.normal?.effort === "ultra",
-  )).toBe(true);
-  await expect(runtime).toContainText("ultra");
-});
-
-test("Codex custom model and effort inputs keep focus while typing", async ({ page }) => {
-  await enterApp(page);
-  await page.locator(".model-picker-btn").click();
-  await page.locator(".model-menu-pick", { hasText: "Codex Local" }).click();
-  await openSettingsSection(page, "Models");
-  await expect(page.getByTestId("codex-runtime-settings")).toBeVisible();
-
-  await page.getByTestId("codex-normal-model").selectOption("__custom__");
-  const customModel = page.getByTestId("codex-normal-custom-model");
-  await customModel.pressSequentially("gpt-custom-preview", { delay: 12 });
-  await expect(customModel).toHaveValue("gpt-custom-preview");
-  await expect.poll(() => customModel.evaluate((element) => document.activeElement === element)).toBe(true);
-
-  await page.getByTestId("codex-normal-effort").selectOption("__custom__");
-  const customEffort = page.getByTestId("codex-normal-custom-effort");
-  await customEffort.pressSequentially("ultra-plus", { delay: 12 });
-  await expect(customEffort).toHaveValue("ultra-plus");
-  await expect.poll(() => customEffort.evaluate((element) => document.activeElement === element)).toBe(true);
-});
-
-test("a failed Settings preview clears stale actual configuration", async ({ page }) => {
-  await enterApp(page);
-  await page.locator(".model-picker-btn").click();
-  await page.locator(".model-menu-pick", { hasText: "Codex Local" }).click();
-  await openSettingsSection(page, "Models");
-  const runtime = page.getByTestId("codex-runtime-settings");
-  await expect(runtime.locator(".codex-preview-empty")).toHaveCount(0);
-  const preview = runtime.getByRole("button", { name: "Preview actual config" });
-  await expect(preview).toBeEnabled();
-
-  await page.evaluate(() => (window as any).__failNextCodexSettingsPreviews(2));
-  await preview.click();
-  await expect(runtime.locator(".codex-runtime-error")).toContainText("Codex settings preview failed");
-  await expect(runtime.locator(".codex-preview-empty")).toHaveCount(2);
-});
-
 test("editing API URL keeps provider state and display aligned", async ({ page }) => {
   await enterApp(page);
   await openModelsSettings(page);
@@ -1508,33 +920,6 @@ test("inline approval scope is sent with confirmation", async ({ page }) => {
     args: {
       approved: true,
       scope: "project",
-    },
-  });
-});
-
-test("plan approval Other sends feedback (#121)", async ({ page }) => {
-  await enterApp(page);
-  await composer(page).fill("PLANOTHER");
-  await page.getByRole("button", { name: "Send" }).click();
-
-  await expect(page.getByText("Review plan before starting?")).toBeVisible({ timeout: 10_000 });
-  await page.getByRole("button", { name: "Other" }).click();
-  await page
-    .getByPlaceholder("Tell wisp what to change in this plan.")
-    .fill("Split protocol work from UI work.");
-  await page.getByRole("button", { name: "Send feedback" }).click();
-
-  await expect.poll(async () => page.evaluate(() => {
-    const calls = ((window as any).__skillInvokeLog ?? []).map((c: any) => ({
-      cmd: c.cmd,
-      args: c.args instanceof Map ? Object.fromEntries(c.args) : (c.args ?? {}),
-    }));
-    return calls.find((c: any) => c.cmd === "confirm_response") ?? null;
-  })).toMatchObject({
-    cmd: "confirm_response",
-    args: {
-      approved: false,
-      feedback: "Split protocol work from UI work.",
     },
   });
 });

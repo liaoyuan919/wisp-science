@@ -44,7 +44,6 @@ pub(super) fn apply_theme_mode(mode: &str) {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ComposerSendAction {
     Normal,
-    PlanFirst,
     BranchNew,
 }
 
@@ -424,31 +423,6 @@ pub(super) fn message_with_attachments(text: &str, paths: &[String]) -> String {
     }
 }
 
-pub(super) fn message_with_references(
-    text: &str,
-    paths: &[String],
-    references: &[ComposerReferenceChip],
-) -> String {
-    let mut message = message_with_attachments(text, paths);
-    for (label, items) in [
-        ("Attached artifacts", references.iter().filter_map(|r| match r { ComposerReferenceChip::Artifact { name, .. } => Some(name.clone()), _ => None }).collect::<Vec<_>>()),
-        ("Attached sessions", references.iter().filter_map(|r| match r { ComposerReferenceChip::Session { title, project_name, .. } => Some(format!("{project_name} / {title}")), _ => None }).collect::<Vec<_>>()),
-        ("Selected skills", references.iter().filter_map(|r| match r { ComposerReferenceChip::Skill { name } => Some(name.clone()), _ => None }).collect::<Vec<_>>()),
-    ] {
-        if !items.is_empty() {
-            message.push_str(&format!("\n\n{label}: {}", items.join(", ")));
-        }
-    }
-    message
-}
-
-pub(super) fn plan_first_message(message: &str) -> String {
-    format!(
-        "Plan first before executing. Write a concise plan for the request, then wait for my confirmation before taking action.\n\nRequest:\n{}",
-        message.trim()
-    )
-}
-
 /// If the composer text ends in an `@`, `#`, or `/` token, return its byte
 /// offset, picker mode, and query. ponytail: this is end-of-text only; upgrade
 /// to caret-index scanning when editing mentions in the middle matters.
@@ -635,12 +609,6 @@ pub(super) fn settings_required_error_key(cfg: &Settings, key: &str) -> Option<&
     None
 }
 
-pub(super) fn should_close_right_pane_on_escape(ev: &web_sys::KeyboardEvent) -> bool {
-    // Kept for callers/tests; Escape always dismisses the right pane once
-    // higher overlays are cleared (composer pickers preventDefault first).
-    !ev.default_prevented() && !ev.is_composing()
-}
-
 /// Single source of truth for `invoke` argument payloads.
 ///
 /// Tauri v2 deserializes command arguments from JS **camelCase** keys onto the
@@ -712,8 +680,6 @@ mod tauri_args_tests {
             references: vec![],
             resume: false,
             collaboration_mode: None,
-            codex_config_generation: None,
-            codex_overrides: None,
         })
         .unwrap();
         assert_eq!(v["sessionId"], "frame-1");
@@ -863,7 +829,7 @@ pub(super) fn clear_running_if_idle(pending: RwSignal<HashMap<String, usize>>, r
 }
 
 pub(super) fn strip_approval_pending(items: &mut Vec<ChatItem>) {
-    items.retain(|i| !matches!(i, ChatItem::ApprovalPending { .. }));
+    items.retain(|i| !matches!(i, ChatItem::ApprovalPending { .. } | ChatItem::AcpPermission { .. }));
 }
 
 pub(super) fn upsert_review(items: &mut Vec<ChatItem>, report: ReviewReport) {
@@ -952,29 +918,11 @@ pub(super) fn last_tool_input(items: &[ChatItem], tool: &str) -> String {
 }
 
 pub(super) fn trailing_queue_start(items: &[ChatItem]) -> usize {
-    items
-        .iter()
-        .rposition(|item| !matches!(item, ChatItem::QueuedUser(_)))
-        .map(|i| i + 1)
-        .unwrap_or(0)
+    items.len()
 }
 
 pub(super) fn start_user_turn(items: &mut Vec<ChatItem>, text: String, model: Option<String>) {
-    if let Some(idx) = items
-        .iter()
-        .position(|item| matches!(item, ChatItem::QueuedUser(s) if s == &text))
-    {
-        items.splice(
-            idx..=idx,
-            [
-                ChatItem::User(text),
-                ChatItem::Assistant {
-                    text: String::new(),
-                    model,
-                },
-            ],
-        );
-    } else if items.windows(2).any(|pair| {
+    if items.windows(2).any(|pair| {
         matches!(&pair[0], ChatItem::User(s) if s == &text)
             && matches!(&pair[1], ChatItem::Assistant { text: assistant, .. } if assistant.is_empty())
     }) {
@@ -1155,20 +1103,6 @@ pub(super) fn profile_to_form(m: &ModelProfile) -> ModelForm {
         reasoning_effort: m.reasoning_effort.clone(),
         supports_vision: m.supports_vision,
         use_for_vision: m.use_for_vision,
-        runner_command: m.runner_command.clone(),
-        runner_profile: m.runner_profile.clone(),
-        runner_sandbox: m.runner_sandbox.clone(),
-        runner_web_search_mode: m.runner_web_search_mode.clone(),
-        runner_claude_command: m.runner_claude_command.clone(),
-        runner_persistent: m.runner_persistent,
-        normal_model: m.normal_model.clone(),
-        normal_reasoning_effort: m.normal_reasoning_effort.clone(),
-        plan_model: m.plan_model.clone(),
-        plan_reasoning_effort: m.plan_reasoning_effort.clone(),
-        service_tier: m.service_tier.clone(),
-        personality: m.personality.clone(),
-        reasoning_summary: m.reasoning_summary.clone(),
-        verbosity: m.verbosity.clone(),
     }
 }
 
@@ -2632,6 +2566,7 @@ pub(super) fn UserMessage(
     text: String,
     ui_index: usize,
     busy: ReadSignal<bool>,
+    can_modify: bool,
     on_copy: Callback<String>,
     on_edit: Callback<usize>,
     on_branch: Callback<usize>,
@@ -2649,19 +2584,21 @@ pub(super) fn UserMessage(
                     title=move || t(locale.get(), "msg.copy")
                     on:click=move |_| on_copy.call(text.clone())
                 >{move || t(locale.get(), "msg.copy")}</button>
-                <button
-                    type="button"
-                    class="msg-btn"
-                    disabled=move || busy.get()
-                    title=move || t(locale.get(), "msg.edit")
-                    on:click=move |_| on_edit.call(ui_index)
-                >{move || t(locale.get(), "msg.edit")}</button>
-                <button
-                    type="button"
-                    class="msg-btn"
-                    title=move || t(locale.get(), "msg.branch")
-                    on:click=move |_| on_branch.call(ui_index)
-                >{move || t(locale.get(), "msg.branch")}</button>
+                {can_modify.then(|| view! {
+                    <button
+                        type="button"
+                        class="msg-btn"
+                        disabled=move || busy.get()
+                        title=move || t(locale.get(), "msg.edit")
+                        on:click=move |_| on_edit.call(ui_index)
+                    >{move || t(locale.get(), "msg.edit")}</button>
+                    <button
+                        type="button"
+                        class="msg-btn"
+                        title=move || t(locale.get(), "msg.branch")
+                        on:click=move |_| on_branch.call(ui_index)
+                    >{move || t(locale.get(), "msg.branch")}</button>
+                })}
             </div>
         </div>
     }
