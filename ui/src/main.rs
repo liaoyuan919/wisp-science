@@ -123,7 +123,7 @@ fn upsert_acp_tool(items: &mut Vec<ChatItem>, payload: &serde_json::Value) {
             content: acp_value_text(payload.get("content")),
             locations: acp_value_text(payload.get("locations")),
         };
-        let index = trailing_queue_start(items);
+        let index = acp_tool_insert_index(items);
         items.insert(index, row);
     }
 }
@@ -281,6 +281,7 @@ fn App() -> impl IntoView {
     let acp_infos = create_rw_signal::<HashMap<String, AcpAgentInfo>>(HashMap::new());
     let acp_session_configs = create_rw_signal::<HashMap<String, Vec<serde_json::Value>>>(HashMap::new());
     let acp_session_modes = create_rw_signal::<HashMap<String, serde_json::Value>>(HashMap::new());
+    let acp_config_menu_open = create_rw_signal::<Option<String>>(None);
     let show_projects = create_rw_signal(true); // app lands on the Projects screen
     let project_info = create_rw_signal::<Option<ProjectInfo>>(None);
     let demo_mode = create_rw_signal(false); // true = the synthetic "Example project" is open
@@ -377,9 +378,28 @@ fn App() -> impl IntoView {
             let args = to_value(&serde_json::json!({ "frameId": session_id.clone() })).unwrap();
             let Ok(value) = invoke_checked("get_acp_session_agent", args).await else { return; };
             let Ok(agent_id) = serde_wasm_bindgen::from_value::<Option<String>>(value) else { return; };
-            if active_session.get_untracked().as_deref() == Some(session_id.as_str()) {
-                active_acp_agent_id.set(agent_id);
+            if active_session.get_untracked().as_deref() != Some(session_id.as_str()) {
+                return;
             }
+            let next = acp_agent_selection_after_fetch(
+                agent_id,
+                &session_id,
+                &pending_turns.get_untracked(),
+                &running.get_untracked(),
+            );
+            let Some(mut next) = next else { return; };
+            // A fetch started before the first ACP bind can still return None after
+            // send_message finishes. Confirm before clearing a live selection.
+            if next.is_none() && active_acp_agent_id.get_untracked().is_some() {
+                let args = to_value(&serde_json::json!({ "frameId": session_id.clone() })).unwrap();
+                let Ok(value) = invoke_checked("get_acp_session_agent", args).await else { return; };
+                let Ok(confirmed) = serde_wasm_bindgen::from_value::<Option<String>>(value) else { return; };
+                if active_session.get_untracked().as_deref() != Some(session_id.as_str()) {
+                    return;
+                }
+                next = confirmed;
+            }
+            active_acp_agent_id.set(next);
         });
     });
     refresh_sessions(sessions);
@@ -965,7 +985,16 @@ fn App() -> impl IntoView {
         let active = active_session.get();
         let branch = action == ComposerSendAction::BranchNew;
         let agent_id = active_acp_agent_id.get();
-        let turn_model = active_model_label(&models.get());
+        let turn_model = if let Some(id) = agent_id.as_ref() {
+            acp_agents
+                .get()
+                .into_iter()
+                .find(|agent| &agent.id == id)
+                .map(|agent| agent.label)
+                .or_else(|| Some("ACP Agent".into()))
+        } else {
+            active_model_label(&models.get())
+        };
         input.set(String::new());
         attachments.set(vec![]);
         composer_references.set(vec![]);
@@ -997,7 +1026,13 @@ fn App() -> impl IntoView {
                     }
                 }
             };
-            active_session.set(Some(id.clone()));
+            // Mark the turn pending before touching active_session so the
+            // session→ACP lookup effect does not clear a just-selected agent
+            // while send_message is still binding the session.
+            begin_pending_turn(pending_turns, running, &id);
+            if active_session.get_untracked().as_deref() != Some(id.as_str()) {
+                active_session.set(Some(id.clone()));
+            }
             route_items(active_session, items, transcripts, &id, |rows| {
                 rows.push(ChatItem::User(display_message.clone()));
                 rows.push(ChatItem::Assistant {
@@ -1006,17 +1041,21 @@ fn App() -> impl IntoView {
                 });
             });
             force_chat_bottom();
-            begin_pending_turn(pending_turns, running, &id);
             let args = to_value(&SendMessageArgs {
                 session_id: Some(id.clone()),
                 message: message.clone(),
                 attachments: paths,
                 references: reference_args,
                 resume: false,
-                acp_agent_id: agent_id,
+                acp_agent_id: agent_id.clone(),
             }).unwrap();
             match invoke_checked("send_message", args).await {
-                Ok(_) => refresh_sessions(sessions),
+                Ok(_) => {
+                    if let Some(agent_id) = agent_id {
+                        active_acp_agent_id.set(Some(agent_id));
+                    }
+                    refresh_sessions(sessions);
+                }
                 Err(error) => {
                     let raw = js_error_text(error);
                     let (started, message_text) = split_turn_started_error(&raw);
@@ -2298,6 +2337,11 @@ fn App() -> impl IntoView {
             model_menu_open.set(false);
             return;
         }
+        if acp_config_menu_open.get().is_some() {
+            ev.prevent_default();
+            acp_config_menu_open.set(None);
+            return;
+        }
         if send_mode_menu_open.get() {
             ev.prevent_default();
             send_mode_menu_open.set(false);
@@ -2848,7 +2892,9 @@ fn App() -> impl IntoView {
                                     }
                                     // Run reaching the tail while busy is the live one.
                                     let live = j > last && busy_now;
-                                    let has_tool = run.iter().any(|(_, c)| matches!(c, ChatItem::Tool { .. }));
+                                    let has_tool = run.iter().any(|(_, c)| {
+                                        matches!(c, ChatItem::Tool { .. } | ChatItem::AcpTool { .. })
+                                    });
                                     if has_tool {
                                         let mut h = std::collections::hash_map::DefaultHasher::new();
                                         for (idx, it) in &run { (idx, it.fingerprint()).hash(&mut h); }
@@ -3044,12 +3090,23 @@ fn App() -> impl IntoView {
                             .and_then(serde_json::Value::as_str).map(str::to_string);
                         (!options.is_empty() || mode.is_some()).then(|| view! {
                             <div class="acp-composer-config" data-testid="acp-session-config">
-                                {mode.map(|mode| view! {
-                                    <span class="acp-config-chip acp-mode" title="Session mode">
-                                        <span class="acp-config-key">"mode"</span>
-                                        <span class="acp-config-val">{mode}</span>
-                                    </span>
-                                })}
+                                {(!options.iter().any(|option| {
+                                    option.get("id").and_then(serde_json::Value::as_str) == Some("mode")
+                                        || option
+                                            .get("name")
+                                            .and_then(serde_json::Value::as_str)
+                                            .is_some_and(|name| name.eq_ignore_ascii_case("mode"))
+                                }))
+                                    .then(|| {
+                                        mode.map(|mode| {
+                                            view! {
+                                                <span class="acp-config-chip acp-mode" title="Session mode">
+                                                    <span class="acp-config-key">"mode"</span>
+                                                    <span class="acp-config-val">{mode}</span>
+                                                </span>
+                                            }
+                                        })
+                                    })}
                                 {options.into_iter().map(|option| {
                                     let config_id = option.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
                                     let name = option.get("name").and_then(serde_json::Value::as_str).unwrap_or(&config_id).to_string();
@@ -3075,26 +3132,64 @@ fn App() -> impl IntoView {
                                         let current = option.get("currentValue").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
                                         let choices = acp_select_options(&option);
                                         let session_id = session_id.clone();
+                                        let menu_id = config_id.clone();
                                         let current_label = choices.iter()
                                             .find(|(value, _)| value == &current)
                                             .map(|(_, label)| label.clone())
                                             .unwrap_or_else(|| current.clone());
+                                        let open_id = menu_id.clone();
                                         view! {
-                                            <label class="acp-config-chip" title=description>
-                                                <span class="acp-config-key">{name.clone()}</span>
-                                                <span class="acp-config-val">{current_label}</span>
-                                                <select aria-label=name on:change=move |event| {
-                                                    let value = dom_value(&event);
-                                                    let frame_id = session_id.clone();
-                                                    let args = to_value(&serde_json::json!({ "frameId": frame_id, "configId": config_id, "value": { "value": value } })).unwrap();
-                                                    spawn_local(async move { if let Ok(value) = invoke_checked("set_acp_session_config", args).await {
-                                                        if let Ok(options) = serde_wasm_bindgen::from_value::<Vec<serde_json::Value>>(value) { acp_session_configs.update(|all| { all.insert(frame_id, options); }); }
-                                                    }});
-                                                }>{choices.into_iter().map(|(value, label)| {
-                                                    let selected = value == current;
-                                                    view! { <option value=value selected=selected>{label}</option> }
-                                                }).collect_view()}</select>
-                                            </label>
+                                            <div class="acp-config-chip acp-config-select" title=description
+                                                class:open=move || acp_config_menu_open.get().as_deref() == Some(open_id.as_str())>
+                                                <button type="button" class="acp-config-trigger" aria-label=name.clone()
+                                                    on:click=move |_| {
+                                                        let id = menu_id.clone();
+                                                        acp_config_menu_open.update(|open| {
+                                                            *open = if open.as_deref() == Some(id.as_str()) { None } else { Some(id) };
+                                                        });
+                                                    }>
+                                                    <span class="acp-config-key">{name.clone()}</span>
+                                                    <span class="acp-config-val">{current_label}</span>
+                                                </button>
+                                                {move || (acp_config_menu_open.get().as_deref() == Some(config_id.as_str())).then(|| {
+                                                    let session_id = session_id.clone();
+                                                    let config_id = config_id.clone();
+                                                    let current = current.clone();
+                                                    view! {
+                                                        <div class="acp-config-backdrop" on:click=move |_| acp_config_menu_open.set(None)></div>
+                                                        <div class="acp-config-menu" role="listbox">
+                                                            {choices.clone().into_iter().map(|(value, label)| {
+                                                                let selected = value == current;
+                                                                let session_id = session_id.clone();
+                                                                let config_id = config_id.clone();
+                                                                view! {
+                                                                    <button type="button" class="acp-config-option" class:active=selected
+                                                                        role="option" aria-selected=selected
+                                                                        on:click=move |_| {
+                                                                            acp_config_menu_open.set(None);
+                                                                            let frame_id = session_id.clone();
+                                                                            let args = to_value(&serde_json::json!({
+                                                                                "frameId": frame_id,
+                                                                                "configId": config_id,
+                                                                                "value": { "value": value },
+                                                                            })).unwrap();
+                                                                            spawn_local(async move {
+                                                                                if let Ok(value) = invoke_checked("set_acp_session_config", args).await {
+                                                                                    if let Ok(options) = serde_wasm_bindgen::from_value::<Vec<serde_json::Value>>(value) {
+                                                                                        acp_session_configs.update(|all| { all.insert(frame_id, options); });
+                                                                                    }
+                                                                                }
+                                                                            });
+                                                                        }>
+                                                                        <span class="acp-config-option-label">{label}</span>
+                                                                        {selected.then(|| view! { <span class="acp-config-option-check">"✓"</span> })}
+                                                                    </button>
+                                                                }
+                                                            }).collect_view()}
+                                                        </div>
+                                                    }
+                                                })}
+                                            </div>
                                         }.into_view()
                                     }
                                 }).collect_view()}
@@ -4535,7 +4630,9 @@ enum ThreadRow {
 /// portable way to drop it — so we don't render one.
 fn render_steps_group(items: Vec<ChatItem>, live: bool) -> impl IntoView {
     let locale = use_locale();
-    let n_tools = items.iter().filter(|c| matches!(c, ChatItem::Tool { .. })).count();
+    let n_tools = items.iter().filter(|c| {
+        matches!(c, ChatItem::Tool { .. } | ChatItem::AcpTool { .. })
+    }).count();
     let now = now_ms();
     let total_ms: u64 = items.iter().map(|c| match c {
         ChatItem::Tool { duration_ms: Some(d), .. } => *d,
@@ -4595,17 +4692,36 @@ fn render_steps_group(items: Vec<ChatItem>, live: bool) -> impl IntoView {
                 </div>
             }.into_view()
         }
-        ChatItem::AcpTool { title, status, content, locations, .. } => {
+        ChatItem::AcpTool { title, kind, status, content, locations, .. } => {
+            let failed = status == "failed";
             let done = matches!(status.as_str(), "completed" | "failed");
-            let detail = [content.as_str(), locations.as_str()].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("\n");
+            let running = !done;
+            let sopen = create_rw_signal(running && live);
+            let detail = acp_tool_step_detail(&kind, &content, &locations);
+            let body = acp_tool_step_body(&content, &locations);
+            let has_body = !body.is_empty();
+            let icon = if failed {
+                view! { <span class="step-icon fail">"✗"</span> }.into_view()
+            } else if done {
+                view! { <span class="step-icon ok">"✓"</span> }.into_view()
+            } else {
+                view! { <span class="step-icon run"><span class="run-dot"></span></span> }.into_view()
+            };
+            let meta = (!done).then(|| status.clone());
             view! {
-                <div class="step acp-tool" data-testid="acp-tool" data-status=status.clone()>
-                    <div class="step-head">
-                        <span class="step-icon" class:ok=done></span>
+                <div class="step acp-tool" data-testid="acp-tool" data-status=status.clone()
+                    class:open=move || sopen.get() class=("no-body", !has_body)>
+                    <div class="step-head" on:click=move |_| { if has_body { sopen.update(|o| *o = !*o) } }>
+                        {icon}
                         <span class="step-name">{title.clone()}</span>
-                        <span class="step-meta">{status.clone()}</span>
+                        {(!detail.is_empty()).then(|| view! { <span class="step-detail">{detail.clone()}</span> })}
+                        {meta.map(|text| view! { <span class="step-meta">{text}</span> })}
                     </div>
-                    {(!detail.is_empty()).then(|| view! { <pre class="tool-output">{detail}</pre> })}
+                    {has_body.then(|| view! {
+                        <div class="step-body">
+                            <pre class="tool-output">{body.clone()}</pre>
+                        </div>
+                    })}
                 </div>
             }.into_view()
         }
@@ -4621,6 +4737,46 @@ fn render_steps_group(items: Vec<ChatItem>, live: bool) -> impl IntoView {
             <div class="steps-body">{rows}</div>
         </div>
     }
+}
+
+fn acp_tool_is_terminal_stub(content: &str) -> bool {
+    let trimmed = content.trim();
+    trimmed.starts_with('[')
+        && trimmed.contains("\"terminalId\"")
+        && !trimmed.contains('\n')
+}
+
+fn acp_tool_step_detail(kind: &str, content: &str, locations: &str) -> String {
+    let from_locations = locations
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    if !from_locations.is_empty() {
+        return from_locations.chars().take(80).collect();
+    }
+    if acp_tool_is_terminal_stub(content) || content.trim().is_empty() {
+        return kind.chars().take(80).collect();
+    }
+    content
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(80)
+        .collect()
+}
+
+fn acp_tool_step_body(content: &str, locations: &str) -> String {
+    let mut parts = Vec::new();
+    if !locations.trim().is_empty() {
+        parts.push(locations.trim().to_string());
+    }
+    if !content.trim().is_empty() && !acp_tool_is_terminal_stub(content) {
+        parts.push(content.trim().to_string());
+    }
+    parts.join("\n")
 }
 
 fn render_item(

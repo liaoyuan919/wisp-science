@@ -366,6 +366,14 @@ pub(crate) struct LoadedItem {
     pub(crate) input: String,
     #[serde(default)]
     pub(crate) model_name: Option<String>,
+    #[serde(default)]
+    pub(crate) call_id: Option<String>,
+    #[serde(default)]
+    pub(crate) kind: Option<String>,
+    #[serde(default)]
+    pub(crate) status: Option<String>,
+    #[serde(default)]
+    pub(crate) locations: Option<String>,
 }
 
 impl LoadedItem {
@@ -373,6 +381,14 @@ impl LoadedItem {
         match self.role.as_str() {
             "user" => ChatItem::User(self.text),
             "reasoning" => ChatItem::Reasoning(self.text),
+            "acp_tool" => ChatItem::AcpTool {
+                call_id: self.call_id.unwrap_or_default(),
+                title: self.tool_name.unwrap_or_else(|| "ACP tool".into()),
+                kind: self.kind.unwrap_or_default(),
+                status: self.status.unwrap_or_else(|| "completed".into()),
+                content: self.text,
+                locations: self.locations.unwrap_or_default(),
+            },
             "tool" => ChatItem::Tool {
                 name: self.tool_name.unwrap_or_else(|| "tool".into()),
                 ok: self.ok,

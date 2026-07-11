@@ -373,6 +373,102 @@ fn text_from_payload(payload: &serde_json::Value) -> Option<&str> {
         .or_else(|| payload.get("text").and_then(serde_json::Value::as_str))
 }
 
+/// Durable ACP tool snapshot stored as a `Message::tool` body so reloads can
+/// rebuild the live `AcpTool` transcript rows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct AcpToolEnvelope {
+    pub v: u8,
+    pub call_id: String,
+    pub title: String,
+    #[serde(default)]
+    pub kind: String,
+    pub status: String,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub locations: String,
+}
+
+impl AcpToolEnvelope {
+    pub(crate) fn to_message(&self) -> Message {
+        let body = serde_json::to_string(self).unwrap_or_else(|_| "{}".into());
+        Message::tool(&self.call_id, format!("acp:{}", self.title), body)
+    }
+
+    pub(crate) fn from_tool_message(name: Option<&str>, body: &str) -> Option<Self> {
+        if !name.is_some_and(|name| name.starts_with("acp:")) {
+            return None;
+        }
+        let envelope: Self = serde_json::from_str(body).ok()?;
+        (envelope.v == 1 && !envelope.call_id.is_empty()).then_some(envelope)
+    }
+}
+
+fn json_value_text(value: Option<&serde_json::Value>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(text) => text.clone(),
+        value => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+    }
+}
+
+fn upsert_acp_tool_envelope(tools: &mut Vec<AcpToolEnvelope>, payload: &serde_json::Value) {
+    let Some(call_id) = payload
+        .get("toolCallId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+    else {
+        return;
+    };
+    let patch = |tool: &mut AcpToolEnvelope| {
+        if let Some(value) = payload.get("title").and_then(serde_json::Value::as_str) {
+            tool.title = value.to_string();
+        }
+        if let Some(value) = payload.get("kind").and_then(serde_json::Value::as_str) {
+            tool.kind = value.to_string();
+        }
+        if let Some(value) = payload.get("status").and_then(serde_json::Value::as_str) {
+            tool.status = value.to_string();
+        }
+        if payload.get("content").is_some() {
+            tool.content = json_value_text(payload.get("content"));
+        }
+        if payload.get("locations").is_some() {
+            tool.locations = json_value_text(payload.get("locations"));
+        }
+    };
+    if let Some(tool) = tools.iter_mut().find(|tool| tool.call_id == call_id) {
+        patch(tool);
+        return;
+    }
+    let mut tool = AcpToolEnvelope {
+        v: 1,
+        call_id: call_id.to_string(),
+        title: payload
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("ACP tool")
+            .to_string(),
+        kind: payload
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        status: payload
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("pending")
+            .to_string(),
+        content: json_value_text(payload.get("content")),
+        locations: json_value_text(payload.get("locations")),
+    };
+    patch(&mut tool);
+    tools.push(tool);
+}
+
 fn permission_event(frame_id: &str, request: &AcpPermissionRequest) -> PermissionEvent {
     PermissionEvent {
         request_id: request.request_id.clone(),
@@ -464,6 +560,7 @@ pub(crate) async fn run_acp_turn(
     tokio::pin!(prompt);
     let mut assistant = String::new();
     let mut reasoning = String::new();
+    let mut tools: Vec<AcpToolEnvelope> = Vec::new();
     let outcome = loop {
         tokio::select! {
             result = &mut prompt => break result.map_err(|error| error.to_string())?,
@@ -481,6 +578,9 @@ pub(crate) async fn run_acp_turn(
                             let _ = app.emit("agent", event);
                         }
                     } else {
+                        if matches!(kind, AcpUpdateKind::ToolCall | AcpUpdateKind::ToolCallUpdate) {
+                            upsert_acp_tool_envelope(&mut tools, &payload);
+                        }
                         let _ = app.emit("acp-session-update", serde_json::json!({
                             "frameId": frame_id,
                             "kind": format!("{kind:?}"),
@@ -538,6 +638,9 @@ pub(crate) async fn run_acp_turn(
                     kind,
                     AcpUpdateKind::AgentMessage | AcpUpdateKind::AgentThought
                 ) {
+                    if matches!(kind, AcpUpdateKind::ToolCall | AcpUpdateKind::ToolCallUpdate) {
+                        upsert_acp_tool_envelope(&mut tools, &payload);
+                    }
                     let _ = app.emit(
                         "acp-session-update",
                         serde_json::json!({
@@ -555,6 +658,15 @@ pub(crate) async fn run_acp_turn(
             AcpSessionEvent::Exited { error: None } => break,
         }
     }
+    let mut next_seq = seq + 2;
+    for tool in &tools {
+        state
+            .store
+            .append_message(frame_id, next_seq, &tool.to_message())
+            .await
+            .map_err(|error| error.to_string())?;
+        next_seq += 1;
+    }
     let mut persisted = Message::assistant(assistant);
     persisted.reasoning = (!reasoning.is_empty()).then_some(reasoning);
     persisted.model_name = profiles(&state.store)
@@ -564,7 +676,7 @@ pub(crate) async fn run_acp_turn(
         .map(|profile| profile.label);
     state
         .store
-        .append_message(frame_id, seq + 2, &persisted)
+        .append_message(frame_id, next_seq, &persisted)
         .await
         .map_err(|error| error.to_string())?;
     cancel_pending_permissions(state, frame_id, &runtime).await;
@@ -759,5 +871,37 @@ mod tests {
             Some("a")
         );
         assert_eq!(text_from_payload(&serde_json::json!({"future":true})), None);
+    }
+
+    #[test]
+    fn acp_tool_envelope_round_trips_through_tool_message() {
+        let mut tools = Vec::new();
+        upsert_acp_tool_envelope(
+            &mut tools,
+            &serde_json::json!({
+                "toolCallId": "call-1",
+                "title": "Get-ChildItem -Force",
+                "kind": "execute",
+                "status": "in_progress",
+            }),
+        );
+        upsert_acp_tool_envelope(
+            &mut tools,
+            &serde_json::json!({
+                "toolCallId": "call-1",
+                "status": "completed",
+                "content": [{"type":"terminal","terminalId":"t1"}],
+            }),
+        );
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].status, "completed");
+        assert!(tools[0].content.contains("terminalId"));
+        let message = tools[0].to_message();
+        let restored = AcpToolEnvelope::from_tool_message(
+            message.tool_name.as_deref(),
+            &message.content.as_text(),
+        )
+        .unwrap();
+        assert_eq!(restored, tools[0]);
     }
 }

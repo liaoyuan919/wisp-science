@@ -802,6 +802,61 @@ pub(super) fn begin_pending_turn(pending: RwSignal<HashMap<String, usize>>, runn
     });
 }
 
+/// Decide how `get_acp_session_agent` should update the picker selection.
+///
+/// Returning `None` means "leave the current selection alone" — needed when the
+/// first ACP turn is still binding the session and the backend still reports
+/// `None` (otherwise the picker snaps back to the HTTP model mid-send).
+pub(super) fn acp_agent_selection_after_fetch(
+    fetched: Option<String>,
+    session_id: &str,
+    pending: &HashMap<String, usize>,
+    running: &HashSet<String>,
+) -> Option<Option<String>> {
+    match fetched {
+        Some(id) => Some(Some(id)),
+        None if pending.contains_key(session_id) || running.contains(session_id) => None,
+        None => Some(None),
+    }
+}
+
+#[cfg(test)]
+mod acp_agent_selection_tests {
+    use super::acp_agent_selection_after_fetch;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn applies_bound_agent() {
+        let pending = HashMap::new();
+        let running = HashSet::new();
+        assert_eq!(
+            acp_agent_selection_after_fetch(Some("agent-1".into()), "s1", &pending, &running),
+            Some(Some("agent-1".into()))
+        );
+    }
+
+    #[test]
+    fn preserves_selection_while_first_turn_pending() {
+        let mut pending = HashMap::new();
+        pending.insert("s1".into(), 1);
+        let running = HashSet::new();
+        assert_eq!(
+            acp_agent_selection_after_fetch(None, "s1", &pending, &running),
+            None
+        );
+    }
+
+    #[test]
+    fn clears_when_session_has_no_binding() {
+        let pending = HashMap::new();
+        let running = HashSet::new();
+        assert_eq!(
+            acp_agent_selection_after_fetch(None, "s1", &pending, &running),
+            Some(None)
+        );
+    }
+}
+
 pub(super) fn finish_pending_turn(pending: RwSignal<HashMap<String, usize>>, running: RwSignal<HashSet<String>>, id: &str) {
     let remaining = pending.with(|m| m.get(id).copied().unwrap_or(0));
     if remaining > 1 {
@@ -919,6 +974,61 @@ pub(super) fn last_tool_input(items: &[ChatItem], tool: &str) -> String {
 
 pub(super) fn trailing_queue_start(items: &[ChatItem]) -> usize {
     items.len()
+}
+
+/// Insert ACP tool rows above the turn's assistant answer (and above the empty
+/// streaming placeholder), so they coalesce into the same "Ran N steps" panel
+/// as native Wisp tools instead of dangling under the finished reply.
+pub(super) fn acp_tool_insert_index(items: &[ChatItem]) -> usize {
+    let Some(user_idx) = items.iter().rposition(|item| matches!(item, ChatItem::User(_))) else {
+        return items.len();
+    };
+    for (offset, item) in items[user_idx + 1..].iter().enumerate() {
+        match item {
+            ChatItem::Reasoning(_) | ChatItem::AcpTool { .. } => {}
+            ChatItem::Tool { name, .. } if name != "attempt_completion" => {}
+            _ => return user_idx + 1 + offset,
+        }
+    }
+    items.len()
+}
+
+#[cfg(test)]
+mod acp_tool_insert_tests {
+    use super::acp_tool_insert_index;
+    use crate::dto::ChatItem;
+
+    #[test]
+    fn inserts_before_streaming_assistant_placeholder() {
+        let items = vec![
+            ChatItem::User("hi".into()),
+            ChatItem::Assistant {
+                text: String::new(),
+                model: None,
+            },
+        ];
+        assert_eq!(acp_tool_insert_index(&items), 1);
+    }
+
+    #[test]
+    fn stacks_with_existing_acp_tools() {
+        let items = vec![
+            ChatItem::User("hi".into()),
+            ChatItem::AcpTool {
+                call_id: "1".into(),
+                title: "ls".into(),
+                kind: "execute".into(),
+                status: "completed".into(),
+                content: String::new(),
+                locations: String::new(),
+            },
+            ChatItem::Assistant {
+                text: "done".into(),
+                model: Some("Codex".into()),
+            },
+        ];
+        assert_eq!(acp_tool_insert_index(&items), 2);
+    }
 }
 
 pub(super) fn start_user_turn(items: &mut Vec<ChatItem>, text: String, model: Option<String>) {
