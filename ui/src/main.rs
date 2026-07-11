@@ -1377,13 +1377,6 @@ fn App() -> impl IntoView {
             status.set("ACP protocol v1 does not support branching a bound session.".into());
             return;
         }
-        if active_acp_agent_id.get().is_some() && !reference_args.is_empty() {
-            status.set(
-                "ACP sessions currently support text and file attachments, not Wisp references."
-                    .into(),
-            );
-            return;
-        }
         let active = active_session.get();
         let branch = action == ComposerSendAction::BranchNew;
         let agent_id = active_acp_agent_id.get();

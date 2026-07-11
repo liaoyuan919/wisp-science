@@ -659,7 +659,13 @@ mod tests {
 
     #[test]
     fn run_control_plane_names_are_reserved() {
-        for name in ["wisp_run_in_context", "wisp_get_run", "wisp_cancel_run"] {
+        for name in [
+            "wisp_list_skills",
+            "wisp_use_skill",
+            "wisp_run_in_context",
+            "wisp_get_run",
+            "wisp_cancel_run",
+        ] {
             assert!(is_builtin_tool(name), "{name} must be reserved");
         }
         assert!(!is_builtin_tool("third_party_run"));

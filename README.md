@@ -128,6 +128,8 @@ In a desktop conversation, type `@` to attach a saved artifact, `#` to attach
 a saved session (including another project), or `/` to apply an enabled skill
 to the next turn. Attachments are explicit, removable chips; cross-project
 artifacts stay at their original local path and are never copied automatically.
+The same references work with ACP Agents: selected skills and session context
+are sent as ACP text blocks, while artifacts are sent as file links.
 
 Use Ctrl+K on Windows/Linux or Cmd+K on macOS to search projects, artifacts,
 sessions, and common commands. Enter opens the selected result; Shift+Enter
