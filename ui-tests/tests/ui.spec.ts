@@ -600,7 +600,8 @@ test("workspace file context menu attaches its path to the composer", async ({ p
   await expect.poll(() => lastInvokeArgs(page, "download_file")).toMatchObject({ path: "report.csv" });
   await file.click({ button: "right" });
   await page.getByRole("button", { name: "Attach to chat" }).click();
-  await expect(composer(page)).toHaveValue(/report\.csv/);
+  await expect(page.locator(".composer-attachment.ready")).toHaveText("report.csv");
+  await expect(composer(page)).toHaveValue("");
 });
 
 test("pasted image attaches to the composer", async ({ page }) => {

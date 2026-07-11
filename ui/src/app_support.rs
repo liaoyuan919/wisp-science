@@ -7,13 +7,13 @@ use crate::bindings::{
     upload_input_files, upload_pasted_images,
 };
 use crate::dto::*;
-use crate::i18n::{localize_backend, tf, t, use_locale, Locale};
+use crate::i18n::{localize_backend, t, tf, use_locale, Locale};
 use crate::text::{
-    dom_value, event_target_value, extract_href_from_tag, fasta_seq_count, fenced_blocks, file_kind,
-    format_duration_ms, html_escape, is_external_href, is_separator, is_table_row,
-    md_inline_to_html, md_to_html, next_artifact_id,
-    normalize_path, opens_in_system_browser, parent_path, parse_csv_line, provider_defaults,
-    provider_value, split_row, tool_lang, unique_dom_id,
+    dom_value, event_target_value, extract_href_from_tag, fasta_seq_count, fenced_blocks,
+    file_kind, format_duration_ms, html_escape, is_external_href, is_separator, is_table_row,
+    md_inline_to_html, md_to_html, next_artifact_id, normalize_path, opens_in_system_browser,
+    parent_path, parse_csv_line, provider_defaults, provider_value, split_row, tool_lang,
+    unique_dom_id,
 };
 use leptos::{ev, window_event_listener, *};
 use serde_wasm_bindgen::to_value;
@@ -32,7 +32,9 @@ pub(super) fn load_theme_mode() -> String {
 }
 
 pub(super) fn apply_theme_mode(mode: &str) {
-    let Some(window) = web_sys::window() else { return; };
+    let Some(window) = web_sys::window() else {
+        return;
+    };
     if let Some(root) = window.document().and_then(|d| d.document_element()) {
         let _ = root.set_attribute("data-theme", mode);
     }
@@ -63,9 +65,18 @@ pub(super) enum ComposerPickerItem {
 
 #[derive(Clone)]
 pub(super) enum ComposerReferenceChip {
-    Artifact { id: String, name: String },
-    Session { id: String, title: String, project_name: String },
-    Skill { name: String },
+    Artifact {
+        id: String,
+        name: String,
+    },
+    Session {
+        id: String,
+        title: String,
+        project_name: String,
+    },
+    Skill {
+        name: String,
+    },
 }
 
 #[derive(Clone, PartialEq)]
@@ -97,7 +108,11 @@ impl ComposerReferenceChip {
     pub(super) fn label(&self) -> String {
         match self {
             Self::Artifact { name, .. } | Self::Skill { name } => name.clone(),
-            Self::Session { title, project_name, .. } => format!("{project_name} / {title}"),
+            Self::Session {
+                title,
+                project_name,
+                ..
+            } => format!("{project_name} / {title}"),
         }
     }
 
@@ -134,13 +149,11 @@ pub(super) fn step_tool_meta(
     lines: usize,
     now: u64,
 ) -> Option<String> {
-    let dur = duration_ms
-        .map(format_duration_ms)
-        .or_else(|| {
-            (ok.is_none())
-                .then_some(started_at_ms?)
-                .map(|start| format_duration_ms(now.saturating_sub(start)))
-        });
+    let dur = duration_ms.map(format_duration_ms).or_else(|| {
+        (ok.is_none())
+            .then_some(started_at_ms?)
+            .map(|start| format_duration_ms(now.saturating_sub(start)))
+    });
     let line_label = (lines > 0 && ok != Some(false))
         .then(|| tf(locale, "chat.step_lines", &[("n", &lines.to_string())]));
     match (dur, line_label) {
@@ -195,6 +208,34 @@ pub(super) fn start_session_drag(ev: &web_sys::DragEvent, id: &str) {
 
 pub(super) fn composer_attachment_key(name: &str, idx: usize) -> String {
     format!("att-{idx}-{name}")
+}
+
+/// Attach an already-project-relative (or absolute native) path as a chip.
+/// Returns false when the path was already attached.
+pub(super) fn attach_ready_path(
+    attachments: RwSignal<Vec<ComposerAttachment>>,
+    path: impl Into<String>,
+) -> bool {
+    let path = path.into();
+    if path.trim().is_empty() {
+        return false;
+    }
+    if attachments.get_untracked().iter().any(|attachment| {
+        matches!(attachment, ComposerAttachment::Ready { path: existing, .. } if existing == &path)
+    }) {
+        return false;
+    }
+    let name = path
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path.as_str())
+        .to_string();
+    let key = format!("path:{path}");
+    attachments.update(|items| {
+        items.push(ComposerAttachment::Ready { key, name, path });
+    });
+    true
 }
 
 pub(super) const COMPOSER_H_DEFAULT: f64 = 220.0;
@@ -260,7 +301,11 @@ pub(super) fn file_list_len(files: &JsValue) -> usize {
         .unwrap_or(0)
 }
 
-pub(super) fn begin_uploads(attachments: RwSignal<Vec<ComposerAttachment>>, uploading: RwSignal<bool>, count: usize) {
+pub(super) fn begin_uploads(
+    attachments: RwSignal<Vec<ComposerAttachment>>,
+    uploading: RwSignal<bool>,
+    count: usize,
+) {
     if count == 0 {
         return;
     }
@@ -293,7 +338,11 @@ pub(super) fn finish_uploads(
             let key = composer_attachment_key(&name, items.len());
             if result.ok {
                 if let Some(info) = result.info {
-                    items.push(ComposerAttachment::Ready { key, name, path: info.path });
+                    items.push(ComposerAttachment::Ready {
+                        key,
+                        name,
+                        path: info.path,
+                    });
                 }
             } else {
                 items.push(ComposerAttachment::Error {
@@ -310,17 +359,27 @@ pub(super) fn finish_uploads(
 // mirroring native `<select>`-style auto-close so the menu doesn't linger
 // open after the user picks an option.
 pub(super) fn close_details_ancestor(ev: &web_sys::MouseEvent) {
-    let el = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok());
+    let el = ev
+        .target()
+        .and_then(|t| t.dyn_into::<web_sys::Element>().ok());
     if let Some(details) = el.and_then(|e| e.closest("details").ok().flatten()) {
         details.remove_attribute("open").ok();
     }
 }
 
-pub(super) fn queue_uploads(attachments: RwSignal<Vec<ComposerAttachment>>, uploading: RwSignal<bool>, files: JsValue) {
+pub(super) fn queue_uploads(
+    attachments: RwSignal<Vec<ComposerAttachment>>,
+    uploading: RwSignal<bool>,
+    files: JsValue,
+) {
     let count = file_list_len(&files);
     begin_uploads(attachments, uploading, count);
     spawn_local(async move {
-        finish_uploads(attachments, uploading, parse_upload_results(upload_files(files).await));
+        finish_uploads(
+            attachments,
+            uploading,
+            parse_upload_results(upload_files(files).await),
+        );
     });
 }
 
@@ -390,13 +449,19 @@ pub(super) fn context_capability_summary(ctx: &ExecutionContext) -> String {
             (true, true) => {}
         }
         for key in ["gpu_summary", "scheduler", "python"] {
-            if let Some(s) = v.get(key).and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+            if let Some(s) = v
+                .get(key)
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+            {
                 parts.push(s.to_string());
             }
         }
     }
     if parts.is_empty() {
-        ctx.last_probe_status.clone().unwrap_or_else(|| "not probed".into())
+        ctx.last_probe_status
+            .clone()
+            .unwrap_or_else(|| "not probed".into())
     } else {
         parts.join(" · ")
     }
@@ -448,8 +513,12 @@ pub(super) fn active_composer_trigger(text: &str) -> Option<(usize, ComposerPick
 }
 
 pub(super) fn scroll_picker_item(selector: &str, index: usize) {
-    let Some(document) = web_sys::window().and_then(|window| window.document()) else { return; };
-    let Ok(items) = document.query_selector_all(selector) else { return; };
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Ok(items) = document.query_selector_all(selector) else {
+        return;
+    };
     if let Some(item) = items.item(index as u32) {
         item.unchecked_into::<web_sys::Element>().scroll_into_view();
     }
@@ -470,9 +539,15 @@ mod mention_tests {
 
     #[test]
     fn detects_mention_at_end() {
-        assert!(matches!(active_composer_trigger("look at @qc"), Some((8, ComposerPickerMode::Artifact, q)) if q == "qc"));
-        assert!(matches!(active_composer_trigger("#old"), Some((0, ComposerPickerMode::Session, q)) if q == "old"));
-        assert!(matches!(active_composer_trigger("/boltz"), Some((0, ComposerPickerMode::Skill, q)) if q == "boltz"));
+        assert!(
+            matches!(active_composer_trigger("look at @qc"), Some((8, ComposerPickerMode::Artifact, q)) if q == "qc")
+        );
+        assert!(
+            matches!(active_composer_trigger("#old"), Some((0, ComposerPickerMode::Session, q)) if q == "old")
+        );
+        assert!(
+            matches!(active_composer_trigger("/boltz"), Some((0, ComposerPickerMode::Skill, q)) if q == "boltz")
+        );
     }
 
     #[test]
@@ -485,31 +560,67 @@ mod mention_tests {
 
 pub(super) fn js_error_text(err: JsValue) -> String {
     err.as_string()
-        .or_else(|| js_sys::Reflect::get(&err, &JsValue::from_str("message")).ok().and_then(|v| v.as_string()))
+        .or_else(|| {
+            js_sys::Reflect::get(&err, &JsValue::from_str("message"))
+                .ok()
+                .and_then(|v| v.as_string())
+        })
         .unwrap_or_else(|| t(Locale::En, "err.unknown").into())
 }
 
 pub(super) fn show_copy_toast() {
-    let Some(window) = web_sys::window() else { return; };
-    let Some(document) = window.document() else { return; };
-    if let Some(old) = document.get_element_by_id("copy-toast") { old.remove(); }
-    let Ok(toast) = document.create_element("div") else { return; };
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    if let Some(old) = document.get_element_by_id("copy-toast") {
+        old.remove();
+    }
+    let Ok(toast) = document.create_element("div") else {
+        return;
+    };
     toast.set_id("copy-toast");
     toast.set_class_name("copy-toast");
-    toast.set_text_content(Some(if document.document_element().and_then(|el| el.get_attribute("lang")).as_deref() == Some("zh") { "已复制" } else { "Copied" }));
-    let Some(body) = document.body() else { return; };
-    if body.append_child(&toast).is_err() { return; }
+    toast.set_text_content(Some(
+        if document
+            .document_element()
+            .and_then(|el| el.get_attribute("lang"))
+            .as_deref()
+            == Some("zh")
+        {
+            "已复制"
+        } else {
+            "Copied"
+        },
+    ));
+    let Some(body) = document.body() else {
+        return;
+    };
+    if body.append_child(&toast).is_err() {
+        return;
+    }
     let remove = Closure::once(move || toast.remove());
-    let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(remove.as_ref().unchecked_ref(), 1_600);
+    let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+        remove.as_ref().unchecked_ref(),
+        1_600,
+    );
     remove.forget();
 }
 
 pub(super) fn copy_text(text: String) {
-    if text.is_empty() { return; }
+    if text.is_empty() {
+        return;
+    }
     spawn_local(async move {
-        let Some(window) = web_sys::window() else { return; };
+        let Some(window) = web_sys::window() else {
+            return;
+        };
         let promise = window.navigator().clipboard().write_text(&text);
-        if wasm_bindgen_futures::JsFuture::from(promise).await.is_ok() { show_copy_toast(); }
+        if wasm_bindgen_futures::JsFuture::from(promise).await.is_ok() {
+            show_copy_toast();
+        }
     });
 }
 
@@ -549,12 +660,16 @@ fn html_table_to_tsv(table: &web_sys::HtmlTableElement) -> String {
     let mut lines = Vec::with_capacity(rows.length() as usize);
     for i in 0..rows.length() {
         let Some(row) = rows.item(i) else { continue };
-        let Ok(row) = row.dyn_into::<web_sys::HtmlTableRowElement>() else { continue };
+        let Ok(row) = row.dyn_into::<web_sys::HtmlTableRowElement>() else {
+            continue;
+        };
         let cells = row.cells();
         let mut vals = Vec::with_capacity(cells.length() as usize);
         for j in 0..cells.length() {
             let Some(cell) = cells.item(j) else { continue };
-            vals.push(normalize_table_copy_cell(&cell.text_content().unwrap_or_default()));
+            vals.push(normalize_table_copy_cell(
+                &cell.text_content().unwrap_or_default(),
+            ));
         }
         if !vals.is_empty() {
             lines.push(vals.join("\t"));
@@ -685,7 +800,10 @@ mod tauri_args_tests {
         assert_eq!(v["sessionId"], "frame-1");
         assert_eq!(v["message"], "hi");
         assert_eq!(v["attachments"][0], "a.png");
-        assert!(v.get("session_id").is_none(), "snake_case key would bind to None on the backend");
+        assert!(
+            v.get("session_id").is_none(),
+            "snake_case key would bind to None on the backend"
+        );
     }
 
     #[test]
@@ -732,7 +850,10 @@ mod tauri_args_tests {
     // into a bad root-relative path that 404'd on click (#12).
     #[test]
     fn normalize_path_keeps_absolute_paths() {
-        assert_eq!(normalize_path("/Users/x/proj/results/fig.png"), "/Users/x/proj/results/fig.png");
+        assert_eq!(
+            normalize_path("/Users/x/proj/results/fig.png"),
+            "/Users/x/proj/results/fig.png"
+        );
         assert_eq!(normalize_path("C:\\proj\\out.csv"), "C:\\proj\\out.csv");
         // Redundant current-dir prefixes are still trimmed; relative stays relative.
         assert_eq!(normalize_path("./results/fig.png"), "results/fig.png");
@@ -743,8 +864,14 @@ mod tauri_args_tests {
             normalize_path("figures/panel_I_heatmap_4genes_median.png/.pdf"),
             "figures/panel_I_heatmap_4genes_median.png"
         );
-        assert_eq!(normalize_path("./figures/plot.JPG/.PDF"), "figures/plot.JPG");
-        assert_eq!(normalize_path("C:\\proj\\fig.png\\.pdf"), "C:\\proj\\fig.png");
+        assert_eq!(
+            normalize_path("./figures/plot.JPG/.PDF"),
+            "figures/plot.JPG"
+        );
+        assert_eq!(
+            normalize_path("C:\\proj\\fig.png\\.pdf"),
+            "C:\\proj\\fig.png"
+        );
     }
 
     #[test]
@@ -754,7 +881,10 @@ mod tauri_args_tests {
             model: None,
         }];
         let arts = collect_artifacts(&items, Locale::En, &mut ProtoCache::new());
-        let a = arts.iter().find(|a| a.name == "panel_I_heatmap_4genes_median.png").unwrap();
+        let a = arts
+            .iter()
+            .find(|a| a.name == "panel_I_heatmap_4genes_median.png")
+            .unwrap();
         assert_eq!(a.kind, "image");
         match &a.data {
             PreviewData::File { path, kind } => {
@@ -767,7 +897,12 @@ mod tauri_args_tests {
 }
 
 pub(super) fn split_tags(raw: &str) -> Vec<String> {
-    raw.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect::<BTreeSet<_>>().into_iter().collect()
+    raw.split(',')
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 pub(super) fn join_tags(tags: &[String]) -> String {
@@ -781,7 +916,10 @@ pub(super) fn skill_matches_filter(skill: &SkillRow, tag: &str, query: &str) -> 
         t => skill.tags.iter().any(|s| s == t),
     };
     let q = query.trim().to_ascii_lowercase();
-    tag_match && (q.is_empty() || skill.name.to_ascii_lowercase().contains(&q) || skill.description.to_ascii_lowercase().contains(&q))
+    tag_match
+        && (q.is_empty()
+            || skill.name.to_ascii_lowercase().contains(&q)
+            || skill.description.to_ascii_lowercase().contains(&q))
 }
 
 pub(super) fn refresh_capabilities(caps: RwSignal<Option<Capabilities>>) {
@@ -793,7 +931,11 @@ pub(super) fn refresh_capabilities(caps: RwSignal<Option<Capabilities>>) {
     });
 }
 
-pub(super) fn begin_pending_turn(pending: RwSignal<HashMap<String, usize>>, running: RwSignal<HashSet<String>>, id: &str) {
+pub(super) fn begin_pending_turn(
+    pending: RwSignal<HashMap<String, usize>>,
+    running: RwSignal<HashSet<String>>,
+    id: &str,
+) {
     pending.update(|m| {
         *m.entry(id.to_string()).or_insert(0) += 1;
     });
@@ -857,7 +999,11 @@ mod acp_agent_selection_tests {
     }
 }
 
-pub(super) fn finish_pending_turn(pending: RwSignal<HashMap<String, usize>>, running: RwSignal<HashSet<String>>, id: &str) {
+pub(super) fn finish_pending_turn(
+    pending: RwSignal<HashMap<String, usize>>,
+    running: RwSignal<HashSet<String>>,
+    id: &str,
+) {
     let remaining = pending.with(|m| m.get(id).copied().unwrap_or(0));
     if remaining > 1 {
         pending.update(|m| {
@@ -875,7 +1021,11 @@ pub(super) fn finish_pending_turn(pending: RwSignal<HashMap<String, usize>>, run
     });
 }
 
-pub(super) fn clear_running_if_idle(pending: RwSignal<HashMap<String, usize>>, running: RwSignal<HashSet<String>>, id: &str) {
+pub(super) fn clear_running_if_idle(
+    pending: RwSignal<HashMap<String, usize>>,
+    running: RwSignal<HashSet<String>>,
+    id: &str,
+) {
     if pending.with(|m| m.get(id).copied().unwrap_or(0)) == 0 {
         running.update(|r| {
             r.remove(id);
@@ -884,13 +1034,19 @@ pub(super) fn clear_running_if_idle(pending: RwSignal<HashMap<String, usize>>, r
 }
 
 pub(super) fn strip_approval_pending(items: &mut Vec<ChatItem>) {
-    items.retain(|i| !matches!(i, ChatItem::ApprovalPending { .. } | ChatItem::AcpPermission { .. }));
+    items.retain(|i| {
+        !matches!(
+            i,
+            ChatItem::ApprovalPending { .. } | ChatItem::AcpPermission { .. }
+        )
+    });
 }
 
 pub(super) fn upsert_review(items: &mut Vec<ChatItem>, report: ReviewReport) {
-    if let Some(existing) = items.iter_mut().find(|item| {
-        matches!(item, ChatItem::Review(current) if current.id == report.id)
-    }) {
+    if let Some(existing) = items
+        .iter_mut()
+        .find(|item| matches!(item, ChatItem::Review(current) if current.id == report.id))
+    {
         *existing = ChatItem::Review(report);
     } else {
         let index = trailing_queue_start(items);
@@ -942,9 +1098,10 @@ pub(super) fn strip_error_at(items: &mut Vec<ChatItem>, idx: usize) {
 
 pub(super) fn ensure_streaming_assistant(items: &mut Vec<ChatItem>, model: Option<String>) {
     let queue_start = trailing_queue_start(items);
-    let has_blank = items[..queue_start].iter().rev().any(|i| {
-        matches!(i, ChatItem::Assistant { text, .. } if text.trim().is_empty())
-    });
+    let has_blank = items[..queue_start]
+        .iter()
+        .rev()
+        .any(|i| matches!(i, ChatItem::Assistant { text, .. } if text.trim().is_empty()));
     if !has_blank {
         items.insert(
             queue_start,
@@ -980,7 +1137,10 @@ pub(super) fn trailing_queue_start(items: &[ChatItem]) -> usize {
 /// streaming placeholder), so they coalesce into the same "Ran N steps" panel
 /// as native Wisp tools instead of dangling under the finished reply.
 pub(super) fn acp_tool_insert_index(items: &[ChatItem]) -> usize {
-    let Some(user_idx) = items.iter().rposition(|item| matches!(item, ChatItem::User(_))) else {
+    let Some(user_idx) = items
+        .iter()
+        .rposition(|item| matches!(item, ChatItem::User(_)))
+    else {
         return items.len();
     };
     for (offset, item) in items[user_idx + 1..].iter().enumerate() {
@@ -1032,12 +1192,23 @@ mod acp_tool_insert_tests {
 }
 
 pub(super) fn start_user_turn(items: &mut Vec<ChatItem>, text: String, model: Option<String>) {
-    if items.windows(2).any(|pair| {
-        matches!(&pair[0], ChatItem::User(s) if s == &text)
-            && matches!(&pair[1], ChatItem::Assistant { text: assistant, .. } if assistant.is_empty())
+    let incoming_body = composer_text_from_user_message(&text);
+    if let Some(idx) = items.windows(2).position(|pair| {
+        matches!(
+            &pair[0],
+            ChatItem::User(s)
+                if s == &text || composer_text_from_user_message(s) == incoming_body
+        ) && matches!(&pair[1], ChatItem::Assistant { text: assistant, .. } if assistant.is_empty())
     }) {
         // Normal sends are rendered optimistically. The backend User event is
         // only an acknowledgement in that case, so do not append a duplicate.
+        // Prefer the longer display form when one side still lacks the
+        // "Uploaded files:" (or reference) suffix.
+        if let ChatItem::User(existing) = &mut items[idx] {
+            if text.len() > existing.len() {
+                *existing = text;
+            }
+        }
     } else {
         items.push(ChatItem::User(text));
         items.push(ChatItem::Assistant {
@@ -1047,7 +1218,60 @@ pub(super) fn start_user_turn(items: &mut Vec<ChatItem>, text: String, model: Op
     }
 }
 
-pub(super) fn append_assistant_delta(items: &mut Vec<ChatItem>, delta: String, model: Option<String>) {
+#[cfg(test)]
+mod start_user_turn_tests {
+    use super::{composer_text_from_user_message, message_with_attachments, start_user_turn};
+    use crate::dto::ChatItem;
+
+    #[test]
+    fn message_with_attachments_appends_suffix() {
+        assert_eq!(
+            message_with_attachments("描述下图片", &["uploads/a.png".into()]),
+            "描述下图片\n\nUploaded files: uploads/a.png"
+        );
+        assert_eq!(
+            message_with_attachments("  ", &["uploads/a.png".into()]),
+            "Uploaded files: uploads/a.png"
+        );
+    }
+
+    #[test]
+    fn does_not_duplicate_when_backend_acks_bare_body() {
+        let display = message_with_attachments("图片里有啥文字?", &["uploads/img.png".into()]);
+        let mut items = vec![
+            ChatItem::User(display.clone()),
+            ChatItem::Assistant {
+                text: String::new(),
+                model: Some("gpt".into()),
+            },
+        ];
+        start_user_turn(&mut items, "图片里有啥文字?".into(), Some("gpt".into()));
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[0], ChatItem::User(s) if s == &display));
+    }
+
+    #[test]
+    fn upgrades_optimistic_row_when_ack_has_suffix() {
+        let display = message_with_attachments("描述下图片", &["uploads/img.png".into()]);
+        let mut items = vec![
+            ChatItem::User("描述下图片".into()),
+            ChatItem::Assistant {
+                text: String::new(),
+                model: None,
+            },
+        ];
+        start_user_turn(&mut items, display.clone(), None);
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[0], ChatItem::User(s) if s == &display));
+        assert_eq!(composer_text_from_user_message(&display), "描述下图片");
+    }
+}
+
+pub(super) fn append_assistant_delta(
+    items: &mut Vec<ChatItem>,
+    delta: String,
+    model: Option<String>,
+) {
     let queue_start = trailing_queue_start(items);
     if let Some(idx) = items[..queue_start]
         .iter()
@@ -1086,14 +1310,17 @@ pub(super) fn append_stdout_chunk(items: &mut Vec<ChatItem>, chunk: String) {
             return;
         }
     }
-    items.insert(queue_start, ChatItem::Tool {
-        name: "stdout".into(),
-        ok: None,
-        input: String::new(),
-        output: chunk,
-        started_at_ms: None,
-        duration_ms: None,
-    });
+    items.insert(
+        queue_start,
+        ChatItem::Tool {
+            name: "stdout".into(),
+            ok: None,
+            input: String::new(),
+            output: chunk,
+            started_at_ms: None,
+            duration_ms: None,
+        },
+    );
 }
 
 // --- Streaming delta batching (#65) ------------------------------------------
@@ -1175,15 +1402,25 @@ pub(super) fn schedule_delta_flush(
 }
 
 pub(super) fn format_relative_time(ts: i64, locale: Locale) -> String {
-    if ts <= 0 { return String::new(); }
+    if ts <= 0 {
+        return String::new();
+    }
     let now_ms = js_sys::Date::now();
-    let ts_ms = if ts > 1_000_000_000_000 { ts as f64 } else { ts as f64 * 1000.0 };
+    let ts_ms = if ts > 1_000_000_000_000 {
+        ts as f64
+    } else {
+        ts as f64 * 1000.0
+    };
     let secs = ((now_ms - ts_ms) / 1000.0).max(0.0) as i64;
     if secs < 45 {
         return t(locale, "time.just_now").into();
     }
     if secs < 3600 {
-        return tf(locale, "time.minutes", &[("n", &(secs / 60).max(1).to_string())]);
+        return tf(
+            locale,
+            "time.minutes",
+            &[("n", &(secs / 60).max(1).to_string())],
+        );
     }
     if secs < 86_400 {
         return tf(locale, "time.hours", &[("n", &(secs / 3600).to_string())]);
@@ -1192,7 +1429,10 @@ pub(super) fn format_relative_time(ts: i64, locale: Locale) -> String {
 }
 
 #[component]
-pub(super) fn SessionStatusBadge(status: SessionStatusKind, locale: RwSignal<Locale>) -> impl IntoView {
+pub(super) fn SessionStatusBadge(
+    status: SessionStatusKind,
+    locale: RwSignal<Locale>,
+) -> impl IntoView {
     let key = status.i18n_key();
     let class = status.css();
     view! {
@@ -1209,7 +1449,11 @@ pub(super) fn profile_to_form(m: &ModelProfile) -> ModelForm {
         provider: m.provider.clone(),
         api_url: m.api_url.clone(),
         model: m.model.clone(),
-        max_tokens: if m.max_tokens >= 16 { m.max_tokens } else { 8192 },
+        max_tokens: if m.max_tokens >= 16 {
+            m.max_tokens
+        } else {
+            8192
+        },
         reasoning_effort: m.reasoning_effort.clone(),
         supports_vision: m.supports_vision,
         use_for_vision: m.use_for_vision,
@@ -1284,24 +1528,44 @@ pub(super) const CRED_GROUPS: &[CredGroup] = &[
     CredGroup {
         name_key: "cred.openalex.name",
         hint_key: "cred.openalex.hint",
-        fields: &[CredField { id: "openalex_api_key", label_key: "cred.openalex_api_key.label", secret: true }],
+        fields: &[CredField {
+            id: "openalex_api_key",
+            label_key: "cred.openalex_api_key.label",
+            secret: true,
+        }],
     },
     CredGroup {
         name_key: "cred.infinisynapse.name",
         hint_key: "cred.infinisynapse.hint",
-        fields: &[CredField { id: "infinisynapse_api_key", label_key: "cred.infinisynapse_api_key.label", secret: true }],
+        fields: &[CredField {
+            id: "infinisynapse_api_key",
+            label_key: "cred.infinisynapse_api_key.label",
+            secret: true,
+        }],
     },
     CredGroup {
         name_key: "cred.scimaster.name",
         hint_key: "cred.scimaster.hint",
-        fields: &[CredField { id: "scimaster_api_key", label_key: "cred.scimaster_api_key.label", secret: true }],
+        fields: &[CredField {
+            id: "scimaster_api_key",
+            label_key: "cred.scimaster_api_key.label",
+            secret: true,
+        }],
     },
     CredGroup {
         name_key: "cred.ncbi.name",
         hint_key: "cred.ncbi.hint",
         fields: &[
-            CredField { id: "ncbi_api_key", label_key: "cred.ncbi_api_key.label", secret: true },
-            CredField { id: "ncbi_email", label_key: "cred.ncbi_email.label", secret: false },
+            CredField {
+                id: "ncbi_api_key",
+                label_key: "cred.ncbi_api_key.label",
+                secret: true,
+            },
+            CredField {
+                id: "ncbi_email",
+                label_key: "cred.ncbi_email.label",
+                secret: false,
+            },
         ],
     },
 ];
@@ -1335,7 +1599,11 @@ pub(super) fn settings_subpage_label(
                 })
             }),
         "specialists" => specialist_form.map(|s| {
-            if s.id.is_empty() { t(loc, "specialists.add") } else { s.name.clone() }
+            if s.id.is_empty() {
+                t(loc, "specialists.add")
+            } else {
+                s.name.clone()
+            }
         }),
         "connections" => conn_form
             .map(|f| {
@@ -1352,11 +1620,22 @@ pub(super) fn settings_subpage_label(
 }
 
 pub(super) fn build_conn_json(f: &ConnForm, assign_id: bool) -> serde_json::Value {
-    let id = f.id.clone().unwrap_or_else(|| if assign_id {
-        format!("conn-{}", (js_sys::Math::random() * 1e9) as u64)
-    } else { "test".into() });
+    let id = f.id.clone().unwrap_or_else(|| {
+        if assign_id {
+            format!("conn-{}", (js_sys::Math::random() * 1e9) as u64)
+        } else {
+            "test".into()
+        }
+    });
     let transport = if f.kind == "http" {
-        let headers: Vec<(String,String)> = f.headers.lines().filter_map(|l| l.split_once(':').map(|(k,v)| (k.trim().to_string(), v.trim().to_string()))).collect();
+        let headers: Vec<(String, String)> = f
+            .headers
+            .lines()
+            .filter_map(|l| {
+                l.split_once(':')
+                    .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+            })
+            .collect();
         serde_json::json!({ "kind": "http", "url": f.url.trim(), "headers": headers })
     } else {
         let args: Vec<String> = f.args.split_whitespace().map(|s| s.to_string()).collect();
@@ -1368,14 +1647,27 @@ pub(super) fn build_conn_json(f: &ConnForm, assign_id: bool) -> serde_json::Valu
 pub(super) fn conn_form_from_row(row: &ConnRow) -> ConnForm {
     match &row.transport {
         ConnTransport::Stdio { command, args, .. } => ConnForm {
-            id: Some(row.id.clone()), name: row.name.clone(), kind: "stdio".into(),
-            command: command.clone(), args: args.join(" "), url: String::new(), headers: String::new(),
+            id: Some(row.id.clone()),
+            name: row.name.clone(),
+            kind: "stdio".into(),
+            command: command.clone(),
+            args: args.join(" "),
+            url: String::new(),
+            headers: String::new(),
             enabled: row.enabled,
         },
         ConnTransport::Http { url, headers } => ConnForm {
-            id: Some(row.id.clone()), name: row.name.clone(), kind: "http".into(),
-            command: String::new(), args: String::new(), url: url.clone(),
-            headers: headers.iter().map(|(k,v)| format!("{k}: {v}")).collect::<Vec<_>>().join("\n"),
+            id: Some(row.id.clone()),
+            name: row.name.clone(),
+            kind: "http".into(),
+            command: String::new(),
+            args: String::new(),
+            url: url.clone(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| format!("{k}: {v}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
             enabled: row.enabled,
         },
     }
@@ -1384,7 +1676,11 @@ pub(super) fn conn_form_from_row(row: &ConnRow) -> ConnForm {
 pub(super) fn refresh_dir(cwd: RwSignal<String>, entries: RwSignal<Vec<DirEntry>>) {
     spawn_local(async move {
         let path = cwd.get();
-        let v = invoke("list_dir", to_value(&serde_json::json!({ "path": path })).unwrap()).await;
+        let v = invoke(
+            "list_dir",
+            to_value(&serde_json::json!({ "path": path })).unwrap(),
+        )
+        .await;
         if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<DirEntry>>(v) {
             entries.set(list);
         }
@@ -1444,11 +1740,7 @@ pub(super) fn contains_search(q: &str, parts: &[&str]) -> bool {
 pub(super) type ModalArtifact = (String, String, String);
 
 pub(super) fn open_workspace_file(path: String, modal_artifact: RwSignal<Option<ModalArtifact>>) {
-    let name = path
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(&path)
-        .to_string();
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(&path).to_string();
     let kind = file_kind(&path).unwrap_or("text").to_string();
     modal_artifact.set(Some((path, name, kind)));
 }
@@ -1473,7 +1765,9 @@ pub(super) fn modal_image_nav_targets(
     let Some(index) = images.iter().position(|(path, _, _)| path == current_path) else {
         return (None, None);
     };
-    let prev = index.checked_sub(1).and_then(|idx| images.get(idx).cloned());
+    let prev = index
+        .checked_sub(1)
+        .and_then(|idx| images.get(idx).cloned());
     let next = images.get(index + 1).cloned();
     (prev, next)
 }
@@ -1540,12 +1834,7 @@ pub(super) fn reveal_in_files(
     file_query.set(String::new());
     file_cwd.set(parent_path(path));
     refresh_dir(file_cwd, file_entries);
-    ensure_right_tab(
-        RightTab::File,
-        show_right,
-        open_right_tabs,
-        right_tab,
-    );
+    ensure_right_tab(RightTab::File, show_right, open_right_tabs, right_tab);
 }
 
 pub(super) fn file_dir_label(path: &str) -> String {
@@ -1595,8 +1884,7 @@ pub(super) fn href_matches_artifact(href: &str, a: &Artifact) -> bool {
 }
 
 pub(super) fn artifact_index_for_href(arts: &[Artifact], href: &str) -> Option<usize> {
-    arts.iter()
-        .position(|a| href_matches_artifact(href, a))
+    arts.iter().position(|a| href_matches_artifact(href, a))
 }
 
 pub(super) fn replace_file_links(html: String, arts: &[Artifact]) -> String {
@@ -1646,19 +1934,25 @@ pub(super) fn replace_artifact_tokens(mut html: String, arts: &[Artifact]) -> St
     while let Some(start) = html.find("{{artifact:") {
         let (head, rest) = html.split_at(start);
         let rest = &rest["{{artifact:".len()..];
-        let Some(end) = rest.find("}}") else { break; };
+        let Some(end) = rest.find("}}") else {
+            break;
+        };
         let token = rest[..end].trim();
         let tail = &rest[end + 2..];
-        let chip = arts.iter().enumerate().find_map(|(i, a)| {
-            if artifact_matches_token(token, &a.id) {
-                Some(art_chip(i, a))
-            } else {
-                None
-            }
-        }).unwrap_or_else(|| {
-            let short = &token[..token.len().min(8)];
-            format!(r#"<span class="art-ref dead" title="{token}">artifact-{short}</span>"#)
-        });
+        let chip = arts
+            .iter()
+            .enumerate()
+            .find_map(|(i, a)| {
+                if artifact_matches_token(token, &a.id) {
+                    Some(art_chip(i, a))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                let short = &token[..token.len().min(8)];
+                format!(r#"<span class="art-ref dead" title="{token}">artifact-{short}</span>"#)
+            });
         html = format!("{head}{chip}{tail}");
     }
     html
@@ -1846,7 +2140,10 @@ mod art_ref_marker_tests {
     fn table_data_to_tsv_uses_tabs_and_newlines() {
         let t = TableData {
             headers: vec!["Gene".into(), "TPM".into()],
-            rows: vec![vec!["A".into(), "2.62".into()], vec!["B".into(), "1.81".into()]],
+            rows: vec![
+                vec!["A".into(), "2.62".into()],
+                vec!["B".into(), "1.81".into()],
+            ],
         };
         assert_eq!(table_data_to_tsv(&t), "Gene\tTPM\nA\t2.62\nB\t1.81");
     }
@@ -1859,7 +2156,9 @@ pub(super) fn handle_md_click(
     on_file: &Callback<(String, String)>,
 ) {
     use wasm_bindgen::JsCast;
-    let mut el = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok());
+    let mut el = ev
+        .target()
+        .and_then(|t| t.dyn_into::<web_sys::Element>().ok());
     while let Some(n) = el {
         if n.class_list().contains("md-table-copy") {
             if let Ok(Some(card)) = n.closest(".md-table-card") {
@@ -1874,7 +2173,11 @@ pub(super) fn handle_md_click(
             return;
         }
         if n.class_list().contains("art-ref") {
-            if let Ok(idx) = n.get_attribute("data-art-idx").unwrap_or_default().parse::<usize>() {
+            if let Ok(idx) = n
+                .get_attribute("data-art-idx")
+                .unwrap_or_default()
+                .parse::<usize>()
+            {
                 ev.prevent_default();
                 ev.stop_propagation();
                 on_artifact.call(idx);
@@ -1925,7 +2228,9 @@ pub(super) fn refresh_folders(folders: RwSignal<Vec<FolderInfo>>) {
     });
 }
 
-pub(super) fn bucket_sessions_by_date(list: &[SessionInfo]) -> (Vec<SessionInfo>, Vec<SessionInfo>) {
+pub(super) fn bucket_sessions_by_date(
+    list: &[SessionInfo],
+) -> (Vec<SessionInfo>, Vec<SessionInfo>) {
     let now_ms = js_sys::Date::now();
     let (mut today, mut earlier) = (Vec::new(), Vec::new());
     for s in list {
@@ -1946,7 +2251,10 @@ pub(super) fn bucket_sessions_by_date(list: &[SessionInfo]) -> (Vec<SessionInfo>
 // --- Artifact detection (Markdown tables + fenced CSV) -----------------------
 
 /// Segment assistant text into plain-text and rendered Markdown-table chunks.
-pub(super) enum Seg { Text, Table(TableData) }
+pub(super) enum Seg {
+    Text,
+    Table(TableData),
+}
 
 pub(super) fn split_segments(text: &str) -> Vec<Seg> {
     let lines: Vec<&str> = text.lines().collect();
@@ -1955,7 +2263,10 @@ pub(super) fn split_segments(text: &str) -> Vec<Seg> {
     let mut i = 0;
     while i < lines.len() {
         if is_table_row(lines[i]) && i + 1 < lines.len() && is_separator(lines[i + 1]) {
-            if !buf.is_empty() { segs.push(Seg::Text); buf.clear(); }
+            if !buf.is_empty() {
+                segs.push(Seg::Text);
+                buf.clear();
+            }
             let headers = split_row(lines[i]);
             let mut rows = vec![];
             let mut j = i + 2;
@@ -1970,7 +2281,9 @@ pub(super) fn split_segments(text: &str) -> Vec<Seg> {
             i += 1;
         }
     }
-    if !buf.is_empty() { segs.push(Seg::Text); }
+    if !buf.is_empty() {
+        segs.push(Seg::Text);
+    }
     segs
 }
 
@@ -1987,8 +2300,15 @@ pub(super) enum ProtoArtifact {
 }
 
 pub(super) fn file_proto(word: &str) -> Option<ProtoArtifact> {
-    let p = normalize_path(word.trim().trim_matches('`').trim_matches('"').trim_matches('\''));
-    if p.is_empty() { return None; }
+    let p = normalize_path(
+        word.trim()
+            .trim_matches('`')
+            .trim_matches('"')
+            .trim_matches('\''),
+    );
+    if p.is_empty() {
+        return None;
+    }
     let kind = file_kind(&p)?;
     Some(ProtoArtifact::File { path: p, kind })
 }
@@ -2031,16 +2351,24 @@ pub(super) fn extract_markdown_protos(out: &mut Vec<ProtoArtifact>, s: &str) {
         if lines[i].trim().starts_with("$") {
             let mut body = vec![];
             let mut j = i + 1;
-            while j < lines.len() && !lines[j].trim().ends_with("$") { body.push(lines[j]); j += 1; }
-            if j < lines.len() { body.push(lines[j].trim().trim_end_matches("$")); }
+            while j < lines.len() && !lines[j].trim().ends_with("$") {
+                body.push(lines[j]);
+                j += 1;
+            }
+            if j < lines.len() {
+                body.push(lines[j].trim().trim_end_matches("$"));
+            }
             out.push(ProtoArtifact::Latex(body.join("\n")));
             i = j + 1;
             continue;
         }
         i += 1;
     }
-    for word in s.split(|c: char| c.is_whitespace() || c == '(' || c == ')' || c == '[' || c == ']') {
-        if let Some(p) = file_proto(word) { out.push(p); }
+    for word in s.split(|c: char| c.is_whitespace() || c == '(' || c == ')' || c == '[' || c == ']')
+    {
+        if let Some(p) = file_proto(word) {
+            out.push(p);
+        }
     }
 }
 
@@ -2051,17 +2379,32 @@ pub(super) fn extract_protos(it: &ChatItem) -> Vec<ProtoArtifact> {
         // Uploaded files live only in the user turn ("Uploaded files: a, b").
         ChatItem::User(s) => {
             for word in s.split(|c: char| c.is_whitespace() || c == ',' || c == '"' || c == '\'') {
-                if let Some(p) = file_proto(word) { out.push(p); }
+                if let Some(p) = file_proto(word) {
+                    out.push(p);
+                }
             }
         }
         ChatItem::Assistant { text: s, .. } => extract_markdown_protos(&mut out, s),
-        ChatItem::Tool { name, input, output, .. } => {
+        ChatItem::Tool {
+            name,
+            input,
+            output,
+            ..
+        } => {
             if name == "attempt_completion" && !output.is_empty() {
                 extract_markdown_protos(&mut out, output);
             } else {
-                let text = if output.is_empty() { input.as_str() } else { output.as_str() };
-                for word in text.split(|c: char| c.is_whitespace() || c == '\n' || c == '"' || c == '\'') {
-                    if let Some(p) = file_proto(word) { out.push(p); }
+                let text = if output.is_empty() {
+                    input.as_str()
+                } else {
+                    output.as_str()
+                };
+                for word in
+                    text.split(|c: char| c.is_whitespace() || c == '\n' || c == '"' || c == '\'')
+                {
+                    if let Some(p) = file_proto(word) {
+                        out.push(p);
+                    }
                 }
             }
         }
@@ -2072,9 +2415,16 @@ pub(super) fn extract_protos(it: &ChatItem) -> Vec<ProtoArtifact> {
 
 /// Numbering half: assign ids, localized names, and cross-item file dedup.
 /// O(artifact count) per run — cheap next to re-scanning message text.
-pub(super) fn assemble_artifacts(per_item: &[Rc<Vec<ProtoArtifact>>], locale: Locale) -> Vec<Artifact> {
+pub(super) fn assemble_artifacts(
+    per_item: &[Rc<Vec<ProtoArtifact>>],
+    locale: Locale,
+) -> Vec<Artifact> {
     let mut out: Vec<Artifact> = vec![];
-    let mut scan = ArtifactScan { tbl_n: 0, csv_n: 0, tex_n: 0 };
+    let mut scan = ArtifactScan {
+        tbl_n: 0,
+        csv_n: 0,
+        tex_n: 0,
+    };
     for (source_item, protos) in per_item.iter().enumerate() {
         for p in protos.iter() {
             match p {
@@ -2093,34 +2443,70 @@ pub(super) fn assemble_artifacts(per_item: &[Rc<Vec<ProtoArtifact>>], locale: Lo
                 ProtoArtifact::Csv(t) => {
                     scan.csv_n += 1;
                     let id = next_artifact_id(out.len());
-                    out.push(Artifact { id, name: format!("data-{}.csv", scan.csv_n), kind: "csv", data: PreviewData::Table(t.clone()), source_item, superseded: false });
+                    out.push(Artifact {
+                        id,
+                        name: format!("data-{}.csv", scan.csv_n),
+                        kind: "csv",
+                        data: PreviewData::Table(t.clone()),
+                        source_item,
+                        superseded: false,
+                    });
                 }
                 ProtoArtifact::Fasta(body) => {
                     let id = next_artifact_id(out.len());
-                    out.push(Artifact { id, name: format!("alignment-{}.fasta", scan.csv_n), kind: "fasta", data: PreviewData::Fasta(body.clone()), source_item, superseded: false });
+                    out.push(Artifact {
+                        id,
+                        name: format!("alignment-{}.fasta", scan.csv_n),
+                        kind: "fasta",
+                        data: PreviewData::Fasta(body.clone()),
+                        source_item,
+                        superseded: false,
+                    });
                 }
                 ProtoArtifact::Latex(tex) => {
                     scan.tex_n += 1;
                     let id = next_artifact_id(out.len());
                     out.push(Artifact {
                         id,
-                        name: tf(locale, "artifact.equation", &[("n", &scan.tex_n.to_string())]),
+                        name: tf(
+                            locale,
+                            "artifact.equation",
+                            &[("n", &scan.tex_n.to_string())],
+                        ),
                         kind: "latex",
-                        data: PreviewData::Latex { tex: tex.clone(), display: true },
+                        data: PreviewData::Latex {
+                            tex: tex.clone(),
+                            display: true,
+                        },
                         source_item,
                         superseded: false,
                     });
                 }
                 ProtoArtifact::File { path, kind } => {
-                    if out.iter().any(|a| a.source_item == source_item && matches!(&a.data, PreviewData::File { path: p, .. } if p == path)) {
+                    if out.iter().any(|a| {
+                        a.source_item == source_item
+                            && matches!(&a.data, PreviewData::File { path: p, .. } if p == path)
+                    }) {
                         continue;
                     }
-                    for existing in out.iter_mut().filter(|a| matches!(&a.data, PreviewData::File { path: p, .. } if p == path)) {
+                    for existing in out.iter_mut().filter(
+                        |a| matches!(&a.data, PreviewData::File { path: p, .. } if p == path),
+                    ) {
                         existing.superseded = true;
                     }
                     let name = path.rsplit(['/', '\\']).next().unwrap_or(path).to_string();
                     let id = next_artifact_id(out.len());
-                    out.push(Artifact { id, name, kind, data: PreviewData::File { path: path.clone(), kind: kind.to_string() }, source_item, superseded: false });
+                    out.push(Artifact {
+                        id,
+                        name,
+                        kind,
+                        data: PreviewData::File {
+                            path: path.clone(),
+                            kind: kind.to_string(),
+                        },
+                        source_item,
+                        superseded: false,
+                    });
                 }
             }
         }
@@ -2131,8 +2517,13 @@ pub(super) fn assemble_artifacts(per_item: &[Rc<Vec<ProtoArtifact>>], locale: Lo
 /// Promote `attempt_completion` output into the assistant bubble (web-dist renders
 /// completion as the final markdown response, not a collapsed tool row).
 pub(super) fn promote_assistant_text(items: &mut Vec<ChatItem>, text: &str) {
-    if text.trim().is_empty() { return; }
-    if let Some(i) = items.iter().rposition(|i| matches!(i, ChatItem::Assistant { .. })) {
+    if text.trim().is_empty() {
+        return;
+    }
+    if let Some(i) = items
+        .iter()
+        .rposition(|i| matches!(i, ChatItem::Assistant { .. }))
+    {
         if let ChatItem::Assistant { text: s, .. } = &mut items[i] {
             if s.is_empty() {
                 s.push_str(text);
@@ -2140,7 +2531,10 @@ pub(super) fn promote_assistant_text(items: &mut Vec<ChatItem>, text: &str) {
             }
         }
     }
-    items.push(ChatItem::Assistant { text: text.to_string(), model: None });
+    items.push(ChatItem::Assistant {
+        text: text.to_string(),
+        model: None,
+    });
 }
 
 /// Identity hash of the artifact list as seen by assistant markdown (chip
@@ -2161,12 +2555,18 @@ pub(super) type ProtoCache = HashMap<(usize, u64), Rc<Vec<ProtoArtifact>>>;
 /// Extraction is cached per (index, content hash): a streaming flush only
 /// re-extracts the message it touched, then renumbering runs over the cached
 /// protos — instead of rescanning every message on every signal write.
-pub(super) fn collect_artifacts(items: &[ChatItem], locale: Locale, cache: &mut ProtoCache) -> Vec<Artifact> {
+pub(super) fn collect_artifacts(
+    items: &[ChatItem],
+    locale: Locale,
+    cache: &mut ProtoCache,
+) -> Vec<Artifact> {
     let mut next: ProtoCache = HashMap::with_capacity(items.len());
     let mut per_item: Vec<Rc<Vec<ProtoArtifact>>> = Vec::with_capacity(items.len());
     for (i, it) in items.iter().enumerate() {
         let key = (i, it.fingerprint());
-        let protos = cache.remove(&key).unwrap_or_else(|| Rc::new(extract_protos(it)));
+        let protos = cache
+            .remove(&key)
+            .unwrap_or_else(|| Rc::new(extract_protos(it)));
         next.insert(key, protos.clone());
         per_item.push(protos);
     }
@@ -2174,8 +2574,13 @@ pub(super) fn collect_artifacts(items: &[ChatItem], locale: Locale, cache: &mut 
     let mut artifacts = assemble_artifacts(&per_item, locale);
     for artifact in &mut artifacts {
         if matches!(items.get(artifact.source_item), Some(ChatItem::Tool { .. })) {
-            if let Some(next_assistant) = items.iter().enumerate().skip(artifact.source_item + 1)
-                .find_map(|(index, item)| matches!(item, ChatItem::Assistant { .. }).then_some(index))
+            if let Some(next_assistant) = items
+                .iter()
+                .enumerate()
+                .skip(artifact.source_item + 1)
+                .find_map(|(index, item)| {
+                    matches!(item, ChatItem::Assistant { .. }).then_some(index)
+                })
             {
                 artifact.source_item = next_assistant;
             }
@@ -2199,7 +2604,10 @@ mod artifact_scan_tests {
         let mut cache = ProtoCache::new();
         let mut items = vec![
             ChatItem::User("check data.csv and data.csv".into()),
-            ChatItem::Assistant { text: "| a | b |\n|---|---|\n| 1 | 2 |\n\n```csv\nx,y\n1,2\n```".into(), model: None },
+            ChatItem::Assistant {
+                text: "| a | b |\n|---|---|\n| 1 | 2 |\n\n```csv\nx,y\n1,2\n```".into(),
+                model: None,
+            },
         ];
         let a1 = collect_artifacts(&items, Locale::En, &mut cache);
         assert!(a1 == fresh(&items, Locale::En));
@@ -2211,8 +2619,12 @@ mod artifact_scan_tests {
             text.push_str("\n```py\nprint(1)\n```");
         }
         items.push(ChatItem::Tool {
-            name: "write".into(), ok: Some(true), input: String::new(),
-            output: "wrote out/result.csv".into(), started_at_ms: None, duration_ms: Some(1),
+            name: "write".into(),
+            ok: Some(true),
+            input: String::new(),
+            output: "wrote out/result.csv".into(),
+            started_at_ms: None,
+            duration_ms: Some(1),
         });
         let a2 = collect_artifacts(&items, Locale::En, &mut cache);
         assert!(a2 == fresh(&items, Locale::En));
@@ -2222,8 +2634,14 @@ mod artifact_scan_tests {
     #[test]
     fn overwritten_file_belongs_to_its_latest_message() {
         let items = vec![
-            ChatItem::Assistant { text: "Created `result.csv`".into(), model: None },
-            ChatItem::Assistant { text: "Updated `result.csv`".into(), model: None },
+            ChatItem::Assistant {
+                text: "Created `result.csv`".into(),
+                model: None,
+            },
+            ChatItem::Assistant {
+                text: "Updated `result.csv`".into(),
+                model: None,
+            },
         ];
         let artifacts = fresh(&items, Locale::En);
         assert_eq!(artifacts.len(), 2);
@@ -2237,10 +2655,17 @@ mod artifact_scan_tests {
     fn tool_output_belongs_to_the_following_reply() {
         let items = vec![
             ChatItem::Tool {
-                name: "write".into(), ok: Some(true), input: String::new(),
-                output: "wrote result.csv".into(), started_at_ms: None, duration_ms: None,
+                name: "write".into(),
+                ok: Some(true),
+                input: String::new(),
+                output: "wrote result.csv".into(),
+                started_at_ms: None,
+                duration_ms: None,
             },
-            ChatItem::Assistant { text: "Done.".into(), model: None },
+            ChatItem::Assistant {
+                text: "Done.".into(),
+                model: None,
+            },
         ];
         let artifacts = fresh(&items, Locale::En);
         assert_eq!(artifacts.len(), 1);
@@ -2253,7 +2678,10 @@ pub(super) fn table_view(table: &TableData, locale: Locale) -> impl IntoView {
     let truncated = total > 500;
     let copy = table_data_to_tsv(table);
     let headers: Vec<String> = table.headers.iter().map(|h| md_inline_to_html(h)).collect();
-    let rows: Vec<Vec<String>> = table.rows.iter().take(500)
+    let rows: Vec<Vec<String>> = table
+        .rows
+        .iter()
+        .take(500)
         .map(|r| r.iter().map(|c| md_inline_to_html(c)).collect())
         .collect();
     view! {
@@ -2301,10 +2729,14 @@ pub(super) fn artifact_group_label(key: &str, locale: Locale) -> String {
 
 pub(super) fn artifact_meta(a: &Artifact, locale: Locale) -> String {
     match &a.data {
-        PreviewData::Table(t) => tf(locale, "artifact.meta.table", &[
-            ("rows", &t.rows.len().to_string()),
-            ("cols", &t.headers.len().to_string()),
-        ]),
+        PreviewData::Table(t) => tf(
+            locale,
+            "artifact.meta.table",
+            &[
+                ("rows", &t.rows.len().to_string()),
+                ("cols", &t.headers.len().to_string()),
+            ],
+        ),
         PreviewData::File { path, kind } => {
             if kind == "fasta" {
                 t(locale, "artifact.kind.fasta").into()
@@ -2321,9 +2753,17 @@ pub(super) fn artifact_meta(a: &Artifact, locale: Locale) -> String {
             }
         }
         PreviewData::Latex { .. } => t(locale, "artifact.latex").into(),
-        PreviewData::Fasta(s) => tf(locale, "artifact.meta.fasta", &[("seqs", &fasta_seq_count(s).max(1).to_string())]),
+        PreviewData::Fasta(s) => tf(
+            locale,
+            "artifact.meta.fasta",
+            &[("seqs", &fasta_seq_count(s).max(1).to_string())],
+        ),
         PreviewData::Smiles(s) => s.chars().take(28).collect(),
-        PreviewData::Text(s) | PreviewData::Markdown(s) => tf(locale, "artifact.meta.text", &[("chars", &s.len().to_string())]),
+        PreviewData::Text(s) | PreviewData::Markdown(s) => tf(
+            locale,
+            "artifact.meta.text",
+            &[("chars", &s.len().to_string())],
+        ),
     }
 }
 
@@ -2336,14 +2776,18 @@ pub(super) fn HeavyPreview(dom_id: String, kind: String, payload: String) -> imp
         let dom_id = id_for_effect.clone();
         let kind = kind_for_effect.clone();
         let payload = payload_for_effect.clone();
-        spawn_local(async move { let _ = mount_preview(&kind, &dom_id, &payload).await; });
+        spawn_local(async move {
+            let _ = mount_preview(&kind, &dom_id, &payload).await;
+        });
     });
     view! { <div class="rp-heavy" id=dom_id></div> }
 }
 
 pub(super) fn parse_csv_text(text: &str) -> Option<TableData> {
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-    if lines.is_empty() { return None; }
+    if lines.is_empty() {
+        return None;
+    }
     let headers = parse_csv_line(lines[0]);
     let rows: Vec<Vec<String>> = lines[1..].iter().map(|l| parse_csv_line(l)).collect();
     Some(TableData { headers, rows })
@@ -2365,8 +2809,20 @@ pub(super) fn CsvFilePreview(path: String) -> impl IntoView {
             table.set(None);
             err.set(None);
             let v = match artifact_id_path(&path) {
-                Some(id) => invoke("read_artifact", to_value(&serde_json::json!({ "id": id })).unwrap()).await,
-                None => invoke("read_file", to_value(&serde_json::json!({ "path": path })).unwrap()).await,
+                Some(id) => {
+                    invoke(
+                        "read_artifact",
+                        to_value(&serde_json::json!({ "id": id })).unwrap(),
+                    )
+                    .await
+                }
+                None => {
+                    invoke(
+                        "read_file",
+                        to_value(&serde_json::json!({ "path": path })).unwrap(),
+                    )
+                    .await
+                }
             };
             let Ok(fc) = serde_wasm_bindgen::from_value::<FileContent>(v) else {
                 err.set(Some(tf(loc, "err.file_not_found", &[("path", &path)])));
@@ -2403,8 +2859,20 @@ pub(super) fn FilePreview(dom_id: String, path: String, kind: String) -> impl In
             // On failure, surface the real backend error (size limit / outside project
             // root / …) instead of a blanket "file not found".
             let result = match artifact_id_path(&path) {
-                Some(id) => invoke_checked("read_artifact", to_value(&serde_json::json!({ "id": id })).unwrap()).await,
-                None => invoke_checked("read_file", to_value(&tauri_args::read_file(&path, Some(32 * 1024 * 1024))).unwrap()).await,
+                Some(id) => {
+                    invoke_checked(
+                        "read_artifact",
+                        to_value(&serde_json::json!({ "id": id })).unwrap(),
+                    )
+                    .await
+                }
+                None => {
+                    invoke_checked(
+                        "read_file",
+                        to_value(&tauri_args::read_file(&path, Some(32 * 1024 * 1024))).unwrap(),
+                    )
+                    .await
+                }
             };
             let fc = match result {
                 Ok(v) => match serde_wasm_bindgen::from_value::<FileContent>(v) {
@@ -2412,7 +2880,11 @@ pub(super) fn FilePreview(dom_id: String, path: String, kind: String) -> impl In
                     Err(_) => {
                         if let Some(el) = el {
                             el.set_class_name("rp-heavy rp-error");
-                            el.set_text_content(Some(&tf(loc, "err.file_not_found", &[("path", &path)])));
+                            el.set_text_content(Some(&tf(
+                                loc,
+                                "err.file_not_found",
+                                &[("path", &path)],
+                            )));
                         }
                         return;
                     }
@@ -2434,9 +2906,18 @@ pub(super) fn FilePreview(dom_id: String, path: String, kind: String) -> impl In
             }
             let (mount_kind, payload) = match kind.as_str() {
                 "pdf" => ("pdf", serde_json::json!({ "b64": fc.base64 }).to_string()),
-                "image" => ("image", serde_json::json!({ "b64": fc.base64, "mime": fc.mime }).to_string()),
-                "structure" => ("structure", serde_json::json!({ "text": fc.text, "format": "pdb" }).to_string()),
-                "molecule" | "smiles" => ("molecule", serde_json::json!({ "text": fc.text, "smiles": fc.text }).to_string()),
+                "image" => (
+                    "image",
+                    serde_json::json!({ "b64": fc.base64, "mime": fc.mime }).to_string(),
+                ),
+                "structure" => (
+                    "structure",
+                    serde_json::json!({ "text": fc.text, "format": "pdb" }).to_string(),
+                ),
+                "molecule" | "smiles" => (
+                    "molecule",
+                    serde_json::json!({ "text": fc.text, "smiles": fc.text }).to_string(),
+                ),
                 "fasta" => ("fasta", serde_json::json!({ "text": fc.text }).to_string()),
                 "msa" => ("msa", serde_json::json!({ "text": fc.text }).to_string()),
                 _ => ("text", serde_json::json!({ "text": fc.text }).to_string()),
@@ -2451,30 +2932,37 @@ pub(super) fn artifact_preview(a: &Artifact, dom_id: String, locale: Locale) -> 
     match &a.data {
         PreviewData::Table(t) => table_view(t, locale).into_view(),
         PreviewData::Text(s) => view! { <pre class="rp-pre">{s.clone()}</pre> }.into_view(),
-        PreviewData::Markdown(s) => view! { <div class="md rp-md" inner_html=md_to_html(s)></div> }.into_view(),
+        PreviewData::Markdown(s) => {
+            view! { <div class="md rp-md" inner_html=md_to_html(s)></div> }.into_view()
+        }
         PreviewData::Latex { tex, display } => {
             let payload = serde_json::json!({ "tex": tex, "display": display }).to_string();
-            view! { <HeavyPreview dom_id=dom_id kind="latex".to_string() payload=payload /> }.into_view()
+            view! { <HeavyPreview dom_id=dom_id kind="latex".to_string() payload=payload /> }
+                .into_view()
         }
         PreviewData::Fasta(text) => {
             let payload = serde_json::json!({ "text": text }).to_string();
-            view! { <HeavyPreview dom_id=dom_id kind="fasta".to_string() payload=payload /> }.into_view()
+            view! { <HeavyPreview dom_id=dom_id kind="fasta".to_string() payload=payload /> }
+                .into_view()
         }
         PreviewData::Smiles(s) => {
             let payload = serde_json::json!({ "smiles": s }).to_string();
-            view! { <HeavyPreview dom_id=dom_id kind="molecule".to_string() payload=payload /> }.into_view()
+            view! { <HeavyPreview dom_id=dom_id kind="molecule".to_string() payload=payload /> }
+                .into_view()
         }
         PreviewData::File { path, kind } => {
             if kind == "csv" {
                 view! {
                     <p class="rp-path hint">{path.clone()}</p>
                     <CsvFilePreview path=path.clone() />
-                }.into_view()
+                }
+                .into_view()
             } else {
                 view! {
                     <p class="rp-path hint">{path.clone()}</p>
                     <FilePreview dom_id=dom_id path=path.clone() kind=kind.clone() />
-                }.into_view()
+                }
+                .into_view()
             }
         }
     }
@@ -2482,7 +2970,11 @@ pub(super) fn artifact_preview(a: &Artifact, dom_id: String, locale: Locale) -> 
 
 #[component]
 pub(super) fn CodeBlock(lang: String, body: String) -> impl IntoView {
-    let lang_class = if lang.is_empty() { "plaintext".to_string() } else { lang.clone() };
+    let lang_class = if lang.is_empty() {
+        "plaintext".to_string()
+    } else {
+        lang.clone()
+    };
     let hid = unique_dom_id("code");
     let hid_for_effect = hid.clone();
     let lang_track = lang_class.clone();
@@ -2503,7 +2995,11 @@ pub(super) fn CodeBlock(lang: String, body: String) -> impl IntoView {
 /// The gutter is a plain <pre> (no <code>) so highlight.js skips it.
 #[component]
 pub(super) fn RpCodeView(lang: String, body: String) -> impl IntoView {
-    let lang_class = if lang.is_empty() { "plaintext".to_string() } else { lang.clone() };
+    let lang_class = if lang.is_empty() {
+        "plaintext".to_string()
+    } else {
+        lang.clone()
+    };
     let hid = unique_dom_id("rpcode");
     let hid_for_effect = hid.clone();
     let body_track = body.clone();
@@ -2514,7 +3010,10 @@ pub(super) fn RpCodeView(lang: String, body: String) -> impl IntoView {
     // split('\n') matches how <pre> renders a trailing newline, keeping the
     // gutter aligned with the body line-for-line.
     let n = body.split('\n').count().max(1);
-    let gutter = (1..=n).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+    let gutter = (1..=n)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
     view! {
         <div class="rp-code" id=hid.clone()>
             <pre class="rp-code-gutter">{gutter}</pre>
@@ -2538,7 +3037,9 @@ pub(super) fn download_artifact(path: String) {
 }
 
 pub(super) fn keyboard_event_targets_text_entry(ev: &web_sys::KeyboardEvent) -> bool {
-    let mut el = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok());
+    let mut el = ev
+        .target()
+        .and_then(|t| t.dyn_into::<web_sys::Element>().ok());
     while let Some(node) = el {
         if node.dyn_ref::<web_sys::HtmlInputElement>().is_some()
             || node.dyn_ref::<web_sys::HtmlTextAreaElement>().is_some()
@@ -2580,7 +3081,11 @@ pub(super) fn ArtifactModal(
         spawn_local(async move {
             let arg = to_value(&serde_json::json!({ "sessionId": session, "path": path })).unwrap();
             let v = invoke("get_artifact_provenance", arg).await;
-            prov.set(serde_wasm_bindgen::from_value::<Option<ArtifactProvenance>>(v).ok().flatten());
+            prov.set(
+                serde_wasm_bindgen::from_value::<Option<ArtifactProvenance>>(v)
+                    .ok()
+                    .flatten(),
+            );
             loaded.set(true);
         });
     }
@@ -2677,12 +3182,17 @@ pub(super) fn ArtifactModal(
 }
 
 pub(super) fn composer_text_from_user_message(text: &str) -> String {
-    ["\n\nUploaded files: ", "\n\nAttached artifacts: ", "\n\nAttached sessions: ", "\n\nSelected skills: "]
-        .iter()
-        .filter_map(|marker| text.find(marker))
-        .min()
-        .map(|idx| text[..idx].trim().to_string())
-        .unwrap_or_else(|| text.to_string())
+    [
+        "\n\nUploaded files: ",
+        "\n\nAttached artifacts: ",
+        "\n\nAttached sessions: ",
+        "\n\nSelected skills: ",
+    ]
+    .iter()
+    .filter_map(|marker| text.find(marker))
+    .min()
+    .map(|idx| text[..idx].trim().to_string())
+    .unwrap_or_else(|| text.to_string())
 }
 
 pub(super) fn user_message_index(items: &[ChatItem], ui_index: usize) -> Option<usize> {
@@ -2712,8 +3222,12 @@ pub(super) fn focus_and_select_element(id: &str) {
 }
 
 fn focus_element_inner(id: &str, select_all: bool) {
-    let Some(doc) = web_sys::window().and_then(|w| w.document()) else { return; };
-    let Some(el) = doc.get_element_by_id(id) else { return; };
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    let Some(el) = doc.get_element_by_id(id) else {
+        return;
+    };
     let _ = el.dyn_ref::<web_sys::HtmlElement>().map(|e| e.focus());
     if !select_all {
         return;
@@ -2744,7 +3258,10 @@ fn schedule_focus(id: &'static str, select_all: bool) {
         }
     });
     if let Some(window) = web_sys::window() {
-        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(focus.as_ref().unchecked_ref(), 0);
+        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+            focus.as_ref().unchecked_ref(),
+            0,
+        );
     }
     focus.forget();
 }
@@ -2776,7 +3293,14 @@ pub(super) fn compose_icon(kind: &str) -> impl IntoView {
         "list" => view! { <path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/> }.into_view(),
         _ => view! { <path d="M9 18l6-6-6-6"/> }.into_view(), // chevron
     };
-    let size = if matches!(kind, "chevron" | "chevron-down" | "chevron-left" | "chevron-right") { "16" } else { "18" };
+    let size = if matches!(
+        kind,
+        "chevron" | "chevron-down" | "chevron-left" | "chevron-right"
+    ) {
+        "16"
+    } else {
+        "18"
+    };
     view! {
         <svg width=size height=size viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{body}</svg>
@@ -2839,7 +3363,9 @@ pub(super) fn AssistantMessage(
     let locale = use_locale();
     let arts_for_html = artifacts.clone();
     let text_for_html = text.clone();
-    let html = create_memo(move |_| enrich_md_html(md_to_html(&text_for_html), &arts_for_html, locale.get()));
+    let html = create_memo(move |_| {
+        enrich_md_html(md_to_html(&text_for_html), &arts_for_html, locale.get())
+    });
     let hid = unique_dom_id("md");
     let hid_for_effect = hid.clone();
     create_effect(move |_| {
@@ -2849,9 +3375,18 @@ pub(super) fn AssistantMessage(
     let on_artifact = on_artifact.clone();
     let on_file = on_file.clone();
     let arts_for_click = artifacts.clone();
-    let generated = artifacts.iter().enumerate()
+    let generated = artifacts
+        .iter()
+        .enumerate()
         .filter(|(_, artifact)| artifact.source_item == source_item)
-        .map(|(index, artifact)| (index, artifact.name.clone(), artifact.kind, artifact.superseded))
+        .map(|(index, artifact)| {
+            (
+                index,
+                artifact.name.clone(),
+                artifact.kind,
+                artifact.superseded,
+            )
+        })
         .collect::<Vec<_>>();
     let generated_count = generated.len();
     let generated_cards = generated.into_iter().map(|(index, name, kind, superseded)| {
@@ -2905,7 +3440,12 @@ pub(super) fn AssistantMessage(
 }
 
 #[component]
-pub(super) fn ToolBlock(name: String, ok: Option<bool>, input: String, output: String) -> impl IntoView {
+pub(super) fn ToolBlock(
+    name: String,
+    ok: Option<bool>,
+    input: String,
+    output: String,
+) -> impl IntoView {
     let locale = use_locale();
     let open = ok != Some(true);
     let lang = tool_lang(&name).to_string();
@@ -2922,7 +3462,11 @@ pub(super) fn ToolBlock(name: String, ok: Option<bool>, input: String, output: S
     });
     let name_for_label = name.clone();
     let input_label = move || {
-        if name_for_label == "python" { t(locale.get(), "tool.copy_code") } else { t(locale.get(), "tool.copy_input") }
+        if name_for_label == "python" {
+            t(locale.get(), "tool.copy_code")
+        } else {
+            t(locale.get(), "tool.copy_input")
+        }
     };
 
     view! {
@@ -3191,11 +3735,17 @@ pub(super) fn ProjectsScreen(
     let reload = move || {
         spawn_local(async move {
             let v = invoke("list_projects", JsValue::UNDEFINED).await;
-            if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ProjectSummary>>(v) { projects.set(list); }
+            if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ProjectSummary>>(v) {
+                projects.set(list);
+            }
             let r = invoke("list_recent_sessions", JsValue::UNDEFINED).await;
-            if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<RecentSession>>(r) { recent.set(list); }
+            if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<RecentSession>>(r) {
+                recent.set(list);
+            }
             let dm = invoke("list_demos", JsValue::UNDEFINED).await;
-            if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<DemoInfo>>(dm) { demo_count.set(list.len()); }
+            if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<DemoInfo>>(dm) {
+                demo_count.set(list.len());
+            }
         });
     };
     reload();
@@ -3235,7 +3785,11 @@ pub(super) fn ProjectsScreen(
             .filter(|p| contains_search(&q, &[&p.name, &p.description]))
             .take(HOME_SEARCH_PROJECT_LIMIT)
             .count();
-        let artifacts_n = artifact_hits.get().into_iter().take(HOME_SEARCH_ARTIFACT_LIMIT).count();
+        let artifacts_n = artifact_hits
+            .get()
+            .into_iter()
+            .take(HOME_SEARCH_ARTIFACT_LIMIT)
+            .count();
         let sessions_n = recent
             .get()
             .into_iter()
@@ -3261,7 +3815,11 @@ pub(super) fn ProjectsScreen(
             }
             pos += 1;
         }
-        for a in artifact_hits.get().into_iter().take(HOME_SEARCH_ARTIFACT_LIMIT) {
+        for a in artifact_hits
+            .get()
+            .into_iter()
+            .take(HOME_SEARCH_ARTIFACT_LIMIT)
+        {
             if pos == idx {
                 search_open.set(false);
                 let path = stored_artifact_path(&a.path);
@@ -3303,22 +3861,31 @@ pub(super) fn ProjectsScreen(
         }
     });
 
-    let choose_dir = move |_| spawn_local(async move {
-        let v = invoke("pick_directory", JsValue::UNDEFINED).await;
-        if let Ok(Some(p)) = serde_wasm_bindgen::from_value::<Option<String>>(v) { new_dir.set(p); }
-    });
+    let choose_dir = move |_| {
+        spawn_local(async move {
+            let v = invoke("pick_directory", JsValue::UNDEFINED).await;
+            if let Ok(Some(p)) = serde_wasm_bindgen::from_value::<Option<String>>(v) {
+                new_dir.set(p);
+            }
+        })
+    };
 
     let submit = move |_| {
         let (n, d, desc, ctx) = (new_name.get(), new_dir.get(), new_desc.get(), new_ctx.get());
-        if n.trim().is_empty() || d.trim().is_empty() { return; }
+        if n.trim().is_empty() || d.trim().is_empty() {
+            return;
+        }
         spawn_local(async move {
             let arg = to_value(&serde_json::json!({
                 "name": n, "workspaceDir": d, "description": desc, "agentContext": ctx,
-            })).unwrap();
+            }))
+            .unwrap();
             let v = invoke("create_project", arg).await;
             if let Ok(p) = serde_wasm_bindgen::from_value::<ProjectSummary>(v) {
-                new_name.set(String::new()); new_dir.set(String::new());
-                new_desc.set(String::new()); new_ctx.set(String::new());
+                new_name.set(String::new());
+                new_dir.set(String::new());
+                new_desc.set(String::new());
+                new_ctx.set(String::new());
                 creating.set(false);
                 on_open.call(p.id);
             }
@@ -3330,7 +3897,9 @@ pub(super) fn ProjectsScreen(
             let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
             let _ = invoke("delete_project", arg).await;
             let v = invoke("list_projects", JsValue::UNDEFINED).await;
-            if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ProjectSummary>>(v) { projects.set(list); }
+            if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ProjectSummary>>(v) {
+                projects.set(list);
+            }
         });
     };
     let delete_confirmed = delete.clone(); // used by the confirm modal below
@@ -3338,7 +3907,9 @@ pub(super) fn ProjectsScreen(
     // Local Escape stack — ProjectsScreen owns its own modals, so the App
     // window listener cannot see `creating` / `pending_delete`.
     window_event_listener(ev::keydown, move |ev| {
-        let Some(ev) = ev.dyn_ref::<web_sys::KeyboardEvent>() else { return };
+        let Some(ev) = ev.dyn_ref::<web_sys::KeyboardEvent>() else {
+            return;
+        };
         if ev.key() != "Escape" || ev.default_prevented() || ev.is_composing() {
             return;
         }
@@ -3748,37 +4319,74 @@ pub(super) fn CommandPalette(
     let artifacts = create_rw_signal(Vec::<ArtifactInfo>::new());
     let sessions = create_rw_signal(Vec::<SessionSearchInfo>::new());
     create_effect(move |_| {
-        if !open.get() { return; }
+        if !open.get() {
+            return;
+        }
         let q = query.get();
         spawn_local(async move {
             let p = invoke("list_projects", JsValue::UNDEFINED).await;
-            if let Ok(rows) = serde_wasm_bindgen::from_value::<Vec<ProjectSummary>>(p) { projects.set(rows); }
-            let a = invoke("search_artifacts", to_value(&serde_json::json!({ "query": q, "limit": 12, "allProjects": true })).unwrap()).await;
-            if query.get_untracked() == q {
-                if let Ok(rows) = serde_wasm_bindgen::from_value::<Vec<ArtifactInfo>>(a) { artifacts.set(rows); }
+            if let Ok(rows) = serde_wasm_bindgen::from_value::<Vec<ProjectSummary>>(p) {
+                projects.set(rows);
             }
-            let s = invoke("search_sessions", to_value(&serde_json::json!({ "query": q, "limit": 12 })).unwrap()).await;
+            let a = invoke(
+                "search_artifacts",
+                to_value(&serde_json::json!({ "query": q, "limit": 12, "allProjects": true }))
+                    .unwrap(),
+            )
+            .await;
             if query.get_untracked() == q {
-                if let Ok(rows) = serde_wasm_bindgen::from_value::<Vec<SessionSearchInfo>>(s) { sessions.set(rows); }
+                if let Ok(rows) = serde_wasm_bindgen::from_value::<Vec<ArtifactInfo>>(a) {
+                    artifacts.set(rows);
+                }
+            }
+            let s = invoke(
+                "search_sessions",
+                to_value(&serde_json::json!({ "query": q, "limit": 12 })).unwrap(),
+            )
+            .await;
+            if query.get_untracked() == q {
+                if let Ok(rows) = serde_wasm_bindgen::from_value::<Vec<SessionSearchInfo>>(s) {
+                    sessions.set(rows);
+                }
             }
         });
     });
-    create_effect(move |_| { open.get(); query.get(); active.set(0); });
     create_effect(move |_| {
-        if open.get() { focus_element_soon("command-palette-input"); }
+        open.get();
+        query.get();
+        active.set(0);
+    });
+    create_effect(move |_| {
+        if open.get() {
+            focus_element_soon("command-palette-input");
+        }
     });
     let items = create_memo(move |_| {
         let q = query.get().trim().to_lowercase();
         let current = current_project_id.get();
         let mut out = Vec::new();
-        let mut ps: Vec<_> = projects.get().into_iter().filter(|p| contains_search(&q, &[&p.name, &p.description])).collect();
+        let mut ps: Vec<_> = projects
+            .get()
+            .into_iter()
+            .filter(|p| contains_search(&q, &[&p.name, &p.description]))
+            .collect();
         ps.sort_by_key(|p| (current.as_deref() != Some(p.id.as_str()), p.name.clone()));
         out.extend(ps.into_iter().map(CommandPaletteItem::Project));
         let mut ars = artifacts.get();
-        ars.sort_by_key(|a| (current.as_deref() != a.project_id.as_deref(), std::cmp::Reverse(a.ts)));
+        ars.sort_by_key(|a| {
+            (
+                current.as_deref() != a.project_id.as_deref(),
+                std::cmp::Reverse(a.ts),
+            )
+        });
         out.extend(ars.into_iter().map(CommandPaletteItem::Artifact));
         let mut ss = sessions.get();
-        ss.sort_by_key(|s| (current.as_deref() != Some(s.project_id.as_str()), std::cmp::Reverse(s.activity_at)));
+        ss.sort_by_key(|s| {
+            (
+                current.as_deref() != Some(s.project_id.as_str()),
+                std::cmp::Reverse(s.activity_at),
+            )
+        });
         out.extend(ss.into_iter().map(CommandPaletteItem::Session));
         out.push(CommandPaletteItem::Command("new"));
         if current.is_some() {
@@ -3788,29 +4396,58 @@ pub(super) fn CommandPalette(
         out
     });
     let open_item = Callback::new(move |idx: usize| {
-        let Some(item) = items.get().get(idx).cloned() else { return; };
+        let Some(item) = items.get().get(idx).cloned() else {
+            return;
+        };
         open.set(false);
         match item {
             CommandPaletteItem::Project(p) => on_open_project.call(p.id),
             CommandPaletteItem::Artifact(a) => {
-                let kind = file_kind(&a.name).or_else(|| file_kind(&a.path)).unwrap_or("text").to_string();
+                let kind = file_kind(&a.name)
+                    .or_else(|| file_kind(&a.path))
+                    .unwrap_or("text")
+                    .to_string();
                 on_open_artifact.call((format!("artifact:{}", a.id), a.name, kind));
             }
             CommandPaletteItem::Session(s) => on_open_session.call((s.project_id, s.id)),
             CommandPaletteItem::Command("new") => on_new_session.call(()),
             CommandPaletteItem::Command("settings") => on_project_settings.call(()),
             CommandPaletteItem::Command("skills") => on_manage_skills.call(()),
-            CommandPaletteItem::Command(_) => {},
+            CommandPaletteItem::Command(_) => {}
         }
     });
     let attach_item = Callback::new(move |idx: usize| {
         let list = items.get();
-        let item = list.get(idx).cloned().filter(|item| matches!(item, CommandPaletteItem::Artifact(_) | CommandPaletteItem::Session(_)))
-            .or_else(|| list.into_iter().find(|item| matches!(item, CommandPaletteItem::Artifact(_) | CommandPaletteItem::Session(_))));
-        let Some(item) = item else { return; };
+        let item = list
+            .get(idx)
+            .cloned()
+            .filter(|item| {
+                matches!(
+                    item,
+                    CommandPaletteItem::Artifact(_) | CommandPaletteItem::Session(_)
+                )
+            })
+            .or_else(|| {
+                list.into_iter().find(|item| {
+                    matches!(
+                        item,
+                        CommandPaletteItem::Artifact(_) | CommandPaletteItem::Session(_)
+                    )
+                })
+            });
+        let Some(item) = item else {
+            return;
+        };
         match item {
-            CommandPaletteItem::Artifact(a) => on_attach.call(ComposerReferenceChip::Artifact { id: a.id, name: a.name }),
-            CommandPaletteItem::Session(s) => on_attach.call(ComposerReferenceChip::Session { id: s.id, title: s.title, project_name: s.project_name }),
+            CommandPaletteItem::Artifact(a) => on_attach.call(ComposerReferenceChip::Artifact {
+                id: a.id,
+                name: a.name,
+            }),
+            CommandPaletteItem::Session(s) => on_attach.call(ComposerReferenceChip::Session {
+                id: s.id,
+                title: s.title,
+                project_name: s.project_name,
+            }),
             _ => return,
         }
         open.set(false);
@@ -3873,21 +4510,33 @@ pub(super) fn CommandPalette(
 }
 
 #[component]
-pub(super) fn ActionPalette(open: RwSignal<bool>, on_action: Callback<&'static str>) -> impl IntoView {
+pub(super) fn ActionPalette(
+    open: RwSignal<bool>,
+    on_action: Callback<&'static str>,
+) -> impl IntoView {
     let locale = use_locale();
     let query = create_rw_signal(String::new());
     let active = create_rw_signal(0usize);
     create_effect(move |_| {
-        if !open.get() { return; }
+        if !open.get() {
+            return;
+        }
         query.set(String::new());
         active.set(0);
         let focus = Closure::once(|| {
-            let Some(doc) = web_sys::window().and_then(|w| w.document()) else { return; };
-            let Some(input) = doc.get_element_by_id("action-palette-input") else { return; };
+            let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+                return;
+            };
+            let Some(input) = doc.get_element_by_id("action-palette-input") else {
+                return;
+            };
             let _ = input.dyn_ref::<web_sys::HtmlElement>().map(|el| el.focus());
         });
         if let Some(window) = web_sys::window() {
-            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(focus.as_ref().unchecked_ref(), 0);
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                focus.as_ref().unchecked_ref(),
+                0,
+            );
         }
         focus.forget();
     });
@@ -3897,32 +4546,121 @@ pub(super) fn ActionPalette(open: RwSignal<bool>, on_action: Callback<&'static s
         let navigate = t(loc, "command.group.navigate").to_string();
         let appearance = t(loc, "command.group.appearance").to_string();
         let entries = [
-            ("new", "plus", "command.new_session", general.clone(), "Ctrl/⌘ N"),
-            ("search", "search", "command.search", general.clone(), "Ctrl/⌘ K"),
-            ("settings", "gear", "command.settings", general.clone(), "Ctrl/⌘ ,"),
-            ("project-settings", "gear", "command.project_settings", general.clone(), ""),
+            (
+                "new",
+                "plus",
+                "command.new_session",
+                general.clone(),
+                "Ctrl/⌘ N",
+            ),
+            (
+                "search",
+                "search",
+                "command.search",
+                general.clone(),
+                "Ctrl/⌘ K",
+            ),
+            (
+                "settings",
+                "gear",
+                "command.settings",
+                general.clone(),
+                "Ctrl/⌘ ,",
+            ),
+            (
+                "project-settings",
+                "gear",
+                "command.project_settings",
+                general.clone(),
+                "",
+            ),
             ("skills", "grid", "command.skills", general, ""),
-            ("projects", "folder", "command.projects", navigate.clone(), ""),
-            ("toggle-sidebar", "panel", "command.toggle_sidebar", navigate.clone(), "Ctrl/⌘ B"),
-            ("artifacts", "grid", "command.artifacts", navigate.clone(), ""),
+            (
+                "projects",
+                "folder",
+                "command.projects",
+                navigate.clone(),
+                "",
+            ),
+            (
+                "toggle-sidebar",
+                "panel",
+                "command.toggle_sidebar",
+                navigate.clone(),
+                "Ctrl/⌘ B",
+            ),
+            (
+                "artifacts",
+                "grid",
+                "command.artifacts",
+                navigate.clone(),
+                "",
+            ),
             ("notebook", "doc", "command.notebook", navigate.clone(), ""),
             ("files", "doc", "command.files", navigate.clone(), ""),
-            ("provenance", "copy", "command.provenance", navigate.clone(), ""),
-            ("contexts", "server", "command.contexts", navigate.clone(), ""),
-            ("side-chat", "bubble", "command.side_chat", navigate.clone(), ""),
+            (
+                "provenance",
+                "copy",
+                "command.provenance",
+                navigate.clone(),
+                "",
+            ),
+            (
+                "contexts",
+                "server",
+                "command.contexts",
+                navigate.clone(),
+                "",
+            ),
+            (
+                "side-chat",
+                "bubble",
+                "command.side_chat",
+                navigate.clone(),
+                "",
+            ),
             ("close-panel", "panel", "command.close_panel", navigate, ""),
-            ("theme-light", "gear", "command.theme_light", appearance.clone(), ""),
-            ("theme-dark", "gear", "command.theme_dark", appearance.clone(), ""),
-            ("theme-system", "gear", "command.theme_system", appearance, ""),
+            (
+                "theme-light",
+                "gear",
+                "command.theme_light",
+                appearance.clone(),
+                "",
+            ),
+            (
+                "theme-dark",
+                "gear",
+                "command.theme_dark",
+                appearance.clone(),
+                "",
+            ),
+            (
+                "theme-system",
+                "gear",
+                "command.theme_system",
+                appearance,
+                "",
+            ),
         ];
         let q = query.get().trim().to_lowercase();
-        entries.into_iter().filter_map(|(id, icon, key, group, shortcut)| {
-            let title = t(loc, key).to_string();
-            contains_search(&q, &[id, &title, &group]).then_some(CommandAction { id, icon, title, group, shortcut })
-        }).collect::<Vec<_>>()
+        entries
+            .into_iter()
+            .filter_map(|(id, icon, key, group, shortcut)| {
+                let title = t(loc, key).to_string();
+                contains_search(&q, &[id, &title, &group]).then_some(CommandAction {
+                    id,
+                    icon,
+                    title,
+                    group,
+                    shortcut,
+                })
+            })
+            .collect::<Vec<_>>()
     });
     let run = Callback::new(move |index: usize| {
-        let Some(action) = actions.get().get(index).cloned() else { return; };
+        let Some(action) = actions.get().get(index).cloned() else {
+            return;
+        };
         open.set(false);
         on_action.call(action.id);
     });

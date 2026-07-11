@@ -17,27 +17,30 @@ use bindings::{
 };
 use context_menu::{ContextMenuPortal, CtxMenu};
 use dto::*;
-use i18n::{empty_subtitle, empty_title, localize_backend, set_document_lang, tab_count, tf, t, use_locale, Locale, EMPTY_SUBTITLE_COUNT, EMPTY_TITLE_COUNT};
+use futures_channel::oneshot;
+use i18n::{
+    empty_subtitle, empty_title, localize_backend, set_document_lang, t, tab_count, tf, use_locale,
+    Locale, EMPTY_SUBTITLE_COUNT, EMPTY_TITLE_COUNT,
+};
+use leptos::{ev, window_event_listener, *};
 use notebook::{collect_notebook_cells, NotebookCache, NotebookView};
 use overlays::{AddHostOverlay, CapabilitiesOverlay, OnboardingOverlay};
 use project_landing::{ProjectLanding, ProjectLandingState};
+use serde_wasm_bindgen::to_value;
 use settings_view::{SettingsView, SettingsViewState};
 use sidebar::{Sidebar, SidebarState};
-use window_titlebar::WindowTitlebar;
-use leptos::{ev, window_event_listener, *};
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use text::{
-    dom_value, event_target_checked, event_target_value, format_bytes,
-    format_duration_ms, group_artifact_indices, join_path, md_to_html, opens_in_system_browser,
-    parent_path, provider_defaults, provider_value,
+    dom_value, event_target_checked, event_target_value, format_bytes, format_duration_ms,
+    group_artifact_indices, join_path, md_to_html, opens_in_system_browser, parent_path,
+    provider_defaults, provider_value,
 };
-use serde_wasm_bindgen::to_value;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use futures_channel::oneshot;
-use std::collections::VecDeque;
+use window_titlebar::WindowTitlebar;
 
 /// Stable substring of the backend's missing-key error (`src-tauri` `send_message`),
 /// used to turn that failure into an actionable "open Settings" prompt.
@@ -93,9 +96,10 @@ fn project_transition_is_current(
     epoch.get() == request_epoch && target.borrow().as_deref() == Some(project_id)
 }
 
-
 fn acp_value_text(value: Option<&serde_json::Value>) -> String {
-    let Some(value) = value else { return String::new(); };
+    let Some(value) = value else {
+        return String::new();
+    };
     match value {
         serde_json::Value::Null => String::new(),
         serde_json::Value::String(text) => text.clone(),
@@ -104,22 +108,59 @@ fn acp_value_text(value: Option<&serde_json::Value>) -> String {
 }
 
 fn upsert_acp_tool(items: &mut Vec<ChatItem>, payload: &serde_json::Value) {
-    let Some(call_id) = payload.get("toolCallId").and_then(serde_json::Value::as_str) else { return; };
-    let index = items.iter().position(|item| matches!(item, ChatItem::AcpTool { call_id: id, .. } if id == call_id));
+    let Some(call_id) = payload
+        .get("toolCallId")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return;
+    };
+    let index = items
+        .iter()
+        .position(|item| matches!(item, ChatItem::AcpTool { call_id: id, .. } if id == call_id));
     if let Some(index) = index {
-        if let ChatItem::AcpTool { title, kind, status, content, locations, .. } = &mut items[index] {
-            if let Some(value) = payload.get("title").and_then(serde_json::Value::as_str) { *title = value.into(); }
-            if let Some(value) = payload.get("kind").and_then(serde_json::Value::as_str) { *kind = value.into(); }
-            if let Some(value) = payload.get("status").and_then(serde_json::Value::as_str) { *status = value.into(); }
-            if payload.get("content").is_some() { *content = acp_value_text(payload.get("content")); }
-            if payload.get("locations").is_some() { *locations = acp_value_text(payload.get("locations")); }
+        if let ChatItem::AcpTool {
+            title,
+            kind,
+            status,
+            content,
+            locations,
+            ..
+        } = &mut items[index]
+        {
+            if let Some(value) = payload.get("title").and_then(serde_json::Value::as_str) {
+                *title = value.into();
+            }
+            if let Some(value) = payload.get("kind").and_then(serde_json::Value::as_str) {
+                *kind = value.into();
+            }
+            if let Some(value) = payload.get("status").and_then(serde_json::Value::as_str) {
+                *status = value.into();
+            }
+            if payload.get("content").is_some() {
+                *content = acp_value_text(payload.get("content"));
+            }
+            if payload.get("locations").is_some() {
+                *locations = acp_value_text(payload.get("locations"));
+            }
         }
     } else {
         let row = ChatItem::AcpTool {
             call_id: call_id.into(),
-            title: payload.get("title").and_then(serde_json::Value::as_str).unwrap_or("ACP tool").into(),
-            kind: payload.get("kind").and_then(serde_json::Value::as_str).unwrap_or_default().into(),
-            status: payload.get("status").and_then(serde_json::Value::as_str).unwrap_or("pending").into(),
+            title: payload
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("ACP tool")
+                .into(),
+            kind: payload
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .into(),
+            status: payload
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("pending")
+                .into(),
             content: acp_value_text(payload.get("content")),
             locations: acp_value_text(payload.get("locations")),
         };
@@ -129,25 +170,57 @@ fn upsert_acp_tool(items: &mut Vec<ChatItem>, payload: &serde_json::Value) {
 }
 
 fn acp_plan_text(payload: &serde_json::Value) -> String {
-    payload.get("entries").and_then(serde_json::Value::as_array).map(|entries| {
-        entries.iter().map(|entry| {
-            let status = entry.get("status").and_then(serde_json::Value::as_str).unwrap_or("pending");
-            let mark = if status == "completed" { "x" } else { " " };
-            let content = entry.get("content").and_then(serde_json::Value::as_str).unwrap_or_default();
-            format!("- [{mark}] {content}")
-        }).collect::<Vec<_>>().join("\n")
-    }).unwrap_or_default()
+    payload
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| {
+                    let status = entry
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("pending");
+                    let mark = if status == "completed" { "x" } else { " " };
+                    let content = entry
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    format!("- [{mark}] {content}")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
 }
 
 fn acp_select_options(option: &serde_json::Value) -> Vec<(String, String)> {
     let mut result = Vec::new();
-    for row in option.get("options").and_then(serde_json::Value::as_array).into_iter().flatten() {
+    for row in option
+        .get("options")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         if let Some(value) = row.get("value").and_then(serde_json::Value::as_str) {
-            result.push((value.into(), row.get("name").and_then(serde_json::Value::as_str).unwrap_or(value).into()));
+            result.push((
+                value.into(),
+                row.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(value)
+                    .into(),
+            ));
         } else if let Some(options) = row.get("options").and_then(serde_json::Value::as_array) {
             for choice in options {
                 if let Some(value) = choice.get("value").and_then(serde_json::Value::as_str) {
-                    result.push((value.into(), choice.get("name").and_then(serde_json::Value::as_str).unwrap_or(value).into()));
+                    result.push((
+                        value.into(),
+                        choice
+                            .get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or(value)
+                            .into(),
+                    ));
                 }
             }
         }
@@ -156,9 +229,10 @@ fn acp_select_options(option: &serde_json::Value) -> Vec<(String, String)> {
 }
 
 fn remove_optimistic_send_rows(rows: &mut Vec<ChatItem>, display_message: &str) {
-    let Some(index) = rows.iter().rposition(
-        |item| matches!(item, ChatItem::User(value) if value == display_message),
-    ) else {
+    let Some(index) = rows
+        .iter()
+        .rposition(|item| matches!(item, ChatItem::User(value) if value == display_message))
+    else {
         return;
     };
     if matches!(rows.get(index + 1), Some(ChatItem::Assistant { text, .. }) if text.is_empty()) {
@@ -167,9 +241,10 @@ fn remove_optimistic_send_rows(rows: &mut Vec<ChatItem>, display_message: &str) 
 }
 
 fn mark_optimistic_send_failed(rows: &mut [ChatItem], display_message: &str, error: &str) {
-    let Some(index) = rows.iter().rposition(
-        |item| matches!(item, ChatItem::User(value) if value == display_message),
-    ) else {
+    let Some(index) = rows
+        .iter()
+        .rposition(|item| matches!(item, ChatItem::User(value) if value == display_message))
+    else {
         return;
     };
     if let Some(ChatItem::Assistant { text, .. }) = rows.get_mut(index + 1) {
@@ -253,13 +328,13 @@ fn App() -> impl IntoView {
     let custom_conn_tool_errors = create_rw_signal(HashMap::<String, String>::new());
     let open_conn_key = create_rw_signal(None::<String>);
     let conn_form = create_rw_signal(None::<ConnForm>);
-    let conn_test_msg = create_rw_signal(None::<(bool,String)>);
+    let conn_test_msg = create_rw_signal(None::<(bool, String)>);
     // Service credentials (Settings → Credentials, #115). `cred_status` maps a
     // credential id -> whether a value is stored; `cred_inputs` holds the
     // in-progress edit per id; one shared status message.
     let cred_status = create_rw_signal(std::collections::HashMap::<String, bool>::new());
     let cred_inputs = create_rw_signal(std::collections::HashMap::<String, String>::new());
-    let cred_msg = create_rw_signal(None::<(bool,String)>);
+    let cred_msg = create_rw_signal(None::<(bool, String)>);
     // Gate the settings sub-form panes on whether a form is open — NOT on its
     // contents. A closure that reads the whole form signal re-runs on every
     // keystroke (each `on:input` calls `.update`), rebuilding the inputs and
@@ -279,7 +354,8 @@ fn App() -> impl IntoView {
     let acp_form = create_rw_signal::<Option<AcpAgentProfile>>(None);
     let acp_form_msg = create_rw_signal::<Option<(bool, String)>>(None);
     let acp_infos = create_rw_signal::<HashMap<String, AcpAgentInfo>>(HashMap::new());
-    let acp_session_configs = create_rw_signal::<HashMap<String, Vec<serde_json::Value>>>(HashMap::new());
+    let acp_session_configs =
+        create_rw_signal::<HashMap<String, Vec<serde_json::Value>>>(HashMap::new());
     let acp_session_modes = create_rw_signal::<HashMap<String, serde_json::Value>>(HashMap::new());
     let acp_config_menu_open = create_rw_signal::<Option<String>>(None);
     let show_projects = create_rw_signal(true); // app lands on the Projects screen
@@ -301,23 +377,30 @@ fn App() -> impl IntoView {
     // Set when a send fails because no API key is configured, so the status bar
     // can offer a one-click jump to Settings instead of a dead-end message.
     let needs_api_key = create_rw_signal(false);
-    let refresh_models = move || spawn_local(async move {
-        let v = invoke("list_models", JsValue::UNDEFINED).await;
-        if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(v) {
-            models.set(list);
-        }
-        let v = invoke("list_acp_agents", JsValue::UNDEFINED).await;
-        if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<AcpAgentProfile>>(v) {
-            acp_agents.set(list);
-        }
-    });
+    let refresh_models = move || {
+        spawn_local(async move {
+            let v = invoke("list_models", JsValue::UNDEFINED).await;
+            if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(v) {
+                models.set(list);
+            }
+            let v = invoke("list_acp_agents", JsValue::UNDEFINED).await;
+            if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<AcpAgentProfile>>(v) {
+                acp_agents.set(list);
+            }
+        })
+    };
     // Tauri's native drag/drop event contains absolute paths (including
     // directories). Keep those paths as references; unlike the browser File
     // picker they must not be copied through `upload_file` first.
     let native_drop_cb = Closure::wrap(Box::new(move |payload: JsValue| {
         let inside = native_drop_in_composer(payload.clone());
-        let value = serde_wasm_bindgen::from_value::<serde_json::Value>(payload).unwrap_or_default();
-        let kind = value.get("kind").and_then(|item| item.as_str()).unwrap_or("").to_ascii_lowercase();
+        let value =
+            serde_wasm_bindgen::from_value::<serde_json::Value>(payload).unwrap_or_default();
+        let kind = value
+            .get("kind")
+            .and_then(|item| item.as_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
         if matches!(kind.as_str(), "enter" | "over" | "hover" | "hovered") {
             drag_over.set(inside);
             return;
@@ -326,30 +409,44 @@ fn App() -> impl IntoView {
             drag_over.set(false);
             return;
         }
-        if !matches!(kind.as_str(), "drop" | "dropped") { return; }
+        if !matches!(kind.as_str(), "drop" | "dropped") {
+            return;
+        }
         drag_over.set(false);
-        if !inside { return; }
-        let paths = value.get("paths").and_then(|item| item.as_array()).cloned().unwrap_or_default();
-        for path in paths.into_iter().filter_map(|item| item.as_str().map(str::to_string)) {
-            if attachments.get_untracked().iter().any(|attachment| matches!(attachment, ComposerAttachment::Ready { path: existing, .. } if existing == &path)) {
-                continue;
-            }
-            let name = path.rsplit(['/', '\\']).next().filter(|name| !name.is_empty()).unwrap_or(&path).to_string();
-            attachments.update(|items| items.push(ComposerAttachment::Ready {
-                key: format!("native:{path}"), name, path,
-            }));
+        if !inside {
+            return;
+        }
+        let paths = value
+            .get("paths")
+            .and_then(|item| item.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for path in paths
+            .into_iter()
+            .filter_map(|item| item.as_str().map(str::to_string))
+        {
+            let _ = attach_ready_path(attachments, path);
         }
         if active_acp_agent_id.get_untracked().is_none() {
             status.set(t(locale.get_untracked(), "composer.native_path_api_hint").into());
         }
     }) as Box<dyn FnMut(JsValue)>);
-    let native_drop_js = native_drop_cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
+    let native_drop_js = native_drop_cb
+        .as_ref()
+        .unchecked_ref::<js_sys::Function>()
+        .clone();
     std::mem::forget(native_drop_cb);
-    spawn_local(async move { let _ = listen_native_file_drop(&native_drop_js).await; });
-    let refresh_specialists = move || spawn_local(async move {
-        let v = invoke("list_specialists", JsValue::UNDEFINED).await;
-        if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<Specialist>>(v) { specialists.set(list); }
+    spawn_local(async move {
+        let _ = listen_native_file_drop(&native_drop_js).await;
     });
+    let refresh_specialists = move || {
+        spawn_local(async move {
+            let v = invoke("list_specialists", JsValue::UNDEFINED).await;
+            if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<Specialist>>(v) {
+                specialists.set(list);
+            }
+        })
+    };
     // Per-session specialist (persona) picker, gated to before the first message.
     let session_specialist = create_rw_signal::<Option<Specialist>>(None);
     let demos = create_rw_signal::<Vec<DemoInfo>>(vec![]);
@@ -376,8 +473,12 @@ fn App() -> impl IntoView {
         };
         spawn_local(async move {
             let args = to_value(&serde_json::json!({ "frameId": session_id.clone() })).unwrap();
-            let Ok(value) = invoke_checked("get_acp_session_agent", args).await else { return; };
-            let Ok(agent_id) = serde_wasm_bindgen::from_value::<Option<String>>(value) else { return; };
+            let Ok(value) = invoke_checked("get_acp_session_agent", args).await else {
+                return;
+            };
+            let Ok(agent_id) = serde_wasm_bindgen::from_value::<Option<String>>(value) else {
+                return;
+            };
             if active_session.get_untracked().as_deref() != Some(session_id.as_str()) {
                 return;
             }
@@ -387,13 +488,19 @@ fn App() -> impl IntoView {
                 &pending_turns.get_untracked(),
                 &running.get_untracked(),
             );
-            let Some(mut next) = next else { return; };
+            let Some(mut next) = next else {
+                return;
+            };
             // A fetch started before the first ACP bind can still return None after
             // send_message finishes. Confirm before clearing a live selection.
             if next.is_none() && active_acp_agent_id.get_untracked().is_some() {
                 let args = to_value(&serde_json::json!({ "frameId": session_id.clone() })).unwrap();
-                let Ok(value) = invoke_checked("get_acp_session_agent", args).await else { return; };
-                let Ok(confirmed) = serde_wasm_bindgen::from_value::<Option<String>>(value) else { return; };
+                let Ok(value) = invoke_checked("get_acp_session_agent", args).await else {
+                    return;
+                };
+                let Ok(confirmed) = serde_wasm_bindgen::from_value::<Option<String>>(value) else {
+                    return;
+                };
                 if active_session.get_untracked().as_deref() != Some(session_id.as_str()) {
                     return;
                 }
@@ -405,37 +512,52 @@ fn App() -> impl IntoView {
     refresh_sessions(sessions);
     refresh_folders(folders);
 
-
     // `busy` is "the active session is currently streaming" — derived from the
     // per-session `running` set so it stays correct when the user switches
     // conversations or a background turn finishes.
     create_effect(move |_| {
         let r = running.get();
-        let b = active_session.get().map(|id| r.contains(&id)).unwrap_or(false);
+        let b = active_session
+            .get()
+            .map(|id| r.contains(&id))
+            .unwrap_or(false);
         busy.set(b);
     });
 
     // Refresh the session's specialist whenever the active session changes
     // (including on load and on "no session").
     create_effect(move |_| {
-        let Some(sid) = active_session.get() else { session_specialist.set(None); return; };
+        let Some(sid) = active_session.get() else {
+            session_specialist.set(None);
+            return;
+        };
         spawn_local(async move {
             let arg = to_value(&serde_json::json!({ "frameId": sid })).unwrap();
             let v = invoke("get_session_specialist", arg).await;
             if active_session.get_untracked().as_deref() == Some(sid.as_str()) {
-                session_specialist.set(serde_wasm_bindgen::from_value::<Option<Specialist>>(v).ok().flatten());
+                session_specialist.set(
+                    serde_wasm_bindgen::from_value::<Option<Specialist>>(v)
+                        .ok()
+                        .flatten(),
+                );
             }
         });
     });
     let pick_specialist = move |id: String| {
-        let Some(sid) = active_session.get() else { return; };
+        let Some(sid) = active_session.get() else {
+            return;
+        };
         spawn_local(async move {
             let arg = to_value(&serde_json::json!({ "frameId": sid, "id": id })).unwrap();
             if invoke_checked("set_session_specialist", arg).await.is_ok() {
                 let arg = to_value(&serde_json::json!({ "frameId": sid })).unwrap();
                 let v = invoke("get_session_specialist", arg).await;
                 if active_session.get_untracked().as_deref() == Some(sid.as_str()) {
-                    session_specialist.set(serde_wasm_bindgen::from_value::<Option<Specialist>>(v).ok().flatten());
+                    session_specialist.set(
+                        serde_wasm_bindgen::from_value::<Option<Specialist>>(v)
+                            .ok()
+                            .flatten(),
+                    );
                 }
             }
         });
@@ -468,10 +590,18 @@ fn App() -> impl IntoView {
     // backend which referenced files are gone and drop them from the list.
     let missing_paths = create_rw_signal(std::collections::HashSet::<String>::new());
     create_effect(move |_| {
-        let paths: Vec<String> = artifacts_all.get().iter()
-            .filter_map(|a| match &a.data { PreviewData::File { path, .. } => Some(path.clone()), _ => None })
+        let paths: Vec<String> = artifacts_all
+            .get()
+            .iter()
+            .filter_map(|a| match &a.data {
+                PreviewData::File { path, .. } => Some(path.clone()),
+                _ => None,
+            })
             .collect();
-        if paths.is_empty() { missing_paths.set(std::collections::HashSet::new()); return; }
+        if paths.is_empty() {
+            missing_paths.set(std::collections::HashSet::new());
+            return;
+        }
         spawn_local(async move {
             let arg = to_value(&serde_json::json!({ "paths": paths })).unwrap();
             let v = invoke("missing_files", arg).await;
@@ -482,8 +612,13 @@ fn App() -> impl IntoView {
     });
     let artifacts = create_memo(move |_| {
         let miss = missing_paths.get();
-        artifacts_all.get().into_iter()
-            .filter(|a| match &a.data { PreviewData::File { path, .. } => !miss.contains(path), _ => true })
+        artifacts_all
+            .get()
+            .into_iter()
+            .filter(|a| match &a.data {
+                PreviewData::File { path, .. } => !miss.contains(path),
+                _ => true,
+            })
             .collect::<Vec<_>>()
     });
     let notebook_cache = Rc::new(RefCell::new(NotebookCache::new()));
@@ -534,12 +669,7 @@ fn App() -> impl IntoView {
                 }
                 open_workspace_file(path.clone(), modal_artifact);
             } else {
-                ensure_right_tab(
-                    RightTab::Artifacts,
-                    show_right,
-                    open_right_tabs,
-                    right_tab,
-                );
+                ensure_right_tab(RightTab::Artifacts, show_right, open_right_tabs, right_tab);
                 sel_artifact.set(idx);
                 show_art_preview.set(true);
             }
@@ -560,28 +690,45 @@ fn App() -> impl IntoView {
     let picker_artifacts = create_rw_signal(Vec::<ArtifactInfo>::new());
     let picker_sessions = create_rw_signal(Vec::<SessionSearchInfo>::new());
     create_effect(move |_| {
-        let Some(mode) = picker_mode.get() else { return; };
+        let Some(mode) = picker_mode.get() else {
+            return;
+        };
         let query = picker_query.get();
         match mode {
             ComposerPickerMode::Artifact => spawn_local(async move {
-                let arg = to_value(&serde_json::json!({ "query": query, "limit": 40, "allProjects": true })).unwrap();
+                let arg = to_value(
+                    &serde_json::json!({ "query": query, "limit": 40, "allProjects": true }),
+                )
+                .unwrap();
                 let v = invoke("search_artifacts", arg).await;
-                if picker_mode.get_untracked() == Some(mode) && picker_query.get_untracked() == query {
-                    if let Ok(rows) = serde_wasm_bindgen::from_value::<Vec<ArtifactInfo>>(v) { picker_artifacts.set(rows); }
+                if picker_mode.get_untracked() == Some(mode)
+                    && picker_query.get_untracked() == query
+                {
+                    if let Ok(rows) = serde_wasm_bindgen::from_value::<Vec<ArtifactInfo>>(v) {
+                        picker_artifacts.set(rows);
+                    }
                 }
             }),
             ComposerPickerMode::Session => spawn_local(async move {
                 let arg = to_value(&serde_json::json!({ "query": query, "limit": 40 })).unwrap();
                 let v = invoke("search_sessions", arg).await;
-                if picker_mode.get_untracked() == Some(mode) && picker_query.get_untracked() == query {
-                    if let Ok(rows) = serde_wasm_bindgen::from_value::<Vec<SessionSearchInfo>>(v) { picker_sessions.set(rows); }
+                if picker_mode.get_untracked() == Some(mode)
+                    && picker_query.get_untracked() == query
+                {
+                    if let Ok(rows) = serde_wasm_bindgen::from_value::<Vec<SessionSearchInfo>>(v) {
+                        picker_sessions.set(rows);
+                    }
                 }
             }),
-            ComposerPickerMode::Skill if skills_list.get_untracked().is_empty() => spawn_local(async move {
-                let v = invoke("list_skills", JsValue::UNDEFINED).await;
-                if let Ok(rows) = serde_wasm_bindgen::from_value::<Vec<SkillRow>>(v) { skills_list.set(rows); }
-            }),
-            ComposerPickerMode::Skill => {},
+            ComposerPickerMode::Skill if skills_list.get_untracked().is_empty() => {
+                spawn_local(async move {
+                    let v = invoke("list_skills", JsValue::UNDEFINED).await;
+                    if let Ok(rows) = serde_wasm_bindgen::from_value::<Vec<SkillRow>>(v) {
+                        skills_list.set(rows);
+                    }
+                })
+            }
+            ComposerPickerMode::Skill => {}
         }
     });
     let picker_items = create_memo(move |_| {
@@ -591,24 +738,46 @@ fn App() -> impl IntoView {
                 let current_session = active_session.get();
                 let current_project = project_info.get().map(|p| p.id);
                 let mut rows = picker_artifacts.get();
-                rows.sort_by_key(|a| (
-                    if a.session_id.as_deref() == current_session.as_deref() { 0 } else if a.project_id.as_deref() == current_project.as_deref() { 1 } else { 2 },
-                    std::cmp::Reverse(a.ts),
-                ));
+                rows.sort_by_key(|a| {
+                    (
+                        if a.session_id.as_deref() == current_session.as_deref() {
+                            0
+                        } else if a.project_id.as_deref() == current_project.as_deref() {
+                            1
+                        } else {
+                            2
+                        },
+                        std::cmp::Reverse(a.ts),
+                    )
+                });
                 rows.into_iter().map(ComposerPickerItem::Artifact).collect()
             }
             Some(ComposerPickerMode::Session) => {
                 let current_project = project_info.get().map(|p| p.id);
-                let mut rows: Vec<_> = picker_sessions.get().into_iter()
-                    .filter(|s| active_session.get().as_deref() != Some(s.id.as_str())).collect();
-                rows.sort_by_key(|s| (current_project.as_deref() != Some(s.project_id.as_str()), std::cmp::Reverse(s.activity_at)));
+                let mut rows: Vec<_> = picker_sessions
+                    .get()
+                    .into_iter()
+                    .filter(|s| active_session.get().as_deref() != Some(s.id.as_str()))
+                    .collect();
+                rows.sort_by_key(|s| {
+                    (
+                        current_project.as_deref() != Some(s.project_id.as_str()),
+                        std::cmp::Reverse(s.activity_at),
+                    )
+                });
                 rows.into_iter().map(ComposerPickerItem::Session).collect()
             }
             Some(ComposerPickerMode::Skill) => {
-                let mut rows: Vec<_> = skills_list.get().into_iter().filter(|s| s.enabled && (
-                    s.name.to_lowercase().contains(&query) || s.description.to_lowercase().contains(&query) ||
-                    s.tags.iter().any(|tag| tag.to_lowercase().contains(&query))
-                )).collect();
+                let mut rows: Vec<_> = skills_list
+                    .get()
+                    .into_iter()
+                    .filter(|s| {
+                        s.enabled
+                            && (s.name.to_lowercase().contains(&query)
+                                || s.description.to_lowercase().contains(&query)
+                                || s.tags.iter().any(|tag| tag.to_lowercase().contains(&query)))
+                    })
+                    .collect();
                 rows.sort_by_key(|s| (!s.builtin, s.name.clone()));
                 rows.into_iter().map(ComposerPickerItem::Skill).collect()
             }
@@ -616,17 +785,30 @@ fn App() -> impl IntoView {
         }
     });
     let select_picker_item = Callback::new(move |i: usize| {
-        let Some(item) = picker_items.get().get(i).cloned() else { return; };
+        let Some(item) = picker_items.get().get(i).cloned() else {
+            return;
+        };
         let reference = match item {
-            ComposerPickerItem::Artifact(a) => ComposerReferenceChip::Artifact { id: a.id, name: a.name },
-            ComposerPickerItem::Session(s) => ComposerReferenceChip::Session { id: s.id, title: s.title, project_name: s.project_name },
+            ComposerPickerItem::Artifact(a) => ComposerReferenceChip::Artifact {
+                id: a.id,
+                name: a.name,
+            },
+            ComposerPickerItem::Session(s) => ComposerReferenceChip::Session {
+                id: s.id,
+                title: s.title,
+                project_name: s.project_name,
+            },
             ComposerPickerItem::Skill(s) => ComposerReferenceChip::Skill { name: s.name },
         };
         input.update(|s| {
-            if let Some((at, _, _)) = active_composer_trigger(s) { s.truncate(at); }
+            if let Some((at, _, _)) = active_composer_trigger(s) {
+                s.truncate(at);
+            }
         });
         composer_references.update(|items| {
-            if !items.iter().any(|item| item.key() == reference.key()) { items.push(reference); }
+            if !items.iter().any(|item| item.key() == reference.key()) {
+                items.push(reference);
+            }
         });
         picker_mode.set(None);
         focus_composer();
@@ -647,7 +829,9 @@ fn App() -> impl IntoView {
         }
         let v = invoke("get_onboarding_state", JsValue::UNDEFINED).await;
         if let Ok(s) = serde_wasm_bindgen::from_value::<OnboardingState>(v) {
-            if s.show { show_onboarding.set(true); }
+            if s.show {
+                show_onboarding.set(true);
+            }
         }
         let b = invoke("get_bootstrap_status", JsValue::UNDEFINED).await;
         if let Ok(st) = serde_wasm_bindgen::from_value::<BootstrapStatus>(b) {
@@ -696,7 +880,14 @@ fn App() -> impl IntoView {
         let flush_now = || flush_delta_buf(&cb_buf, active_cb, items_cb, transcripts_cb, models_cb);
         let queue = |fid: String, d: PendingDelta| {
             queue_delta(&cb_buf, fid, d);
-            schedule_delta_flush(&cb_buf, &cb_scheduled, active_cb, items_cb, transcripts_cb, models_cb);
+            schedule_delta_flush(
+                &cb_buf,
+                &cb_scheduled,
+                active_cb,
+                items_cb,
+                transcripts_cb,
+                models_cb,
+            );
         };
         match ev {
             AgentEvent::User { frame_id, text } => {
@@ -707,69 +898,131 @@ fn App() -> impl IntoView {
                 })
             }
             AgentEvent::Text { frame_id, delta } => queue(frame_id, PendingDelta::Text(delta)),
-            AgentEvent::Reasoning { frame_id, delta } => queue(frame_id, PendingDelta::Reasoning(delta)),
-            AgentEvent::ToolCall { frame_id, name, preview } => { flush_now(); route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
-                let idx = trailing_queue_start(v);
-                v.insert(idx, ChatItem::Tool {
-                    name,
-                    ok: None,
-                    input: preview,
-                    output: String::new(),
-                    started_at_ms: Some(now_ms()),
-                    duration_ms: None,
-                });
-            }) }
-            AgentEvent::ToolResult { frame_id, name, ok, content, duration_ms: event_ms } => { flush_now(); route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
-                let queue_start = trailing_queue_start(v);
-                let idx = v[..queue_start].iter().rposition(|c| matches!(c, ChatItem::Tool { name: n, ok: None, .. } if n == &name));
-                if let Some(i) = idx {
-                    if let ChatItem::Tool { ok: o, output, started_at_ms, duration_ms, .. } = &mut v[i] {
-                        *o = Some(ok);
-                        *output = content.clone();
-                        finalize_tool_duration(started_at_ms, duration_ms, event_ms);
+            AgentEvent::Reasoning { frame_id, delta } => {
+                queue(frame_id, PendingDelta::Reasoning(delta))
+            }
+            AgentEvent::ToolCall {
+                frame_id,
+                name,
+                preview,
+            } => {
+                flush_now();
+                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
+                    let idx = trailing_queue_start(v);
+                    v.insert(
+                        idx,
+                        ChatItem::Tool {
+                            name,
+                            ok: None,
+                            input: preview,
+                            output: String::new(),
+                            started_at_ms: Some(now_ms()),
+                            duration_ms: None,
+                        },
+                    );
+                })
+            }
+            AgentEvent::ToolResult {
+                frame_id,
+                name,
+                ok,
+                content,
+                duration_ms: event_ms,
+            } => {
+                flush_now();
+                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
+                    let queue_start = trailing_queue_start(v);
+                    let idx = v[..queue_start].iter().rposition(
+                        |c| matches!(c, ChatItem::Tool { name: n, ok: None, .. } if n == &name),
+                    );
+                    if let Some(i) = idx {
+                        if let ChatItem::Tool {
+                            ok: o,
+                            output,
+                            started_at_ms,
+                            duration_ms,
+                            ..
+                        } = &mut v[i]
+                        {
+                            *o = Some(ok);
+                            *output = content.clone();
+                            finalize_tool_duration(started_at_ms, duration_ms, event_ms);
+                        }
+                    } else {
+                        let dur = if event_ms > 0 { Some(event_ms) } else { None };
+                        v.insert(
+                            queue_start,
+                            ChatItem::Tool {
+                                name: name.clone(),
+                                ok: Some(ok),
+                                input: String::new(),
+                                output: content.clone(),
+                                started_at_ms: None,
+                                duration_ms: dur,
+                            },
+                        );
                     }
-                } else {
-                    let dur = if event_ms > 0 { Some(event_ms) } else { None };
-                    v.insert(queue_start, ChatItem::Tool {
-                        name: name.clone(),
-                        ok: Some(ok),
-                        input: String::new(),
-                        output: content.clone(),
-                        started_at_ms: None,
-                        duration_ms: dur,
-                    });
-                }
-                if name == "attempt_completion" && ok {
-                    promote_assistant_text(v, &content);
-                }
-            }) }
-            AgentEvent::Usage { frame_id, input, output, ctx_tokens, max_context, .. } => {
+                    if name == "attempt_completion" && ok {
+                        promote_assistant_text(v, &content);
+                    }
+                })
+            }
+            AgentEvent::Usage {
+                frame_id,
+                input,
+                output,
+                ctx_tokens,
+                max_context,
+                ..
+            } => {
                 // Status bar reflects only the active session's usage.
                 if active_cb.get().as_deref() == Some(&frame_id) {
-                    let pct = if max_context > 0 { ctx_tokens * 100 / max_context } else { 0 };
+                    let pct = if max_context > 0 {
+                        ctx_tokens * 100 / max_context
+                    } else {
+                        0
+                    };
                     let loc = locale_cb.get();
-                    status_cb.set(tf(loc, "status.usage", &[
-                        ("in", &format!("{:.1}", input as f64 / 1000.0)),
-                        ("out", &format!("{:.1}", output as f64 / 1000.0)),
-                        ("pct", &pct.to_string()),
-                    ]));
+                    status_cb.set(tf(
+                        loc,
+                        "status.usage",
+                        &[
+                            ("in", &format!("{:.1}", input as f64 / 1000.0)),
+                            ("out", &format!("{:.1}", output as f64 / 1000.0)),
+                            ("pct", &pct.to_string()),
+                        ],
+                    ));
                 }
             }
-            AgentEvent::Compaction { frame_id, before, after, .. } => {
+            AgentEvent::Compaction {
+                frame_id,
+                before,
+                after,
+                ..
+            } => {
                 if active_cb.get().as_deref() == Some(&frame_id) {
-                    status_cb.set(tf(locale_cb.get(), "status.compact", &[
-                        ("before", &before.to_string()),
-                        ("after", &after.to_string()),
-                    ]));
+                    status_cb.set(tf(
+                        locale_cb.get(),
+                        "status.compact",
+                        &[
+                            ("before", &before.to_string()),
+                            ("after", &after.to_string()),
+                        ],
+                    ));
                 }
             }
             AgentEvent::Stdout { frame_id, chunk } => queue(frame_id, PendingDelta::Stdout(chunk)),
-            AgentEvent::Done { frame_id, stop_reason: _ } => {
+            AgentEvent::Done {
+                frame_id,
+                stop_reason: _,
+            } => {
                 flush_now();
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |items| {
                     strip_approval_pending(items);
                 });
-                approval_cb.update(|s| { s.remove(&frame_id); });
+                approval_cb.update(|s| {
+                    s.remove(&frame_id);
+                });
                 clear_running_if_idle(pending_cb, running_cb, &frame_id);
                 if stopping_session.get().as_deref() == Some(&frame_id) {
                     stopping_session.set(None);
@@ -781,9 +1034,14 @@ fn App() -> impl IntoView {
                 let model = active_model_label(&models_cb.get());
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
                     strip_approval_pending(v);
-                    v.push(ChatItem::Assistant { text: format!("Error: {message}"), model });
+                    v.push(ChatItem::Assistant {
+                        text: format!("Error: {message}"),
+                        model,
+                    });
                 });
-                approval_cb.update(|s| { s.remove(&frame_id); });
+                approval_cb.update(|s| {
+                    s.remove(&frame_id);
+                });
                 clear_running_if_idle(pending_cb, running_cb, &frame_id);
                 if stopping_session.get().as_deref() == Some(&frame_id) {
                     stopping_session.set(None);
@@ -799,10 +1057,13 @@ fn App() -> impl IntoView {
                 flush_now();
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
                     let index = trailing_queue_start(v);
-                    v.insert(index, ChatItem::Assistant {
-                        text: String::new(),
-                        model: (!model.is_empty()).then_some(model),
-                    });
+                    v.insert(
+                        index,
+                        ChatItem::Assistant {
+                            text: String::new(),
+                            model: (!model.is_empty()).then_some(model),
+                        },
+                    );
                 });
                 if active_cb.get().as_deref() == Some(&frame_id) {
                     status_cb.set(t(locale_cb.get(), "status.correcting"));
@@ -810,7 +1071,9 @@ fn App() -> impl IntoView {
             }
             AgentEvent::Review { frame_id, report } => {
                 flush_now();
-                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| upsert_review(v, report));
+                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
+                    upsert_review(v, report)
+                });
                 if active_cb.get().as_deref() == Some(&frame_id) {
                     status_cb.set(t(locale_cb.get(), "status.review_done"));
                 }
@@ -822,7 +1085,9 @@ fn App() -> impl IntoView {
     std::mem::forget(cb);
     // wasm-bindgen only runs an async extern's JS body when the returned
     // future is polled, so we must await `listen` (not fire-and-forget it).
-    spawn_local(async move { let _ = listen("agent", &agent_js).await; });
+    spawn_local(async move {
+        let _ = listen("agent", &agent_js).await;
+    });
 
     // Confirm handler: render an inline approval card in the session thread
     // (not a global modal — see README inline tool-approval card).
@@ -832,13 +1097,29 @@ fn App() -> impl IntoView {
     let confirm_pending = approval_pending;
     let confirm_cb = Closure::wrap(Box::new(move |payload: JsValue| {
         if let Ok(v) = serde_wasm_bindgen::from_value::<serde_json::Value>(payload) {
-            let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
-            let fid = v.get("frame_id").and_then(|m| m.as_str()).unwrap_or("").to_string();
+            let msg = v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_string();
+            let fid = v
+                .get("frame_id")
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_string();
             if msg.is_empty() || fid.is_empty() {
                 return;
             }
-            let mut tool = v.get("tool").and_then(|t| t.as_str()).unwrap_or("").to_string();
-            let mut preview = v.get("preview").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            let mut tool = v
+                .get("tool")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mut preview = v
+                .get("preview")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
             if tool.is_empty() {
                 if let Some(rest) = msg.strip_prefix("Run tool '") {
                     if let Some((t, _)) = rest.split_once("'?") {
@@ -848,113 +1129,228 @@ fn App() -> impl IntoView {
                     tool = "shell".into();
                 }
             }
-            route_items(confirm_active, confirm_items, confirm_transcripts, &fid, |v| {
-                strip_approval_pending(v);
-                if preview.is_empty() {
-                    preview = last_tool_input(v, &tool);
-                }
-                v.push(ChatItem::ApprovalPending {
-                    tool,
-                    preview,
-                    message: msg,
-                });
-            });
+            route_items(
+                confirm_active,
+                confirm_items,
+                confirm_transcripts,
+                &fid,
+                |v| {
+                    strip_approval_pending(v);
+                    if preview.is_empty() {
+                        preview = last_tool_input(v, &tool);
+                    }
+                    v.push(ChatItem::ApprovalPending {
+                        tool,
+                        preview,
+                        message: msg,
+                    });
+                },
+            );
             confirm_pending.update(|s| {
                 s.insert(fid);
             });
             force_chat_bottom();
         }
     }) as Box<dyn FnMut(JsValue)>);
-    let confirm_js = confirm_cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
+    let confirm_js = confirm_cb
+        .as_ref()
+        .unchecked_ref::<js_sys::Function>()
+        .clone();
     std::mem::forget(confirm_cb);
-    spawn_local(async move { let _ = listen("confirm-request", &confirm_js).await; });
+    spawn_local(async move {
+        let _ = listen("confirm-request", &confirm_js).await;
+    });
     let acp_permission_items = items;
     let acp_permission_active = active_session;
     let acp_permission_transcripts = transcripts;
     let acp_permission_cb = Closure::wrap(Box::new(move |payload: JsValue| {
-        let Ok(request) = serde_wasm_bindgen::from_value::<AcpPermissionRequest>(payload) else { return; };
-        let tool = request.tool_call.get("title").and_then(serde_json::Value::as_str)
-            .or_else(|| request.tool_call.get("name").and_then(serde_json::Value::as_str))
-            .unwrap_or("ACP tool request").to_string();
-        route_items(acp_permission_active, acp_permission_items, acp_permission_transcripts, &request.frame_id, |items| {
-            items.push(ChatItem::AcpPermission { request_id: request.request_id, tool, options: request.options });
-        });
+        let Ok(request) = serde_wasm_bindgen::from_value::<AcpPermissionRequest>(payload) else {
+            return;
+        };
+        let tool = request
+            .tool_call
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                request
+                    .tool_call
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .unwrap_or("ACP tool request")
+            .to_string();
+        route_items(
+            acp_permission_active,
+            acp_permission_items,
+            acp_permission_transcripts,
+            &request.frame_id,
+            |items| {
+                items.push(ChatItem::AcpPermission {
+                    request_id: request.request_id,
+                    tool,
+                    options: request.options,
+                });
+            },
+        );
     }) as Box<dyn FnMut(JsValue)>);
-    let acp_permission_js: js_sys::Function = acp_permission_cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
+    let acp_permission_js: js_sys::Function = acp_permission_cb
+        .as_ref()
+        .unchecked_ref::<js_sys::Function>()
+        .clone();
     acp_permission_cb.forget();
-    spawn_local(async move { let _ = listen("permission-request", &acp_permission_js).await; });
+    spawn_local(async move {
+        let _ = listen("permission-request", &acp_permission_js).await;
+    });
 
     let acp_update_cb = Closure::wrap(Box::new(move |payload: JsValue| {
-        let Ok(update) = serde_wasm_bindgen::from_value::<AcpSessionUpdate>(payload) else { return; };
+        let Ok(update) = serde_wasm_bindgen::from_value::<AcpSessionUpdate>(payload) else {
+            return;
+        };
         match update.kind.as_str() {
-            "ToolCall" | "ToolCallUpdate" => route_items(active_session, items, transcripts, &update.frame_id, |rows| {
-                upsert_acp_tool(rows, &update.payload);
-            }),
+            "ToolCall" | "ToolCallUpdate" => route_items(
+                active_session,
+                items,
+                transcripts,
+                &update.frame_id,
+                |rows| {
+                    upsert_acp_tool(rows, &update.payload);
+                },
+            ),
             "Plan" => {
                 let text = acp_plan_text(&update.payload);
-                route_items(active_session, items, transcripts, &update.frame_id, |rows| {
-                    let card = PlanCard { text };
-                    if let Some(index) = rows.iter().rposition(|row| matches!(row, ChatItem::Plan(_))) {
-                        rows[index] = ChatItem::Plan(card);
-                    } else {
-                        let index = trailing_queue_start(rows);
-                        rows.insert(index, ChatItem::Plan(card));
-                    }
-                });
+                route_items(
+                    active_session,
+                    items,
+                    transcripts,
+                    &update.frame_id,
+                    |rows| {
+                        let card = PlanCard { text };
+                        if let Some(index) = rows
+                            .iter()
+                            .rposition(|row| matches!(row, ChatItem::Plan(_)))
+                        {
+                            rows[index] = ChatItem::Plan(card);
+                        } else {
+                            let index = trailing_queue_start(rows);
+                            rows.insert(index, ChatItem::Plan(card));
+                        }
+                    },
+                );
             }
             "ConfigOptions" => {
-                if let Some(options) = update.payload.get("configOptions").and_then(serde_json::Value::as_array) {
-                    acp_session_configs.update(|all| { all.insert(update.frame_id, options.clone()); });
+                if let Some(options) = update
+                    .payload
+                    .get("configOptions")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    acp_session_configs.update(|all| {
+                        all.insert(update.frame_id, options.clone());
+                    });
                 }
             }
             "CurrentMode" => {
-                acp_session_modes.update(|all| { all.insert(update.frame_id, update.payload); });
+                acp_session_modes.update(|all| {
+                    all.insert(update.frame_id, update.payload);
+                });
             }
-            "Usage" => if active_session.get_untracked().as_deref() == Some(update.frame_id.as_str()) {
-                let used = update.payload.get("used").and_then(serde_json::Value::as_u64).unwrap_or(0);
-                let size = update.payload.get("size").and_then(serde_json::Value::as_u64).unwrap_or(0);
-                status.set(if size == 0 { format!("ACP context: {used} tokens") } else { format!("ACP context: {used} / {size} tokens") });
-            },
-            "SessionInfo" => if active_session.get_untracked().as_deref() == Some(update.frame_id.as_str()) {
-                if let Some(title) = update.payload.get("title").and_then(serde_json::Value::as_str) {
-                    status.set(title.into());
+            "Usage" => {
+                if active_session.get_untracked().as_deref() == Some(update.frame_id.as_str()) {
+                    let used = update
+                        .payload
+                        .get("used")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    let size = update
+                        .payload
+                        .get("size")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    status.set(if size == 0 {
+                        format!("ACP context: {used} tokens")
+                    } else {
+                        format!("ACP context: {used} / {size} tokens")
+                    });
                 }
-            },
-            "AvailableCommands" => if active_session.get_untracked().as_deref() == Some(update.frame_id.as_str()) {
-                status.set("ACP commands updated".into());
-            },
+            }
+            "SessionInfo" => {
+                if active_session.get_untracked().as_deref() == Some(update.frame_id.as_str()) {
+                    if let Some(title) = update
+                        .payload
+                        .get("title")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        status.set(title.into());
+                    }
+                }
+            }
+            "AvailableCommands" => {
+                if active_session.get_untracked().as_deref() == Some(update.frame_id.as_str()) {
+                    status.set("ACP commands updated".into());
+                }
+            }
             _ => {}
         }
     }) as Box<dyn FnMut(JsValue)>);
-    let acp_update_js: js_sys::Function = acp_update_cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
+    let acp_update_js: js_sys::Function = acp_update_cb
+        .as_ref()
+        .unchecked_ref::<js_sys::Function>()
+        .clone();
     acp_update_cb.forget();
-    spawn_local(async move { let _ = listen("acp-session-update", &acp_update_js).await; });
+    spawn_local(async move {
+        let _ = listen("acp-session-update", &acp_update_js).await;
+    });
 
     let acp_state_cb = Closure::wrap(Box::new(move |payload: JsValue| {
-        let Ok(state) = serde_wasm_bindgen::from_value::<AcpSessionState>(payload) else { return; };
+        let Ok(state) = serde_wasm_bindgen::from_value::<AcpSessionState>(payload) else {
+            return;
+        };
         if let Some(options) = state.config_options {
-            acp_session_configs.update(|all| { all.insert(state.frame_id.clone(), options); });
+            acp_session_configs.update(|all| {
+                all.insert(state.frame_id.clone(), options);
+            });
         }
         if let Some(modes) = state.modes {
-            acp_session_modes.update(|all| { all.insert(state.frame_id, modes); });
+            acp_session_modes.update(|all| {
+                all.insert(state.frame_id, modes);
+            });
         }
     }) as Box<dyn FnMut(JsValue)>);
-    let acp_state_js: js_sys::Function = acp_state_cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
+    let acp_state_js: js_sys::Function = acp_state_cb
+        .as_ref()
+        .unchecked_ref::<js_sys::Function>()
+        .clone();
     acp_state_cb.forget();
-    spawn_local(async move { let _ = listen("acp-session-state", &acp_state_js).await; });
+    spawn_local(async move {
+        let _ = listen("acp-session-state", &acp_state_js).await;
+    });
 
     let acp_resolved_cb = Closure::wrap(Box::new(move |payload: JsValue| {
-        let Ok(resolved) = serde_wasm_bindgen::from_value::<AcpPermissionResolved>(payload) else { return; };
-        route_items(active_session, items, transcripts, &resolved.frame_id, |rows| {
-            rows.retain(|row| !matches!(row, ChatItem::AcpPermission { request_id, .. } if request_id == &resolved.request_id));
-        });
+        let Ok(resolved) = serde_wasm_bindgen::from_value::<AcpPermissionResolved>(payload) else {
+            return;
+        };
+        route_items(
+            active_session,
+            items,
+            transcripts,
+            &resolved.frame_id,
+            |rows| {
+                rows.retain(|row| !matches!(row, ChatItem::AcpPermission { request_id, .. } if request_id == &resolved.request_id));
+            },
+        );
     }) as Box<dyn FnMut(JsValue)>);
-    let acp_resolved_js: js_sys::Function = acp_resolved_cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
+    let acp_resolved_js: js_sys::Function = acp_resolved_cb
+        .as_ref()
+        .unchecked_ref::<js_sys::Function>()
+        .clone();
     acp_resolved_cb.forget();
-    spawn_local(async move { let _ = listen("permission-resolved", &acp_resolved_js).await; });
+    spawn_local(async move {
+        let _ = listen("permission-resolved", &acp_resolved_js).await;
+    });
 
     let stop = move |_| {
-        if stopping_session.get().is_some() { return; }
+        if stopping_session.get().is_some() {
+            return;
+        }
         // Stop only the active session's turn; background conversations keep running.
         let sid = active_session.get();
         stopping_session.set(sid.clone());
@@ -970,7 +1366,10 @@ fn App() -> impl IntoView {
         let refs = composer_references.get();
         let paths = attachment_paths(&saved_attachments);
         let display_message = message_with_attachments(&message, &paths);
-        let reference_args = refs.iter().map(ComposerReferenceChip::arg).collect::<Vec<_>>();
+        let reference_args = refs
+            .iter()
+            .map(ComposerReferenceChip::arg)
+            .collect::<Vec<_>>();
         if message.trim().is_empty() && paths.is_empty() && reference_args.is_empty() {
             return;
         }
@@ -979,7 +1378,10 @@ fn App() -> impl IntoView {
             return;
         }
         if active_acp_agent_id.get().is_some() && !reference_args.is_empty() {
-            status.set("ACP sessions currently support text and file attachments, not Wisp references.".into());
+            status.set(
+                "ACP sessions currently support text and file attachments, not Wisp references."
+                    .into(),
+            );
             return;
         }
         let active = active_session.get();
@@ -1001,7 +1403,12 @@ fn App() -> impl IntoView {
         picker_mode.set(None);
         spawn_local(async move {
             let id = if branch {
-                let args = to_value(&tauri_args::branch_session(&active, Some(message.trim()), None)).unwrap();
+                let args = to_value(&tauri_args::branch_session(
+                    &active,
+                    Some(message.trim()),
+                    None,
+                ))
+                .unwrap();
                 match invoke("branch_session", args).await.as_string() {
                     Some(id) => id,
                     None => {
@@ -1041,14 +1448,19 @@ fn App() -> impl IntoView {
                 });
             });
             force_chat_bottom();
+            // Persist/emit the same display text the optimistic bubble uses
+            // (including "Uploaded files: …"). Sending the bare composer body
+            // makes AgentEvent::User mismatch the optimistic row and append a
+            // duplicate; after a session switch only the persisted body remains.
             let args = to_value(&SendMessageArgs {
                 session_id: Some(id.clone()),
-                message: message.clone(),
+                message: display_message.clone(),
                 attachments: paths,
                 references: reference_args,
                 resume: false,
                 acp_agent_id: agent_id.clone(),
-            }).unwrap();
+            })
+            .unwrap();
             match invoke_checked("send_message", args).await {
                 Ok(_) => {
                     if let Some(agent_id) = agent_id {
@@ -1067,12 +1479,24 @@ fn App() -> impl IntoView {
                         }
                     });
                     if !started {
-                        if input.get_untracked().is_empty() { input.set(message); }
-                        if attachments.get_untracked().is_empty() { attachments.set(saved_attachments); }
-                        if composer_references.get_untracked().is_empty() { composer_references.set(refs); }
+                        if input.get_untracked().is_empty() {
+                            input.set(message);
+                        }
+                        if attachments.get_untracked().is_empty() {
+                            attachments.set(saved_attachments);
+                        }
+                        if composer_references.get_untracked().is_empty() {
+                            composer_references.set(refs);
+                        }
                     }
-                    if raw.contains(NO_API_KEY_MARK) { needs_api_key.set(true); }
-                    status.set(tf(locale.get(), "status.send_failed", &[("msg", &localize_backend(locale.get(), message_text))]));
+                    if raw.contains(NO_API_KEY_MARK) {
+                        needs_api_key.set(true);
+                    }
+                    status.set(tf(
+                        locale.get(),
+                        "status.send_failed",
+                        &[("msg", &localize_backend(locale.get(), message_text))],
+                    ));
                 }
             }
             finish_pending_turn(pending_turns, running, &id);
@@ -1083,12 +1507,7 @@ fn App() -> impl IntoView {
         if question.is_empty() || side_chat_busy.get() {
             return;
         }
-        ensure_right_tab(
-            RightTab::SideChat,
-            show_right,
-            open_right_tabs,
-            right_tab,
-        );
+        ensure_right_tab(RightTab::SideChat, show_right, open_right_tabs, right_tab);
         side_chat_input.set(String::new());
         side_chat_items.update(|v| v.push(ChatItem::User(question.clone())));
         side_chat_busy.set(true);
@@ -1104,13 +1523,19 @@ fn App() -> impl IntoView {
                 Ok(v) => {
                     let text = v.as_string().unwrap_or_default();
                     side_chat_items.update(|items| {
-                        items.push(ChatItem::Assistant { text, model: model.clone() });
+                        items.push(ChatItem::Assistant {
+                            text,
+                            model: model.clone(),
+                        });
                     });
                 }
                 Err(err) => {
                     side_chat_items.update(|items| {
                         items.push(ChatItem::Assistant {
-                            text: format!("Error: {}", localize_backend(locale.get(), &js_error_text(err))),
+                            text: format!(
+                                "Error: {}",
+                                localize_backend(locale.get(), &js_error_text(err))
+                            ),
                             model: model.clone(),
                         });
                     });
@@ -1143,13 +1568,22 @@ fn App() -> impl IntoView {
                     picker_index.set(next);
                     scroll_picker_item(".mention-item", next);
                 }
-                "Enter" | "Tab" => { ev.prevent_default(); select_picker_item.call(picker_index.get()); }
-                "Escape" => { ev.prevent_default(); picker_mode.set(None); }
+                "Enter" | "Tab" => {
+                    ev.prevent_default();
+                    select_picker_item.call(picker_index.get());
+                }
+                "Escape" => {
+                    ev.prevent_default();
+                    picker_mode.set(None);
+                }
                 _ => {}
             }
             return;
         }
-        if ev.key() == "Enter" && !ev.shift_key() { ev.prevent_default(); send.call(ComposerSendAction::Normal); }
+        if ev.key() == "Enter" && !ev.shift_key() {
+            ev.prevent_default();
+            send.call(ComposerSendAction::Normal);
+        }
     };
 
     let edit_message = move |ui_index: usize| {
@@ -1275,18 +1709,30 @@ fn App() -> impl IntoView {
                         }
                         let is_active = active_session.get().as_deref() == Some(&id);
                         let stranded = if is_active {
-                            items.with(|v| v.iter().any(|c| matches!(c, ChatItem::Tool { ok: None, .. })))
+                            items.with(|v| {
+                                v.iter()
+                                    .any(|c| matches!(c, ChatItem::Tool { ok: None, .. }))
+                            })
                         } else {
                             transcripts.with(|m| {
-                                m.get(&id)
-                                    .map_or(false, |v| v.iter().any(|c| matches!(c, ChatItem::Tool { ok: None, .. })))
+                                m.get(&id).map_or(false, |v| {
+                                    v.iter()
+                                        .any(|c| matches!(c, ChatItem::Tool { ok: None, .. }))
+                                })
                             })
                         };
                         if stranded {
-                            let v = invoke("load_session", to_value(&serde_json::json!({ "id": id })).unwrap()).await;
+                            let v = invoke(
+                                "load_session",
+                                to_value(&serde_json::json!({ "id": id })).unwrap(),
+                            )
+                            .await;
                             if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<LoadedItem>>(v) {
-                                let chats: Vec<ChatItem> = list.into_iter().map(LoadedItem::into_chat).collect();
-                                transcripts.update(|m| { m.insert(id.clone(), chats.clone()); });
+                                let chats: Vec<ChatItem> =
+                                    list.into_iter().map(LoadedItem::into_chat).collect();
+                                transcripts.update(|m| {
+                                    m.insert(id.clone(), chats.clone());
+                                });
                                 if active_session.get().as_deref() == Some(&id) {
                                     items.set(chats);
                                     force_chat_bottom();
@@ -1301,7 +1747,11 @@ fn App() -> impl IntoView {
                         if raw.contains(NO_API_KEY_MARK) {
                             needs_api_key.set(true);
                         }
-                        status.set(tf(loc, "status.send_failed", &[("msg", &localize_backend(loc, &raw))]));
+                        status.set(tf(
+                            loc,
+                            "status.send_failed",
+                            &[("msg", &localize_backend(loc, &raw))],
+                        ));
                         finish_pending_turn(pending_turns, running, &id);
                         if stopping_session.get().as_deref() == Some(&id) {
                             stopping_session.set(None);
@@ -1316,9 +1766,15 @@ fn App() -> impl IntoView {
         if uploading.get() {
             return;
         }
-        let Some(window) = web_sys::window() else { return; };
-        let Some(doc) = window.document() else { return; };
-        let Some(el) = doc.get_element_by_id("composer-file-input") else { return; };
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Some(doc) = window.document() else {
+            return;
+        };
+        let Some(el) = doc.get_element_by_id("composer-file-input") else {
+            return;
+        };
         let _ = el.dyn_ref::<web_sys::HtmlElement>().map(|e| e.click());
     };
 
@@ -1370,19 +1826,29 @@ fn App() -> impl IntoView {
     let composer_blocked = move || uploading.get();
 
     let check_updates = move |_| {
-        if settings_busy.get() { return; }
+        if settings_busy.get() {
+            return;
+        }
         settings_busy.set(true);
-        settings_message.set(Some((true, t(locale.get(), "status.checking_updates").into())));
+        settings_message.set(Some((
+            true,
+            t(locale.get(), "status.checking_updates").into(),
+        )));
         let msg = settings_message;
         let busy = settings_busy;
         let loc = locale;
         spawn_local(async move {
             match invoke_checked("check_for_updates", JsValue::UNDEFINED).await {
                 Ok(v) => {
-                    let text = v.as_string().unwrap_or_else(|| t(loc.get(), "status.update_check_complete").into());
+                    let text = v
+                        .as_string()
+                        .unwrap_or_else(|| t(loc.get(), "status.update_check_complete").into());
                     msg.set(Some((true, localize_backend(loc.get(), &text))));
                 }
-                Err(err) => msg.set(Some((false, localize_backend(loc.get(), &js_error_text(err))))),
+                Err(err) => msg.set(Some((
+                    false,
+                    localize_backend(loc.get(), &js_error_text(err)),
+                ))),
             }
             busy.set(false);
         });
@@ -1406,7 +1872,10 @@ fn App() -> impl IntoView {
                     refresh_skills();
                 }
                 Err(err) => {
-                    skills_msg.set(Some((false, localize_backend(locale.get(), &js_error_text(err)))));
+                    skills_msg.set(Some((
+                        false,
+                        localize_backend(locale.get(), &js_error_text(err)),
+                    )));
                 }
             }
         });
@@ -1415,9 +1884,13 @@ fn App() -> impl IntoView {
     let refresh_conns = move || {
         spawn_local(async move {
             let v = invoke("list_mcp_connections", JsValue::UNDEFINED).await;
-            if let Ok(view) = serde_wasm_bindgen::from_value::<ConnView>(v) { conns_view.set(Some(view)); }
+            if let Ok(view) = serde_wasm_bindgen::from_value::<ConnView>(v) {
+                conns_view.set(Some(view));
+            }
             let c = invoke("list_connectors", JsValue::UNDEFINED).await;
-            if let Ok(view) = serde_wasm_bindgen::from_value::<ConnectorsView>(c) { connectors.set(Some(view)); }
+            if let Ok(view) = serde_wasm_bindgen::from_value::<ConnectorsView>(c) {
+                connectors.set(Some(view));
+            }
         });
     };
 
@@ -1432,16 +1905,33 @@ fn App() -> impl IntoView {
 
     let load_custom_conn_tools = move |row: ConnRow| {
         let id = row.id.clone();
-        custom_conn_tools_loading.update(|s| { s.insert(id.clone()); });
-        custom_conn_tool_errors.update(|m| { m.remove(&id); });
+        custom_conn_tools_loading.update(|s| {
+            s.insert(id.clone());
+        });
+        custom_conn_tool_errors.update(|m| {
+            m.remove(&id);
+        });
         spawn_local(async move {
             let conn = build_conn_json(&conn_form_from_row(&row), false);
-            let out = invoke_checked("test_mcp_connection", to_value(&serde_json::json!({ "conn": conn })).unwrap()).await;
-            match out.and_then(|v| serde_wasm_bindgen::from_value::<Vec<ConnectorTool>>(v).map_err(|e| JsValue::from_str(&e.to_string()))) {
-                Ok(tools) => custom_conn_tools.update(|m| { m.insert(id.clone(), tools); }),
-                Err(err) => custom_conn_tool_errors.update(|m| { m.insert(id.clone(), js_error_text(err)); }),
+            let out = invoke_checked(
+                "test_mcp_connection",
+                to_value(&serde_json::json!({ "conn": conn })).unwrap(),
+            )
+            .await;
+            match out.and_then(|v| {
+                serde_wasm_bindgen::from_value::<Vec<ConnectorTool>>(v)
+                    .map_err(|e| JsValue::from_str(&e.to_string()))
+            }) {
+                Ok(tools) => custom_conn_tools.update(|m| {
+                    m.insert(id.clone(), tools);
+                }),
+                Err(err) => custom_conn_tool_errors.update(|m| {
+                    m.insert(id.clone(), js_error_text(err));
+                }),
             }
-            custom_conn_tools_loading.update(|s| { s.remove(&id); });
+            custom_conn_tools_loading.update(|s| {
+                s.remove(&id);
+            });
         });
     };
 
@@ -1531,14 +2021,19 @@ fn App() -> impl IntoView {
                 set_document_lang(l);
                 s.set(cfg);
             } else {
-                msg.set(Some((false, t(loc.get(), "status.failed_load_settings").into())));
+                msg.set(Some((
+                    false,
+                    t(loc.get(), "status.failed_load_settings").into(),
+                )));
             }
         });
     };
     let open_settings = move |_| open_settings_fn(None);
 
     let save_settings = move |_| {
-        if settings_busy.get() { return; }
+        if settings_busy.get() {
+            return;
+        }
         let mut cfg = normalized_settings(settings.get());
         cfg.locale = locale.get().code().into();
         let s = settings;
@@ -1555,10 +2050,15 @@ fn App() -> impl IntoView {
             let settings_result = invoke_checked(
                 "set_settings",
                 to_value(&serde_json::json!({ "settings": cfg.clone() })).unwrap(),
-            ).await;
+            )
+            .await;
             if let Err(err) = settings_result {
                 let l = loc.get();
-                let text = tf(l, "status.save_failed", &[("msg", &localize_backend(l, &js_error_text(err)))]);
+                let text = tf(
+                    l,
+                    "status.save_failed",
+                    &[("msg", &localize_backend(l, &js_error_text(err)))],
+                );
                 msg.set(Some((false, text.clone())));
                 status_msg.set(text);
                 busy.set(false);
@@ -1572,12 +2072,24 @@ fn App() -> impl IntoView {
     };
 
     let save_model_form = move |_| {
-        if settings_busy.get() { return; }
-        let Some(form) = model_form.get() else { return; };
+        if settings_busy.get() {
+            return;
+        }
+        let Some(form) = model_form.get() else {
+            return;
+        };
         let loc = locale.get();
         let key = model_form_key.get();
-        let has_key = form.id.as_ref()
-            .and_then(|id| models.get().iter().find(|m| &m.id == id).map(|m| m.has_api_key))
+        let has_key = form
+            .id
+            .as_ref()
+            .and_then(|id| {
+                models
+                    .get()
+                    .iter()
+                    .find(|m| &m.id == id)
+                    .map(|m| m.has_api_key)
+            })
             .unwrap_or(false);
         let cfg = model_form_to_settings(&form, has_key && key.is_empty());
         if let Some(err_key) = settings_required_error_key(&cfg, &key) {
@@ -1606,7 +2118,8 @@ fn App() -> impl IntoView {
                 "profile": profile,
                 "key": key_arg,
                 "useForVision": form.use_for_vision,
-            })).unwrap();
+            }))
+            .unwrap();
             match invoke_checked("save_model", arg).await {
                 Ok(v) => {
                     if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(v) {
@@ -1628,17 +2141,28 @@ fn App() -> impl IntoView {
         });
     };
 
-
     let validate_model_form = move |_| {
-        if settings_busy.get() { return; }
-        let Some(form) = model_form.get() else { return; };
+        if settings_busy.get() {
+            return;
+        }
+        let Some(form) = model_form.get() else {
+            return;
+        };
         let loc = locale.get();
         let key = model_form_key.get();
-        let has_key = models.get().iter().find(|m| Some(m.id.as_str()) == form.id.as_deref()).map(|m| m.has_api_key).unwrap_or(false);
+        let has_key = models
+            .get()
+            .iter()
+            .find(|m| Some(m.id.as_str()) == form.id.as_deref())
+            .map(|m| m.has_api_key)
+            .unwrap_or(false);
         let cfg = model_form_to_settings(&form, has_key);
         if let Some(err_key) = settings_required_error_key(&cfg, &key) {
             let err = t(loc, err_key);
-            model_form_msg.set(Some((false, tf(loc, "status.validation_failed", &[("msg", &err)]))));
+            model_form_msg.set(Some((
+                false,
+                tf(loc, "status.validation_failed", &[("msg", &err)]),
+            )));
             return;
         }
         settings_busy.set(true);
@@ -1648,14 +2172,24 @@ fn App() -> impl IntoView {
                 "validate_settings",
                 to_value(&serde_json::json!({ "settings": cfg, "key": key })).unwrap(),
                 35_000,
-            ).await;
+            )
+            .await;
             match res {
                 Ok(v) => {
-                    let raw = v.as_string().unwrap_or_else(|| t(loc, "status.validation_succeeded").into());
+                    let raw = v
+                        .as_string()
+                        .unwrap_or_else(|| t(loc, "status.validation_succeeded").into());
                     model_form_msg.set(Some((true, localize_backend(loc, &raw))));
                 }
                 Err(err) => {
-                    model_form_msg.set(Some((false, tf(loc, "status.validation_failed", &[("msg", &localize_backend(loc, &js_error_text(err)))]))));
+                    model_form_msg.set(Some((
+                        false,
+                        tf(
+                            loc,
+                            "status.validation_failed",
+                            &[("msg", &localize_backend(loc, &js_error_text(err)))],
+                        ),
+                    )));
                 }
             }
             settings_busy.set(false);
@@ -1663,7 +2197,9 @@ fn App() -> impl IntoView {
     };
 
     let save_specialist_form = move |_| {
-        let Some(spec) = specialist_form.get() else { return; };
+        let Some(spec) = specialist_form.get() else {
+            return;
+        };
         if spec.name.trim().is_empty() {
             settings_message.set(Some((false, "Specialist name is required.".into())));
             return;
@@ -1701,11 +2237,13 @@ fn App() -> impl IntoView {
 
     let new_session = move |_| {
         demo_mode.set(false); // starting a fresh chat leaves the demo view
-        // Stash the current transcript under its id so a running turn keeps
-        // streaming into the cache, then create a fresh frame and show it.
-        // We do NOT cancel any running turn — parallel conversations keep going.
+                              // Stash the current transcript under its id so a running turn keeps
+                              // streaming into the cache, then create a fresh frame and show it.
+                              // We do NOT cancel any running turn — parallel conversations keep going.
         if let Some(old) = active_session.get() {
-            transcripts.update(|m| { m.insert(old, items.get()); });
+            transcripts.update(|m| {
+                m.insert(old, items.get());
+            });
         }
         attachments.set(vec![]);
         sel_artifact.set(0);
@@ -1738,7 +2276,9 @@ fn App() -> impl IntoView {
         let sessions = sessions;
         let models = models;
         move |_| {
-            if busy.get() { return; }
+            if busy.get() {
+                return;
+            }
             show_capabilities.set(false);
             attachments.set(vec![]);
             sel_artifact.set(0);
@@ -1747,7 +2287,10 @@ fn App() -> impl IntoView {
             let turn_model = active_model_label(&models.get());
             items.set(vec![
                 ChatItem::User(text.clone()),
-                ChatItem::Assistant { text: String::new(), model: turn_model },
+                ChatItem::Assistant {
+                    text: String::new(),
+                    model: turn_model,
+                },
             ]);
             force_chat_bottom();
             spawn_local(async move {
@@ -1760,23 +2303,43 @@ fn App() -> impl IntoView {
                     return;
                 }
                 active_session.set(Some(id.clone()));
-                running.update(|r| { r.insert(id.clone()); });
+                running.update(|r| {
+                    r.insert(id.clone());
+                });
                 refresh_sessions(sessions);
                 let arg = to_value(&SendMessageArgs {
-                    session_id: Some(id.clone()), message: text, attachments: vec![], references: vec![], resume: false,
+                    session_id: Some(id.clone()),
+                    message: text,
+                    attachments: vec![],
+                    references: vec![],
+                    resume: false,
                     acp_agent_id: None,
-                }).unwrap();
+                })
+                .unwrap();
                 match invoke_checked("send_message", arg).await {
                     // The awaited command resolving is the reliable turn-complete
                     // signal; clear `running` here so a dropped `Done` broadcast
                     // can't pin the session on "运行中" (#34).
-                    Ok(_) => { running.update(|r| { r.remove(&id); }); refresh_sessions(sessions); }
+                    Ok(_) => {
+                        running.update(|r| {
+                            r.remove(&id);
+                        });
+                        refresh_sessions(sessions);
+                    }
                     Err(err) => {
                         let loc = locale.get();
                         let raw = js_error_text(err);
-                        if raw.contains(NO_API_KEY_MARK) { needs_api_key.set(true); }
-                        status.set(tf(loc, "status.send_failed", &[("msg", &localize_backend(loc, &raw))]));
-                        running.update(|r| { r.clear(); });
+                        if raw.contains(NO_API_KEY_MARK) {
+                            needs_api_key.set(true);
+                        }
+                        status.set(tf(
+                            loc,
+                            "status.send_failed",
+                            &[("msg", &localize_backend(loc, &raw))],
+                        ));
+                        running.update(|r| {
+                            r.clear();
+                        });
                     }
                 }
             });
@@ -1789,7 +2352,9 @@ fn App() -> impl IntoView {
         right_tab.set(RightTab::Artifacts);
         // Stash the transcript we're leaving under its id.
         if let Some(old) = active_session.get() {
-            transcripts.update(|m| { m.insert(old, items.get()); });
+            transcripts.update(|m| {
+                m.insert(old, items.get());
+            });
         }
         let is_running = running.get().contains(&id);
         active_session.set(Some(id.clone()));
@@ -1803,10 +2368,16 @@ fn App() -> impl IntoView {
         }
         // Idle session: load from DB and overwrite any stale cache entry.
         spawn_local(async move {
-            let v = invoke("load_session", to_value(&serde_json::json!({ "id": id.clone() })).unwrap()).await;
+            let v = invoke(
+                "load_session",
+                to_value(&serde_json::json!({ "id": id.clone() })).unwrap(),
+            )
+            .await;
             if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<LoadedItem>>(v) {
                 let chats: Vec<ChatItem> = list.into_iter().map(LoadedItem::into_chat).collect();
-                transcripts.update(|m| { m.insert(id.clone(), chats.clone()); });
+                transcripts.update(|m| {
+                    m.insert(id.clone(), chats.clone());
+                });
                 // Only repaint the view if we're still on this session — a rapid
                 // switch could have moved on while the load was in flight, and an
                 // unguarded set would clobber the newer view with stale rows (#53).
@@ -1824,7 +2395,9 @@ fn App() -> impl IntoView {
         // Demos are read-only transcripts; they don't stream, so we don't touch
         // `running`. We do stash the current chat so returning to it is possible.
         if let Some(old) = active_session.get() {
-            transcripts.update(|m| { m.insert(old, items.get()); });
+            transcripts.update(|m| {
+                m.insert(old, items.get());
+            });
         }
         attachments.set(vec![]);
         sel_artifact.set(0);
@@ -1833,13 +2406,22 @@ fn App() -> impl IntoView {
         spawn_local(async move {
             // Fresh session so the demo doesn't mix into a real conversation.
             let _ = invoke("new_session", JsValue::UNDEFINED).await;
-            let v = invoke("load_demo", to_value(&serde_json::json!({ "id": id })).unwrap()).await;
+            let v = invoke(
+                "load_demo",
+                to_value(&serde_json::json!({ "id": id })).unwrap(),
+            )
+            .await;
             if let Ok(demo) = serde_wasm_bindgen::from_value::<Demo>(v) {
                 let mut view = vec![ChatItem::User(demo.request.clone())];
                 if let Some(t) = &demo.thinking {
-                    if !t.is_empty() { view.push(ChatItem::Reasoning(t.clone())); }
+                    if !t.is_empty() {
+                        view.push(ChatItem::Reasoning(t.clone()));
+                    }
                 }
-                view.push(ChatItem::Assistant { text: demo.response.clone(), model: None });
+                view.push(ChatItem::Assistant {
+                    text: demo.response.clone(),
+                    model: None,
+                });
                 items.set(view);
                 force_chat_bottom();
                 status_cb.set(tf(locale.get(), "status.demo", &[("title", &demo.title)]));
@@ -1852,17 +2434,31 @@ fn App() -> impl IntoView {
         let items = items;
         let transcripts = transcripts;
         let approval_pending = approval_pending;
-        Callback::new(move |(sid, approved, feedback, scope): (String, bool, Option<String>, String)| {
-            route_items(active_session, items, transcripts, &sid, strip_approval_pending);
-            approval_pending.update(|s| {
-                s.remove(&sid);
-            });
-            let arg =
-                to_value(&tauri_args::confirm_response(&sid, approved, feedback.as_deref(), Some(&scope))).unwrap();
-            spawn_local(async move { let _ = invoke("confirm_response", arg).await; });
-        })
+        Callback::new(
+            move |(sid, approved, feedback, scope): (String, bool, Option<String>, String)| {
+                route_items(
+                    active_session,
+                    items,
+                    transcripts,
+                    &sid,
+                    strip_approval_pending,
+                );
+                approval_pending.update(|s| {
+                    s.remove(&sid);
+                });
+                let arg = to_value(&tauri_args::confirm_response(
+                    &sid,
+                    approved,
+                    feedback.as_deref(),
+                    Some(&scope),
+                ))
+                .unwrap();
+                spawn_local(async move {
+                    let _ = invoke("confirm_response", arg).await;
+                });
+            },
+        )
     };
-
 
     let on_sidebar_resize_start = move |ev: web_sys::MouseEvent| {
         ev.prevent_default();
@@ -1905,7 +2501,8 @@ fn App() -> impl IntoView {
     let on_composer_resize_move = move |ev: web_sys::MouseEvent| {
         if composer_dragging.get() {
             let dy = composer_drag_start_y.get() - ev.client_y() as f64;
-            composer_h.set((composer_drag_start_h.get() + dy).clamp(COMPOSER_H_MIN, COMPOSER_H_MAX));
+            composer_h
+                .set((composer_drag_start_h.get() + dy).clamp(COMPOSER_H_MIN, COMPOSER_H_MAX));
             composer_h_custom.set(true);
         }
     };
@@ -1918,12 +2515,7 @@ fn App() -> impl IntoView {
     };
 
     let open_files = move |_| {
-        ensure_right_tab(
-            RightTab::File,
-            show_right,
-            open_right_tabs,
-            right_tab,
-        );
+        ensure_right_tab(RightTab::File, show_right, open_right_tabs, right_tab);
         refresh_dir(file_cwd, file_entries);
     };
 
@@ -1977,7 +2569,11 @@ fn App() -> impl IntoView {
     let save_skill_tags = Callback::new(move |(name, raw): (String, String)| {
         let tags = split_tags(&raw);
         spawn_local(async move {
-            let _ = invoke_checked("set_skill_tags", to_value(&serde_json::json!({ "name": name, "tags": tags })).unwrap()).await;
+            let _ = invoke_checked(
+                "set_skill_tags",
+                to_value(&serde_json::json!({ "name": name, "tags": tags })).unwrap(),
+            )
+            .await;
             refresh_skills();
         });
     });
@@ -1985,7 +2581,9 @@ fn App() -> impl IntoView {
     let set_visible_skills_enabled = Callback::new(move |enabled: bool| {
         let tag = skill_filter_tag.get();
         let query = skills_search.get();
-        let names = skills_list.get().into_iter()
+        let names = skills_list
+            .get()
+            .into_iter()
             .filter(|s| skill_matches_filter(s, &tag, &query))
             .map(|s| s.name)
             .collect::<Vec<_>>();
@@ -2001,14 +2599,20 @@ fn App() -> impl IntoView {
             }
         });
         spawn_local(async move {
-            let _ = invoke_checked("set_skills_enabled", to_value(&serde_json::json!({ "names": names, "enabled": enabled })).unwrap()).await;
+            let _ = invoke_checked(
+                "set_skills_enabled",
+                to_value(&serde_json::json!({ "names": names, "enabled": enabled })).unwrap(),
+            )
+            .await;
             refresh_skills();
         });
     });
 
     let dismiss_onboarding = Callback::new(move |_| {
         show_onboarding.set(false);
-        spawn_local(async move { let _ = invoke("dismiss_onboarding", JsValue::UNDEFINED).await; });
+        spawn_local(async move {
+            let _ = invoke("dismiss_onboarding", JsValue::UNDEFINED).await;
+        });
     });
     let dismiss_onboard = move |_| dismiss_onboarding.call(());
 
@@ -2120,7 +2724,7 @@ fn App() -> impl IntoView {
         let ui_confirm = ui_confirm;
         let active_session = active_session;
         let artifacts = artifacts;
-        let input = input;
+        let attachments = attachments;
         Callback::new(move |(action, payload): (String, String)| {
             if action == "downloadFile" {
                 download_artifact(payload);
@@ -2128,21 +2732,22 @@ fn App() -> impl IntoView {
             }
             if action == "copyImage" {
                 spawn_local(async move {
-                    if context_menu::copy_image(&payload).await { show_copy_toast(); }
+                    if context_menu::copy_image(&payload).await {
+                        show_copy_toast();
+                    }
                 });
                 return;
             }
             if action == "attachWorkspaceFile" {
-                input.update(|text| {
-                    if !text.is_empty() && !text.ends_with('\n') { text.push('\n'); }
-                    text.push_str(&format!("Use project file `{payload}` as context."));
-                });
+                let _ = attach_ready_path(attachments, payload);
                 focus_composer();
                 return;
             }
             if action == "exportSession" {
                 let session_id = if payload.is_empty() {
-                    let Some(id) = active_session.get() else { return };
+                    let Some(id) = active_session.get() else {
+                        return;
+                    };
                     id
                 } else {
                     payload.clone()
@@ -2192,7 +2797,9 @@ fn App() -> impl IntoView {
                     context_menu::SessionAction::Move { id, folder_id } => {
                         let sessions = sessions;
                         spawn_local(async move {
-                            let arg = to_value(&serde_json::json!({ "id": id, "folderId": folder_id })).unwrap();
+                            let arg =
+                                to_value(&serde_json::json!({ "id": id, "folderId": folder_id }))
+                                    .unwrap();
                             if invoke_checked("move_session", arg).await.is_ok() {
                                 refresh_sessions(sessions);
                             }
@@ -2228,7 +2835,9 @@ fn App() -> impl IntoView {
     // but app-level overlays (settings, artifact modal, onboarding) still
     // close here — they can sit on top of the projects landing.
     window_event_listener(ev::keydown, move |ev| {
-        let Some(ev) = ev.dyn_ref::<web_sys::KeyboardEvent>() else { return };
+        let Some(ev) = ev.dyn_ref::<web_sys::KeyboardEvent>() else {
+            return;
+        };
         if ev.key() != "Escape" || ev.default_prevented() || ev.is_composing() {
             return;
         }
@@ -2380,10 +2989,12 @@ fn App() -> impl IntoView {
         }
 
         // --- approval reject last ---
-        if active_session
-            .get()
-            .is_some_and(|_sid| items.get().iter().any(|i| matches!(i, ChatItem::ApprovalPending { .. })))
-        {
+        if active_session.get().is_some_and(|_sid| {
+            items
+                .get()
+                .iter()
+                .any(|i| matches!(i, ChatItem::ApprovalPending { .. }))
+        }) {
             ev.prevent_default();
             if let Some(sid) = active_session.get() {
                 respond_confirm.call((sid, false, None, "once".into()));
@@ -2402,7 +3013,9 @@ fn App() -> impl IntoView {
         if ev.default_prevented() {
             return;
         }
-        let mut el = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok());
+        let mut el = ev
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::Element>().ok());
         while let Some(n) = el {
             if n.tag_name().eq_ignore_ascii_case("a") {
                 if let Some(href) = n.get_attribute("href") {
@@ -2549,7 +3162,9 @@ fn App() -> impl IntoView {
         if opening {
             spawn_local(async move {
                 let v = invoke("list_projects", JsValue::UNDEFINED).await;
-                if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ProjectSummary>>(v) { proj_list.set(list); }
+                if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ProjectSummary>>(v) {
+                    proj_list.set(list);
+                }
             });
         }
     };
@@ -2564,9 +3179,13 @@ fn App() -> impl IntoView {
         });
     };
     let save_proj_settings = move |_| {
-        if proj_settings_busy.get() { return; }
+        if proj_settings_busy.get() {
+            return;
+        }
         let form = proj_settings.get();
-        if form.name.trim().is_empty() { return; }
+        if form.name.trim().is_empty() {
+            return;
+        }
         proj_settings_busy.set(true);
         spawn_local(async move {
             let arg = to_value(&serde_json::json!({
@@ -2577,7 +3196,9 @@ fn App() -> impl IntoView {
             if res.is_ok() {
                 show_proj_settings.set(false);
                 let v = invoke("get_project_info", JsValue::UNDEFINED).await;
-                if let Ok(p) = serde_wasm_bindgen::from_value::<ProjectInfo>(v) { project_info.set(Some(p)); }
+                if let Ok(p) = serde_wasm_bindgen::from_value::<ProjectInfo>(v) {
+                    project_info.set(Some(p));
+                }
             }
         });
     };
@@ -2586,7 +3207,8 @@ fn App() -> impl IntoView {
         let sessions = sessions;
         Callback::new(move |(session_id, folder_id): (String, Option<String>)| {
             spawn_local(async move {
-                let arg = to_value(&serde_json::json!({ "id": session_id, "folderId": folder_id })).unwrap();
+                let arg = to_value(&serde_json::json!({ "id": session_id, "folderId": folder_id }))
+                    .unwrap();
                 if invoke_checked("move_session", arg).await.is_ok() {
                     refresh_sessions(sessions);
                 }
@@ -2630,12 +3252,17 @@ fn App() -> impl IntoView {
             open_project_transition.call((project_id, Some(session_id)));
         })
     };
-    let palette_open_artifact = Callback::new(move |(path, name, kind): (String, String, String)| {
-        modal_artifact.set(Some((path, name, kind)));
-    });
+    let palette_open_artifact =
+        Callback::new(move |(path, name, kind): (String, String, String)| {
+            modal_artifact.set(Some((path, name, kind)));
+        });
     let palette_new_session = Callback::new(move |_: ()| {
         demo_mode.set(false);
-        if let Some(old) = active_session.get() { transcripts.update(|m| { m.insert(old, items.get()); }); }
+        if let Some(old) = active_session.get() {
+            transcripts.update(|m| {
+                m.insert(old, items.get());
+            });
+        }
         attachments.set(vec![]);
         composer_references.set(vec![]);
         sel_artifact.set(0);
@@ -2665,11 +3292,17 @@ fn App() -> impl IntoView {
         settings_section.set("skills".into());
         spawn_local(async move {
             let v = invoke("list_skills", JsValue::UNDEFINED).await;
-            if let Ok(rows) = serde_wasm_bindgen::from_value::<Vec<SkillRow>>(v) { skills_list.set(rows); }
+            if let Ok(rows) = serde_wasm_bindgen::from_value::<Vec<SkillRow>>(v) {
+                skills_list.set(rows);
+            }
         });
     });
     let palette_attach = Callback::new(move |reference: ComposerReferenceChip| {
-        if !composer_references.get().iter().any(|item| item.key() == reference.key()) {
+        if !composer_references
+            .get()
+            .iter()
+            .any(|item| item.key() == reference.key())
+        {
             composer_references.update(|items| items.push(reference));
         }
     });
@@ -2682,16 +3315,34 @@ fn App() -> impl IntoView {
             "search" => command_palette_open.set(true),
             "commands" => action_palette_open.set(true),
             "projects" => show_projects.set(true),
-            "settings" => { show_settings.set(true); settings_section.set("models".into()); }
+            "settings" => {
+                show_settings.set(true);
+                settings_section.set("models".into());
+            }
             "project-settings" => project_settings.call(()),
             "skills" => manage_skills.call(()),
             "toggle-sidebar" => show_sidebar.update(|show| *show = !*show),
-            "artifacts" => ensure_right_tab(RightTab::Artifacts, show_right, open_right_tabs, right_tab),
-            "notebook" => ensure_right_tab(RightTab::Notebook, show_right, open_right_tabs, right_tab),
-            "files" => { ensure_right_tab(RightTab::File, show_right, open_right_tabs, right_tab); refresh_dir(file_cwd, file_entries); }
-            "provenance" => ensure_right_tab(RightTab::Provenance, show_right, open_right_tabs, right_tab),
-            "contexts" => { ensure_right_tab(RightTab::Hosts, show_right, open_right_tabs, right_tab); refresh_execution_contexts(execution_contexts); refresh_runs(run_records); }
-            "side-chat" => ensure_right_tab(RightTab::SideChat, show_right, open_right_tabs, right_tab),
+            "artifacts" => {
+                ensure_right_tab(RightTab::Artifacts, show_right, open_right_tabs, right_tab)
+            }
+            "notebook" => {
+                ensure_right_tab(RightTab::Notebook, show_right, open_right_tabs, right_tab)
+            }
+            "files" => {
+                ensure_right_tab(RightTab::File, show_right, open_right_tabs, right_tab);
+                refresh_dir(file_cwd, file_entries);
+            }
+            "provenance" => {
+                ensure_right_tab(RightTab::Provenance, show_right, open_right_tabs, right_tab)
+            }
+            "contexts" => {
+                ensure_right_tab(RightTab::Hosts, show_right, open_right_tabs, right_tab);
+                refresh_execution_contexts(execution_contexts);
+                refresh_runs(run_records);
+            }
+            "side-chat" => {
+                ensure_right_tab(RightTab::SideChat, show_right, open_right_tabs, right_tab)
+            }
             "close-panel" => show_right.set(false),
             "theme-light" => theme_mode.set("light".into()),
             "theme-dark" => theme_mode.set("dark".into()),
@@ -2702,7 +3353,9 @@ fn App() -> impl IntoView {
     let palette_project_id = Signal::derive(move || project_info.get().map(|p| p.id));
     let shortcut_action = palette_action.clone();
     window_event_listener(ev::keydown, move |ev| {
-        let Some(ev) = ev.dyn_ref::<web_sys::KeyboardEvent>() else { return; };
+        let Some(ev) = ev.dyn_ref::<web_sys::KeyboardEvent>() else {
+            return;
+        };
         if ev.is_composing() || !(ev.ctrl_key() || ev.meta_key()) {
             return;
         }
@@ -2718,14 +3371,25 @@ fn App() -> impl IntoView {
                 action_palette_open.set(false);
                 command_palette_open.update(|open| *open = !*open);
             }
-            "n" => { ev.prevent_default(); shortcut_action.call("new"); }
-            "b" => { ev.prevent_default(); shortcut_action.call("toggle-sidebar"); }
-            "," => { ev.prevent_default(); shortcut_action.call("settings"); }
+            "n" => {
+                ev.prevent_default();
+                shortcut_action.call("new");
+            }
+            "b" => {
+                ev.prevent_default();
+                shortcut_action.call("toggle-sidebar");
+            }
+            "," => {
+                ev.prevent_default();
+                shortcut_action.call("settings");
+            }
             _ => {}
         }
     });
     window_event_listener(ev::keydown, move |ev| {
-        let Some(ev) = ev.dyn_ref::<web_sys::KeyboardEvent>() else { return; };
+        let Some(ev) = ev.dyn_ref::<web_sys::KeyboardEvent>() else {
+            return;
+        };
         if ev.default_prevented()
             || ev.is_composing()
             || ev.alt_key()
@@ -2736,16 +3400,23 @@ fn App() -> impl IntoView {
         {
             return;
         }
-        let Some((path, _, kind)) = modal_artifact.get() else { return; };
-        let (prev_artifact, next_artifact) = modal_image_nav_targets(&artifacts.get(), &path, &kind);
+        let Some((path, _, kind)) = modal_artifact.get() else {
+            return;
+        };
+        let (prev_artifact, next_artifact) =
+            modal_image_nav_targets(&artifacts.get(), &path, &kind);
         match ev.key().as_str() {
             "ArrowLeft" => {
-                let Some((path, name, kind)) = prev_artifact else { return; };
+                let Some((path, name, kind)) = prev_artifact else {
+                    return;
+                };
                 ev.prevent_default();
                 modal_artifact.set(Some((path, name, kind)));
             }
             "ArrowRight" => {
-                let Some((path, name, kind)) = next_artifact else { return; };
+                let Some((path, name, kind)) = next_artifact else {
+                    return;
+                };
                 ev.prevent_default();
                 modal_artifact.set(Some((path, name, kind)));
             }
@@ -4617,8 +5288,15 @@ fn is_process_item(item: &ChatItem) -> bool {
 /// One thread render unit: either a single message, or a coalesced steps panel.
 #[derive(Clone)]
 enum ThreadRow {
-    Item { i: usize, item: ChatItem, is_last: bool },
-    Steps { items: Vec<ChatItem>, live: bool },
+    Item {
+        i: usize,
+        item: ChatItem,
+        is_last: bool,
+    },
+    Steps {
+        items: Vec<ChatItem>,
+        live: bool,
+    },
 }
 
 /// Compact, foldable summary of a thinking + tool run (#82). Collapsed by
@@ -4630,23 +5308,38 @@ enum ThreadRow {
 /// portable way to drop it — so we don't render one.
 fn render_steps_group(items: Vec<ChatItem>, live: bool) -> impl IntoView {
     let locale = use_locale();
-    let n_tools = items.iter().filter(|c| {
-        matches!(c, ChatItem::Tool { .. } | ChatItem::AcpTool { .. })
-    }).count();
+    let n_tools = items
+        .iter()
+        .filter(|c| matches!(c, ChatItem::Tool { .. } | ChatItem::AcpTool { .. }))
+        .count();
     let now = now_ms();
-    let total_ms: u64 = items.iter().map(|c| match c {
-        ChatItem::Tool { duration_ms: Some(d), .. } => *d,
-        ChatItem::Tool { duration_ms: None, started_at_ms: Some(s), ok: None, .. } if live => {
-            now.saturating_sub(*s)
-        }
-        _ => 0,
-    }).sum();
+    let total_ms: u64 = items
+        .iter()
+        .map(|c| match c {
+            ChatItem::Tool {
+                duration_ms: Some(d),
+                ..
+            } => *d,
+            ChatItem::Tool {
+                duration_ms: None,
+                started_at_ms: Some(s),
+                ok: None,
+                ..
+            } if live => now.saturating_sub(*s),
+            _ => 0,
+        })
+        .sum();
     let title = move || {
-        if live { t(locale.get(), "chat.steps_running").to_string() }
-        else if n_tools == 1 { t(locale.get(), "chat.steps_1").to_string() }
-        else { tf(locale.get(), "chat.steps_n", &[("n", &n_tools.to_string())]) }
+        if live {
+            t(locale.get(), "chat.steps_running").to_string()
+        } else if n_tools == 1 {
+            t(locale.get(), "chat.steps_1").to_string()
+        } else {
+            tf(locale.get(), "chat.steps_n", &[("n", &n_tools.to_string())])
+        }
     };
-    let total_label = (total_ms > 0 && (!live || n_tools > 0)).then(|| format_duration_ms(total_ms));
+    let total_label =
+        (total_ms > 0 && (!live || n_tools > 0)).then(|| format_duration_ms(total_ms));
     let open = create_rw_signal(live);
     let rows = items.into_iter().map(|it| match it {
         ChatItem::Reasoning(text) => {
@@ -4741,9 +5434,7 @@ fn render_steps_group(items: Vec<ChatItem>, live: bool) -> impl IntoView {
 
 fn acp_tool_is_terminal_stub(content: &str) -> bool {
     let trimmed = content.trim();
-    trimmed.starts_with('[')
-        && trimmed.contains("\"terminalId\"")
-        && !trimmed.contains('\n')
+    trimmed.starts_with('[') && trimmed.contains("\"terminalId\"") && !trimmed.contains('\n')
 }
 
 fn acp_tool_step_detail(kind: &str, content: &str, locations: &str) -> String {
