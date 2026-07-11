@@ -3110,12 +3110,13 @@ async fn spawn_project_window(
     // even before the window's frontend calls open_project.
     set_active_project(state, &label, id).await?;
     let url = tauri::WebviewUrl::App(format!("index.html?project={id}").into());
-    let win = tauri::WebviewWindowBuilder::new(app, &label, url)
+    let builder = tauri::WebviewWindowBuilder::new(app, &label, url)
         .title("wisp-science")
         .inner_size(1100.0, 760.0)
-        .resizable(true)
-        .build()
-        .map_err(|e| e.to_string())?;
+        .resizable(true);
+    #[cfg(target_os = "windows")]
+    let builder = builder.decorations(false).shadow(true);
+    let win = builder.build().map_err(|e| e.to_string())?;
     let evt_app = app.clone();
     let evt_label = label.clone();
     let evt_id = id.to_string();
@@ -3948,6 +3949,11 @@ pub fn run() {
             };
             app.manage(state);
             set_dev_flag(app.handle());
+            #[cfg(target_os = "windows")]
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_decorations(false);
+                let _ = window.set_shadow(true);
+            }
             // Restore the project windows open when the app last quit (#52). The
             // "main" window comes from tauri.conf; these are the extra per-project
             // ones. A project that was since deleted simply fails to spawn.

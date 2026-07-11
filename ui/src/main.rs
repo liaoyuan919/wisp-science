@@ -11,7 +11,8 @@ mod text;
 
 use bindings::{
     attach_chat_autoscroll, force_chat_bottom, invoke, invoke_checked, invoke_timeout, listen,
-    open_external_url, pasted_image_count, schedule_chat_follow, CHAT_SCROLLER_ID, CHAT_THREAD_ID,
+    is_windows, open_external_url, pasted_image_count, schedule_chat_follow, window_control,
+    CHAT_SCROLLER_ID, CHAT_THREAD_ID,
 };
 use context_menu::{ContextMenuPortal, CtxMenu};
 use dto::*;
@@ -2318,6 +2319,26 @@ fn App() -> impl IntoView {
     });
 
     view! {
+        {is_windows().then(|| view! {
+            <header class="window-titlebar" data-tauri-drag-region>
+                <div class="window-brand" data-tauri-drag-region>
+                    <span class="window-brand-icon"></span>
+                    <span>"wisp-science"</span>
+                </div>
+                <nav class="window-menu" aria-label="Application menu">
+                    <span>{move || if locale.get() == Locale::Zh { "文件" } else { "File" }}</span>
+                    <span>{move || if locale.get() == Locale::Zh { "编辑" } else { "Edit" }}</span>
+                    <span>{move || if locale.get() == Locale::Zh { "视图" } else { "View" }}</span>
+                    <span>{move || if locale.get() == Locale::Zh { "帮助" } else { "Help" }}</span>
+                </nav>
+                <div class="window-drag" data-tauri-drag-region></div>
+                <div class="window-controls">
+                    <button type="button" aria-label="Minimize" on:click=move |_| spawn_local(async { window_control("minimize").await })>"−"</button>
+                    <button type="button" aria-label="Maximize" on:click=move |_| spawn_local(async { window_control("toggle-maximize").await })>"□"</button>
+                    <button type="button" class="window-close" aria-label="Close" on:click=move |_| spawn_local(async { window_control("close").await })>"×"</button>
+                </div>
+            </header>
+        })}
         <ActionPalette open=action_palette_open on_action=palette_action />
         <CommandPalette open=command_palette_open current_project_id=palette_project_id
             on_open_project=switch_project on_open_session=palette_open_session on_open_artifact=palette_open_artifact

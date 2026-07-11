@@ -942,6 +942,23 @@ test("projects landing stays centered on wide windows", async ({ page }) => {
   })).toBeLessThanOrEqual(1200);
 });
 
+test("Windows uses the integrated title bar without covering the project landing", async ({ browser }) => {
+  const context = await browser.newContext({
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36",
+  });
+  const page = await context.newPage();
+  await page.addInitScript(tauriMock);
+  await page.goto("/");
+
+  await expect(page.locator(".window-titlebar")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Minimize" })).toBeVisible();
+  await expect.poll(async () => page.locator(".projects-screen").evaluate((el) =>
+    Math.round(el.getBoundingClientRect().top)
+  )).toBe(38);
+
+  await context.close();
+});
+
 test("project cards use semantic buttons for keyboard access", async ({ page }) => {
   await page.goto("/");
   const project = page.locator(".proj-card-main").first();
