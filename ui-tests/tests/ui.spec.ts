@@ -184,8 +184,19 @@ test("Ctrl+P command palette runs commands and switches themes", async ({ page }
   await expect(input).toHaveAttribute("autocomplete", "off");
   await expect(palette).toContainText("New session");
 
+  const rows = palette.locator(".project-search-row");
+  await expect(rows.first()).toHaveClass(/active/);
+  await input.press("ArrowDown");
+  await expect(rows.nth(1)).toHaveClass(/active/);
+  await expect(rows.nth(1)).toBeInViewport();
+  // Arrow past the fold must keep the active row visible (same as Ctrl+K).
+  for (let i = 0; i < 12; i++) await input.press("ArrowDown");
+  await expect(palette.locator(".project-search-row.active")).toBeInViewport();
+  await input.press("ArrowUp");
+  await expect(palette.locator(".project-search-row.active")).toBeInViewport();
+
   // Typing must keep focus in the input; otherwise arrow keys hit the page behind.
-  await input.pressSequentially("d");
+  await input.fill("d");
   await expect(input).toBeFocused();
   await expect(input).toHaveValue("d");
   await page.keyboard.press("ArrowDown");
@@ -956,6 +967,19 @@ test("Windows uses the integrated title bar without covering the project landing
     Math.round(el.getBoundingClientRect().top)
   )).toBe(38);
 
+  await page.getByRole("button", { name: "File" }).click();
+  await expect(page.getByRole("menuitem", { name: "Open projects" })).toBeVisible();
+  await page.getByRole("menuitem", { name: "Open projects" }).click();
+  await expect(page.locator(".projects-screen")).toBeVisible();
+
+  await page.getByRole("button", { name: "Help" }).click();
+  await page.getByRole("menuitem", { name: "Documentation" }).click();
+  await expect.poll(async () => page.evaluate(() =>
+    ((window as any).__skillInvokeLog ?? [])
+      .filter((c: any) => c.cmd === "open_external_url")
+      .map((c: any) => (c.args instanceof Map ? c.args.get("url") : c.args?.url))
+  )).toContain("https://github.com/xuzhougeng/wisp-science#readme");
+
   await context.close();
 });
 
@@ -964,6 +988,37 @@ test("project cards use semantic buttons for keyboard access", async ({ page }) 
   const project = page.locator(".proj-card-main").first();
   await expect(project).toBeVisible();
   await expect(project.evaluate((el) => el.tagName)).resolves.toBe("BUTTON");
+});
+
+test("Escape closes settings on the projects landing and the right pane from the composer", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings" }).click();
+  await expect(page.locator(".settings-modal")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".settings-modal")).toHaveCount(0);
+
+  await enterApp(page);
+  await page.getByRole("button", { name: "Toggle panel" }).click();
+  await expect(page.locator(".rightpane")).toBeVisible();
+  await composer(page).focus();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".rightpane")).toHaveCount(0);
+});
+
+test("Windows titlebar menus close on Escape", async ({ browser }) => {
+  const context = await browser.newContext({
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36",
+  });
+  const page = await context.newPage();
+  await page.addInitScript(tauriMock);
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "File" }).click();
+  await expect(page.getByRole("menu")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menu")).toHaveCount(0);
+
+  await context.close();
 });
 
 test("compact workspace keeps the conversation usable and opens Inspector as a drawer", async ({ page }) => {

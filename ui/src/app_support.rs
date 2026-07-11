@@ -636,23 +636,9 @@ pub(super) fn settings_required_error_key(cfg: &Settings, key: &str) -> Option<&
 }
 
 pub(super) fn should_close_right_pane_on_escape(ev: &web_sys::KeyboardEvent) -> bool {
-    if ev.default_prevented() || ev.is_composing() {
-        return false;
-    }
-    let Some(window) = web_sys::window() else { return false };
-    let Some(document) = window.document() else { return false };
-    let target = ev.target().and_then(|t| t.dyn_into::<web_sys::Node>().ok());
-    let Some(node) = target.as_ref() else { return true };
-    if !node.is_connected() {
-        return false;
-    }
-    if let Ok(Some(panel)) = document.query_selector(".rightpane") {
-        if panel.contains(Some(node)) {
-            return true;
-        }
-    }
-    document.body().as_ref().is_some_and(|body| node.is_same_node(Some(body)))
-        || document.document_element().as_ref().is_some_and(|html| node.is_same_node(Some(html)))
+    // Kept for callers/tests; Escape always dismisses the right pane once
+    // higher overlays are cleared (composer pickers preventDefault first).
+    !ev.default_prevented() && !ev.is_composing()
 }
 
 /// Single source of truth for `invoke` argument payloads.
@@ -3596,8 +3582,8 @@ pub(super) fn CommandPalette(
                                 let n = items.get().len();
                                 match ev.key().as_str() {
                                     "Escape" => { ev.prevent_default(); open.set(false); }
-                                    "ArrowDown" => { ev.prevent_default(); if n > 0 { let next = (active.get() + 1) % n; active.set(next); scroll_picker_item(".project-search-overlay .project-search-row", next); } }
-                                    "ArrowUp" => { ev.prevent_default(); if n > 0 { let next = (active.get() + n - 1) % n; active.set(next); scroll_picker_item(".project-search-overlay .project-search-row", next); } }
+                                    "ArrowDown" => { ev.prevent_default(); if n > 0 { let next = (active.get() + 1) % n; active.set(next); scroll_picker_item(".project-search-dialog:not(.action-palette) .project-search-row", next); } }
+                                    "ArrowUp" => { ev.prevent_default(); if n > 0 { let next = (active.get() + n - 1) % n; active.set(next); scroll_picker_item(".project-search-dialog:not(.action-palette) .project-search-row", next); } }
                                     "Enter" if ev.shift_key() => { ev.prevent_default(); attach_item.call(active.get()); }
                                     "Enter" => { ev.prevent_default(); open_item.call(active.get()); }
                                     _ => {}
@@ -3706,8 +3692,22 @@ pub(super) fn ActionPalette(open: RwSignal<bool>, on_action: Callback<&'static s
                                 let n = actions.get().len();
                                 match ev.key().as_str() {
                                     "Escape" => { ev.prevent_default(); open.set(false); }
-                                    "ArrowDown" => { ev.prevent_default(); if n > 0 { active.update(|i| *i = (*i + 1) % n); } }
-                                    "ArrowUp" => { ev.prevent_default(); if n > 0 { active.update(|i| *i = (*i + n - 1) % n); } }
+                                    "ArrowDown" => {
+                                        ev.prevent_default();
+                                        if n > 0 {
+                                            let next = (active.get() + 1) % n;
+                                            active.set(next);
+                                            scroll_picker_item(".action-palette .project-search-row", next);
+                                        }
+                                    }
+                                    "ArrowUp" => {
+                                        ev.prevent_default();
+                                        if n > 0 {
+                                            let next = (active.get() + n - 1) % n;
+                                            active.set(next);
+                                            scroll_picker_item(".action-palette .project-search-row", next);
+                                        }
+                                    }
                                     "Enter" => { ev.prevent_default(); run.call(active.get()); }
                                     _ => {}
                                 }

@@ -8,10 +8,11 @@ mod project_landing;
 mod settings_view;
 mod sidebar;
 mod text;
+mod window_titlebar;
 
 use bindings::{
     attach_chat_autoscroll, force_chat_bottom, invoke, invoke_checked, invoke_timeout, listen,
-    is_windows, open_external_url, pasted_image_count, schedule_chat_follow, window_control,
+    is_windows, open_external_url, pasted_image_count, schedule_chat_follow,
     CHAT_SCROLLER_ID, CHAT_THREAD_ID,
 };
 use context_menu::{ContextMenuPortal, CtxMenu};
@@ -22,6 +23,7 @@ use overlays::{AddHostOverlay, CapabilitiesOverlay, OnboardingOverlay};
 use project_landing::{ProjectLanding, ProjectLandingState};
 use settings_view::{SettingsView, SettingsViewState};
 use sidebar::{Sidebar, SidebarState};
+use window_titlebar::WindowTitlebar;
 use leptos::{ev, window_event_listener, *};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -1905,7 +1907,9 @@ fn App() -> impl IntoView {
     // Escape stack: topmost overlay → menus → drag cancel → right pane →
     // approval reject last. Composer @-mention and plan-feedback collapse
     // preventDefault locally so they win before this handler runs.
-    // ProjectsScreen owns its own Escape listener while `show_projects`.
+    // ProjectsScreen owns create/delete/search Escape while `show_projects`,
+    // but app-level overlays (settings, artifact modal, onboarding) still
+    // close here — they can sit on top of the projects landing.
     window_event_listener(ev::keydown, move |ev| {
         let Some(ev) = ev.dyn_ref::<web_sys::KeyboardEvent>() else { return };
         if ev.key() != "Escape" || ev.default_prevented() || ev.is_composing() {
@@ -1921,6 +1925,29 @@ fn App() -> impl IntoView {
             command_palette_open.set(false);
             return;
         }
+
+        // Overlays that can appear over the projects landing (must run before
+        // the show_projects early-return below).
+        if show_settings.get() && !settings_busy.get() {
+            ev.prevent_default();
+            show_settings.set(false);
+            return;
+        }
+        if modal_artifact.get().is_some() {
+            ev.prevent_default();
+            modal_artifact.set(None);
+            return;
+        }
+        if show_onboarding.get() {
+            ev.prevent_default();
+            if onboard_step.get() > 0 {
+                onboard_step.update(|s| *s = s.saturating_sub(1));
+            } else {
+                dismiss_onboarding.call(());
+            }
+            return;
+        }
+
         if show_projects.get() {
             return;
         }
@@ -1946,33 +1973,14 @@ fn App() -> impl IntoView {
             show_add_host.set(false);
             return;
         }
-        if modal_artifact.get().is_some() {
-            ev.prevent_default();
-            modal_artifact.set(None);
-            return;
-        }
         if show_proj_settings.get() && !proj_settings_busy.get() {
             ev.prevent_default();
             show_proj_settings.set(false);
             return;
         }
-        if show_settings.get() && !settings_busy.get() {
-            ev.prevent_default();
-            show_settings.set(false);
-            return;
-        }
         if show_capabilities.get() {
             ev.prevent_default();
             show_capabilities.set(false);
-            return;
-        }
-        if show_onboarding.get() {
-            ev.prevent_default();
-            if onboard_step.get() > 0 {
-                onboard_step.update(|s| *s = s.saturating_sub(1));
-            } else {
-                dismiss_onboarding.call(());
-            }
             return;
         }
 
@@ -2040,8 +2048,10 @@ fn App() -> impl IntoView {
             return;
         }
 
-        // --- right pane (only when focus is in-pane or on body) ---
-        if show_right.get() && should_close_right_pane_on_escape(ev) {
+        // --- right pane ---
+        // Close regardless of focus: mention/skill pickers already preventDefault
+        // Escape locally, so they still win when open.
+        if show_right.get() {
             ev.prevent_default();
             show_right.set(false);
             return;
@@ -2246,6 +2256,7 @@ fn App() -> impl IntoView {
         Callback::new(move |action: &'static str| match action {
             "new" => new_session.call(()),
             "search" => command_palette_open.set(true),
+            "commands" => action_palette_open.set(true),
             "projects" => show_projects.set(true),
             "settings" => { show_settings.set(true); settings_section.set("models".into()); }
             "project-settings" => project_settings.call(()),
@@ -2320,24 +2331,7 @@ fn App() -> impl IntoView {
 
     view! {
         {is_windows().then(|| view! {
-            <header class="window-titlebar" data-tauri-drag-region>
-                <div class="window-brand" data-tauri-drag-region>
-                    <span class="window-brand-icon"></span>
-                    <span>"wisp-science"</span>
-                </div>
-                <nav class="window-menu" aria-label="Application menu">
-                    <span>{move || if locale.get() == Locale::Zh { "文件" } else { "File" }}</span>
-                    <span>{move || if locale.get() == Locale::Zh { "编辑" } else { "Edit" }}</span>
-                    <span>{move || if locale.get() == Locale::Zh { "视图" } else { "View" }}</span>
-                    <span>{move || if locale.get() == Locale::Zh { "帮助" } else { "Help" }}</span>
-                </nav>
-                <div class="window-drag" data-tauri-drag-region></div>
-                <div class="window-controls">
-                    <button type="button" aria-label="Minimize" on:click=move |_| spawn_local(async { window_control("minimize").await })>"−"</button>
-                    <button type="button" aria-label="Maximize" on:click=move |_| spawn_local(async { window_control("toggle-maximize").await })>"□"</button>
-                    <button type="button" class="window-close" aria-label="Close" on:click=move |_| spawn_local(async { window_control("close").await })>"×"</button>
-                </div>
-            </header>
+            <WindowTitlebar locale=locale on_action=palette_action.clone() />
         })}
         <ActionPalette open=action_palette_open on_action=palette_action />
         <CommandPalette open=command_palette_open current_project_id=palette_project_id
