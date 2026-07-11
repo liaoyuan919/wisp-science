@@ -5,9 +5,9 @@ configure these in **Settings -> Models**. Each row is a model profile with its
 own display name, provider, API URL, model ID, advanced options, and API key.
 
 Model profiles describe model access and capabilities for the **built-in Wisp
-agent**. External coding agents (Codex / Claude via ACP) are configured
-separately — see [ACP Agents](acp-agents.md). Do not put an ACP launch command
-in a Models profile.
+agent**. External coding agents (Codex / Claude via ACP) are configured under
+**Settings → Models → ACP Agents** — see [ACP Agents](acp-agents.md). Do not put
+an ACP launch command in an HTTP model profile.
 
 For image workflows, mark an API profile as **Supports image input** and optionally **Use for image analysis**. `view_image` and image reads call that assigned vision model and return text observations to the main agent, so the active/default chat model can remain non-visual.
 

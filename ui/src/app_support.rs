@@ -1195,8 +1195,10 @@ pub(super) fn settings_subpage_label(
     open_conn: Option<&str>,
     memory_selected: Option<&str>,
     specialist_form: Option<&Specialist>,
+    acp_agents_open: bool,
 ) -> Option<String> {
     match section {
+        "models" if acp_agents_open => Some(t(loc, "models.acp_open").into()),
         "models" => model_form.map(|f| {
             if f.id.is_some() {
                 t(loc, "models.edit").into()

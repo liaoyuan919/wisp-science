@@ -106,7 +106,8 @@ Quick path:
 
 1. Install an ACP adapter, for example Codex:
    `npm install -g @agentclientprotocol/codex-acp`
-2. In the composer model picker, click **Add ACP Agent**.
+2. Open **Settings → Models → ACP Agents**, or from the chat model picker click
+   **Add ACP Agent**. Do not put ACP launch commands in the HTTP “Add model” form.
 3. Set **Label**, **Command** (`codex-acp` or `npx` / `npx.cmd`), and
    **Arguments** (one per line; for `npx` use `-y` then
    `@agentclientprotocol/codex-acp`).

@@ -94,12 +94,24 @@ test("send streams a mocked assistant reply", async ({ page, context }) => {
   await expect(page.locator(".copy-toast")).toHaveText("Copied");
 });
 
+test("Settings Models page can open ACP Agents dialog", async ({ page }) => {
+  await enterApp(page);
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Models", exact: true }).click();
+  await expect(page.getByTestId("acp-models-list-hint")).toBeVisible();
+  await page.getByTestId("open-acp-agents-from-settings").click();
+  await expect(page.getByTestId("acp-agents-settings")).toBeVisible();
+  await expect(page.getByText("Models")).toBeVisible();
+  await expect(page.getByText("ACP Agents").first()).toBeVisible();
+});
+
 test("ACP Agent settings create, test, and authenticate an installed agent", async ({ page }) => {
   await enterApp(page);
   await page.locator(".model-picker-btn").click();
   await page.getByTestId("add-acp-agent").click();
   const settings = page.getByTestId("acp-agents-settings");
   await expect(settings).toBeVisible();
+  await expect(page.locator(".settings-breadcrumb")).toContainText("ACP Agents");
   await settings.getByTestId("acp-agent-label").fill("My ACP");
   await settings.getByTestId("acp-agent-command").fill("my-acp");
   await settings.getByTestId("acp-agent-args").fill("--stdio\n  spaced  \n\n--safe");

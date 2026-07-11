@@ -385,6 +385,13 @@
   max-width: 100%;
   justify-self: start;
 }
+.settings-toolbar-end .settings-toolbar-actions {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  justify-self: end;
+}
 .settings-toolbar-end .settings-add-btn,
 .settings-toolbar-end .settings-add-menu { justify-self: end; }
 .settings-filter {

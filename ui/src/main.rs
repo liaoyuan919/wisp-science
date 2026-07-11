@@ -189,115 +189,6 @@ mod app_support;
 use app_support::*;
 
 #[component]
-fn AcpAgentsOverlay(
-    show: RwSignal<bool>,
-    agents: RwSignal<Vec<AcpAgentProfile>>,
-    active_agent_id: RwSignal<Option<String>>,
-) -> impl IntoView {
-    let edit_id = create_rw_signal(String::new());
-    let label = create_rw_signal(String::new());
-    let command = create_rw_signal(String::new());
-    let args_text = create_rw_signal(String::new());
-    let message = create_rw_signal(None::<(bool, String)>);
-    let infos = create_rw_signal(HashMap::<String, AcpAgentInfo>::new());
-    let reset = move || {
-        edit_id.set(String::new()); label.set(String::new()); command.set(String::new());
-        args_text.set(String::new()); message.set(None);
-    };
-    view! {
-        {move || show.get().then(|| view! {
-            <div class="overlay" data-testid="acp-agents-settings" on:click=move |_| show.set(false)>
-                <section class="modal acp-agents-settings" on:click=|event| event.stop_propagation()>
-                    <header class="modal-head"><div><h2>"ACP Agents"</h2><p>"Configure an installed ACP v1 agent. Each argument uses one line."</p></div>
-                        <button type="button" aria-label="Close" on:click=move |_| show.set(false)>"×"</button>
-                    </header>
-                    <div class="acp-agent-list">
-                        {move || agents.get().into_iter().map(|agent| {
-                            let edit = agent.clone();
-                            let test_id = agent.id.clone();
-                            let delete_id = agent.id.clone();
-                            let active = active_agent_id.get().as_deref() == Some(agent.id.as_str());
-                            let agent_info = infos.get().get(&agent.id).cloned();
-                            view! {
-                                <article class="settings-list-row" data-testid="acp-agent-row">
-                                    <div class="settings-list-main"><strong>{agent.label.clone()}</strong><code>{agent.command.clone()}</code></div>
-                                    <div class="settings-list-actions">
-                                        <button type="button" on:click=move |_| {
-                                            edit_id.set(edit.id.clone()); label.set(edit.label.clone()); command.set(edit.command.clone()); args_text.set(edit.args.join("\n"));
-                                        }>"Edit"</button>
-                                        <button type="button" data-testid="test-acp-agent" on:click=move |_| {
-                                            let id = test_id.clone();
-                                            spawn_local(async move {
-                                                let args = to_value(&serde_json::json!({ "id": id.clone() })).unwrap();
-                                                match invoke_checked("test_acp_agent", args).await {
-                                                    Ok(value) => match serde_wasm_bindgen::from_value::<AcpAgentInfo>(value) {
-                                                        Ok(value) => { infos.update(|all| { all.insert(id, value); }); message.set(Some((true, "Connection succeeded".into()))); }
-                                                        Err(error) => message.set(Some((false, error.to_string()))),
-                                                    },
-                                                    Err(error) => message.set(Some((false, js_error_text(error)))),
-                                                }
-                                            });
-                                        }>"Test Connection"</button>
-                                        <button type="button" disabled=active on:click=move |_| {
-                                            let id = delete_id.clone();
-                                            spawn_local(async move {
-                                                let args = to_value(&serde_json::json!({ "id": id })).unwrap();
-                                                if let Ok(value) = invoke_checked("remove_acp_agent", args).await {
-                                                    if let Ok(value) = serde_wasm_bindgen::from_value::<Vec<AcpAgentProfile>>(value) { agents.set(value); }
-                                                }
-                                            });
-                                        }>"Delete"</button>
-                                    </div>
-                                    {agent_info.map(|agent_info| view! {
-                                        <div class="acp-agent-info" data-testid="acp-agent-info">
-                                            <span>{format!("ACP v{}", agent_info.protocol_version)}</span>
-                                            {agent_info.auth_methods.into_iter().map(|method| {
-                                                let id = agent.id.clone(); let method_id = method.id.clone();
-                                                view! { <button type="button" data-testid="authenticate-acp-agent" title=method.description on:click=move |_| {
-                                                    let args = to_value(&serde_json::json!({ "id": id, "methodId": method_id })).unwrap();
-                                                    spawn_local(async move { message.set(Some(match invoke_checked("authenticate_acp_agent", args).await {
-                                                        Ok(_) => (true, "Authentication completed".into()), Err(error) => (false, js_error_text(error)),
-                                                    })); });
-                                                }>{method.name}</button> }
-                                            }).collect_view()}
-                                        </div>
-                                    })}
-                                </article>
-                            }
-                        }).collect_view()}
-                    </div>
-                    <form class="settings-form" on:submit=move |event| {
-                        event.prevent_default();
-                        let raw_args = args_text.get();
-                        let profile = AcpAgentProfile {
-                            id: edit_id.get(), label: label.get().trim().into(), command: command.get().trim().into(),
-                            args: if raw_args.is_empty() { Vec::new() } else { raw_args.split('\n').map(|arg| arg.strip_suffix('\r').unwrap_or(arg).to_string()).collect() },
-                        };
-                        if profile.label.is_empty() || profile.command.is_empty() { message.set(Some((false, "Label and command are required".into()))); return; }
-                        spawn_local(async move {
-                            let args = to_value(&serde_json::json!({ "profile": profile })).unwrap();
-                            match invoke_checked("save_acp_agent", args).await {
-                                Ok(value) => match serde_wasm_bindgen::from_value::<Vec<AcpAgentProfile>>(value) {
-                                    Ok(value) => { agents.set(value); reset(); message.set(Some((true, "Agent saved".into()))); }
-                                    Err(error) => message.set(Some((false, error.to_string()))),
-                                },
-                                Err(error) => message.set(Some((false, js_error_text(error)))),
-                            }
-                        });
-                    }>
-                        <label><span>"Label"</span><input data-testid="acp-agent-label" prop:value=move || label.get() on:input=move |event| label.set(dom_value(&event))/></label>
-                        <label><span>"Command"</span><input data-testid="acp-agent-command" prop:value=move || command.get() on:input=move |event| command.set(dom_value(&event))/></label>
-                        <label><span>"Arguments (one per line)"</span><textarea data-testid="acp-agent-args" prop:value=move || args_text.get() on:input=move |event| args_text.set(dom_value(&event))></textarea></label>
-                        <div class="row"><button type="button" on:click=move |_| reset()>"New"</button><button type="submit" class="primary" data-testid="save-acp-agent">"Save Agent"</button></div>
-                    </form>
-                    {move || message.get().map(|(ok, text)| view! { <p class="form-msg" class:ok=ok class:err=!ok>{text}</p> })}
-                </section>
-            </div>
-        })}
-    }
-}
-
-#[component]
 fn App() -> impl IntoView {
     let locale = create_rw_signal(Locale::detect_browser());
     provide_context(locale.read_only());
@@ -1544,6 +1435,7 @@ fn App() -> impl IntoView {
         model_form.set(None);
         model_form_key.set(String::new());
         model_form_msg.set(None);
+        show_acp_agents.set(false);
         specialist_form.set(None);
         conn_form.set(None);
         open_conn_key.set(None);
@@ -3494,6 +3386,7 @@ fn App() -> impl IntoView {
                                             }>{move || t(locale.get(), "models.add")}</button>
                                             <button type="button" class="model-menu-add" data-testid="add-acp-agent" on:click=move |_| {
                                                 model_menu_open.set(false);
+                                                open_settings_fn(Some("models".into()));
                                                 show_acp_agents.set(true);
                                             }>"Add ACP Agent"</button>
                                         </div>
@@ -4513,12 +4406,12 @@ fn App() -> impl IntoView {
                     }) />
             }
         })}
-        <AcpAgentsOverlay show=show_acp_agents agents=acp_agents active_agent_id=active_acp_agent_id />
         <SettingsView
             state=SettingsViewState {
                 locale, show_settings, settings_section, open_conn_key, connectors, model_form,
                 conn_form, memory_selected, specialist_form, settings, bootstrap, settings_message,
-                settings_busy, model_form_open, model_form_key, models, model_form_msg, specialists,
+                settings_busy, model_form_open, model_form_key, models, model_form_msg, show_acp_agents,
+                acp_agents, active_acp_agent_id, specialists,
                 specialist_form_open, memory_view, memory_editor, memory_msg, skills_list,
                 skill_filter_tag, skills_search, skills_msg, cred_status, cred_inputs, cred_msg,
                 approval_grants, conns_view, conn_form_open, conn_form_kind, conn_test_msg,

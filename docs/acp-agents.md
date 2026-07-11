@@ -15,10 +15,20 @@ Do **not** put plain `codex`, `claude`, or `claude -p` in the ACP form. Those CL
 - [`@agentclientprotocol/codex-acp`](https://github.com/agentclientprotocol/codex-acp)
 - [`@agentclientprotocol/claude-agent-acp`](https://github.com/agentclientprotocol/claude-agent-acp)
 
+## Where to find it
+
+ACP lives under **Settings → Models**, as a sibling of **Add model**:
+
+1. Open **Settings → Models**
+2. Click **ACP Agents** (breadcrumb becomes `Models › ACP Agents`)
+3. Or from the chat model picker, click **Add ACP Agent** — same subpage
+
+HTTP API profiles still use **Add model** / edit rows on the Models list.
+
 ## Add an ACP Agent in Wisp
 
 1. Open a project and start a **new empty** session.
-2. In the composer model picker, click **Add ACP Agent**.
+2. Open the ACP dialog with one of the paths above.
 3. Fill the form:
 
 | Field | Meaning |
