@@ -1,6 +1,11 @@
 use crate::{acp_bridge_launch, ActiveProject, AgentEvent, AppState};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -502,6 +507,8 @@ pub(crate) async fn run_acp_turn(
     profile_id: Option<&str>,
     message: &str,
     attachments: &[String],
+    injected_context: &[String],
+    artifact_references: &[PathBuf],
 ) -> Result<String, String> {
     let runtime = runtime_for(state, project, frame_id, profile_id).await?;
     if let Some(session_state) = runtime.session_state.lock().await.take() {
@@ -519,24 +526,19 @@ pub(crate) async fn run_acp_turn(
             return Err("The ACP Agent selection is locked after the first prompt.".into());
         }
     }
-    let mut content = vec![ContentBlock::Text(TextContent::new(message.to_string()))];
+    let mut content = acp_text_content(message, injected_context);
+    let mut linked_paths = HashSet::new();
     for attachment in attachments {
         let path = wisp_tools::safety::validate_file_path(project.root.as_path(), attachment)
             .map_err(|_| format!("Attachment '{attachment}' is outside the active project."))?;
-        let uri = url::Url::from_file_path(&path).map_err(|_| {
-            format!(
-                "Attachment path '{}' cannot be represented as a file URI.",
-                path.display()
-            )
-        })?;
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("attachment");
-        content.push(ContentBlock::ResourceLink(ResourceLink::new(
-            name,
-            uri.to_string(),
-        )));
+        if linked_paths.insert(path.clone()) {
+            content.push(acp_resource_link(&path)?);
+        }
+    }
+    for path in artifact_references {
+        if linked_paths.insert(path.clone()) {
+            content.push(acp_resource_link(path)?);
+        }
     }
     let seq = state
         .store
@@ -638,7 +640,10 @@ pub(crate) async fn run_acp_turn(
                     kind,
                     AcpUpdateKind::AgentMessage | AcpUpdateKind::AgentThought
                 ) {
-                    if matches!(kind, AcpUpdateKind::ToolCall | AcpUpdateKind::ToolCallUpdate) {
+                    if matches!(
+                        kind,
+                        AcpUpdateKind::ToolCall | AcpUpdateKind::ToolCallUpdate
+                    ) {
                         upsert_acp_tool_envelope(&mut tools, &payload);
                     }
                     let _ = app.emit(
@@ -681,6 +686,35 @@ pub(crate) async fn run_acp_turn(
         .map_err(|error| error.to_string())?;
     cancel_pending_permissions(state, frame_id, &runtime).await;
     Ok(stop_reason(outcome.stop_reason).into())
+}
+
+/// ACP has no Wisp-reference block type. Render trusted, host-resolved Wisp
+/// context as ordinary text blocks, which every ACP v1 Agent accepts.
+fn acp_text_content(message: &str, injected_context: &[String]) -> Vec<ContentBlock> {
+    let mut content = vec![ContentBlock::Text(TextContent::new(message.to_string()))];
+    content.extend(
+        injected_context
+            .iter()
+            .map(|text| ContentBlock::Text(TextContent::new(text.clone()))),
+    );
+    content
+}
+
+fn acp_resource_link(path: &Path) -> Result<ContentBlock, String> {
+    let uri = url::Url::from_file_path(path).map_err(|_| {
+        format!(
+            "Attachment path '{}' cannot be represented as a file URI.",
+            path.display()
+        )
+    })?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("attachment");
+    Ok(ContentBlock::ResourceLink(ResourceLink::new(
+        name,
+        uri.to_string(),
+    )))
 }
 
 fn stop_reason(reason: AcpStopReason) -> &'static str {
@@ -871,6 +905,17 @@ mod tests {
             Some("a")
         );
         assert_eq!(text_from_payload(&serde_json::json!({"future":true})), None);
+    }
+
+    #[test]
+    fn explicit_wisp_context_becomes_standard_acp_text() {
+        let content = acp_text_content(
+            "analyse this",
+            &["The user explicitly selected these skills:\n# Skill: bear-map".into()],
+        );
+        let json = serde_json::to_value(content).unwrap().to_string();
+        assert!(json.contains("analyse this"));
+        assert!(json.contains("bear-map"));
     }
 
     #[test]

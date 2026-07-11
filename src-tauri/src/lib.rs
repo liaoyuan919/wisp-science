@@ -802,10 +802,7 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
                         role: "acp_tool".into(),
                         text: envelope.content,
                         tool_name: Some(envelope.title),
-                        ok: Some(matches!(
-                            envelope.status.as_str(),
-                            "completed" | "failed"
-                        )),
+                        ok: Some(matches!(envelope.status.as_str(), "completed" | "failed")),
                         input: None,
                         model_name: None,
                         call_id: Some(envelope.call_id),
@@ -2045,6 +2042,49 @@ async fn resolve_composer_references(
     Ok(injections)
 }
 
+/// Resolve artifact references to files that can be passed to an ACP Agent as
+/// standard `ResourceLink` blocks. Unlike ordinary composer attachments, an
+/// artifact may belong to another Wisp project, so validate it against its
+/// recorded project root rather than the currently active project.
+async fn resolve_acp_artifact_references(
+    store: &Store,
+    refs: &[ComposerReferenceArg],
+) -> Result<Vec<PathBuf>, String> {
+    let mut seen = HashSet::new();
+    let mut paths = Vec::new();
+    for reference in refs {
+        let ComposerReferenceArg::Artifact { id } = reference else {
+            continue;
+        };
+        if !seen.insert(id) {
+            continue;
+        }
+        let artifact = store
+            .get_artifact_detail(id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Attached artifact '{id}' no longer exists."))?;
+        let path = wisp_tools::safety::validate_file_path(
+            Path::new(&artifact.project_root),
+            &artifact.path,
+        )
+        .map_err(|_| {
+            format!(
+                "Attached artifact '{}' is no longer readable.",
+                artifact.name
+            )
+        })?;
+        if !path.is_file() {
+            return Err(format!(
+                "Attached artifact '{}' is no longer readable.",
+                artifact.name
+            ));
+        }
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
 #[tauri::command]
 async fn send_message(
     state: State<'_, AppState>,
@@ -2078,12 +2118,6 @@ async fn send_message(
         if resume {
             return Err("ACP turns cannot use Wisp's transcript replay command.".into());
         }
-        if references
-            .as_ref()
-            .is_some_and(|references| !references.is_empty())
-        {
-            return Err("ACP v1 sessions currently accept text and file attachments, not Wisp transcript/skill references.".into());
-        }
         let frame_id = match session_id.as_deref().filter(|id| !id.is_empty()) {
             Some(id) => {
                 let owner = state
@@ -2099,6 +2133,11 @@ async fn send_message(
             None => create_session_frame(&state.store, &ap.id).await?,
         };
         state.set_active_frame(window.label(), Some(frame_id.clone()));
+        let refs = references.as_deref().unwrap_or_default();
+        let skills = active_skill_index(&state.store, &ap).await;
+        let injected_context =
+            resolve_composer_references(&state.store, refs, &frame_id, &skills).await?;
+        let artifact_references = resolve_acp_artifact_references(&state.store, refs).await?;
         let runtime = {
             let mut sessions = state.sessions.lock().await;
             sessions
@@ -2117,6 +2156,8 @@ async fn send_message(
             acp_agent_id.as_deref().filter(|id| !id.trim().is_empty()),
             &message,
             attachments.as_deref().unwrap_or_default(),
+            &injected_context,
+            &artifact_references,
         )
         .await;
         state.running_turns.lock().await.remove(&frame_id);

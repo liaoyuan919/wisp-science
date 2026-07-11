@@ -163,6 +163,22 @@ test("ACP turn maps config, overlapping tools, plan, usage, and exact permission
   await expect(page.getByRole("button", { name: /deepseek-v4-pro/ })).toBeDisabled();
 });
 
+test("ACP turns retain explicitly selected Wisp skills", async ({ page }) => {
+  await enterApp(page);
+  await page.getByRole("button", { name: "New session" }).click();
+  await page.locator(".model-picker-btn").click();
+  await page.getByRole("button", { name: /Test ACP Agent/ }).click();
+  await composer(page).fill("/alpha");
+  await page.locator(".mention-menu .mention-item").first().click();
+  await composer(page).fill("use this skill");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await expect.poll(() => lastInvokeArgs(page, "send_message")).toMatchObject({
+    acpAgentId: "acp-test",
+    references: [{ kind: "skill", name: "alphafold2" }],
+  });
+});
+
 test("ACP cancellation is scoped to the active bound frame", async ({ page }) => {
   await enterApp(page);
   await page.getByRole("button", { name: "New session" }).click();

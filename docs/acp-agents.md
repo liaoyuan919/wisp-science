@@ -115,7 +115,19 @@ npm install -g @agentclientprotocol/claude-agent-acp
 - Stop cancels the active ACP turn for the bound session.
 - After restart, Wisp reconnects only when the same profile fingerprint and project path still match and the agent supports resume/load. Editing Command/Arguments creates a new fingerprint; start a fresh session.
 
-Wisp also injects its scientific MCP bridge into the ACP session, so the external agent can call bundled Wisp tools while it works in the project directory.
+Wisp injects its scientific MCP bridge into the ACP session, so the external
+agent can call bundled Wisp tools while it works in the project directory. The
+bridge exposes `wisp_list_skills` and `wisp_use_skill`, plus Wisp Run controls,
+enabled scientific tools, and enabled custom MCP connections.
+
+Composer references work in ACP sessions too:
+
+- `/` adds the selected enabled skill's rendered `SKILL.md` guidance to that
+  ACP prompt as text.
+- `#` adds the selected session transcript as reference-only text, with the
+  same size limits and prompt-injection guard as Wisp's built-in agent.
+- `@` sends the selected artifact as a standard ACP file link. Cross-project
+  artifacts remain at their original validated local path.
 
 ## Troubleshooting
 
@@ -126,6 +138,7 @@ Wisp also injects its scientific MCP bridge into the ACP session, so the externa
 | “selection is locked after the first prompt” | Expected; create a new empty session to change backend |
 | “profile or project path changed” | Profile Command/Arguments or project cwd changed; start a new ACP session |
 | Agent runs but has no science tools | Confirm the session started through Wisp (MCP bridge is injected automatically) |
+| Agent does not call a bridge tool | Verify the selected ACP adapter supports MCP servers; the bridge tools are available to the agent, but its model decides when to invoke them |
 
 ## Current limits
 
