@@ -292,10 +292,13 @@ details.rz .body { margin-top: 6px; }
   border-radius: 6px; padding: 1px 7px; font-family: var(--font-mono); font-size: 12px;
   font-weight: 600; cursor: pointer; line-height: 1.45; vertical-align: baseline;
 }
+.art-ref:empty { display: none; }
 .art-ref:hover { background: rgba(13, 148, 136, 0.18); text-decoration: underline; }
 .art-ref code { background: none; border: none; padding: 0; font-size: inherit; color: inherit; }
 .art-ref.dead { cursor: default; opacity: .65; color: var(--text-muted); border-style: dashed; }
 .art-ref.dead:hover { text-decoration: none; }
+.md li > .art-ref { margin: 0; }
+.md li > .art-ref + .art-ref { margin-left: 0.15em; }
 
 .tool > summary.head .run { display: inline-flex; align-items: center; gap: 6px; color: var(--clay); margin-left: auto; font-size: 12px; font-weight: 600; }
 .run-dot {
@@ -538,10 +541,53 @@ details.tool:not([open]) > summary.head .run-dot { animation: tool-pulse 1.1s ea
 .model-menu-del:hover { color: var(--err); }
 .model-menu-add { width: 100%; text-align: left; background: transparent; border: none; border-top: 1px solid var(--border); margin-top: 4px; padding: 9px 10px; font: inherit; font-size: 12.5px; font-weight: 600; color: var(--clay-strong); cursor: pointer; }
 .model-menu-add:hover { background: var(--clay-soft); }
-.acp-composer-config { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11.5px; color: var(--text-muted); }
-.acp-composer-config label { display: inline-flex; align-items: center; gap: 5px; }
-.acp-composer-config select { max-width: 150px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-input); color: var(--text); font: inherit; }
-.acp-mode { padding: 2px 6px; border-radius: 999px; background: var(--bg-sunken); }
+.acp-composer-config {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin-top: 10px; padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+}
+.acp-config-chip {
+  position: relative; display: inline-flex; align-items: center; gap: 6px;
+  height: 26px; max-width: min(240px, 52vw); padding: 0 10px;
+  border-radius: 999px; border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-sunken) 88%, var(--bg-elev));
+  color: var(--text-muted); font: inherit; cursor: default;
+  transition: border-color .12s ease, background .12s ease, color .12s ease;
+}
+.acp-config-chip:has(select),
+.acp-config-chip.acp-config-toggle { cursor: pointer; }
+.acp-config-chip:has(select):hover,
+.acp-config-chip.acp-config-toggle:hover {
+  border-color: color-mix(in srgb, var(--clay-strong) 28%, var(--border-strong));
+  background: var(--bg-sunken); color: var(--text);
+}
+.acp-config-key {
+  flex: 0 0 auto; font-size: 10px; font-weight: 650;
+  letter-spacing: .04em; text-transform: uppercase; color: var(--text-faint);
+}
+.acp-config-val {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; font-weight: 550; color: var(--text); font-family: var(--font-mono);
+  letter-spacing: -.01em;
+}
+.acp-config-chip:has(select) .acp-config-val { padding-right: 12px; }
+.acp-config-chip:has(select)::after {
+  content: ""; position: absolute; right: 10px; top: 50%; width: 5px; height: 5px;
+  border-right: 1.5px solid var(--text-faint); border-bottom: 1.5px solid var(--text-faint);
+  transform: translateY(-70%) rotate(45deg); pointer-events: none;
+}
+.acp-config-chip select {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  opacity: 0; cursor: pointer; border: none; background: transparent; font: inherit;
+}
+.acp-config-toggle { user-select: none; }
+.acp-config-toggle input { position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none; }
+.acp-config-toggle.on {
+  border-color: color-mix(in srgb, var(--clay-strong) 35%, var(--border));
+  background: color-mix(in srgb, var(--clay) 10%, var(--bg-sunken));
+}
+.acp-config-toggle.on .acp-config-val { color: var(--clay-strong); }
+.acp-mode { cursor: default; }
 .composer-hint { margin-top: 5px; padding: 0 2px; font-size: 11px; line-height: 1.35; color: var(--text-faint); user-select: none; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* Compose ("+") menu */

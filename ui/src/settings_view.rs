@@ -141,6 +141,7 @@ pub(super) fn SettingsView(
         custom_conn_tools_loading,
         custom_conn_tool_errors,
     } = state;
+    let acp_form_open = create_memo(move |_| acp_form.get().is_some());
 
 move || show_settings.get().then(|| view! {
     <div class="overlay">
@@ -262,7 +263,7 @@ move || show_settings.get().then(|| view! {
                     </div>
                 }.into_view())}
                 {move || (settings_section.get() == "models").then(|| {
-                    if acp_form.get().is_some() {
+                    if acp_form_open.get() {
                         view! {
                             <div class="settings-pane settings-pane-subpage acp-agents-pane" data-testid="acp-agents-settings">
                                 <div class="conn-form model-form">
@@ -471,7 +472,7 @@ move || show_settings.get().then(|| view! {
                                                 show_acp_agents.set(true);
                                                 acp_form.set(Some(new_acp_form()));
                                                 acp_form_msg.set(None);
-                                            }>{move || t(locale.get(), "models.acp_add")}</button>
+                                            }>{move || t(locale.get(), "models.add_acp")}</button>
                                         }.into_view()
                                     } else {
                                         view! {

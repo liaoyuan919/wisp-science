@@ -679,7 +679,7 @@ mod tauri_args_tests {
             attachments: vec!["a.png".into()],
             references: vec![],
             resume: false,
-            collaboration_mode: None,
+            acp_agent_id: None,
         })
         .unwrap();
         assert_eq!(v["sessionId"], "frame-1");
@@ -1554,6 +1554,57 @@ pub(super) fn replace_artifact_tokens(mut html: String, arts: &[Artifact]) -> St
     html
 }
 
+/// Promote bare `<code>filename</code>` to artifact chips, without nesting
+/// inside an existing `.art-ref` (browsers auto-split nested `<button>`s into
+/// an empty outer chip + a filled sibling — the dashed pills in lists).
+pub(super) fn wrap_code_filenames_as_art_refs(html: String, arts: &[Artifact]) -> String {
+    let mut html = html;
+    for (i, a) in arts.iter().enumerate() {
+        let fname = html_escape(&a.name);
+        if fname.is_empty() {
+            continue;
+        }
+        let needle = format!("<code>{fname}</code>");
+        let replacement = format!(
+            r#"<button type="button" class="art-ref" data-art-idx="{i}" title="{fname}"><code>{fname}</code></button>"#
+        );
+        html = replace_code_outside_art_refs(&html, &needle, &replacement);
+    }
+    html
+}
+
+fn replace_code_outside_art_refs(html: &str, needle: &str, replacement: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(idx) = rest.find(needle) {
+        let before = &rest[..idx];
+        out.push_str(before);
+        if code_is_inside_art_ref(before) {
+            out.push_str(needle);
+        } else {
+            out.push_str(replacement);
+        }
+        rest = &rest[idx + needle.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn code_is_inside_art_ref(before: &str) -> bool {
+    let open_btn = before.rfind(r#"class="art-ref""#);
+    let close_btn = before.rfind("</button>");
+    let close_span = before.rfind("</span>");
+    let last_close = match (close_btn, close_span) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
+    match (open_btn, last_close) {
+        (Some(o), Some(c)) => o > c,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
 /// Drop stray list markers left in front of artifact chips.
 /// Models often write `- \`file\`` inside table cells; after chip promotion the
 /// leading `- ` remains as a dash beside the pill.
@@ -1599,12 +1650,8 @@ pub(super) fn enrich_md_html(mut html: String, arts: &[Artifact], locale: Locale
         let chip = art_chip(i, a);
         let marker = format!("{{{{artifact:{}}}}}", a.id);
         html = html.replace(&marker, &chip);
-        let fname = html_escape(&a.name);
-        html = html.replace(
-            &format!("<code>{fname}</code>"),
-            &format!(r#"<button type="button" class="art-ref" data-art-idx="{i}" title="{fname}"><code>{fname}</code></button>"#),
-        );
     }
+    html = wrap_code_filenames_as_art_refs(html, arts);
     html = strip_list_markers_before_art_refs(&html);
     html = html.replace("<pre><code", "<pre class=\"md-code\"><code");
     html = wrap_markdown_tables_with_copy_controls(html, locale);
@@ -1629,6 +1676,51 @@ mod art_ref_marker_tests {
     fn keeps_dashes_that_are_part_of_prose() {
         let html = r#"see range 1 - <button type="button" class="art-ref" data-art-idx="0">x.csv</button>"#;
         assert_eq!(strip_list_markers_before_art_refs(html), html);
+    }
+
+    #[test]
+    fn does_not_nest_art_refs_for_duplicate_filenames() {
+        let arts = vec![
+            Artifact {
+                id: "aaa".into(),
+                name: "denovo_design_worklist.csv".into(),
+                kind: "csv",
+                data: PreviewData::File {
+                    path: "a/denovo_design_worklist.csv".into(),
+                    kind: "csv".into(),
+                },
+                source_item: 0,
+                superseded: false,
+            },
+            Artifact {
+                id: "bbb".into(),
+                name: "denovo_design_worklist.csv".into(),
+                kind: "csv",
+                data: PreviewData::File {
+                    path: "b/denovo_design_worklist.csv".into(),
+                    kind: "csv".into(),
+                },
+                source_item: 0,
+                superseded: false,
+            },
+        ];
+        let html = r#"<ul><li><code>denovo_design_worklist.csv</code></li></ul>"#;
+        let out = wrap_code_filenames_as_art_refs(html.into(), &arts);
+        assert_eq!(out.matches(r#"class="art-ref""#).count(), 1);
+        assert!(out.contains(r#"data-art-idx="0""#));
+        assert!(!out.contains(r#"data-art-idx="1""#));
+        assert!(!out.contains("</button></button>"));
+    }
+
+    #[test]
+    fn skips_code_already_inside_art_ref_chip() {
+        let html = r#"<button type="button" class="art-ref" data-art-idx="0" title="x.csv"><code>x.csv</code></button>"#;
+        let out = replace_code_outside_art_refs(
+            html,
+            "<code>x.csv</code>",
+            r#"<button type="button" class="art-ref" data-art-idx="1" title="x.csv"><code>x.csv</code></button>"#,
+        );
+        assert_eq!(out, html);
     }
 
     #[test]

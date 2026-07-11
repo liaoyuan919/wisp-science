@@ -3036,6 +3036,71 @@ fn App() -> impl IntoView {
                             }
                         })}
                     </div>
+                    {move || active_session.get().and_then(|session_id| {
+                        active_acp_agent_id.get()?;
+                        let options = acp_session_configs.get().get(&session_id).cloned().unwrap_or_default();
+                        let mode = acp_session_modes.get().get(&session_id)
+                            .and_then(|state| state.get("currentModeId"))
+                            .and_then(serde_json::Value::as_str).map(str::to_string);
+                        (!options.is_empty() || mode.is_some()).then(|| view! {
+                            <div class="acp-composer-config" data-testid="acp-session-config">
+                                {mode.map(|mode| view! {
+                                    <span class="acp-config-chip acp-mode" title="Session mode">
+                                        <span class="acp-config-key">"mode"</span>
+                                        <span class="acp-config-val">{mode}</span>
+                                    </span>
+                                })}
+                                {options.into_iter().map(|option| {
+                                    let config_id = option.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+                                    let name = option.get("name").and_then(serde_json::Value::as_str).unwrap_or(&config_id).to_string();
+                                    let description = option.get("description").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+                                    if option.get("type").and_then(serde_json::Value::as_str) == Some("boolean") {
+                                        let checked = option.get("currentValue").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                                        let session_id = session_id.clone();
+                                        view! {
+                                            <label class="acp-config-chip acp-config-toggle" title=description class:on=checked>
+                                                <input type="checkbox" checked=checked on:change=move |event| {
+                                                    let checked = event_target_checked(&event);
+                                                    let frame_id = session_id.clone();
+                                                    let args = to_value(&serde_json::json!({ "frameId": frame_id, "configId": config_id, "value": { "type": "boolean", "value": checked } })).unwrap();
+                                                    spawn_local(async move { if let Ok(value) = invoke_checked("set_acp_session_config", args).await {
+                                                        if let Ok(options) = serde_wasm_bindgen::from_value::<Vec<serde_json::Value>>(value) { acp_session_configs.update(|all| { all.insert(frame_id, options); }); }
+                                                    }});
+                                                }/>
+                                                <span class="acp-config-key">{name}</span>
+                                                <span class="acp-config-val">{if checked { "On" } else { "Off" }}</span>
+                                            </label>
+                                        }.into_view()
+                                    } else {
+                                        let current = option.get("currentValue").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+                                        let choices = acp_select_options(&option);
+                                        let session_id = session_id.clone();
+                                        let current_label = choices.iter()
+                                            .find(|(value, _)| value == &current)
+                                            .map(|(_, label)| label.clone())
+                                            .unwrap_or_else(|| current.clone());
+                                        view! {
+                                            <label class="acp-config-chip" title=description>
+                                                <span class="acp-config-key">{name.clone()}</span>
+                                                <span class="acp-config-val">{current_label}</span>
+                                                <select aria-label=name on:change=move |event| {
+                                                    let value = dom_value(&event);
+                                                    let frame_id = session_id.clone();
+                                                    let args = to_value(&serde_json::json!({ "frameId": frame_id, "configId": config_id, "value": { "value": value } })).unwrap();
+                                                    spawn_local(async move { if let Ok(value) = invoke_checked("set_acp_session_config", args).await {
+                                                        if let Ok(options) = serde_wasm_bindgen::from_value::<Vec<serde_json::Value>>(value) { acp_session_configs.update(|all| { all.insert(frame_id, options); }); }
+                                                    }});
+                                                }>{choices.into_iter().map(|(value, label)| {
+                                                    let selected = value == current;
+                                                    view! { <option value=value selected=selected>{label}</option> }
+                                                }).collect_view()}</select>
+                                            </label>
+                                        }.into_view()
+                                    }
+                                }).collect_view()}
+                            </div>
+                        })
+                    })}
                     <div class="composer-actions">
                         <div class="composer-tools">
                             <button type="button" class="composer-plus"
@@ -3217,54 +3282,6 @@ fn App() -> impl IntoView {
                             }})}
                         </div>
                         <div class="composer-buttons">
-                            {move || active_session.get().and_then(|session_id| {
-                                active_acp_agent_id.get()?;
-                                let options = acp_session_configs.get().get(&session_id).cloned().unwrap_or_default();
-                                let mode = acp_session_modes.get().get(&session_id)
-                                    .and_then(|state| state.get("currentModeId"))
-                                    .and_then(serde_json::Value::as_str).map(str::to_string);
-                                (!options.is_empty() || mode.is_some()).then(|| view! {
-                                    <div class="acp-composer-config" data-testid="acp-session-config">
-                                        {mode.map(|mode| view! { <span class="acp-mode">{mode}</span> })}
-                                        {options.into_iter().map(|option| {
-                                            let config_id = option.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
-                                            let name = option.get("name").and_then(serde_json::Value::as_str).unwrap_or(&config_id).to_string();
-                                            let description = option.get("description").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
-                                            if option.get("type").and_then(serde_json::Value::as_str) == Some("boolean") {
-                                                let checked = option.get("currentValue").and_then(serde_json::Value::as_bool).unwrap_or(false);
-                                                let session_id = session_id.clone();
-                                                view! {
-                                                    <label title=description><input type="checkbox" checked=checked on:change=move |event| {
-                                                        let checked = event_target_checked(&event);
-                                                        let frame_id = session_id.clone();
-                                                        let args = to_value(&serde_json::json!({ "frameId": frame_id, "configId": config_id, "value": { "type": "boolean", "value": checked } })).unwrap();
-                                                        spawn_local(async move { if let Ok(value) = invoke_checked("set_acp_session_config", args).await {
-                                                            if let Ok(options) = serde_wasm_bindgen::from_value::<Vec<serde_json::Value>>(value) { acp_session_configs.update(|all| { all.insert(frame_id, options); }); }
-                                                        }});
-                                                    }/>{name}</label>
-                                                }.into_view()
-                                            } else {
-                                                let current = option.get("currentValue").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
-                                                let choices = acp_select_options(&option);
-                                                let session_id = session_id.clone();
-                                                view! {
-                                                    <label title=description><span>{name}</span><select on:change=move |event| {
-                                                        let value = dom_value(&event);
-                                                        let frame_id = session_id.clone();
-                                                        let args = to_value(&serde_json::json!({ "frameId": frame_id, "configId": config_id, "value": { "value": value } })).unwrap();
-                                                        spawn_local(async move { if let Ok(value) = invoke_checked("set_acp_session_config", args).await {
-                                                            if let Ok(options) = serde_wasm_bindgen::from_value::<Vec<serde_json::Value>>(value) { acp_session_configs.update(|all| { all.insert(frame_id, options); }); }
-                                                        }});
-                                                    }>{choices.into_iter().map(|(value, label)| {
-                                                        let selected = value == current;
-                                                        view! { <option value=value selected=selected>{label}</option> }
-                                                    }).collect_view()}</select></label>
-                                                }.into_view()
-                                            }
-                                        }).collect_view()}
-                                    </div>
-                                })
-                            })}
                             {move || (!models.get().is_empty() || !acp_agents.get().is_empty()).then(|| view! {
                                 <div class="model-picker">
                                     <button type="button" class="model-picker-btn" class:active=move || model_menu_open.get()
