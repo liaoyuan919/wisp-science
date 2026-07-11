@@ -1,4 +1,193 @@
 use super::*;
+
+#[tokio::test]
+async fn codex_session_config_compare_and_swap_is_atomic() {
+    let tmp = std::env::temp_dir().join(format!(
+        "wisp_store_codex_session_cas_{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = Store::open(&tmp).await.unwrap();
+
+    // Both writers compare against revision zero. Exactly one transaction may
+    // install its complete overrides/mode pair and advance the revision.
+    let first_store = store.clone();
+    let second_store = store.clone();
+    let (first, second) = tokio::join!(
+        first_store.save_codex_session_config(
+            "frame-cas",
+            r#"{"normal":{"model":"first"}}"#,
+            Some("default"),
+            Some(0),
+        ),
+        second_store.save_codex_session_config(
+            "frame-cas",
+            r#"{"normal":{"model":"second"}}"#,
+            Some("plan"),
+            Some(0),
+        ),
+    );
+    assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+    let (winner_overrides, winner_mode) = if first.is_ok() {
+        (r#"{"normal":{"model":"first"}}"#, "default")
+    } else {
+        (r#"{"normal":{"model":"second"}}"#, "plan")
+    };
+    assert_eq!(
+        store
+            .get_setting("codex_session_revision:frame-cas")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        store
+            .get_setting("codex_session_overrides:frame-cas")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(winner_overrides)
+    );
+    assert_eq!(
+        store
+            .get_setting("codex_collaboration_mode:frame-cas")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(winner_mode)
+    );
+
+    // A stale CAS must not partially update either value or the revision.
+    assert!(store
+        .save_codex_session_config(
+            "frame-cas",
+            r#"{"normal":{"model":"stale"}}"#,
+            Some("plan"),
+            Some(0),
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        store
+            .get_setting("codex_session_overrides:frame-cas")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(winner_overrides)
+    );
+    assert_eq!(
+        store
+            .save_codex_session_config(
+                "frame-cas",
+                r#"{"normal":{"model":"next"}}"#,
+                Some("default"),
+                Some(1),
+            )
+            .await
+            .unwrap(),
+        2
+    );
+
+    drop(store);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[tokio::test]
+async fn proposed_plan_revisions_are_durable_and_separate() {
+    let tmp = std::env::temp_dir().join(format!("wisp_store_plan_{}.sqlite", uuid::Uuid::new_v4()));
+    let store = Store::open(&tmp).await.unwrap();
+    store.create_project("p", "proj", "").await.unwrap();
+    store.create_frame("f", "p", "OPERON", "m").await.unwrap();
+    let now = chrono::Utc::now().timestamp();
+    let first = ProposedPlanRecord {
+        id: "plan-1".into(),
+        frame_id: "f".into(),
+        codex_thread_id: Some("thread-1".into()),
+        codex_turn_id: Some("turn-1".into()),
+        revision: store.next_proposed_plan_revision("f").await.unwrap(),
+        markdown: "# First".into(),
+        status: "pending".into(),
+        mode: "native".into(),
+        progress_json: "[]".into(),
+        runtime_config_json: "{\"model\":\"gpt-test\"}".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    store.save_proposed_plan(&first).await.unwrap();
+    assert_eq!(store.next_proposed_plan_revision("f").await.unwrap(), 2);
+    assert!(store
+        .update_proposed_plan_state("plan-1", "approved", Some("[{\"step\":\"go\"}]"))
+        .await
+        .unwrap());
+    let loaded = store.latest_proposed_plan("f").await.unwrap().unwrap();
+    assert_eq!(loaded.status, "approved");
+    assert_eq!(loaded.markdown, "# First");
+    assert_eq!(loaded.mode, "native");
+    assert!(loaded.progress_json.contains("go"));
+
+    let mut second = first.clone();
+    second.id = "plan-2".into();
+    second.revision = 2;
+    second.markdown = "# Second".into();
+    second.status = "pending".into();
+    store.save_proposed_plan(&second).await.unwrap();
+    let mut third = second.clone();
+    third.id = "plan-3".into();
+    third.revision = 3;
+    third.markdown = "# Third".into();
+    store.save_proposed_plan(&third).await.unwrap();
+    let plans = store.list_proposed_plans("f").await.unwrap();
+    assert_eq!(plans[0].status, "approved");
+    assert_eq!(plans[1].status, "superseded");
+    assert_eq!(plans[2].status, "pending");
+
+    let migrations = store.schema_migrations().await.unwrap();
+    assert!(migrations.iter().any(|v| v == "0005_proposed_plans"));
+    drop(store);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[tokio::test]
+async fn codex_turn_config_preserves_requested_and_tracks_actual() {
+    let tmp = std::env::temp_dir().join(format!(
+        "wisp_store_codex_turn_{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = Store::open(&tmp).await.unwrap();
+    store.create_project("p", "proj", "").await.unwrap();
+    store.create_frame("f", "p", "OPERON", "m").await.unwrap();
+    let now = chrono::Utc::now().timestamp();
+    let record = CodexTurnConfigRecord {
+        id: "cfg-1".into(),
+        frame_id: "f".into(),
+        codex_thread_id: Some("thread".into()),
+        codex_turn_id: Some("turn".into()),
+        mode: "plan".into(),
+        config_version: "7".into(),
+        requested_json: "{\"model\":\"requested\"}".into(),
+        effective_json: "{\"model\":\"requested\"}".into(),
+        actual_json: "{\"model\":\"requested\"}".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    store.save_codex_turn_config(&record).await.unwrap();
+    store
+        .update_codex_turn_actual("cfg-1", "{\"model\":\"rerouted\"}")
+        .await
+        .unwrap();
+    let loaded = store.list_codex_turn_configs("f").await.unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert!(loaded[0].requested_json.contains("requested"));
+    assert!(loaded[0].actual_json.contains("rerouted"));
+    assert!(store
+        .schema_migrations()
+        .await
+        .unwrap()
+        .iter()
+        .any(|v| v == "0006_codex_turn_configs"));
+    drop(store);
+    let _ = std::fs::remove_file(&tmp);
+}
 #[tokio::test]
 async fn roundtrip() {
     let tmp = std::env::temp_dir().join(format!("wisp_store_test_{}.sqlite", uuid::Uuid::new_v4()));
@@ -516,6 +705,8 @@ async fn store_open_records_migrations_and_seeds_local_context() {
             ARTIFACT_LINEAGE_MIGRATION.to_string(),
             SSH_RUN_CONTROL_MIGRATION.to_string(),
             RUN_LIFECYCLE_LEASE_MIGRATION.to_string(),
+            PROPOSED_PLANS_MIGRATION.to_string(),
+            CODEX_TURN_CONFIGS_MIGRATION.to_string(),
         ]
     );
 

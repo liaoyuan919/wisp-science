@@ -4,9 +4,11 @@
 //! live in the OS keyring (see [`secrets`]); everything else lives here.
 
 mod artifacts;
+mod codex_turn_configs;
 mod execution_contexts;
 mod models;
 mod projects;
+mod proposed_plans;
 mod provenance;
 mod research;
 mod runs;
@@ -29,6 +31,8 @@ const CONTROL_PLANE_MIGRATION: &str = "0001_control_plane_backfill";
 const ARTIFACT_LINEAGE_MIGRATION: &str = "0002_artifact_lineage";
 const SSH_RUN_CONTROL_MIGRATION: &str = "0003_ssh_run_control";
 const RUN_LIFECYCLE_LEASE_MIGRATION: &str = "0004_run_lifecycle_lease";
+const PROPOSED_PLANS_MIGRATION: &str = "0005_proposed_plans";
+const CODEX_TURN_CONFIGS_MIGRATION: &str = "0006_codex_turn_configs";
 
 #[derive(Clone)]
 pub struct Store {
@@ -87,6 +91,14 @@ impl Store {
         if !Self::migration_applied(pool, RUN_LIFECYCLE_LEASE_MIGRATION).await? {
             Self::apply_run_lifecycle_lease(pool).await?;
             Self::record_migration(pool, RUN_LIFECYCLE_LEASE_MIGRATION).await?;
+        }
+        if !Self::migration_applied(pool, PROPOSED_PLANS_MIGRATION).await? {
+            Self::apply_proposed_plans(pool).await?;
+            Self::record_migration(pool, PROPOSED_PLANS_MIGRATION).await?;
+        }
+        if !Self::migration_applied(pool, CODEX_TURN_CONFIGS_MIGRATION).await? {
+            Self::apply_codex_turn_configs(pool).await?;
+            Self::record_migration(pool, CODEX_TURN_CONFIGS_MIGRATION).await?;
         }
         Ok(())
     }
@@ -298,6 +310,59 @@ impl Store {
         Ok(())
     }
 
+    async fn apply_proposed_plans(pool: &SqlitePool) -> Result<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS proposed_plans (\
+             id TEXT PRIMARY KEY, \
+             frame_id TEXT NOT NULL REFERENCES frames(id) ON DELETE CASCADE, \
+             codex_thread_id TEXT, codex_turn_id TEXT, revision INTEGER NOT NULL, \
+             markdown TEXT NOT NULL, status TEXT NOT NULL, \
+             mode TEXT NOT NULL DEFAULT 'native', \
+             progress_json TEXT NOT NULL DEFAULT '[]', \
+             runtime_config_json TEXT NOT NULL DEFAULT '{}', \
+             created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, \
+             UNIQUE(frame_id, revision))",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS ix_proposed_plans_frame \
+             ON proposed_plans(frame_id, revision DESC)",
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn apply_codex_turn_configs(pool: &SqlitePool) -> Result<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS codex_turn_configs (\
+             id TEXT PRIMARY KEY, \
+             frame_id TEXT NOT NULL REFERENCES frames(id) ON DELETE CASCADE, \
+             codex_thread_id TEXT, codex_turn_id TEXT, mode TEXT NOT NULL, \
+             config_version INTEGER NOT NULL DEFAULT 0, config_version_text TEXT NOT NULL DEFAULT '', requested_json TEXT NOT NULL, \
+             effective_json TEXT NOT NULL, actual_json TEXT NOT NULL, \
+             created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, \
+             UNIQUE(frame_id, codex_turn_id))",
+        )
+        .execute(pool)
+        .await?;
+        if !Self::has_column(pool, "codex_turn_configs", "config_version_text").await? {
+            sqlx::query(
+                "ALTER TABLE codex_turn_configs ADD COLUMN config_version_text TEXT NOT NULL DEFAULT ''",
+            )
+            .execute(pool)
+            .await?;
+        }
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS ix_codex_turn_configs_frame \
+             ON codex_turn_configs(frame_id, created_at DESC)",
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     async fn apply_artifact_lineage(pool: &SqlitePool) -> Result<()> {
         if !Self::has_column(pool, "artifacts", "latest_version_id").await? {
             sqlx::query("ALTER TABLE artifacts ADD COLUMN latest_version_id TEXT")
@@ -374,6 +439,100 @@ impl Store {
             .bind(key).bind(value)
             .execute(&self.pool).await?;
         Ok(())
+    }
+
+    /// Remove Wisp/Codex settings scoped to a deleted frame, including keys
+    /// for profiles whose actors are not currently loaded.
+    pub async fn delete_codex_frame_settings(&self, frame_id: &str) -> Result<()> {
+        let suffix = format!(":{frame_id}");
+        sqlx::query(
+            "DELETE FROM settings WHERE key IN (?,?,?) OR ((key LIKE 'codex_app_thread:%' OR key LIKE 'codex_app_thread_tools:%') AND substr(key, -length(?)) = ?)",
+        )
+        .bind(format!("codex_session_overrides:{frame_id}"))
+        .bind(format!("codex_collaboration_mode:{frame_id}"))
+        .bind(format!("codex_session_revision:{frame_id}"))
+        .bind(&suffix)
+        .bind(&suffix)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_codex_profile_settings(&self, profile_id: &str) -> Result<()> {
+        let thread_prefix = format!("codex_app_thread:{profile_id}:");
+        let tools_prefix = format!("codex_app_thread_tools:{profile_id}:");
+        sqlx::query(
+            "DELETE FROM settings WHERE substr(key,1,length(?))=? OR substr(key,1,length(?))=?",
+        )
+        .bind(&thread_prefix)
+        .bind(&thread_prefix)
+        .bind(&tools_prefix)
+        .bind(&tools_prefix)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_settings_with_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT key,value FROM settings WHERE substr(key,1,length(?))=?")
+                .bind(prefix)
+                .bind(prefix)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows)
+    }
+
+    pub async fn save_codex_session_config(
+        &self,
+        frame_id: &str,
+        overrides_json: &str,
+        mode: Option<&str>,
+        expected_revision: Option<u64>,
+    ) -> Result<u64> {
+        let override_key = format!("codex_session_overrides:{frame_id}");
+        let mode_key = format!("codex_collaboration_mode:{frame_id}");
+        let revision_key = format!("codex_session_revision:{frame_id}");
+        let mut transaction = self.pool.begin().await?;
+        let current: Option<(String,)> = sqlx::query_as("SELECT value FROM settings WHERE key=?")
+            .bind(&revision_key)
+            .fetch_optional(&mut *transaction)
+            .await?;
+        let current = current
+            .and_then(|(value,)| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        if expected_revision.is_some_and(|expected| expected != current) {
+            anyhow::bail!(
+                "Session Codex configuration changed (expected revision {}, current revision {current}); refresh before saving.",
+                expected_revision.unwrap_or_default()
+            );
+        }
+        sqlx::query(
+            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        )
+        .bind(&override_key)
+        .bind(overrides_json)
+        .execute(&mut *transaction)
+        .await?;
+        if let Some(mode) = mode {
+            sqlx::query(
+                "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            )
+            .bind(&mode_key)
+            .bind(mode)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        let next = current.saturating_add(1);
+        sqlx::query(
+            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        )
+        .bind(&revision_key)
+        .bind(next.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(next)
     }
 
     pub async fn get_setting(&self, key: &str) -> Result<Option<String>> {

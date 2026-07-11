@@ -3,6 +3,41 @@ use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqliteRow;
 use sqlx::Row;
 
+/// A frozen Codex Plan proposal.  It is intentionally separate from chat
+/// messages and from the mutable update_plan checklist used during execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposedPlanRecord {
+    pub id: String,
+    pub frame_id: String,
+    pub codex_thread_id: Option<String>,
+    pub codex_turn_id: Option<String>,
+    pub revision: i64,
+    pub markdown: String,
+    pub status: String,
+    /// `native` for App Server collaboration mode and `compatibility` for the
+    /// prompt-based fallback.
+    pub mode: String,
+    pub progress_json: String,
+    pub runtime_config_json: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexTurnConfigRecord {
+    pub id: String,
+    pub frame_id: String,
+    pub codex_thread_id: Option<String>,
+    pub codex_turn_id: Option<String>,
+    pub mode: String,
+    pub config_version: String,
+    pub requested_json: String,
+    pub effective_json: String,
+    pub actual_json: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ExecLog {
     pub id: String,

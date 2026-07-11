@@ -30,6 +30,7 @@ regex = { workspace = true }
 glob = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
+toml = "0.8"
 base64 = "0.22"
 async-trait = "0.1"
 zip = { version = "2", default-features = false, features = ["deflate"] }

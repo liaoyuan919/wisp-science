@@ -28,6 +28,10 @@ pub(crate) fn provider_value(provider: &str) -> &'static str {
     match provider.trim() {
         "anthropic" => "anthropic",
         "openai_responses" | "openai-responses" | "responses" => "openai_responses",
+        "codex_cli" | "codex-cli" | "codex" | "codex_local" | "codex-local" => {
+            "codex_cli"
+        }
+        "claude_code" | "claude-code" => "claude_code",
         _ => "openai",
     }
 }
@@ -36,6 +40,7 @@ pub(crate) fn provider_defaults(provider: &str) -> (&'static str, &'static str) 
     match provider_value(provider) {
         "anthropic" => ("https://api.anthropic.com", "claude-sonnet-5"),
         "openai_responses" => ("https://api.openai.com/v1", "gpt-5.5"),
+        "codex_cli" | "claude_code" => ("", ""),
         _ => ("https://api.deepseek.com", "deepseek-v4-pro"),
     }
 }

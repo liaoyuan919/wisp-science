@@ -93,7 +93,7 @@ async fn composer_references_resolve_artifact_session_and_skill() {
             name: "test-skill".into(),
         },
     ];
-    let injected = resolve_composer_references(&store, &refs, "target", &skills)
+    let injected = resolve_composer_references(&store, &refs, "target", &skills, None)
         .await
         .unwrap()
         .join("\n");
@@ -106,7 +106,8 @@ async fn composer_references_resolve_artifact_session_and_skill() {
             id: "target".into()
         }],
         "target",
-        &skills
+        &skills,
+        None,
     )
     .await
     .is_err());
