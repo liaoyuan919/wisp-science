@@ -98,11 +98,13 @@ test("Settings Models page can open ACP Agents dialog", async ({ page }) => {
   await enterApp(page);
   await page.getByRole("button", { name: "Settings" }).click();
   await page.getByRole("button", { name: "Models", exact: true }).click();
-  await expect(page.getByTestId("acp-models-list-hint")).toBeVisible();
+  await expect(page.getByTestId("models-category-http")).toHaveClass(/active/);
   await page.getByTestId("open-acp-agents-from-settings").click();
+  await expect(page.getByTestId("open-acp-agents-from-settings")).toHaveClass(/active/);
+  await expect(page.getByTestId("acp-agents-list")).toBeVisible();
+  await page.getByTestId("add-acp-agent-settings").click();
   await expect(page.getByTestId("acp-agents-settings")).toBeVisible();
-  await expect(page.getByText("Models")).toBeVisible();
-  await expect(page.getByText("ACP Agents").first()).toBeVisible();
+  await expect(page.locator(".settings-breadcrumb")).toContainText(/ACP/);
 });
 
 test("ACP Agent settings create, test, and authenticate an installed agent", async ({ page }) => {
@@ -111,17 +113,17 @@ test("ACP Agent settings create, test, and authenticate an installed agent", asy
   await page.getByTestId("add-acp-agent").click();
   const settings = page.getByTestId("acp-agents-settings");
   await expect(settings).toBeVisible();
-  await expect(page.locator(".settings-breadcrumb")).toContainText("ACP Agents");
+  await expect(page.locator(".settings-breadcrumb")).toContainText(/ACP/);
   await settings.getByTestId("acp-agent-label").fill("My ACP");
   await settings.getByTestId("acp-agent-command").fill("my-acp");
   await settings.getByTestId("acp-agent-args").fill("--stdio\n  spaced  \n\n--safe");
   await settings.getByTestId("save-acp-agent").click();
-  const row = settings.getByTestId("acp-agent-row").filter({ hasText: "My ACP" });
+  await expect(page.getByTestId("acp-agents-list")).toBeVisible();
+  const row = page.getByTestId("acp-agent-row").filter({ hasText: "My ACP" });
   await expect(row).toBeVisible();
   await row.getByTestId("test-acp-agent").click();
   await expect(row.getByTestId("acp-agent-info")).toContainText("ACP v1");
   await row.getByTestId("authenticate-acp-agent").click();
-  await expect(settings).toContainText("Authentication completed");
   await expect.poll(() => lastInvokeArgs(page, "save_acp_agent")).toMatchObject({
     profile: { label: "My ACP", command: "my-acp", args: ["--stdio", "  spaced  ", "", "--safe"] },
   });

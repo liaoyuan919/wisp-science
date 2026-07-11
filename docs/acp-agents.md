@@ -17,13 +17,14 @@ Do **not** put plain `codex`, `claude`, or `claude -p` in the ACP form. Those CL
 
 ## Where to find it
 
-ACP lives under **Settings → Models**, as a sibling of **Add model**:
+Under **Settings → Models** there are two categories with the same list → add/edit flow:
 
 1. Open **Settings → Models**
-2. Click **ACP Agents** (breadcrumb becomes `Models › ACP Agents`)
-3. Or from the chat model picker, click **Add ACP Agent** — same subpage
+2. Switch tabs: **Models (n)** | **ACP Agents (n)**
+3. Click **Add model** or **Add ACP Agent** (breadcrumb subpage form)
+4. Or from the chat model picker: **Add model** / **Add ACP Agent** — same forms
 
-HTTP API profiles still use **Add model** / edit rows on the Models list.
+Click a row to edit. HTTP and ACP both use Cancel / Save on the subpage.
 
 ## Add an ACP Agent in Wisp
 

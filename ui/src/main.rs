@@ -276,6 +276,9 @@ fn App() -> impl IntoView {
     let acp_agents = create_rw_signal::<Vec<AcpAgentProfile>>(vec![]);
     let active_acp_agent_id = create_rw_signal::<Option<String>>(None);
     let show_acp_agents = create_rw_signal(false);
+    let acp_form = create_rw_signal::<Option<AcpAgentProfile>>(None);
+    let acp_form_msg = create_rw_signal::<Option<(bool, String)>>(None);
+    let acp_infos = create_rw_signal::<HashMap<String, AcpAgentInfo>>(HashMap::new());
     let acp_session_configs = create_rw_signal::<HashMap<String, Vec<serde_json::Value>>>(HashMap::new());
     let acp_session_modes = create_rw_signal::<HashMap<String, serde_json::Value>>(HashMap::new());
     let show_projects = create_rw_signal(true); // app lands on the Projects screen
@@ -1435,7 +1438,8 @@ fn App() -> impl IntoView {
         model_form.set(None);
         model_form_key.set(String::new());
         model_form_msg.set(None);
-        show_acp_agents.set(false);
+        acp_form.set(None);
+        acp_form_msg.set(None);
         specialist_form.set(None);
         conn_form.set(None);
         open_conn_key.set(None);
@@ -3379,15 +3383,20 @@ fn App() -> impl IntoView {
                                             })}
                                             <button type="button" class="model-menu-add" on:click=move |_| {
                                                 model_menu_open.set(false);
+                                                open_settings_fn(Some("models".into()));
+                                                show_acp_agents.set(false);
+                                                acp_form.set(None);
                                                 model_form.set(Some(new_model_form()));
                                                 model_form_key.set(String::new());
                                                 model_form_msg.set(None);
-                                                open_settings_fn(Some("models".into()));
                                             }>{move || t(locale.get(), "models.add")}</button>
                                             <button type="button" class="model-menu-add" data-testid="add-acp-agent" on:click=move |_| {
                                                 model_menu_open.set(false);
                                                 open_settings_fn(Some("models".into()));
                                                 show_acp_agents.set(true);
+                                                model_form.set(None);
+                                                acp_form_msg.set(None);
+                                                acp_form.set(Some(new_acp_form()));
                                             }>"Add ACP Agent"</button>
                                         </div>
                                     })}
@@ -4411,7 +4420,7 @@ fn App() -> impl IntoView {
                 locale, show_settings, settings_section, open_conn_key, connectors, model_form,
                 conn_form, memory_selected, specialist_form, settings, bootstrap, settings_message,
                 settings_busy, model_form_open, model_form_key, models, model_form_msg, show_acp_agents,
-                acp_agents, active_acp_agent_id, specialists,
+                acp_agents, active_acp_agent_id, acp_form, acp_form_msg, acp_infos, specialists,
                 specialist_form_open, memory_view, memory_editor, memory_msg, skills_list,
                 skill_filter_tag, skills_search, skills_msg, cred_status, cred_inputs, cred_msg,
                 approval_grants, conns_view, conn_form_open, conn_form_kind, conn_test_msg,

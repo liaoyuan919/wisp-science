@@ -13,9 +13,10 @@
   --radius: 16px;
   --radius-sm: 10px;
   --shadow: 0 24px 60px -28px rgba(15, 23, 42, 0.28);
-  --font-ui: "Inter", system-ui, "Segoe UI", sans-serif;
-  --font-serif: "Source Serif 4", "Noto Serif SC", Georgia, serif;
-  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  /* CJK-first stacks keep Chinese and Latin in the same family optical size */
+  --font-ui: "Plus Jakarta Sans", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --font-serif: "Noto Serif SC", "Source Serif 4", "Songti SC", "STSong", Georgia, serif;
+  --font-mono: "JetBrains Mono", "Noto Sans Mono", ui-monospace, monospace;
   --max: 1120px;
   --nav-h: 64px;
 }
@@ -25,6 +26,8 @@
 html {
   scroll-behavior: smooth;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
 body {
@@ -32,7 +35,12 @@ body {
   font-family: var(--font-ui);
   color: var(--text);
   background: var(--bg);
-  line-height: 1.6;
+  line-height: 1.7;
+  letter-spacing: 0.01em;
+  font-optical-sizing: auto;
+  /* Chrome 123+: insert space between CJK and Latin / numbers */
+  text-autospace: normal;
+  font-feature-settings: "kern" 1, "liga" 1;
 }
 
 a { color: inherit; text-decoration: none; }
@@ -156,17 +164,20 @@ code {
   margin: 0 0 16px;
   font-family: var(--font-serif);
   font-size: clamp(2.4rem, 5vw, 3.75rem);
-  font-weight: 500;
-  line-height: 1.08;
-  letter-spacing: -0.03em;
+  font-weight: 600;
+  line-height: 1.22;
+  letter-spacing: 0.02em;
+  text-wrap: balance;
 }
 
 .hero .lead {
   max-width: 640px;
   margin: 0 auto 32px;
-  font-size: clamp(1.05rem, 2vw, 1.25rem);
+  font-size: clamp(1.05rem, 2vw, 1.22rem);
   color: var(--text-muted);
-  line-height: 1.55;
+  line-height: 1.8;
+  letter-spacing: 0.015em;
+  font-weight: 400;
 }
 
 .hero-actions {
@@ -367,7 +378,9 @@ code {
   margin: 0;
   font-family: var(--font-serif);
   font-size: 1.08rem;
-  line-height: 1.75;
+  line-height: 1.85;
+  letter-spacing: 0.015em;
+  font-weight: 500;
 }
 
 .voice-card figcaption {
@@ -430,15 +443,18 @@ section { padding: 88px 0; }
   margin: 0 0 12px;
   font-family: var(--font-serif);
   font-size: clamp(1.75rem, 3.5vw, 2.5rem);
-  font-weight: 500;
-  line-height: 1.15;
-  letter-spacing: -0.02em;
+  font-weight: 600;
+  line-height: 1.28;
+  letter-spacing: 0.02em;
+  text-wrap: balance;
 }
 
 .section-head p {
   margin: 0;
   font-size: 1.05rem;
   color: var(--text-muted);
+  line-height: 1.8;
+  letter-spacing: 0.01em;
 }
 
 .feature-grid {
@@ -464,14 +480,16 @@ section { padding: 88px 0; }
   margin: 0 0 10px;
   font-family: var(--font-serif);
   font-size: 1.5rem;
-  font-weight: 500;
-  letter-spacing: -0.02em;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: 0.015em;
 }
 
 .feature-card p {
   margin: 0;
   color: var(--text-muted);
-  line-height: 1.65;
+  line-height: 1.8;
+  letter-spacing: 0.01em;
 }
 
 .feature-visual {
@@ -508,14 +526,19 @@ section { padding: 88px 0; }
 
 .feature-list-item h4 {
   margin: 0 0 8px;
-  font-size: 1rem;
+  font-family: var(--font-serif);
+  font-size: 1.05rem;
   font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.015em;
 }
 
 .feature-list-item p {
   margin: 0;
   font-size: 0.95rem;
   color: var(--text-muted);
+  line-height: 1.75;
+  letter-spacing: 0.01em;
 }
 
 .feature-list-item a {
@@ -578,13 +601,16 @@ section { padding: 88px 0; }
   margin: 0 0 12px;
   font-family: var(--font-serif);
   font-size: 1.6rem;
-  font-weight: 500;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: 0.015em;
 }
 
 .tab-panel p {
   margin: 0 0 16px;
   color: var(--text-muted);
-  line-height: 1.65;
+  line-height: 1.8;
+  letter-spacing: 0.01em;
 }
 
 .tab-panel ul {
@@ -677,16 +703,28 @@ section { padding: 88px 0; }
   margin: 0 0 16px;
   font-family: var(--font-serif);
   font-size: clamp(2.2rem, 4.5vw, 3.4rem);
-  font-weight: 500;
-  line-height: 1.1;
-  letter-spacing: -0.03em;
+  font-weight: 600;
+  line-height: 1.24;
+  letter-spacing: 0.02em;
+  text-wrap: balance;
 }
 
 .doc-page .doc-hero .lead {
   max-width: 760px;
   margin: 0 0 28px;
-  font-size: clamp(1.05rem, 2vw, 1.2rem);
+  font-size: clamp(1.05rem, 2vw, 1.18rem);
   color: var(--text-muted);
+  line-height: 1.85;
+  letter-spacing: 0.015em;
+}
+
+.doc-subhead {
+  margin: 0 0 12px;
+  font-family: var(--font-serif);
+  font-size: 1.28rem;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.015em;
 }
 
 .doc-page .hero-actions {
@@ -710,6 +748,8 @@ section { padding: 88px 0; }
   min-width: 720px;
   border-collapse: collapse;
   font-size: 0.95rem;
+  line-height: 1.7;
+  letter-spacing: 0.01em;
 }
 
 .doc-table th,
@@ -766,7 +806,9 @@ section { padding: 88px 0; }
   padding: 18px 20px;
   font: inherit;
   font-size: 1rem;
-  font-weight: 500;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1.5;
   text-align: left;
   background: transparent;
   border: none;
@@ -785,7 +827,8 @@ section { padding: 88px 0; }
   display: none;
   padding: 0 20px 18px;
   color: var(--text-muted);
-  line-height: 1.65;
+  line-height: 1.85;
+  letter-spacing: 0.01em;
 }
 
 .faq-item.open .faq-a { display: block; }

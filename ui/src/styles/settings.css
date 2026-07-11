@@ -392,6 +392,35 @@
   gap: 8px;
   justify-self: end;
 }
+.settings-category-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-self: start;
+}
+.settings-category-tab {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--text-muted);
+  white-space: nowrap;
+  padding: 7px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  transition: color .12s ease, border-color .12s ease, background .12s ease;
+}
+.settings-category-tab:hover {
+  color: var(--text);
+  background: var(--bg-sunken);
+}
+.settings-category-tab.active {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: var(--bg-input);
+}
 .settings-toolbar-end .settings-add-btn,
 .settings-toolbar-end .settings-add-menu { justify-self: end; }
 .settings-filter {

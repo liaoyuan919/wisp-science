@@ -1117,6 +1117,15 @@ pub(super) fn new_model_form() -> ModelForm {
     }
 }
 
+pub(super) fn new_acp_form() -> AcpAgentProfile {
+    AcpAgentProfile {
+        id: String::new(),
+        label: String::new(),
+        command: String::new(),
+        args: Vec::new(),
+    }
+}
+
 pub(super) fn model_form_to_settings(form: &ModelForm, has_api_key: bool) -> Settings {
     let mut cfg = Settings::default();
     cfg.provider = provider_value(&form.provider).into();
@@ -1195,17 +1204,26 @@ pub(super) fn settings_subpage_label(
     open_conn: Option<&str>,
     memory_selected: Option<&str>,
     specialist_form: Option<&Specialist>,
-    acp_agents_open: bool,
+    acp_form: Option<&AcpAgentProfile>,
 ) -> Option<String> {
     match section {
-        "models" if acp_agents_open => Some(t(loc, "models.acp_open").into()),
-        "models" => model_form.map(|f| {
-            if f.id.is_some() {
-                t(loc, "models.edit").into()
-            } else {
-                t(loc, "models.add").into()
-            }
-        }),
+        "models" => acp_form
+            .map(|f| {
+                if f.id.is_empty() {
+                    t(loc, "models.add_acp").into()
+                } else {
+                    t(loc, "models.edit_acp").into()
+                }
+            })
+            .or_else(|| {
+                model_form.map(|f| {
+                    if f.id.is_some() {
+                        t(loc, "models.edit").into()
+                    } else {
+                        t(loc, "models.add").into()
+                    }
+                })
+            }),
         "specialists" => specialist_form.map(|s| {
             if s.id.is_empty() { t(loc, "specialists.add") } else { s.name.clone() }
         }),
