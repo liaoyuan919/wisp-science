@@ -14,10 +14,23 @@ use serde::{Deserialize, Serialize};
 #[allow(dead_code)]
 #[serde(tag = "kind")]
 pub(crate) enum AgentEvent {
-    User { frame_id: String, text: String },
-    Text { frame_id: String, delta: String },
-    Reasoning { frame_id: String, delta: String },
-    ToolCall { frame_id: String, name: String, preview: String },
+    User {
+        frame_id: String,
+        text: String,
+    },
+    Text {
+        frame_id: String,
+        delta: String,
+    },
+    Reasoning {
+        frame_id: String,
+        delta: String,
+    },
+    ToolCall {
+        frame_id: String,
+        name: String,
+        preview: String,
+    },
     ToolResult {
         frame_id: String,
         name: String,
@@ -26,15 +39,48 @@ pub(crate) enum AgentEvent {
         #[serde(default)]
         duration_ms: u64,
     },
-    Usage { frame_id: String, round: u64, input: u64, output: u64, ctx_tokens: usize, max_context: usize },
-    Compaction { frame_id: String, before: usize, after: usize, strategy: String },
-    Diff { frame_id: String, path: String },
-    Stdout { frame_id: String, chunk: String },
-    Done { frame_id: String, #[serde(default)] stop_reason: Option<String> },
-    Error { frame_id: String, message: String },
-    ReviewStarted { frame_id: String },
-    Review { frame_id: String, report: ReviewReport },
-    CorrectionStarted { frame_id: String, model: String },
+    Usage {
+        frame_id: String,
+        round: u64,
+        input: u64,
+        output: u64,
+        ctx_tokens: usize,
+        max_context: usize,
+    },
+    Compaction {
+        frame_id: String,
+        before: usize,
+        after: usize,
+        strategy: String,
+    },
+    Diff {
+        frame_id: String,
+        path: String,
+    },
+    Stdout {
+        frame_id: String,
+        chunk: String,
+    },
+    Done {
+        frame_id: String,
+        #[serde(default)]
+        stop_reason: Option<String>,
+    },
+    Error {
+        frame_id: String,
+        message: String,
+    },
+    ReviewStarted {
+        frame_id: String,
+    },
+    Review {
+        frame_id: String,
+        report: ReviewReport,
+    },
+    CorrectionStarted {
+        frame_id: String,
+        model: String,
+    },
 }
 
 #[derive(Deserialize, Clone, Hash, PartialEq, Eq)]
@@ -72,7 +118,10 @@ pub(crate) struct ReviewReport {
 #[derive(Clone)]
 pub(crate) enum ChatItem {
     User(String),
-    Assistant { text: String, model: Option<String> },
+    Assistant {
+        text: String,
+        model: Option<String>,
+    },
     Reasoning(String),
     Tool {
         name: String,
@@ -85,8 +134,16 @@ pub(crate) enum ChatItem {
         duration_ms: Option<u64>,
     },
     /// Inline tool-approval card (replaces the old centered modal).
-    ApprovalPending { tool: String, preview: String, message: String },
-    AcpPermission { request_id: String, tool: String, options: Vec<AcpPermissionOption> },
+    ApprovalPending {
+        tool: String,
+        preview: String,
+        message: String,
+    },
+    AcpPermission {
+        request_id: String,
+        tool: String,
+        options: Vec<AcpPermissionOption>,
+    },
     AcpTool {
         call_id: String,
         title: String,
@@ -110,14 +167,32 @@ impl ChatItem {
             Self::User(s) => (0u8, s).hash(&mut h),
             Self::Assistant { text, model } => (2u8, text, model).hash(&mut h),
             Self::Reasoning(s) => (3u8, s).hash(&mut h),
-            Self::Tool { name, ok, input, output, duration_ms, .. } => {
-                (4u8, name, ok, input, output, duration_ms).hash(&mut h)
-            }
-            Self::ApprovalPending { tool, preview, message } => (6u8, tool, preview, message).hash(&mut h),
-            Self::AcpPermission { request_id, tool, options } => (9u8, request_id, tool, options).hash(&mut h),
-            Self::AcpTool { call_id, title, kind, status, content, locations } => {
-                (10u8, call_id, title, kind, status, content, locations).hash(&mut h)
-            }
+            Self::Tool {
+                name,
+                ok,
+                input,
+                output,
+                duration_ms,
+                ..
+            } => (4u8, name, ok, input, output, duration_ms).hash(&mut h),
+            Self::ApprovalPending {
+                tool,
+                preview,
+                message,
+            } => (6u8, tool, preview, message).hash(&mut h),
+            Self::AcpPermission {
+                request_id,
+                tool,
+                options,
+            } => (9u8, request_id, tool, options).hash(&mut h),
+            Self::AcpTool {
+                call_id,
+                title,
+                kind,
+                status,
+                content,
+                locations,
+            } => (10u8, call_id, title, kind, status, content, locations).hash(&mut h),
             Self::Review(report) => (5u8, report).hash(&mut h),
             Self::Plan(plan) => (7u8, plan).hash(&mut h),
         }
@@ -131,7 +206,12 @@ pub(crate) struct PlanCard {
 }
 
 pub(crate) fn active_model_label(models: &[ModelProfile]) -> Option<String> {
-    models.iter().find(|m| m.active).or_else(|| models.first()).map(|m| m.label.clone()).filter(|s| !s.is_empty())
+    models
+        .iter()
+        .find(|m| m.active)
+        .or_else(|| models.first())
+        .map(|m| m.label.clone())
+        .filter(|s| !s.is_empty())
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
@@ -141,12 +221,18 @@ pub(crate) struct ArtifactInfo {
     pub(crate) kind: String,
     pub(crate) path: String,
     pub(crate) ts: i64,
-    #[serde(default)] pub(crate) project_id: Option<String>,
-    #[serde(default)] pub(crate) project_name: Option<String>,
-    #[serde(default)] pub(crate) session_id: Option<String>,
-    #[serde(default)] pub(crate) session_title: Option<String>,
-    #[serde(default)] pub(crate) size_bytes: Option<i64>,
-    #[serde(default)] pub(crate) origin: Option<String>,
+    #[serde(default)]
+    pub(crate) project_id: Option<String>,
+    #[serde(default)]
+    pub(crate) project_name: Option<String>,
+    #[serde(default)]
+    pub(crate) session_id: Option<String>,
+    #[serde(default)]
+    pub(crate) session_title: Option<String>,
+    #[serde(default)]
+    pub(crate) size_bytes: Option<i64>,
+    #[serde(default)]
+    pub(crate) origin: Option<String>,
 }
 
 #[derive(Deserialize, Clone, PartialEq)]
@@ -155,9 +241,12 @@ pub(crate) struct SessionSearchInfo {
     pub(crate) project_id: String,
     pub(crate) project_name: String,
     pub(crate) title: String,
-    #[serde(default)] pub(crate) ts: i64,
-    #[serde(default)] pub(crate) activity_at: i64,
-    #[serde(default)] pub(crate) status: String,
+    #[serde(default)]
+    pub(crate) ts: i64,
+    #[serde(default)]
+    pub(crate) activity_at: i64,
+    #[serde(default)]
+    pub(crate) status: String,
 }
 
 #[derive(Serialize, Clone, PartialEq, Eq)]
@@ -183,9 +272,20 @@ pub(crate) struct SshHost {
 
 #[derive(Clone)]
 pub(crate) enum ComposerAttachment {
-    Uploading { key: String, name: String },
-    Ready { key: String, name: String, path: String },
-    Error { key: String, name: String, error: String },
+    Uploading {
+        key: String,
+        name: String,
+    },
+    Ready {
+        key: String,
+        name: String,
+        path: String,
+    },
+    Error {
+        key: String,
+        name: String,
+        error: String,
+    },
 }
 
 #[derive(Deserialize)]
@@ -366,6 +466,14 @@ pub(crate) struct LoadedItem {
     pub(crate) input: String,
     #[serde(default)]
     pub(crate) model_name: Option<String>,
+    #[serde(default)]
+    pub(crate) call_id: Option<String>,
+    #[serde(default)]
+    pub(crate) kind: Option<String>,
+    #[serde(default)]
+    pub(crate) status: Option<String>,
+    #[serde(default)]
+    pub(crate) locations: Option<String>,
 }
 
 impl LoadedItem {
@@ -373,6 +481,14 @@ impl LoadedItem {
         match self.role.as_str() {
             "user" => ChatItem::User(self.text),
             "reasoning" => ChatItem::Reasoning(self.text),
+            "acp_tool" => ChatItem::AcpTool {
+                call_id: self.call_id.unwrap_or_default(),
+                title: self.tool_name.unwrap_or_else(|| "ACP tool".into()),
+                kind: self.kind.unwrap_or_default(),
+                status: self.status.unwrap_or_else(|| "completed".into()),
+                content: self.text,
+                locations: self.locations.unwrap_or_default(),
+            },
             "tool" => ChatItem::Tool {
                 name: self.tool_name.unwrap_or_else(|| "tool".into()),
                 ok: self.ok,
@@ -381,7 +497,10 @@ impl LoadedItem {
                 started_at_ms: None,
                 duration_ms: None,
             },
-            _ => ChatItem::Assistant { text: self.text, model: self.model_name },
+            _ => ChatItem::Assistant {
+                text: self.text,
+                model: self.model_name,
+            },
         }
     }
 }
@@ -442,7 +561,8 @@ pub(crate) struct FileSearchHit {
 #[derive(Deserialize, Clone)]
 #[allow(dead_code)]
 pub(crate) struct ProjectInfo {
-    #[serde(default)] pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) root: String,
     pub(crate) skill_count: usize,
@@ -455,22 +575,34 @@ pub(crate) struct ProjectInfo {
 pub(crate) struct ProjectSummary {
     pub(crate) id: String,
     pub(crate) name: String,
-    #[serde(default)] pub(crate) description: String,
-    #[allow(dead_code)] #[serde(default)] pub(crate) workspace_dir: String,
-    #[serde(default)] pub(crate) session_count: i64,
-    #[serde(default)] pub(crate) updated_at: i64,
-    #[serde(default)] pub(crate) running_count: i64,
-    #[serde(default)] pub(crate) needs_you_count: i64,
+    #[serde(default)]
+    pub(crate) description: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub(crate) workspace_dir: String,
+    #[serde(default)]
+    pub(crate) session_count: i64,
+    #[serde(default)]
+    pub(crate) updated_at: i64,
+    #[serde(default)]
+    pub(crate) running_count: i64,
+    #[serde(default)]
+    pub(crate) needs_you_count: i64,
 }
 
 /// Editable project settings (Project Settings modal). `agent_context` is the
 /// project's `.wisp/WISP.md`, injected into every seeded system prompt.
 #[derive(Clone, Deserialize, Default)]
 pub(crate) struct ProjectSettings {
-    #[allow(dead_code)] #[serde(default)] pub(crate) id: String,
-    #[serde(default)] pub(crate) name: String,
-    #[serde(default)] pub(crate) description: String,
-    #[serde(default)] pub(crate) agent_context: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) description: String,
+    #[serde(default)]
+    pub(crate) agent_context: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -511,15 +643,25 @@ impl SessionStatusKind {
 pub(crate) struct ModelProfile {
     pub(crate) id: String,
     pub(crate) label: String,
-    #[serde(default)] pub(crate) provider: String,
-    #[serde(default)] pub(crate) api_url: String,
-    #[serde(default)] pub(crate) model: String,
-    #[allow(dead_code)] #[serde(default)] pub(crate) has_api_key: bool,
-    #[serde(default)] pub(crate) active: bool,
-    #[serde(default)] pub(crate) max_tokens: u64,
-    #[serde(default)] pub(crate) reasoning_effort: String,
-    #[serde(default)] pub(crate) supports_vision: bool,
-    #[serde(default)] pub(crate) use_for_vision: bool,
+    #[serde(default)]
+    pub(crate) provider: String,
+    #[serde(default)]
+    pub(crate) api_url: String,
+    #[serde(default)]
+    pub(crate) model: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub(crate) has_api_key: bool,
+    #[serde(default)]
+    pub(crate) active: bool,
+    #[serde(default)]
+    pub(crate) max_tokens: u64,
+    #[serde(default)]
+    pub(crate) reasoning_effort: String,
+    #[serde(default)]
+    pub(crate) supports_vision: bool,
+    #[serde(default)]
+    pub(crate) use_for_vision: bool,
 }
 
 /// A user-definable agent persona (mirrors `specialists::Specialist` in src-tauri).
@@ -527,14 +669,22 @@ pub(crate) struct ModelProfile {
 pub(crate) struct Specialist {
     pub(crate) id: String,
     pub(crate) name: String,
-    #[serde(default)] pub(crate) icon: String,
-    #[serde(default)] pub(crate) color: String,
-    #[serde(default)] pub(crate) description: String,
-    #[serde(default)] pub(crate) instructions: String,
-    #[serde(default)] pub(crate) model_id: String,
-    #[serde(default)] pub(crate) skills: Option<Vec<String>>,
-    #[serde(default)] pub(crate) connectors: Option<Vec<String>>,
-    #[serde(default)] pub(crate) builtin: bool,
+    #[serde(default)]
+    pub(crate) icon: String,
+    #[serde(default)]
+    pub(crate) color: String,
+    #[serde(default)]
+    pub(crate) description: String,
+    #[serde(default)]
+    pub(crate) instructions: String,
+    #[serde(default)]
+    pub(crate) model_id: String,
+    #[serde(default)]
+    pub(crate) skills: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) connectors: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) builtin: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -542,49 +692,84 @@ pub(crate) struct RecentSession {
     pub(crate) id: String,
     pub(crate) project_id: String,
     pub(crate) title: String,
-    #[allow(dead_code)] #[serde(default)] pub(crate) ts: i64,
-    #[serde(default)] pub(crate) status: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub(crate) ts: i64,
+    #[serde(default)]
+    pub(crate) status: String,
 }
 
 #[derive(Clone, serde::Deserialize, PartialEq)]
 pub(crate) struct SkillRow {
     pub(crate) name: String,
     pub(crate) description: String,
-    #[serde(default)] pub(crate) tags: Vec<String>,
+    #[serde(default)]
+    pub(crate) tags: Vec<String>,
     pub(crate) enabled: bool,
     pub(crate) builtin: bool,
-    #[allow(dead_code)] pub(crate) dir: String,
+    #[allow(dead_code)]
+    pub(crate) dir: String,
 }
 
 #[derive(Clone, serde::Deserialize)]
-pub(crate) struct ConnRow { pub(crate) id: String, pub(crate) name: String, pub(crate) enabled: bool, pub(crate) transport: ConnTransport }
+pub(crate) struct ConnRow {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) enabled: bool,
+    pub(crate) transport: ConnTransport,
+}
 #[derive(Clone, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub(crate) enum ConnTransport {
-    Stdio { command: String, #[serde(default)] args: Vec<String>, #[allow(dead_code)] #[serde(default)] env: Vec<(String,String)>, #[allow(dead_code)] #[serde(default)] cwd: Option<String> },
-    Http  { url: String, #[serde(default)] headers: Vec<(String,String)> },
+    Stdio {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[allow(dead_code)]
+        #[serde(default)]
+        env: Vec<(String, String)>,
+        #[allow(dead_code)]
+        #[serde(default)]
+        cwd: Option<String>,
+    },
+    Http {
+        url: String,
+        #[serde(default)]
+        headers: Vec<(String, String)>,
+    },
 }
 #[derive(Clone, serde::Deserialize)]
-pub(crate) struct ConnView { pub(crate) connections: Vec<ConnRow> }
+pub(crate) struct ConnView {
+    pub(crate) connections: Vec<ConnRow>,
+}
 
 // Multi-level connectors tree (bundled bio-tools domains + custom connections).
-fn default_tool_mode() -> String { "allow".into() }
+fn default_tool_mode() -> String {
+    "allow".into()
+}
 #[derive(Clone, serde::Deserialize)]
 pub(crate) struct ConnectorTool {
     pub(crate) name: String,
-    #[serde(default = "default_tool_mode")] pub(crate) mode: String,
-    #[serde(default)] pub(crate) description: String,
-    #[allow(dead_code)] #[serde(default, rename = "inputSchema")] pub(crate) input_schema: serde_json::Value,
+    #[serde(default = "default_tool_mode")]
+    pub(crate) mode: String,
+    #[serde(default)]
+    pub(crate) description: String,
+    #[allow(dead_code)]
+    #[serde(default, rename = "inputSchema")]
+    pub(crate) input_schema: serde_json::Value,
 }
 #[derive(Clone, serde::Deserialize)]
 pub(crate) struct ConnectorInfo {
     pub(crate) key: String,
     pub(crate) name: String,
     pub(crate) kind: String,
-    #[allow(dead_code)] pub(crate) enabled: bool,
+    #[allow(dead_code)]
+    pub(crate) enabled: bool,
     pub(crate) skip_approvals: bool,
-    #[allow(dead_code)] pub(crate) transport: String,
-    #[allow(dead_code)] pub(crate) subtitle: String,
+    #[allow(dead_code)]
+    pub(crate) transport: String,
+    #[allow(dead_code)]
+    pub(crate) subtitle: String,
     pub(crate) tools: Vec<ConnectorTool>,
 }
 #[derive(Clone, serde::Deserialize)]
@@ -608,7 +793,16 @@ pub(crate) struct ApprovalGrantRow {
 
 // Simple flat form state (kind + raw text fields; args/env/headers entered as text, parsed on save).
 #[derive(Clone, Default)]
-pub(crate) struct ConnForm { pub(crate) id: Option<String>, pub(crate) name: String, pub(crate) kind: String, pub(crate) command: String, pub(crate) args: String, pub(crate) url: String, pub(crate) headers: String, pub(crate) enabled: bool }
+pub(crate) struct ConnForm {
+    pub(crate) id: Option<String>,
+    pub(crate) name: String,
+    pub(crate) kind: String,
+    pub(crate) command: String,
+    pub(crate) args: String,
+    pub(crate) url: String,
+    pub(crate) headers: String,
+    pub(crate) enabled: bool,
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct ModelForm {
@@ -645,7 +839,8 @@ pub(crate) struct BootstrapStatus {
     pub(crate) mcp_catalog: usize,
     pub(crate) uv_ok: bool,
     pub(crate) node_ok: bool,
-    #[allow(dead_code)] pub(crate) npm_ok: bool,
+    #[allow(dead_code)]
+    pub(crate) npm_ok: bool,
     pub(crate) sci_ok: bool,
     pub(crate) pixi_ok: bool,
     pub(crate) app_version: String,

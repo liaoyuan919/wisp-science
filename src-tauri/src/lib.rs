@@ -685,6 +685,14 @@ struct UiItem {
     input: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    locations: Option<String>,
 }
 
 /// Index in `msgs` where the `user_index`‑th user turn starts (0-based user count).
@@ -730,6 +738,10 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
                         ok: None,
                         input: None,
                         model_name: None,
+                        call_id: None,
+                        kind: None,
+                        status: None,
+                        locations: None,
                     });
                 }
             }
@@ -743,6 +755,10 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
                             ok: None,
                             input: None,
                             model_name: None,
+                            call_id: None,
+                            kind: None,
+                            status: None,
+                            locations: None,
                         });
                     }
                 }
@@ -755,6 +771,10 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
                         ok: None,
                         input: None,
                         model_name: m.model_name.clone(),
+                        call_id: None,
+                        kind: None,
+                        status: None,
+                        locations: None,
                     });
                 }
             }
@@ -769,8 +789,30 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
                             ok: None,
                             input: None,
                             model_name: m.model_name.clone(),
+                            call_id: None,
+                            kind: None,
+                            status: None,
+                            locations: None,
                         });
                     }
+                } else if let Some(envelope) =
+                    acp::AcpToolEnvelope::from_tool_message(m.tool_name.as_deref(), &text)
+                {
+                    out.push(UiItem {
+                        role: "acp_tool".into(),
+                        text: envelope.content,
+                        tool_name: Some(envelope.title),
+                        ok: Some(matches!(
+                            envelope.status.as_str(),
+                            "completed" | "failed"
+                        )),
+                        input: None,
+                        model_name: None,
+                        call_id: Some(envelope.call_id),
+                        kind: (!envelope.kind.is_empty()).then_some(envelope.kind),
+                        status: Some(envelope.status),
+                        locations: (!envelope.locations.is_empty()).then_some(envelope.locations),
+                    });
                 } else {
                     out.push(UiItem {
                         role: "tool".into(),
@@ -783,6 +825,10 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
                             .and_then(|id| tool_inputs.get(id))
                             .cloned(),
                         model_name: None,
+                        call_id: None,
+                        kind: None,
+                        status: None,
+                        locations: None,
                     });
                 }
             }

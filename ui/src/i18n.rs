@@ -49,11 +49,17 @@ pub fn t(locale: Locale, key: &str) -> String {
 }
 
 pub fn empty_title(locale: Locale, index: usize) -> String {
-    t(locale, &format!("empty.title.{}", index % EMPTY_TITLE_COUNT))
+    t(
+        locale,
+        &format!("empty.title.{}", index % EMPTY_TITLE_COUNT),
+    )
 }
 
 pub fn empty_subtitle(locale: Locale, index: usize) -> String {
-    t(locale, &format!("empty.subtitle.{}", index % EMPTY_SUBTITLE_COUNT))
+    t(
+        locale,
+        &format!("empty.subtitle.{}", index % EMPTY_SUBTITLE_COUNT),
+    )
 }
 
 fn lookup(locale: Locale, key: &str) -> Option<&'static str> {
@@ -134,12 +140,25 @@ fn lookup(locale: Locale, key: &str) -> Option<&'static str> {
         (Locale::En, "sidechat.thinking") => Some("Thinking…"),
         (Locale::En, "models.add") => Some("Add model"),
         (Locale::En, "models.edit") => Some("Edit model"),
+        (Locale::En, "models.add_acp") => Some("Add ACP Agent"),
+        (Locale::En, "models.edit_acp") => Some("Edit ACP Agent"),
         (Locale::En, "models.empty") => Some("Add a model or select one from the list to edit."),
+        (Locale::En, "models.empty_acp") => Some("Add an ACP Agent or select one from the list to edit."),
         (Locale::En, "models.remove") => Some("Remove model"),
         (Locale::En, "models.use") => Some("Use"),
         (Locale::En, "models.acp_open") => Some("ACP Agents"),
-        (Locale::En, "models.acp_hint") => Some("Local ACP agents are under Models › ACP Agents. They are separate from HTTP API model profiles."),
+        (Locale::En, "models.category.http") => Some("Models"),
+        (Locale::En, "models.acp_hint") => Some("Two backends under Models: HTTP API profiles, and local ACP Agents."),
         (Locale::En, "models.acp_subpage_hint") => Some("Configure an installed ACP v1 agent. Command is the executable only; put each argument on its own line."),
+        (Locale::En, "models.acp_test") => Some("Test Connection"),
+        (Locale::En, "models.acp_save") => Some("Save"),
+        (Locale::En, "models.acp_saved") => Some("Agent saved"),
+        (Locale::En, "models.acp_required") => Some("Label and command are required"),
+        (Locale::En, "models.acp_label") => Some("Label"),
+        (Locale::En, "models.acp_command") => Some("Command"),
+        (Locale::En, "models.acp_args") => Some("Arguments (one per line)"),
+        (Locale::En, "models.acp_test_ok") => Some("Connection succeeded"),
+        (Locale::En, "models.acp_auth_ok") => Some("Authentication completed"),
         (Locale::En, "composer.add") => Some("Add to message"),
         (Locale::En, "composer.compose") => Some("Compose"),
         (Locale::En, "composer.group_add") => Some("Add to message"),
@@ -686,12 +705,25 @@ fn lookup(locale: Locale, key: &str) -> Option<&'static str> {
         (Locale::Zh, "sidechat.thinking") => Some("思考中…"),
         (Locale::Zh, "models.add") => Some("添加模型"),
         (Locale::Zh, "models.edit") => Some("编辑模型"),
+        (Locale::Zh, "models.add_acp") => Some("添加 ACP Agent"),
+        (Locale::Zh, "models.edit_acp") => Some("编辑 ACP Agent"),
         (Locale::Zh, "models.empty") => Some("添加模型，或从列表中选择一项进行编辑。"),
+        (Locale::Zh, "models.empty_acp") => Some("添加 ACP Agent，或从列表中选择一项进行编辑。"),
         (Locale::Zh, "models.remove") => Some("删除模型"),
         (Locale::Zh, "models.use") => Some("启用"),
         (Locale::Zh, "models.acp_open") => Some("ACP Agents"),
-        (Locale::Zh, "models.acp_hint") => Some("本地 ACP Agent 在 Models › ACP Agents 下配置，与 HTTP API 模型配置分开。"),
+        (Locale::Zh, "models.category.http") => Some("Models"),
+        (Locale::Zh, "models.acp_hint") => Some("Models 下分两类：HTTP API 模型，以及本地 ACP Agents。"),
         (Locale::Zh, "models.acp_subpage_hint") => Some("配置已安装的 ACP v1 Agent。Command 只填可执行文件；每个参数单独一行。"),
+        (Locale::Zh, "models.acp_test") => Some("测试连接"),
+        (Locale::Zh, "models.acp_save") => Some("保存"),
+        (Locale::Zh, "models.acp_saved") => Some("Agent 已保存"),
+        (Locale::Zh, "models.acp_required") => Some("Label 和 Command 不能为空"),
+        (Locale::Zh, "models.acp_label") => Some("Label"),
+        (Locale::Zh, "models.acp_command") => Some("Command"),
+        (Locale::Zh, "models.acp_args") => Some("Arguments（每行一个）"),
+        (Locale::Zh, "models.acp_test_ok") => Some("连接成功"),
+        (Locale::Zh, "models.acp_auth_ok") => Some("认证完成"),
         (Locale::Zh, "composer.add") => Some("添加到消息"),
         (Locale::Zh, "composer.compose") => Some("撰写"),
         (Locale::Zh, "composer.group_add") => Some("添加到消息"),
@@ -1187,13 +1219,17 @@ pub fn localize_backend(locale: Locale, msg: &str) -> String {
         "API URL is required." => t(locale, "err.api_url_required"),
         "Model is required." => t(locale, "err.model_required"),
         "API key is required." => t(locale, "err.api_key_required"),
-        "No API key set. Open Settings and paste your provider API key." => t(locale, "err.no_api_key"),
+        "No API key set. Open Settings and paste your provider API key." => {
+            t(locale, "err.no_api_key")
+        }
         "Validation timed out after 30s" => t(locale, "err.validation_timeout"),
         "Validation succeeded" => t(locale, "status.validation_succeeded"),
         "selected folder has no SKILL.md" => t(locale, "err.skill_no_md"),
         "select a skill folder or a SKILL.md file" => t(locale, "err.skill_pick"),
         "SKILL.md has no frontmatter (--- block)" => t(locale, "err.skill_no_frontmatter"),
-        "SKILL.md frontmatter is not closed with ---" => t(locale, "err.skill_frontmatter_unclosed"),
+        "SKILL.md frontmatter is not closed with ---" => {
+            t(locale, "err.skill_frontmatter_unclosed")
+        }
         "SKILL.md is missing a description" => t(locale, "err.skill_no_description"),
         m if m.starts_with("a skill named '") && m.ends_with("' already exists") => {
             let name = &m["a skill named '".len()..m.len() - "' already exists".len()];
@@ -1202,7 +1238,11 @@ pub fn localize_backend(locale: Locale, msg: &str) -> String {
         m if m.starts_with("Validated ") => {
             if let Some(rest) = m.strip_prefix("Validated ") {
                 if let Some((provider, model)) = rest.split_once(" with ") {
-                    return tf(locale, "status.validated", &[("provider", provider), ("model", model)]);
+                    return tf(
+                        locale,
+                        "status.validated",
+                        &[("provider", provider), ("model", model)],
+                    );
                 }
             }
             msg.to_string()

@@ -1,12 +1,12 @@
 use crate::app_support::{
-    build_conn_json, close_details_ancestor, compose_icon, conn_form_from_row, js_error_text,
-    join_tags, new_model_form, profile_to_form, settings_section_label, settings_subpage_label,
-    skill_matches_filter, CRED_GROUPS,
+    build_conn_json, close_details_ancestor, compose_icon, conn_form_from_row, join_tags,
+    js_error_text, new_acp_form, new_model_form, profile_to_form, settings_section_label,
+    settings_subpage_label, skill_matches_filter, CRED_GROUPS,
 };
 use crate::bindings::{invoke, invoke_checked};
 use crate::dto::*;
-use crate::i18n::{localize_backend, set_document_lang, tf, t, Locale};
-use crate::text::{dom_value, event_target_checked, event_target_input, format_bytes};
+use crate::i18n::{localize_backend, set_document_lang, t, tf, Locale};
+use crate::text::{dom_value, event_target_checked, event_target_input, event_target_value, format_bytes};
 use leptos::*;
 use serde_wasm_bindgen::to_value;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -25,140 +25,6 @@ fn settings_provider_defaults(provider: &str) -> (&'static str, &'static str) {
         "anthropic" => ("https://api.anthropic.com", "claude-sonnet-5"),
         "openai_responses" => ("https://api.openai.com/v1", "gpt-5.5"),
         _ => ("https://api.deepseek.com", "deepseek-v4-pro"),
-    }
-}
-
-#[component]
-fn AcpAgentsPane(
-    agents: RwSignal<Vec<AcpAgentProfile>>,
-    active_agent_id: RwSignal<Option<String>>,
-) -> impl IntoView {
-    let edit_id = create_rw_signal(String::new());
-    let label = create_rw_signal(String::new());
-    let command = create_rw_signal(String::new());
-    let args_text = create_rw_signal(String::new());
-    let message = create_rw_signal(None::<(bool, String)>);
-    let infos = create_rw_signal(HashMap::<String, AcpAgentInfo>::new());
-    let reset = move || {
-        edit_id.set(String::new());
-        label.set(String::new());
-        command.set(String::new());
-        args_text.set(String::new());
-        message.set(None);
-    };
-    view! {
-        <div class="acp-agent-list">
-            {move || agents.get().into_iter().map(|agent| {
-                let edit = agent.clone();
-                let test_id = agent.id.clone();
-                let delete_id = agent.id.clone();
-                let active = active_agent_id.get().as_deref() == Some(agent.id.as_str());
-                let agent_info = infos.get().get(&agent.id).cloned();
-                view! {
-                    <article class="settings-list-row" data-testid="acp-agent-row">
-                        <div class="settings-list-main"><strong>{agent.label.clone()}</strong><code>{agent.command.clone()}</code></div>
-                        <div class="settings-list-actions">
-                            <button type="button" on:click=move |_| {
-                                edit_id.set(edit.id.clone());
-                                label.set(edit.label.clone());
-                                command.set(edit.command.clone());
-                                args_text.set(edit.args.join("\n"));
-                            }>"Edit"</button>
-                            <button type="button" data-testid="test-acp-agent" on:click=move |_| {
-                                let id = test_id.clone();
-                                spawn_local(async move {
-                                    let args = to_value(&serde_json::json!({ "id": id.clone() })).unwrap();
-                                    match invoke_checked("test_acp_agent", args).await {
-                                        Ok(value) => match serde_wasm_bindgen::from_value::<AcpAgentInfo>(value) {
-                                            Ok(value) => {
-                                                infos.update(|all| { all.insert(id, value); });
-                                                message.set(Some((true, "Connection succeeded".into())));
-                                            }
-                                            Err(error) => message.set(Some((false, error.to_string()))),
-                                        },
-                                        Err(error) => message.set(Some((false, js_error_text(error)))),
-                                    }
-                                });
-                            }>"Test Connection"</button>
-                            <button type="button" disabled=active on:click=move |_| {
-                                let id = delete_id.clone();
-                                spawn_local(async move {
-                                    let args = to_value(&serde_json::json!({ "id": id })).unwrap();
-                                    if let Ok(value) = invoke_checked("remove_acp_agent", args).await {
-                                        if let Ok(value) = serde_wasm_bindgen::from_value::<Vec<AcpAgentProfile>>(value) {
-                                            agents.set(value);
-                                        }
-                                    }
-                                });
-                            }>"Delete"</button>
-                        </div>
-                        {agent_info.map(|agent_info| view! {
-                            <div class="acp-agent-info" data-testid="acp-agent-info">
-                                <span>{format!("ACP v{}", agent_info.protocol_version)}</span>
-                                {agent_info.auth_methods.into_iter().map(|method| {
-                                    let id = agent.id.clone();
-                                    let method_id = method.id.clone();
-                                    view! {
-                                        <button type="button" data-testid="authenticate-acp-agent" title=method.description on:click=move |_| {
-                                            let args = to_value(&serde_json::json!({ "id": id, "methodId": method_id })).unwrap();
-                                            spawn_local(async move {
-                                                message.set(Some(match invoke_checked("authenticate_acp_agent", args).await {
-                                                    Ok(_) => (true, "Authentication completed".into()),
-                                                    Err(error) => (false, js_error_text(error)),
-                                                }));
-                                            });
-                                        }>{method.name}</button>
-                                    }
-                                }).collect_view()}
-                            </div>
-                        })}
-                    </article>
-                }
-            }).collect_view()}
-        </div>
-        <form class="settings-form acp-agent-form" on:submit=move |event| {
-            event.prevent_default();
-            let raw_args = args_text.get();
-            let profile = AcpAgentProfile {
-                id: edit_id.get(),
-                label: label.get().trim().into(),
-                command: command.get().trim().into(),
-                args: if raw_args.is_empty() {
-                    Vec::new()
-                } else {
-                    raw_args.split('\n').map(|arg| arg.strip_suffix('\r').unwrap_or(arg).to_string()).collect()
-                },
-            };
-            if profile.label.is_empty() || profile.command.is_empty() {
-                message.set(Some((false, "Label and command are required".into())));
-                return;
-            }
-            spawn_local(async move {
-                let args = to_value(&serde_json::json!({ "profile": profile })).unwrap();
-                match invoke_checked("save_acp_agent", args).await {
-                    Ok(value) => match serde_wasm_bindgen::from_value::<Vec<AcpAgentProfile>>(value) {
-                        Ok(value) => {
-                            agents.set(value);
-                            reset();
-                            message.set(Some((true, "Agent saved".into())));
-                        }
-                        Err(error) => message.set(Some((false, error.to_string()))),
-                    },
-                    Err(error) => message.set(Some((false, js_error_text(error)))),
-                }
-            });
-        }>
-            <label><span>"Label"</span><input data-testid="acp-agent-label" prop:value=move || label.get() on:input=move |event| label.set(dom_value(&event))/></label>
-            <label><span>"Command"</span><input data-testid="acp-agent-command" prop:value=move || command.get() on:input=move |event| command.set(dom_value(&event))/></label>
-            <label><span>"Arguments (one per line)"</span><textarea data-testid="acp-agent-args" prop:value=move || args_text.get() on:input=move |event| args_text.set(dom_value(&event))></textarea></label>
-            <div class="row">
-                <button type="button" on:click=move |_| reset()>"New"</button>
-                <button type="submit" class="primary" data-testid="save-acp-agent">"Save Agent"</button>
-            </div>
-        </form>
-        {move || message.get().map(|(ok, text)| view! {
-            <p class="form-msg" class:ok=ok class:err=!ok>{text}</p>
-        })}
     }
 }
 
@@ -184,6 +50,9 @@ pub(super) struct SettingsViewState {
     pub(super) show_acp_agents: RwSignal<bool>,
     pub(super) acp_agents: RwSignal<Vec<AcpAgentProfile>>,
     pub(super) active_acp_agent_id: RwSignal<Option<String>>,
+    pub(super) acp_form: RwSignal<Option<AcpAgentProfile>>,
+    pub(super) acp_form_msg: RwSignal<Option<(bool, String)>>,
+    pub(super) acp_infos: RwSignal<HashMap<String, AcpAgentInfo>>,
     pub(super) specialists: RwSignal<Vec<Specialist>>,
     pub(super) specialist_form_open: Memo<bool>,
     pub(super) memory_view: RwSignal<Option<MemoryView>>,
@@ -248,6 +117,9 @@ pub(super) fn SettingsView(
         show_acp_agents,
         acp_agents,
         active_acp_agent_id,
+        acp_form,
+        acp_form_msg,
+        acp_infos,
         specialists,
         specialist_form_open,
         memory_view,
@@ -269,8 +141,10 @@ pub(super) fn SettingsView(
         custom_conn_tools_loading,
         custom_conn_tool_errors,
     } = state;
+    let acp_form_open = create_memo(move |_| acp_form.get().is_some());
 
-move || show_settings.get().then(|| view! {
+    move || {
+        show_settings.get().then(|| view! {
     <div class="overlay">
         <div class="modal settings-modal">
             <div class="settings-nav">
@@ -323,7 +197,7 @@ move || show_settings.get().then(|| view! {
                         open_conn_name.as_deref(),
                         memory_selected.get().as_deref(),
                         specialist_form.get().as_ref(),
-                        show_acp_agents.get(),
+                        acp_form.get().as_ref(),
                     );
                     view! {
                         <div class="settings-head">
@@ -390,11 +264,69 @@ move || show_settings.get().then(|| view! {
                     </div>
                 }.into_view())}
                 {move || (settings_section.get() == "models").then(|| {
-                    if show_acp_agents.get() {
+                    if acp_form_open.get() {
                         view! {
                             <div class="settings-pane settings-pane-subpage acp-agents-pane" data-testid="acp-agents-settings">
-                                <p class="hint">{move || t(locale.get(), "models.acp_subpage_hint")}</p>
-                                <AcpAgentsPane agents=acp_agents active_agent_id=active_acp_agent_id />
+                                <div class="conn-form model-form">
+                                    <div class="settings-form-grid">
+                                        <label class="span-2">{move || t(locale.get(), "models.acp_label")}
+                                            <input data-testid="acp-agent-label"
+                                                prop:value=move || acp_form.get().map(|f| f.label.clone()).unwrap_or_default()
+                                                on:input=move |ev| acp_form.update(|o| if let Some(o)=o { o.label = event_target_value(&ev); }) /></label>
+                                        <label class="span-2">{move || t(locale.get(), "models.acp_command")}
+                                            <input data-testid="acp-agent-command"
+                                                prop:value=move || acp_form.get().map(|f| f.command.clone()).unwrap_or_default()
+                                                on:input=move |ev| acp_form.update(|o| if let Some(o)=o { o.command = event_target_value(&ev); }) /></label>
+                                        <label class="span-2">{move || t(locale.get(), "models.acp_args")}
+                                            <textarea data-testid="acp-agent-args" rows="5"
+                                                prop:value=move || acp_form.get().map(|f| f.args.join("\n")).unwrap_or_default()
+                                                on:input=move |ev| acp_form.update(|o| if let Some(o)=o {
+                                                    o.args = event_target_value(&ev).split('\n').map(|arg| arg.to_string()).collect();
+                                                })></textarea></label>
+                                    </div>
+                                    <span class="hint">{move || t(locale.get(), "models.acp_subpage_hint")}</span>
+                                    {move || acp_form_msg.get().map(|(ok, text)| view! {
+                                        <div class="settings-status" class:ok=ok class:fail=move || !ok>{text}</div>
+                                    })}
+                                    <div class="row settings-footer">
+                                        <button type="button" disabled=move || settings_busy.get() on:click=move |_| {
+                                            acp_form.set(None);
+                                            acp_form_msg.set(None);
+                                        }>{move || t(locale.get(), "settings.cancel")}</button>
+                                        <button type="button" class="primary" data-testid="save-acp-agent" disabled=move || settings_busy.get()
+                                            on:click=move |_| {
+                                                let Some(mut profile) = acp_form.get() else { return; };
+                                                profile.label = profile.label.trim().to_string();
+                                                profile.command = profile.command.trim().to_string();
+                                                if profile.label.is_empty() || profile.command.is_empty() {
+                                                    acp_form_msg.set(Some((false, t(locale.get(), "models.acp_required").to_string())));
+                                                    return;
+                                                }
+                                                let saved = t(locale.get(), "models.acp_saved").to_string();
+                                                spawn_local(async move {
+                                                    settings_busy.set(true);
+                                                    let arg = to_value(&serde_json::json!({ "profile": profile })).unwrap();
+                                                    match invoke_checked("save_acp_agent", arg).await {
+                                                        Ok(value) => match serde_wasm_bindgen::from_value::<Vec<AcpAgentProfile>>(value) {
+                                                            Ok(list) => {
+                                                                acp_agents.set(list);
+                                                                acp_form.set(None);
+                                                                acp_form_msg.set(Some((true, saved)));
+                                                                show_acp_agents.set(true);
+                                                            }
+                                                            Err(error) => {
+                                                                acp_form_msg.set(Some((false, error.to_string())));
+                                                            }
+                                                        },
+                                                        Err(error) => {
+                                                            acp_form_msg.set(Some((false, js_error_text(error))));
+                                                        }
+                                                    }
+                                                    settings_busy.set(false);
+                                                });
+                                            }>{move || t(locale.get(), "models.acp_save")}</button>
+                                    </div>
+                                </div>
                             </div>
                         }.into_view()
                     } else if model_form_open.get() {
@@ -511,94 +443,245 @@ move || show_settings.get().then(|| view! {
                     } else {
                         view! {
                         <div class="settings-pane settings-pane-list model-settings-pane">
-                            <div class="settings-toolbar settings-toolbar-end">
-                                <span class="settings-filter">{move || {
-                                    let n = models.get().len();
-                                    format!("{} ({n})", t(locale.get(), "settings.nav.models"))
-                                }}</span>
+                            <div class="settings-toolbar settings-toolbar-end model-category-toolbar">
+                                <div class="settings-category-tabs" role="tablist" aria-label="Model categories">
+                                    <button type="button" role="tab" class="settings-category-tab"
+                                        class:active=move || !show_acp_agents.get()
+                                        aria-selected=move || (!show_acp_agents.get()).to_string()
+                                        data-testid="models-category-http"
+                                        on:click=move |_| show_acp_agents.set(false)>
+                                        {move || {
+                                            let n = models.get().len();
+                                            format!("{} ({n})", t(locale.get(), "models.category.http"))
+                                        }}
+                                    </button>
+                                    <button type="button" role="tab" class="settings-category-tab"
+                                        class:active=move || show_acp_agents.get()
+                                        aria-selected=move || show_acp_agents.get().to_string()
+                                        data-testid="open-acp-agents-from-settings"
+                                        on:click=move |_| show_acp_agents.set(true)>
+                                        {move || {
+                                            let n = acp_agents.get().len();
+                                            format!("{} ({n})", t(locale.get(), "models.acp_open"))
+                                        }}
+                                    </button>
+                                </div>
                                 <div class="settings-toolbar-actions">
-                                    <button type="button" class="settings-add-btn" data-testid="open-acp-agents-from-settings" on:click=move |_| {
-                                        model_form.set(None);
-                                        show_acp_agents.set(true);
-                                    }>{move || t(locale.get(), "models.acp_open")}</button>
-                                    <button type="button" class="settings-add-btn" on:click=move |_| {
-                                        show_acp_agents.set(false);
-                                        model_form.set(Some(new_model_form()));
-                                        model_form_key.set(String::new());
-                                        model_form_msg.set(None);
-                                    }>{move || t(locale.get(), "models.add")}</button>
+                                    {move || if show_acp_agents.get() {
+                                        view! {
+                                            <button type="button" class="settings-add-btn" data-testid="add-acp-agent-settings" on:click=move |_| {
+                                                show_acp_agents.set(true);
+                                                acp_form.set(Some(new_acp_form()));
+                                                acp_form_msg.set(None);
+                                            }>{move || t(locale.get(), "models.add_acp")}</button>
+                                        }.into_view()
+                                    } else {
+                                        view! {
+                                            <button type="button" class="settings-add-btn" on:click=move |_| {
+                                                show_acp_agents.set(false);
+                                                model_form.set(Some(new_model_form()));
+                                                model_form_key.set(String::new());
+                                                model_form_msg.set(None);
+                                            }>{move || t(locale.get(), "models.add")}</button>
+                                        }.into_view()
+                                    }}
                                 </div>
                             </div>
-                            <p class="hint" data-testid="acp-models-list-hint">{move || t(locale.get(), "models.acp_hint")}</p>
-                            <div class="settings-list">
-                                <For each=move || models.get() key=|m| m.id.clone() let:m>
-                                    {
-                                        let pick_id = m.id.clone();
-                                        let del_id = m.id.clone();
-                                        let edit = m.clone();
-                                        let is_active = m.active;
-                                        let can_delete = models.get().len() > 1;
-                                        let show_sub = !m.model.is_empty() && m.model != m.label;
-                                        view! {
-                                            <div class="settings-list-row settings-list-row-link"
-                                                class:settings-list-row-active=is_active
-                                                on:click=move |_| {
-                                                        let form = profile_to_form(&edit);
-                                                    show_acp_agents.set(false);
-                                                    model_form.set(Some(form));
-                                                    model_form_key.set(String::new());
-                                                    model_form_msg.set(None);
-                                                }>
-                                                <div class="settings-list-main">
-                                                    <span class="settings-list-title">
-                                                        {m.label.clone()}
-                                                        {m.use_for_vision.then(|| view! { <span class="settings-active-mark" title="vision">" vision"</span> })}
-                                                    </span>
-                                                    {show_sub.then(|| view! {
-                                                        <span class="settings-list-sub">{m.model.clone()}</span>
-                                                    })}
-                                                </div>
-                                                <div class="settings-list-actions">
-                                                    {is_active.then(|| view! {
-                                                        <span class="settings-active-mark" title="active">"✓"</span>
-                                                    })}
-                                                    {(can_delete && !is_active).then(|| { let id = del_id.clone(); view! {
-                                                        <button class="settings-list-remove" type="button" title=move || t(locale.get(), "models.remove")
-                                                            on:click=move |ev| {
-                                                                ev.stop_propagation();
-                                                                let id = id.clone();
-                                                                spawn_local(async move {
-                                                                    let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
-                                                                    let v = invoke("remove_model", arg).await;
-                                                                    if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(v) { models.set(list); }
-                                                                });
-                                                            }>{compose_icon("close")}</button>
-                                                    }})}
-                                                    {(!is_active).then(|| { let id = pick_id.clone(); view! {
-                                                        <button class="settings-list-use" type="button"
-                                                            on:click=move |ev| {
-                                                                ev.stop_propagation();
-                                                                let id = id.clone();
-                                                                spawn_local(async move {
-                                                                    let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
-                                                                    if let Ok(v) = invoke_checked("set_active_model", arg).await {
-                                                                        if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(v) {
-                                                                            models.set(list);
-                                                                        }
+                            {move || if show_acp_agents.get() {
+                                view! {
+                                    <div class="acp-agents-pane" data-testid="acp-agents-settings">
+                                        <p class="hint">{move || t(locale.get(), "models.acp_subpage_hint")}</p>
+                                        {move || acp_form_msg.get().map(|(ok, text)| view! {
+                                            <div class="settings-status" class:ok=ok class:fail=move || !ok>{text}</div>
+                                        })}
+                                        <div class="settings-list" data-testid="acp-agents-list">
+                                            <For each=move || acp_agents.get() key=|agent| agent.id.clone() let:agent>
+                                                {
+                                                    let edit = agent.clone();
+                                                    let id_for_test = agent.id.clone();
+                                                    let id_for_delete = agent.id.clone();
+                                                    let is_active = active_acp_agent_id.get().as_deref() == Some(agent.id.as_str());
+                                                    view! {
+                                                        <div class="settings-list-row settings-list-row-link"
+                                                            data-testid="acp-agent-row"
+                                                            class:settings-list-row-active=is_active
+                                                            on:click=move |_| {
+                                                                acp_form.set(Some(edit.clone()));
+                                                                acp_form_msg.set(None);
+                                                            }>
+                                                            <div class="settings-list-main">
+                                                                <span class="settings-list-title">
+                                                                    {agent.label.clone()}
+                                                                    {is_active.then(|| view! { <span class="settings-active-mark" title="active">" ✓"</span> })}
+                                                                </span>
+                                                                <span class="settings-list-sub">{agent.command.clone()}</span>
+                                                            </div>
+                                                            <div class="settings-list-actions">
+                                                                {is_active.then(|| view! {
+                                                                    <span class="settings-active-mark" title="active">"✓"</span>
+                                                                })}
+                                                                <button class="settings-list-use" type="button" data-testid="test-acp-agent"
+                                                                    on:click=move |ev| {
+                                                                        ev.stop_propagation();
+                                                                        let id = id_for_test.clone();
+                                                                        spawn_local(async move {
+                                                                            settings_busy.set(true);
+                                                                            let args = to_value(&serde_json::json!({ "id": id.clone() })).unwrap();
+                                                                            match invoke_checked("test_acp_agent", args).await {
+                                                                                Ok(value) => match serde_wasm_bindgen::from_value::<AcpAgentInfo>(value) {
+                                                                                    Ok(info) => {
+                                                                                        acp_infos.update(|infos| {
+                                                                                            infos.insert(id, info);
+                                                                                        });
+                                                                                        acp_form_msg.set(None);
+                                                                                    }
+                                                                                    Err(error) => acp_form_msg.set(Some((false, error.to_string()))),
+                                                                                },
+                                                                                Err(error) => acp_form_msg.set(Some((false, js_error_text(error)))),
+                                                                            }
+                                                                            settings_busy.set(false);
+                                                                        });
+                                                                    }>{move || t(locale.get(), "models.acp_test")}</button>
+                                                                <button class="settings-list-remove" type="button" title=move || t(locale.get(), "models.remove")
+                                                                    on:click=move |ev| {
+                                                                        ev.stop_propagation();
+                                                                        let id = id_for_delete.clone();
+                                                                        spawn_local(async move {
+                                                                            settings_busy.set(true);
+                                                                            let args = to_value(&serde_json::json!({ "id": id.clone() })).unwrap();
+                                                                            match invoke_checked("remove_acp_agent", args).await {
+                                                                                Ok(value) => {
+                                                                                    if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<AcpAgentProfile>>(value) {
+                                                                                        acp_agents.set(list);
+                                                                                        acp_infos.update(|infos| {
+                                                                                            infos.remove(&id);
+                                                                                        });
+                                                                                        if active_acp_agent_id.get().as_deref() == Some(id.as_str()) {
+                                                                                            active_acp_agent_id.set(None);
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                                Err(error) => acp_form_msg.set(Some((false, js_error_text(error)))),
+                                                                            }
+                                                                            settings_busy.set(false);
+                                                                        });
+                                                                    }>{compose_icon("close")}</button>
+                                                                <span class="settings-list-chevron" aria-hidden="true">"›"</span>
+                                                            </div>
+                                                            {move || {
+                                                                let id = agent.id.clone();
+                                                                acp_infos.get().get(&id).cloned().map(|info| {
+                                                                    let methods = info.auth_methods;
+                                                                    view! {
+                                                                        <div class="acp-agent-info" data-testid="acp-agent-info" on:click=|ev| ev.stop_propagation()>
+                                                                            <span>{format!("ACP v{}", info.protocol_version)}</span>
+                                                                            {methods.into_iter().map(|method| {
+                                                                                let id = id.clone();
+                                                                                let method_id = method.id.clone();
+                                                                                view! {
+                                                                                    <button type="button" data-testid="authenticate-acp-agent" title=method.description.clone().unwrap_or_default()
+                                                                                        on:click=move |ev| {
+                                                                                            ev.stop_propagation();
+                                                                                            let id = id.clone();
+                                                                                            let method_id = method_id.clone();
+                                                                                            spawn_local(async move {
+                                                                                                let args = to_value(&serde_json::json!({ "id": id, "methodId": method_id })).unwrap();
+                                                                                                match invoke_checked("authenticate_acp_agent", args).await {
+                                                                                                    Ok(_) => acp_form_msg.set(Some((true, t(Locale::detect_browser(), "models.acp_auth_ok").into()))),
+                                                                                                    Err(error) => acp_form_msg.set(Some((false, js_error_text(error)))),
+                                                                                                }
+                                                                                            });
+                                                                                        }>{method.name.clone()}</button>
+                                                                                }
+                                                                            }).collect_view()}
+                                                                        </div>
                                                                     }
-                                                                });
-                                                            }>{move || t(locale.get(), "models.use")}</button>
-                                                    }})}
-                                                    <span class="settings-list-chevron" aria-hidden="true">"›"</span>
-                                                </div>
-                                            </div>
-                                        }
-                                    }
-                                </For>
-                            </div>
-                            {move || models.get().is_empty().then(|| view! {
-                                <p class="model-empty-hint">{move || t(locale.get(), "models.empty")}</p>
-                            })}
+                                                                })
+                                                            }}
+                                                        </div>
+                                                    }
+                                                }
+                                            </For>
+                                        </div>
+                                        {move || acp_agents.get().is_empty().then(|| view! {
+                                            <p class="model-empty-hint">{move || t(locale.get(), "models.empty_acp")}</p>
+                                        })}
+                                    </div>
+                                }.into_view()
+                            } else {
+                                view! {
+                                    <p class="hint" data-testid="acp-models-list-hint">{move || t(locale.get(), "models.acp_hint")}</p>
+                                    <div class="settings-list">
+                                        <For each=move || models.get() key=|m| m.id.clone() let:m>
+                                            {
+                                                let pick_id = m.id.clone();
+                                                let del_id = m.id.clone();
+                                                let edit = m.clone();
+                                                let is_active = m.active;
+                                                let can_delete = models.get().len() > 1;
+                                                let show_sub = !m.model.is_empty() && m.model != m.label;
+                                                view! {
+                                                    <div class="settings-list-row settings-list-row-link"
+                                                        class:settings-list-row-active=is_active
+                                                        on:click=move |_| {
+                                                            let form = profile_to_form(&edit);
+                                                            show_acp_agents.set(false);
+                                                            model_form.set(Some(form));
+                                                            model_form_key.set(String::new());
+                                                            model_form_msg.set(None);
+                                                        }>
+                                                        <div class="settings-list-main">
+                                                            <span class="settings-list-title">
+                                                                {m.label.clone()}
+                                                                {m.use_for_vision.then(|| view! { <span class="settings-active-mark" title="vision">" vision"</span> })}
+                                                            </span>
+                                                            {show_sub.then(|| view! {
+                                                                <span class="settings-list-sub">{m.model.clone()}</span>
+                                                            })}
+                                                        </div>
+                                                        <div class="settings-list-actions">
+                                                            {is_active.then(|| view! {
+                                                                <span class="settings-active-mark" title="active">"✓"</span>
+                                                            })}
+                                                            {(can_delete && !is_active).then(|| { let id = del_id.clone(); view! {
+                                                                <button class="settings-list-remove" type="button" title=move || t(locale.get(), "models.remove")
+                                                                    on:click=move |ev| {
+                                                                        ev.stop_propagation();
+                                                                        let id = id.clone();
+                                                                        spawn_local(async move {
+                                                                            let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
+                                                                            let v = invoke("remove_model", arg).await;
+                                                                            if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(v) { models.set(list); }
+                                                                        });
+                                                                    }>{compose_icon("close")}</button>
+                                                            }})}
+                                                            {(!is_active).then(|| { let id = pick_id.clone(); view! {
+                                                                <button class="settings-list-use" type="button"
+                                                                    on:click=move |ev| {
+                                                                        ev.stop_propagation();
+                                                                        let id = id.clone();
+                                                                        spawn_local(async move {
+                                                                            let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
+                                                                            if let Ok(v) = invoke_checked("set_active_model", arg).await {
+                                                                                if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(v) {
+                                                                                    models.set(list);
+                                                                                }
+                                                                            }
+                                                                        });
+                                                                    }>{move || t(locale.get(), "models.use")}</button>
+                                                            }})}
+                                                            <span class="settings-list-chevron" aria-hidden="true">"›"</span>
+                                                        </div>
+                                                    </div>
+                                                }
+                                            }
+                                        </For>
+                                    </div>
+                                    {move || models.get().is_empty().then(|| view! {
+                                        <p class="model-empty-hint">{move || t(locale.get(), "models.empty")}</p>
+                                    })}
+                                }.into_view()
+                            }}
                         </div>
                         }.into_view()
                     }
@@ -1527,4 +1610,5 @@ move || show_settings.get().then(|| view! {
         </div>
     </div>
 }.into_view())
+    }
 }

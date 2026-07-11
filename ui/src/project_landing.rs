@@ -41,35 +41,40 @@ pub(super) fn ProjectLanding(
         command_palette_open,
     } = state;
 
-    move || show_projects.get().then(|| {
-    let on_open_demo = Callback::new(move |_: ()| {
-        project_open_error.set(None);
-        show_projects.set(false);
-        demo_mode.set(true);
-        items.set(vec![]);
-        active_session.set(None);
-        spawn_local(async move {
-            let v = invoke("list_demos", JsValue::UNDEFINED).await;
-            if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<DemoInfo>>(v) { demos.set(list); }
-        });
-    });
-    let on_open_artifact = Callback::new(move |(path, name, kind): (String, String, String)| {
-        modal_artifact.set(Some((path, name, kind)));
-    });
-    let on_open_settings = Callback::new(move |_: ()| open_settings.call(None));
-    view! {
-        <ProjectsScreen
-            locale=locale
-            running=running
-            approval_pending=approval_pending.read_only()
-            open_error=project_open_error
-            on_open=open_project
-            on_open_session=open_project_session
-            on_open_artifact=on_open_artifact
-            on_open_settings=on_open_settings
-            on_open_demo=on_open_demo
-            on_search=Callback::new(move |_| command_palette_open.set(true))
-        />
+    move || {
+        show_projects.get().then(|| {
+            let on_open_demo = Callback::new(move |_: ()| {
+                project_open_error.set(None);
+                show_projects.set(false);
+                demo_mode.set(true);
+                items.set(vec![]);
+                active_session.set(None);
+                spawn_local(async move {
+                    let v = invoke("list_demos", JsValue::UNDEFINED).await;
+                    if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<DemoInfo>>(v) {
+                        demos.set(list);
+                    }
+                });
+            });
+            let on_open_artifact =
+                Callback::new(move |(path, name, kind): (String, String, String)| {
+                    modal_artifact.set(Some((path, name, kind)));
+                });
+            let on_open_settings = Callback::new(move |_: ()| open_settings.call(None));
+            view! {
+                <ProjectsScreen
+                    locale=locale
+                    running=running
+                    approval_pending=approval_pending.read_only()
+                    open_error=project_open_error
+                    on_open=open_project
+                    on_open_session=open_project_session
+                    on_open_artifact=on_open_artifact
+                    on_open_settings=on_open_settings
+                    on_open_demo=on_open_demo
+                    on_search=Callback::new(move |_| command_palette_open.set(true))
+                />
+            }
+        })
     }
-})
 }

@@ -98,11 +98,13 @@ test("Settings Models page can open ACP Agents dialog", async ({ page }) => {
   await enterApp(page);
   await page.getByRole("button", { name: "Settings" }).click();
   await page.getByRole("button", { name: "Models", exact: true }).click();
-  await expect(page.getByTestId("acp-models-list-hint")).toBeVisible();
+  await expect(page.getByTestId("models-category-http")).toHaveClass(/active/);
   await page.getByTestId("open-acp-agents-from-settings").click();
+  await expect(page.getByTestId("open-acp-agents-from-settings")).toHaveClass(/active/);
+  await expect(page.getByTestId("acp-agents-list")).toBeVisible();
+  await page.getByTestId("add-acp-agent-settings").click();
   await expect(page.getByTestId("acp-agents-settings")).toBeVisible();
-  await expect(page.getByText("Models")).toBeVisible();
-  await expect(page.getByText("ACP Agents").first()).toBeVisible();
+  await expect(page.locator(".settings-breadcrumb")).toContainText(/ACP/);
 });
 
 test("ACP Agent settings create, test, and authenticate an installed agent", async ({ page }) => {
@@ -111,17 +113,17 @@ test("ACP Agent settings create, test, and authenticate an installed agent", asy
   await page.getByTestId("add-acp-agent").click();
   const settings = page.getByTestId("acp-agents-settings");
   await expect(settings).toBeVisible();
-  await expect(page.locator(".settings-breadcrumb")).toContainText("ACP Agents");
+  await expect(page.locator(".settings-breadcrumb")).toContainText(/ACP/);
   await settings.getByTestId("acp-agent-label").fill("My ACP");
   await settings.getByTestId("acp-agent-command").fill("my-acp");
   await settings.getByTestId("acp-agent-args").fill("--stdio\n  spaced  \n\n--safe");
   await settings.getByTestId("save-acp-agent").click();
-  const row = settings.getByTestId("acp-agent-row").filter({ hasText: "My ACP" });
+  await expect(page.getByTestId("acp-agents-list")).toBeVisible();
+  const row = page.getByTestId("acp-agent-row").filter({ hasText: "My ACP" });
   await expect(row).toBeVisible();
   await row.getByTestId("test-acp-agent").click();
   await expect(row.getByTestId("acp-agent-info")).toContainText("ACP v1");
   await row.getByTestId("authenticate-acp-agent").click();
-  await expect(settings).toContainText("Authentication completed");
   await expect.poll(() => lastInvokeArgs(page, "save_acp_agent")).toMatchObject({
     profile: { label: "My ACP", command: "my-acp", args: ["--stdio", "  spaced  ", "", "--safe"] },
   });
@@ -141,8 +143,9 @@ test("ACP turn maps config, overlapping tools, plan, usage, and exact permission
   await expect(page.getByText("Inspect")).toBeVisible();
   const config = page.getByTestId("acp-session-config");
   await expect(config).toContainText("code");
-  await expect(config.locator("select")).toHaveValue("smart");
-  await config.locator("select").selectOption("fast");
+  await expect(config).toContainText("Smart");
+  await config.getByRole("button", { name: "Model" }).click();
+  await page.getByRole("option", { name: "Fast" }).click();
   await expect.poll(() => lastInvokeArgs(page, "set_acp_session_config")).toMatchObject({
     configId: "model", value: { value: "fast" },
   });
@@ -535,7 +538,13 @@ test("uploaded file shows up in the artifacts panel after send", async ({ page }
     const calls = ((window as any).__skillInvokeLog ?? []).filter((c: any) => c.cmd === "send_message");
     const args = calls.at(-1)?.args;
     return args instanceof Map ? Object.fromEntries(args) : (args ?? null);
-  })).toMatchObject({ attachments: ["uploads/counts.csv"] });
+  })).toMatchObject({
+    message: "Uploaded files: uploads/counts.csv",
+    attachments: ["uploads/counts.csv"],
+  });
+  // One user bubble only — attachment suffix must not spawn a duplicate turn.
+  await expect(page.locator(".msg.user")).toHaveCount(1);
+  await expect(page.locator(".msg.user")).toContainText("Uploaded files: uploads/counts.csv");
   // The right panel starts collapsed; open it to see the collected artifact.
   await page.getByRole("button", { name: "Toggle panel" }).click();
   // The upload path lives in the user turn; the panel must pick it up from there.
@@ -591,7 +600,8 @@ test("workspace file context menu attaches its path to the composer", async ({ p
   await expect.poll(() => lastInvokeArgs(page, "download_file")).toMatchObject({ path: "report.csv" });
   await file.click({ button: "right" });
   await page.getByRole("button", { name: "Attach to chat" }).click();
-  await expect(composer(page)).toHaveValue(/report\.csv/);
+  await expect(page.locator(".composer-attachment.ready")).toHaveText("report.csv");
+  await expect(composer(page)).toHaveValue("");
 });
 
 test("pasted image attaches to the composer", async ({ page }) => {
@@ -611,7 +621,10 @@ test("pasted image attaches to the composer", async ({ page }) => {
     const calls = ((window as any).__skillInvokeLog ?? []).filter((c: any) => c.cmd === "send_message");
     const args = calls.at(-1)?.args;
     return args instanceof Map ? Object.fromEntries(args) : (args ?? null);
-  })).toMatchObject({ attachments: [expect.stringMatching(/^uploads\/pasted_image_\d+_1\.png$/)] });
+  })).toMatchObject({
+    message: expect.stringMatching(/^Uploaded files: uploads\/pasted_image_\d+_1\.png$/),
+    attachments: [expect.stringMatching(/^uploads\/pasted_image_\d+_1\.png$/)],
+  });
 });
 
 test("right panel shows execution contexts and runs", async ({ page }) => {
