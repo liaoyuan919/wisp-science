@@ -539,6 +539,77 @@ pub(super) fn copy_text(text: String) {
     });
 }
 
+fn normalize_table_copy_cell(text: &str) -> String {
+    let mut out = String::new();
+    for part in text.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(part);
+    }
+    out
+}
+
+fn table_data_to_tsv(t: &TableData) -> String {
+    let mut lines = Vec::with_capacity(t.rows.len() + usize::from(!t.headers.is_empty()));
+    if !t.headers.is_empty() {
+        lines.push(
+            t.headers
+                .iter()
+                .map(|cell| normalize_table_copy_cell(cell))
+                .collect::<Vec<_>>()
+                .join("\t"),
+        );
+    }
+    lines.extend(t.rows.iter().map(|row| {
+        row.iter()
+            .map(|cell| normalize_table_copy_cell(cell))
+            .collect::<Vec<_>>()
+            .join("\t")
+    }));
+    lines.join("\n")
+}
+
+fn html_table_to_tsv(table: &web_sys::HtmlTableElement) -> String {
+    let rows = table.rows();
+    let mut lines = Vec::with_capacity(rows.length() as usize);
+    for i in 0..rows.length() {
+        let Some(row) = rows.item(i) else { continue };
+        let Ok(row) = row.dyn_into::<web_sys::HtmlTableRowElement>() else { continue };
+        let cells = row.cells();
+        let mut vals = Vec::with_capacity(cells.length() as usize);
+        for j in 0..cells.length() {
+            let Some(cell) = cells.item(j) else { continue };
+            vals.push(normalize_table_copy_cell(&cell.text_content().unwrap_or_default()));
+        }
+        if !vals.is_empty() {
+            lines.push(vals.join("\t"));
+        }
+    }
+    lines.join("\n")
+}
+
+fn wrap_markdown_tables_with_copy_controls(html: String, locale: Locale) -> String {
+    let copy_label = html_escape(&t(locale, "table.copy"));
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html.as_str();
+    while let Some(start) = rest.find("<table") {
+        out.push_str(&rest[..start]);
+        let table_rest = &rest[start..];
+        let Some(end) = table_rest.find("</table>") else {
+            out.push_str(table_rest);
+            return out;
+        };
+        let table_html = &table_rest[..end + "</table>".len()];
+        out.push_str(&format!(
+            r#"<div class="md-table-card"><div class="tbl-head"><button type="button" class="tbl-copy md-table-copy" title="{copy_label}" aria-label="{copy_label}">{copy_label}</button></div><div class="tbl-wrap">{table_html}</div></div>"#
+        ));
+        rest = &table_rest[end + "</table>".len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
 pub(super) fn normalize_settings_mut(cfg: &mut Settings) {
     cfg.provider = provider_value(&cfg.provider).into();
     cfg.api_url = cfg.api_url.trim().into();
@@ -600,6 +671,20 @@ pub(super) mod tauri_args {
     pub fn review_session(session_id: &Option<String>) -> Value {
         json!({ "sessionId": session_id })
     }
+    pub fn branch_session(
+        session_id: &Option<String>,
+        title: Option<&str>,
+        user_index: Option<usize>,
+    ) -> Value {
+        let mut payload = json!({ "sessionId": session_id });
+        if let Some(title) = title.map(str::trim).filter(|s| !s.is_empty()) {
+            payload["title"] = json!(title);
+        }
+        if let Some(user_index) = user_index {
+            payload["userIndex"] = json!(user_index);
+        }
+        payload
+    }
     pub fn rewind_session(session_id: &Option<String>, user_index: usize) -> Value {
         json!({ "sessionId": session_id, "userIndex": user_index })
     }
@@ -658,6 +743,13 @@ mod tauri_args_tests {
 
         let v = tauri_args::review_session(&sid);
         assert_eq!(v["sessionId"], "frame-1");
+
+        let v = tauri_args::branch_session(&sid, Some("fork here"), Some(2));
+        assert_eq!(v["sessionId"], "frame-1");
+        assert_eq!(v["title"], "fork here");
+        assert_eq!(v["userIndex"], 2);
+        assert!(v.get("session_id").is_none());
+        assert!(v.get("user_index").is_none());
 
         let v = tauri_args::rewind_session(&sid, 3);
         assert_eq!(v["sessionId"], "frame-1");
@@ -1143,6 +1235,11 @@ pub(super) const CRED_GROUPS: &[CredGroup] = &[
         fields: &[CredField { id: "infinisynapse_api_key", label_key: "cred.infinisynapse_api_key.label", secret: true }],
     },
     CredGroup {
+        name_key: "cred.scimaster.name",
+        hint_key: "cred.scimaster.hint",
+        fields: &[CredField { id: "scimaster_api_key", label_key: "cred.scimaster_api_key.label", secret: true }],
+    },
+    CredGroup {
         name_key: "cred.ncbi.name",
         hint_key: "cred.ncbi.hint",
         fields: &[
@@ -1276,7 +1373,9 @@ pub(super) fn contains_search(q: &str, parts: &[&str]) -> bool {
     q.is_empty() || parts.iter().any(|s| s.to_lowercase().contains(q))
 }
 
-pub(super) fn open_workspace_file(path: String, modal_artifact: RwSignal<Option<(String, String, String)>>) {
+pub(super) type ModalArtifact = (String, String, String);
+
+pub(super) fn open_workspace_file(path: String, modal_artifact: RwSignal<Option<ModalArtifact>>) {
     let name = path
         .rsplit(['/', '\\'])
         .next()
@@ -1284,6 +1383,31 @@ pub(super) fn open_workspace_file(path: String, modal_artifact: RwSignal<Option<
         .to_string();
     let kind = file_kind(&path).unwrap_or("text").to_string();
     modal_artifact.set(Some((path, name, kind)));
+}
+
+pub(super) fn modal_image_nav_targets(
+    artifacts: &[Artifact],
+    current_path: &str,
+    current_kind: &str,
+) -> (Option<ModalArtifact>, Option<ModalArtifact>) {
+    if current_kind != "image" {
+        return (None, None);
+    }
+    let images = artifacts
+        .iter()
+        .filter_map(|artifact| match &artifact.data {
+            PreviewData::File { path, kind } if kind == "image" => {
+                Some((path.clone(), artifact.name.clone(), kind.clone()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(index) = images.iter().position(|(path, _, _)| path == current_path) else {
+        return (None, None);
+    };
+    let prev = index.checked_sub(1).and_then(|idx| images.get(idx).cloned());
+    let next = images.get(index + 1).cloned();
+    (prev, next)
 }
 
 pub(super) const ALL_RIGHT_TABS: [RightTab; 6] = [
@@ -1510,7 +1634,7 @@ fn strip_trailing_list_marker(before: &str) -> &str {
 }
 
 /// Post-process rendered Markdown: artifact chips, code wrappers, filename links.
-pub(super) fn enrich_md_html(mut html: String, arts: &[Artifact]) -> String {
+pub(super) fn enrich_md_html(mut html: String, arts: &[Artifact], locale: Locale) -> String {
     html = replace_artifact_tokens(html, arts);
     html = replace_file_links(html, arts);
     for (i, a) in arts.iter().enumerate() {
@@ -1525,6 +1649,7 @@ pub(super) fn enrich_md_html(mut html: String, arts: &[Artifact]) -> String {
     }
     html = strip_list_markers_before_art_refs(&html);
     html = html.replace("<pre><code", "<pre class=\"md-code\"><code");
+    html = wrap_markdown_tables_with_copy_controls(html, locale);
     html
 }
 
@@ -1547,6 +1672,24 @@ mod art_ref_marker_tests {
         let html = r#"see range 1 - <button type="button" class="art-ref" data-art-idx="0">x.csv</button>"#;
         assert_eq!(strip_list_markers_before_art_refs(html), html);
     }
+
+    #[test]
+    fn wraps_markdown_tables_with_copy_controls() {
+        let html = "<p>Summary</p><table><thead><tr><th>a</th></tr></thead><tbody><tr><td>1</td></tr></tbody></table>";
+        let out = wrap_markdown_tables_with_copy_controls(html.into(), Locale::En);
+        assert!(out.contains("md-table-card"));
+        assert!(out.contains("md-table-copy"));
+        assert!(out.contains("Copy table"));
+    }
+
+    #[test]
+    fn table_data_to_tsv_uses_tabs_and_newlines() {
+        let t = TableData {
+            headers: vec!["Gene".into(), "TPM".into()],
+            rows: vec![vec!["A".into(), "2.62".into()], vec!["B".into(), "1.81".into()]],
+        };
+        assert_eq!(table_data_to_tsv(&t), "Gene\tTPM\nA\t2.62\nB\t1.81");
+    }
 }
 
 pub(super) fn handle_md_click(
@@ -1558,6 +1701,18 @@ pub(super) fn handle_md_click(
     use wasm_bindgen::JsCast;
     let mut el = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok());
     while let Some(n) = el {
+        if n.class_list().contains("md-table-copy") {
+            if let Ok(Some(card)) = n.closest(".md-table-card") {
+                if let Ok(Some(table)) = card.query_selector("table") {
+                    if let Ok(table) = table.dyn_into::<web_sys::HtmlTableElement>() {
+                        ev.prevent_default();
+                        ev.stop_propagation();
+                        copy_text(html_table_to_tsv(&table));
+                    }
+                }
+            }
+            return;
+        }
         if n.class_list().contains("art-ref") {
             if let Ok(idx) = n.get_attribute("data-art-idx").unwrap_or_default().parse::<usize>() {
                 ev.prevent_default();
@@ -1888,26 +2043,34 @@ mod artifact_scan_tests {
     }
 }
 
-pub(super) fn table_view(t: &TableData, locale: Locale) -> impl IntoView {
-    let total = t.rows.len();
+pub(super) fn table_view(table: &TableData, locale: Locale) -> impl IntoView {
+    let total = table.rows.len();
     let truncated = total > 500;
-    let headers: Vec<String> = t.headers.iter().map(|h| md_inline_to_html(h)).collect();
-    let rows: Vec<Vec<String>> = t.rows.iter().take(500)
+    let copy = table_data_to_tsv(table);
+    let headers: Vec<String> = table.headers.iter().map(|h| md_inline_to_html(h)).collect();
+    let rows: Vec<Vec<String>> = table.rows.iter().take(500)
         .map(|r| r.iter().map(|c| md_inline_to_html(c)).collect())
         .collect();
     view! {
-        <div class="tbl-wrap">
-            {truncated.then(|| view! {
-                <div class="tbl-note">{tf(locale, "table.rows_note", &[("total", &total.to_string())])}</div>
-            })}
-            <table class="tbl">
-                <thead><tr>{headers.into_iter().map(|h| view! { <th inner_html=h></th> }).collect_view()}</tr></thead>
-                <tbody>
-                    {rows.into_iter().map(|r| view! {
-                        <tr>{r.into_iter().map(|c| view! { <td inner_html=c></td> }).collect_view()}</tr>
-                    }).collect_view()}
-                </tbody>
-            </table>
+        <div class="tbl-card">
+            <div class="tbl-head">
+                {truncated.then(|| view! {
+                    <span class="tbl-note">{tf(locale, "table.rows_note", &[("total", &total.to_string())])}</span>
+                })}
+                <button type="button" class="tbl-copy" on:click=move |_| copy_text(copy.clone())>
+                    {move || crate::i18n::t(locale, "table.copy")}
+                </button>
+            </div>
+            <div class="tbl-wrap">
+                <table class="tbl">
+                    <thead><tr>{headers.into_iter().map(|h| view! { <th inner_html=h></th> }).collect_view()}</tr></thead>
+                    <tbody>
+                        {rows.into_iter().map(|r| view! {
+                            <tr>{r.into_iter().map(|c| view! { <td inner_html=c></td> }).collect_view()}</tr>
+                        }).collect_view()}
+                    </tbody>
+                </table>
+            </div>
         </div>
     }
 }
@@ -2169,6 +2332,21 @@ pub(super) fn download_artifact(path: String) {
     });
 }
 
+pub(super) fn keyboard_event_targets_text_entry(ev: &web_sys::KeyboardEvent) -> bool {
+    let mut el = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok());
+    while let Some(node) = el {
+        if node.dyn_ref::<web_sys::HtmlInputElement>().is_some()
+            || node.dyn_ref::<web_sys::HtmlTextAreaElement>().is_some()
+            || node.tag_name().eq_ignore_ascii_case("select")
+            || node.has_attribute("contenteditable")
+        {
+            return true;
+        }
+        el = node.parent_element();
+    }
+    false
+}
+
 /// Click-to-expand modal for a produced artifact: shows the full-size
 /// image/PDF (or a CSV as a dataset table) plus tabbed provenance
 /// (Code/Log/Inputs/Environment) fetched from `get_artifact_provenance`.
@@ -2180,6 +2358,10 @@ pub(super) fn ArtifactModal(
     name: String,
     kind: String,
     session: Option<String>,
+    can_prev: bool,
+    can_next: bool,
+    on_prev: Callback<()>,
+    on_next: Callback<()>,
     on_close: Callback<()>,
     on_open_path: Callback<(String, String)>, // open an input file (path, kind)
 ) -> impl IntoView {
@@ -2204,6 +2386,20 @@ pub(super) fn ArtifactModal(
             <div class="modal artifact-modal" on:click=|ev| ev.stop_propagation()>
                 <div class="am-head">
                     <span class="am-name">{name.clone()}</span>
+                    {(can_prev || can_next).then(|| view! {
+                        <div class="am-nav">
+                            <button type="button" class="icon-btn am-nav-btn"
+                                disabled=!can_prev
+                                aria-label=move || t(locale.get(), "artifact.prev_image")
+                                title=move || format!("{} (←)", t(locale.get(), "artifact.prev_image"))
+                                on:click=move |_| on_prev.call(())>{compose_icon("chevron-left")}</button>
+                            <button type="button" class="icon-btn am-nav-btn"
+                                disabled=!can_next
+                                aria-label=move || t(locale.get(), "artifact.next_image")
+                                title=move || format!("{} (→)", t(locale.get(), "artifact.next_image"))
+                                on:click=move |_| on_next.call(())>{compose_icon("chevron-right")}</button>
+                        </div>
+                    })}
                     <div class="spacer"></div>
                     <button class="icon-btn" title=move || t(locale.get(), "artifact.download")
                         on:click=move |_| download_artifact(path_dl.clone())>{compose_icon("download")}</button>
@@ -2359,6 +2555,7 @@ pub(super) fn compose_icon(kind: &str) -> impl IntoView {
         "branch" => view! { <path d="M6 3v6a4 4 0 0 0 4 4h8"/><path d="M18 7v12"/><path d="M14 15l4 4 4-4"/><circle cx="6" cy="3" r="2"/> }.into_view(),
         "chevron-down" => view! { <path d="m6 9 6 6 6-6"/> }.into_view(),
         "chevron-left" => view! { <path d="m15 18-6-6 6-6"/> }.into_view(),
+        "chevron-right" => view! { <path d="m9 18 6-6-6-6"/> }.into_view(),
         "download" => view! { <path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/> }.into_view(),
         "close" => view! { <path d="M18 6 6 18"/><path d="m6 6 12 12"/> }.into_view(),
         "more" => view! { <circle cx="12" cy="5" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1" fill="currentColor" stroke="none"/> }.into_view(),
@@ -2374,7 +2571,7 @@ pub(super) fn compose_icon(kind: &str) -> impl IntoView {
         "list" => view! { <path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/> }.into_view(),
         _ => view! { <path d="M9 18l6-6-6-6"/> }.into_view(), // chevron
     };
-    let size = if matches!(kind, "chevron" | "chevron-down" | "chevron-left") { "16" } else { "18" };
+    let size = if matches!(kind, "chevron" | "chevron-down" | "chevron-left" | "chevron-right") { "16" } else { "18" };
     view! {
         <svg width=size height=size viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{body}</svg>
@@ -2388,6 +2585,7 @@ pub(super) fn UserMessage(
     busy: ReadSignal<bool>,
     on_copy: Callback<String>,
     on_edit: Callback<usize>,
+    on_branch: Callback<usize>,
 ) -> impl IntoView {
     let locale = use_locale();
     view! {
@@ -2409,6 +2607,12 @@ pub(super) fn UserMessage(
                     title=move || t(locale.get(), "msg.edit")
                     on:click=move |_| on_edit.call(ui_index)
                 >{move || t(locale.get(), "msg.edit")}</button>
+                <button
+                    type="button"
+                    class="msg-btn"
+                    title=move || t(locale.get(), "msg.branch")
+                    on:click=move |_| on_branch.call(ui_index)
+                >{move || t(locale.get(), "msg.branch")}</button>
             </div>
         </div>
     }
@@ -2423,9 +2627,10 @@ pub(super) fn AssistantMessage(
     on_file: Callback<(String, String)>,
     on_copy: Callback<String>,
 ) -> impl IntoView {
+    let locale = use_locale();
     let arts_for_html = artifacts.clone();
     let text_for_html = text.clone();
-    let html = create_memo(move |_| enrich_md_html(md_to_html(&text_for_html), &arts_for_html));
+    let html = create_memo(move |_| enrich_md_html(md_to_html(&text_for_html), &arts_for_html, locale.get()));
     let hid = unique_dom_id("md");
     let hid_for_effect = hid.clone();
     create_effect(move |_| {
@@ -2437,7 +2642,6 @@ pub(super) fn AssistantMessage(
     let arts_for_click = artifacts.clone();
     let text_for_disabled = text.clone();
     let text_for_click_copy = text;
-    let locale = use_locale();
     view! {
         <div class="role">
             <span class="role-brand">{move || t(locale.get(), "chat.assistant")}</span>
@@ -2948,7 +3152,8 @@ pub(super) fn ProjectsScreen(
                         on:click=|ev| ev.stop_propagation()>
                         <div class="project-search-input">
                             <span class="gi search"></span>
-                            <input id="project-search-input" type="search" autofocus=true
+                            <input id="project-search-input" type="text" inputmode="search" autofocus=true
+                                autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"
                                 placeholder=move || t(locale.get(), "projects.search_ph")
                                 prop:value=move || search_query.get()
                                 on:input=move |ev| search_query.set(event_target_value(&ev))
@@ -3381,7 +3586,9 @@ pub(super) fn CommandPalette(
                     on:click=|ev| ev.stop_propagation()>
                     <div class="project-search-input">
                         <span class="gi search"></span>
-                        <input id="command-palette-input" type="search" autofocus=true placeholder="Search this project…"
+                        <input id="command-palette-input" type="text" inputmode="search" autofocus=true
+                            autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"
+                            placeholder="Search this project…"
                             prop:value=move || query.get()
                             on:input=move |ev| query.set(event_target_value(&ev))
                             on:keydown=move |ev: web_sys::KeyboardEvent| {
@@ -3489,7 +3696,8 @@ pub(super) fn ActionPalette(open: RwSignal<bool>, on_action: Callback<&'static s
                     on:click=|ev| ev.stop_propagation()>
                     <div class="project-search-input">
                         <span class="gi search"></span>
-                        <input id="action-palette-input" type="search" autofocus=true
+                        <input id="action-palette-input" type="text" inputmode="search" autofocus=true
+                            autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"
                             placeholder=move || t(locale.get(), "command.placeholder")
                             prop:value=move || query.get()
                             on:input=move |ev| { query.set(event_target_value(&ev)); active.set(0); }

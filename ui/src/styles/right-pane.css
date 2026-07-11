@@ -257,8 +257,16 @@
 .rp-md { font-size: 13.5px; line-height: 1.72; }
 
 /* Tables (right pane + inline in assistant messages) */
+.tbl-card { display: flex; flex-direction: column; min-width: 0; }
+.tbl-head { display: flex; align-items: center; gap: 10px; padding: 6px 11px; border: 1px solid var(--border); border-bottom: none; border-radius: var(--radius-sm) var(--radius-sm) 0 0; background: var(--bg-sunken); }
 .tbl-wrap { overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); white-space: normal; }
-.tbl-note { font-size: 11px; color: var(--text-faint); padding: 6px 11px; border-bottom: 1px solid var(--border); background: var(--bg-sunken); }
+.tbl-card .tbl-wrap { border-top: none; border-radius: 0 0 var(--radius-sm) var(--radius-sm); }
+.tbl-note { font-size: 11px; color: var(--text-faint); }
+.tbl-copy {
+  margin-left: auto; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-elev);
+  color: var(--text-muted); padding: 4px 10px; font: inherit; font-size: 11.5px; font-weight: 600; cursor: pointer;
+}
+.tbl-copy:hover { background: var(--bg-app); color: var(--text); }
 .tbl { border-collapse: collapse; width: 100%; font-size: 12.5px; table-layout: auto; }
 /* Data cells stay on one line — a wide CSV scrolls horizontally in .tbl-wrap
    instead of shattering numbers/headers character-by-character (matches the
