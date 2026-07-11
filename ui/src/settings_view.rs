@@ -1,12 +1,12 @@
 use crate::app_support::{
-    build_conn_json, close_details_ancestor, compose_icon, conn_form_from_row, js_error_text,
-    join_tags, new_acp_form, new_model_form, profile_to_form, settings_section_label,
+    build_conn_json, close_details_ancestor, compose_icon, conn_form_from_row, join_tags,
+    js_error_text, new_acp_form, new_model_form, profile_to_form, settings_section_label,
     settings_subpage_label, skill_matches_filter, CRED_GROUPS,
 };
 use crate::bindings::{invoke, invoke_checked};
 use crate::dto::*;
-use crate::i18n::{localize_backend, set_document_lang, tf, t, Locale};
-use crate::text::{dom_value, event_target_checked, event_target_input, format_bytes};
+use crate::i18n::{localize_backend, set_document_lang, t, tf, Locale};
+use crate::text::{dom_value, event_target_checked, event_target_input, event_target_value, format_bytes};
 use leptos::*;
 use serde_wasm_bindgen::to_value;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -143,7 +143,8 @@ pub(super) fn SettingsView(
     } = state;
     let acp_form_open = create_memo(move |_| acp_form.get().is_some());
 
-move || show_settings.get().then(|| view! {
+    move || {
+        show_settings.get().then(|| view! {
     <div class="overlay">
         <div class="modal settings-modal">
             <div class="settings-nav">
@@ -271,16 +272,16 @@ move || show_settings.get().then(|| view! {
                                         <label class="span-2">{move || t(locale.get(), "models.acp_label")}
                                             <input data-testid="acp-agent-label"
                                                 prop:value=move || acp_form.get().map(|f| f.label.clone()).unwrap_or_default()
-                                                on:input=move |ev| acp_form.update(|o| if let Some(o)=o { o.label = event_target_input(&ev).value(); }) /></label>
+                                                on:input=move |ev| acp_form.update(|o| if let Some(o)=o { o.label = event_target_value(&ev); }) /></label>
                                         <label class="span-2">{move || t(locale.get(), "models.acp_command")}
                                             <input data-testid="acp-agent-command"
                                                 prop:value=move || acp_form.get().map(|f| f.command.clone()).unwrap_or_default()
-                                                on:input=move |ev| acp_form.update(|o| if let Some(o)=o { o.command = event_target_input(&ev).value(); }) /></label>
+                                                on:input=move |ev| acp_form.update(|o| if let Some(o)=o { o.command = event_target_value(&ev); }) /></label>
                                         <label class="span-2">{move || t(locale.get(), "models.acp_args")}
                                             <textarea data-testid="acp-agent-args" rows="5"
                                                 prop:value=move || acp_form.get().map(|f| f.args.join("\n")).unwrap_or_default()
                                                 on:input=move |ev| acp_form.update(|o| if let Some(o)=o {
-                                                    o.args = event_target_input(&ev).value().split('\n').map(|arg| arg.to_string()).collect();
+                                                    o.args = event_target_value(&ev).split('\n').map(|arg| arg.to_string()).collect();
                                                 })></textarea></label>
                                     </div>
                                     <span class="hint">{move || t(locale.get(), "models.acp_subpage_hint")}</span>
@@ -1609,5 +1610,5 @@ move || show_settings.get().then(|| view! {
         </div>
     </div>
 }.into_view())
+    }
 }
-

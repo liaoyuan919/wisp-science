@@ -143,8 +143,9 @@ test("ACP turn maps config, overlapping tools, plan, usage, and exact permission
   await expect(page.getByText("Inspect")).toBeVisible();
   const config = page.getByTestId("acp-session-config");
   await expect(config).toContainText("code");
-  await expect(config.locator("select")).toHaveValue("smart");
-  await config.locator("select").selectOption("fast");
+  await expect(config).toContainText("Smart");
+  await config.getByRole("button", { name: "Model" }).click();
+  await page.getByRole("option", { name: "Fast" }).click();
   await expect.poll(() => lastInvokeArgs(page, "set_acp_session_config")).toMatchObject({
     configId: "model", value: { value: "fast" },
   });
@@ -537,7 +538,13 @@ test("uploaded file shows up in the artifacts panel after send", async ({ page }
     const calls = ((window as any).__skillInvokeLog ?? []).filter((c: any) => c.cmd === "send_message");
     const args = calls.at(-1)?.args;
     return args instanceof Map ? Object.fromEntries(args) : (args ?? null);
-  })).toMatchObject({ attachments: ["uploads/counts.csv"] });
+  })).toMatchObject({
+    message: "Uploaded files: uploads/counts.csv",
+    attachments: ["uploads/counts.csv"],
+  });
+  // One user bubble only — attachment suffix must not spawn a duplicate turn.
+  await expect(page.locator(".msg.user")).toHaveCount(1);
+  await expect(page.locator(".msg.user")).toContainText("Uploaded files: uploads/counts.csv");
   // The right panel starts collapsed; open it to see the collected artifact.
   await page.getByRole("button", { name: "Toggle panel" }).click();
   // The upload path lives in the user turn; the panel must pick it up from there.
@@ -613,7 +620,10 @@ test("pasted image attaches to the composer", async ({ page }) => {
     const calls = ((window as any).__skillInvokeLog ?? []).filter((c: any) => c.cmd === "send_message");
     const args = calls.at(-1)?.args;
     return args instanceof Map ? Object.fromEntries(args) : (args ?? null);
-  })).toMatchObject({ attachments: [expect.stringMatching(/^uploads\/pasted_image_\d+_1\.png$/)] });
+  })).toMatchObject({
+    message: expect.stringMatching(/^Uploaded files: uploads\/pasted_image_\d+_1\.png$/),
+    attachments: [expect.stringMatching(/^uploads\/pasted_image_\d+_1\.png$/)],
+  });
 });
 
 test("right panel shows execution contexts and runs", async ({ page }) => {
