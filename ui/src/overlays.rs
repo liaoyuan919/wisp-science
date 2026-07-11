@@ -1,7 +1,7 @@
 use crate::app_support::{compose_icon, refresh_execution_contexts};
 use crate::bindings::{invoke, open_external_url};
 use crate::dto::*;
-use crate::i18n::{tf, t, Locale};
+use crate::i18n::{t, tf, Locale};
 use crate::text::{dom_value, event_target_value, provider_value};
 use leptos::*;
 use serde_wasm_bindgen::to_value;
@@ -19,7 +19,8 @@ pub(super) fn AddHostOverlay(
     ssh_hosts: RwSignal<Vec<SshHost>>,
     execution_contexts: RwSignal<Vec<ExecutionContext>>,
 ) -> impl IntoView {
-    move || show_add_host.get().then(|| view! {
+    move || {
+        show_add_host.get().then(|| view! {
     <div class="overlay">
         <div class="modal host-modal">
             <h2>{move || t(locale.get(), "hosts.add")}</h2>
@@ -71,6 +72,7 @@ pub(super) fn AddHostOverlay(
         </div>
     </div>
 }.into_view())
+    }
 }
 #[component]
 pub(super) fn CapabilitiesOverlay(
@@ -81,7 +83,8 @@ pub(super) fn CapabilitiesOverlay(
     busy: RwSignal<bool>,
     start_env_setup: Callback<web_sys::MouseEvent>,
 ) -> impl IntoView {
-    move || show_capabilities.get().then(|| view! {
+    move || {
+        show_capabilities.get().then(|| view! {
     <div class="overlay">
         <div class="modal modal-wide">
             <div class="fb-head">
@@ -133,6 +136,7 @@ pub(super) fn CapabilitiesOverlay(
         </div>
     </div>
 }.into_view())
+    }
 }
 
 /// Where each provider issues API keys — used by the onboarding "Get an API key" link.
@@ -154,7 +158,8 @@ pub(super) fn OnboardingOverlay(
     save_onboard_key: Callback<()>,
     dismiss_onboard: Callback<web_sys::MouseEvent>,
 ) -> impl IntoView {
-    move || show_onboarding.get().then(|| {
+    move || {
+        show_onboarding.get().then(|| {
     let step = onboard_step.get();
     let loc = locale.get();
     view! {
@@ -217,4 +222,5 @@ pub(super) fn OnboardingOverlay(
         </div>
     }.into_view()
 })
+    }
 }

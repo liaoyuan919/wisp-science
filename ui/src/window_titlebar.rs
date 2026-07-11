@@ -38,10 +38,7 @@ const VIEW_ITEMS: &[MenuItem] = &[
     ("theme-system", "command.theme_system", ""),
 ];
 
-const HELP_ITEMS: &[MenuItem] = &[
-    ("docs", "menu.docs", ""),
-    ("issues", "menu.issues", ""),
-];
+const HELP_ITEMS: &[MenuItem] = &[("docs", "menu.docs", ""), ("issues", "menu.issues", "")];
 
 #[component]
 pub(super) fn WindowTitlebar(
@@ -78,7 +75,9 @@ pub(super) fn WindowTitlebar(
     ];
 
     window_event_listener(ev::keydown, move |ev| {
-        let Some(ev) = ev.dyn_ref::<web_sys::KeyboardEvent>() else { return };
+        let Some(ev) = ev.dyn_ref::<web_sys::KeyboardEvent>() else {
+            return;
+        };
         if ev.key() != "Escape" || ev.default_prevented() || ev.is_composing() {
             return;
         }

@@ -41,12 +41,17 @@ pub(crate) fn provider_defaults(provider: &str) -> (&'static str, &'static str) 
 }
 
 pub(crate) fn join_path(base: &str, name: &str) -> String {
-    if base == "." || base.is_empty() { name.to_string() }
-    else { format!("{}/{}", base.trim_end_matches(['/', '\\']), name) }
+    if base == "." || base.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}/{}", base.trim_end_matches(['/', '\\']), name)
+    }
 }
 
 pub(crate) fn parent_path(path: &str) -> String {
-    if path == "." || path.is_empty() { return ".".into(); }
+    if path == "." || path.is_empty() {
+        return ".".into();
+    }
     let p = path.replace('\\', "/");
     match p.rsplit_once('/') {
         None | Some(("", _)) => ".".into(),
@@ -73,9 +78,13 @@ pub(crate) fn format_duration_ms(ms: u64) -> String {
 }
 
 pub(crate) fn format_bytes(n: u64) -> String {
-    if n < 1024 { format!("{n} B") }
-    else if n < 1024 * 1024 { format!("{:.1} KB", n as f64 / 1024.0) }
-    else { format!("{:.1} MB", n as f64 / (1024.0 * 1024.0)) }
+    if n < 1024 {
+        format!("{n} B")
+    } else if n < 1024 * 1024 {
+        format!("{:.1} KB", n as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", n as f64 / (1024.0 * 1024.0))
+    }
 }
 
 pub(crate) fn event_target_value(ev: &web_sys::Event) -> String {
@@ -83,17 +92,27 @@ pub(crate) fn event_target_value(ev: &web_sys::Event) -> String {
     // panic in the event handler (input never registered) — see the project
     // name field.
     let target = ev.target().unwrap();
-    if let Some(i) = target.dyn_ref::<web_sys::HtmlInputElement>() { return i.value(); }
-    if let Some(a) = target.dyn_ref::<web_sys::HtmlTextAreaElement>() { return a.value(); }
+    if let Some(i) = target.dyn_ref::<web_sys::HtmlInputElement>() {
+        return i.value();
+    }
+    if let Some(a) = target.dyn_ref::<web_sys::HtmlTextAreaElement>() {
+        return a.value();
+    }
     String::new()
 }
 
 pub(crate) fn event_target_input(ev: &web_sys::Event) -> web_sys::HtmlInputElement {
-    ev.target().unwrap().dyn_into::<web_sys::HtmlInputElement>().unwrap()
+    ev.target()
+        .unwrap()
+        .dyn_into::<web_sys::HtmlInputElement>()
+        .unwrap()
 }
 
 pub(crate) fn event_target_checked(ev: &web_sys::Event) -> bool {
-    ev.target().and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok()).map(|i| i.checked()).unwrap_or(false)
+    ev.target()
+        .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+        .map(|i| i.checked())
+        .unwrap_or(false)
 }
 
 /// Render agent/assistant Markdown to HTML for `inner_html`. GFM tables,
@@ -181,11 +200,18 @@ fn is_catalog_ident_line(line: &str) -> bool {
 
 /// Inline Markdown for table cells (bold, code, links, etc.).
 pub(crate) fn md_inline_to_html(src: &str) -> String {
-    if src.is_empty() { return String::new(); }
+    if src.is_empty() {
+        return String::new();
+    }
     let html = md_to_html(src);
     let s = html.trim();
-    if let Some(inner) = s.strip_prefix("<p>").and_then(|rest| rest.strip_suffix("</p>")) {
-        if !inner.contains("<p>") { return inner.to_string(); }
+    if let Some(inner) = s
+        .strip_prefix("<p>")
+        .and_then(|rest| rest.strip_suffix("</p>"))
+    {
+        if !inner.contains("<p>") {
+            return inner.to_string();
+        }
     }
     html
 }
@@ -239,7 +265,8 @@ pub(crate) fn normalize_path(path: &str) -> String {
     // is told to emit absolute paths (system_prompt.rs), and the backend resolves
     // absolute-under-root correctly; stripping the slash turned an absolute path
     // into a bad root-relative one and 404'd on click (#12).
-    let path = path.trim()
+    let path = path
+        .trim()
         .trim_start_matches("./")
         .trim_start_matches(".\\");
     strip_image_pdf_shorthand(path).to_string()
@@ -337,8 +364,12 @@ pub(crate) fn fenced_blocks(text: &str) -> Vec<(String, String)> {
 }
 
 pub(crate) fn split_row(line: &str) -> Vec<String> {
-    line.trim().trim_start_matches('|').trim_end_matches('|')
-        .split('|').map(|c| c.trim().to_string()).collect()
+    line.trim()
+        .trim_start_matches('|')
+        .trim_end_matches('|')
+        .split('|')
+        .map(|c| c.trim().to_string())
+        .collect()
 }
 
 pub(crate) fn is_table_row(line: &str) -> bool {
@@ -348,19 +379,24 @@ pub(crate) fn is_table_row(line: &str) -> bool {
 
 pub(crate) fn is_separator(line: &str) -> bool {
     let cells = split_row(line);
-    !cells.is_empty() && cells.iter().all(|c| {
-        let c = c.trim();
-        !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':') && c.contains('-')
-    })
+    !cells.is_empty()
+        && cells.iter().all(|c| {
+            let c = c.trim();
+            !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':') && c.contains('-')
+        })
 }
 
 pub(crate) fn parse_csv_line(line: &str) -> Vec<String> {
-    line.split(',').map(|c| c.trim().trim_matches('"').to_string()).collect()
+    line.split(',')
+        .map(|c| c.trim().trim_matches('"').to_string())
+        .collect()
 }
 
 pub(crate) fn file_kind(path: &str) -> Option<&'static str> {
     let (_, ext) = path.rsplit_once('.')?;
-    if ext.is_empty() { return None; }
+    if ext.is_empty() {
+        return None;
+    }
     let ext = ext.to_ascii_lowercase();
     Some(match ext.as_str() {
         "csv" | "tsv" => "csv",
@@ -381,7 +417,9 @@ pub(crate) fn file_kind(path: &str) -> Option<&'static str> {
 }
 
 pub(crate) fn fasta_seq_count(text: &str) -> usize {
-    text.lines().filter(|l| l.trim_start().starts_with('>')).count()
+    text.lines()
+        .filter(|l| l.trim_start().starts_with('>'))
+        .count()
 }
 
 #[cfg(test)]
@@ -390,7 +428,10 @@ mod md_catalog_tests {
 
     #[test]
     fn fences_long_identifier_runs() {
-        let src = (0..12).map(|i| format!("tool_name_{i}")).collect::<Vec<_>>().join("\n");
+        let src = (0..12)
+            .map(|i| format!("tool_name_{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let out = fence_identifier_line_runs(&src);
         assert!(out.starts_with("```catalog\n"));
         assert!(out.contains("tool_name_0"));
@@ -403,7 +444,10 @@ mod md_catalog_tests {
     #[test]
     fn leaves_short_runs_and_prose_alone() {
         let src = "Here are a few:\nread\nwrite\nedit\n\nDone.";
-        assert!(matches!(fence_identifier_line_runs(src), std::borrow::Cow::Borrowed(_)));
+        assert!(matches!(
+            fence_identifier_line_runs(src),
+            std::borrow::Cow::Borrowed(_)
+        ));
         let html = md_to_html(src);
         assert!(html.contains("<p>"), "{html}");
     }
@@ -411,6 +455,9 @@ mod md_catalog_tests {
     #[test]
     fn skips_existing_fences() {
         let src = "```\nread\nwrite\nedit\nsearch\ngrep\nshell\npython\ncodex\n```\n";
-        assert!(matches!(fence_identifier_line_runs(src), std::borrow::Cow::Borrowed(_)));
+        assert!(matches!(
+            fence_identifier_line_runs(src),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 }

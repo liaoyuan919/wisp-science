@@ -3,7 +3,7 @@ use crate::app_support::{
     FolderModal,
 };
 use crate::dto::*;
-use crate::i18n::{tf, t, Locale};
+use crate::i18n::{t, tf, Locale};
 use leptos::*;
 use std::collections::HashSet;
 

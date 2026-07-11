@@ -74,7 +74,9 @@ fn selection_text() -> Option<String> {
 
 fn text_from_code_block(el: &web_sys::Element) -> Option<String> {
     for sel in [".code-block", ".tool-panel", "pre.md-code", "pre.rp-pre"] {
-        let Some(block) = closest(el, sel) else { continue };
+        let Some(block) = closest(el, sel) else {
+            continue;
+        };
         if let Ok(Some(code)) = block.query_selector("code") {
             let t = code.text_content().unwrap_or_default();
             if !t.trim().is_empty() {
@@ -93,8 +95,14 @@ fn text_from_code_block(el: &web_sys::Element) -> Option<String> {
 pub enum SessionAction {
     Open(String),
     Delete(String),
-    Rename { id: String, title: String },
-    Move { id: String, folder_id: Option<String> },
+    Rename {
+        id: String,
+        title: String,
+    },
+    Move {
+        id: String,
+        folder_id: Option<String>,
+    },
 }
 
 #[derive(Clone, PartialEq)]
@@ -148,11 +156,7 @@ pub fn build(ev: &web_sys::MouseEvent, locale: Locale, can_export: bool) -> Opti
         if let Some(text) = selection_text() {
             let mut items = vec![item("copy", i18n::t(locale, "ctx.copy"), text)];
             add_export(&mut items, locale, can_export);
-            return Some(CtxMenu {
-                x,
-                y,
-                items,
-            });
+            return Some(CtxMenu { x, y, items });
         }
     }
 
@@ -164,7 +168,11 @@ pub fn build(ev: &web_sys::MouseEvent, locale: Locale, can_export: bool) -> Opti
                 item("cut", i18n::t(locale, "ctx.cut"), String::new()),
                 item("copy", i18n::t(locale, "ctx.copy"), String::new()),
                 item("paste", i18n::t(locale, "ctx.paste"), String::new()),
-                item("selectAll", i18n::t(locale, "ctx.select_all"), String::new()),
+                item(
+                    "selectAll",
+                    i18n::t(locale, "ctx.select_all"),
+                    String::new(),
+                ),
             ],
         });
     }
@@ -172,11 +180,7 @@ pub fn build(ev: &web_sys::MouseEvent, locale: Locale, can_export: bool) -> Opti
     if let Some(code) = text_from_code_block(&target) {
         let mut items = vec![item("copyCode", i18n::t(locale, "ctx.copy_code"), code)];
         add_export(&mut items, locale, can_export);
-        return Some(CtxMenu {
-            x,
-            y,
-            items,
-        });
+        return Some(CtxMenu { x, y, items });
     }
 
     if let Some(ses) = closest(&target, ".side-item.ses") {
@@ -226,11 +230,7 @@ pub fn build(ev: &web_sys::MouseEvent, locale: Locale, can_export: bool) -> Opti
                         i18n::t(locale, "ctx.rename_folder"),
                         format!("{id}\u{1e}{name}"),
                     ),
-                    item(
-                        "deleteFolder",
-                        i18n::t(locale, "ctx.delete_folder"),
-                        id,
-                    ),
+                    item("deleteFolder", i18n::t(locale, "ctx.delete_folder"), id),
                 ],
             });
         }
@@ -253,25 +253,31 @@ pub fn build(ev: &web_sys::MouseEvent, locale: Locale, can_export: bool) -> Opti
         if !name.is_empty() {
             let mut items = vec![item("copyName", i18n::t(locale, "ctx.copy_name"), name)];
             if !path.is_empty() {
-                items.push(item("downloadFile", i18n::t(locale, "artifact.download"), path));
+                items.push(item(
+                    "downloadFile",
+                    i18n::t(locale, "artifact.download"),
+                    path,
+                ));
             }
             add_export(&mut items, locale, can_export);
-            return Some(CtxMenu {
-                x,
-                y,
-                items,
-            });
+            return Some(CtxMenu { x, y, items });
         }
     }
 
     if let Some(file) = closest(&target, ".fb-row[data-workspace-path]") {
-        let path = file.get_attribute("data-workspace-path").unwrap_or_default();
+        let path = file
+            .get_attribute("data-workspace-path")
+            .unwrap_or_default();
         if !path.is_empty() {
             return Some(CtxMenu {
                 x,
                 y,
                 items: vec![
-                    item("attachWorkspaceFile", i18n::t(locale, "ctx.attach_file"), path.clone()),
+                    item(
+                        "attachWorkspaceFile",
+                        i18n::t(locale, "ctx.attach_file"),
+                        path.clone(),
+                    ),
                     item("downloadFile", i18n::t(locale, "artifact.download"), path),
                 ],
             });
@@ -287,21 +293,13 @@ pub fn build(ev: &web_sys::MouseEvent, locale: Locale, can_export: bool) -> Opti
                 text,
             )];
             add_export(&mut items, locale, can_export);
-            return Some(CtxMenu {
-                x,
-                y,
-                items,
-            });
+            return Some(CtxMenu { x, y, items });
         }
     }
 
     let mut items = vec![];
     add_export(&mut items, locale, can_export);
-    Some(CtxMenu {
-        x,
-        y,
-        items,
-    })
+    Some(CtxMenu { x, y, items })
 }
 
 pub fn run_action(action: &str, payload: &str, copy: impl Fn(String)) {

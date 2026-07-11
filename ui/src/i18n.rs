@@ -49,11 +49,17 @@ pub fn t(locale: Locale, key: &str) -> String {
 }
 
 pub fn empty_title(locale: Locale, index: usize) -> String {
-    t(locale, &format!("empty.title.{}", index % EMPTY_TITLE_COUNT))
+    t(
+        locale,
+        &format!("empty.title.{}", index % EMPTY_TITLE_COUNT),
+    )
 }
 
 pub fn empty_subtitle(locale: Locale, index: usize) -> String {
-    t(locale, &format!("empty.subtitle.{}", index % EMPTY_SUBTITLE_COUNT))
+    t(
+        locale,
+        &format!("empty.subtitle.{}", index % EMPTY_SUBTITLE_COUNT),
+    )
 }
 
 fn lookup(locale: Locale, key: &str) -> Option<&'static str> {
@@ -1213,13 +1219,17 @@ pub fn localize_backend(locale: Locale, msg: &str) -> String {
         "API URL is required." => t(locale, "err.api_url_required"),
         "Model is required." => t(locale, "err.model_required"),
         "API key is required." => t(locale, "err.api_key_required"),
-        "No API key set. Open Settings and paste your provider API key." => t(locale, "err.no_api_key"),
+        "No API key set. Open Settings and paste your provider API key." => {
+            t(locale, "err.no_api_key")
+        }
         "Validation timed out after 30s" => t(locale, "err.validation_timeout"),
         "Validation succeeded" => t(locale, "status.validation_succeeded"),
         "selected folder has no SKILL.md" => t(locale, "err.skill_no_md"),
         "select a skill folder or a SKILL.md file" => t(locale, "err.skill_pick"),
         "SKILL.md has no frontmatter (--- block)" => t(locale, "err.skill_no_frontmatter"),
-        "SKILL.md frontmatter is not closed with ---" => t(locale, "err.skill_frontmatter_unclosed"),
+        "SKILL.md frontmatter is not closed with ---" => {
+            t(locale, "err.skill_frontmatter_unclosed")
+        }
         "SKILL.md is missing a description" => t(locale, "err.skill_no_description"),
         m if m.starts_with("a skill named '") && m.ends_with("' already exists") => {
             let name = &m["a skill named '".len()..m.len() - "' already exists".len()];
@@ -1228,7 +1238,11 @@ pub fn localize_backend(locale: Locale, msg: &str) -> String {
         m if m.starts_with("Validated ") => {
             if let Some(rest) = m.strip_prefix("Validated ") {
                 if let Some((provider, model)) = rest.split_once(" with ") {
-                    return tf(locale, "status.validated", &[("provider", provider), ("model", model)]);
+                    return tf(
+                        locale,
+                        "status.validated",
+                        &[("provider", provider), ("model", model)],
+                    );
                 }
             }
             msg.to_string()
