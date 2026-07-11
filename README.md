@@ -28,6 +28,7 @@ wisp-science/
 │  ├─ wisp-skills/  SKILL.md discovery + use_skill tool (bundled catalog at skills/)
 │  ├─ wisp-python/  uv venv provisioning + Windows kernel_worker + `python` REPL tool
 │  ├─ wisp-mcp/     stdio JSON-RPC MCP client + McpTool adapter (bundled bio-tools)
+│  ├─ wisp-acp/     ACP v1 stdio client for external coding agents
 │  └─ wisp-cli/     `wisp-science` headless binary
 ├─ src-tauri/       Tauri v2 desktop shell (commands + agent event stream)
 ├─ ui/              Leptos CSR frontend (built by Trunk, loaded in WebView2)
@@ -44,7 +45,7 @@ wisp-science/
 
 ## Prerequisites
 
-- **Rust** (stable, 1.80+) with `wasm32-unknown-unknown`:
+- **Rust** (stable, 1.88+) with `wasm32-unknown-unknown`:
   `rustup target add wasm32-unknown-unknown`
 - **uv** (Python environment manager): <https://docs.astral.sh/uv/>
 - **Trunk** (WASM frontend bundler): `cargo install --locked trunk`
@@ -96,39 +97,20 @@ messages are appended to the active session frame, so restarting the app
 restores the full history. The headless CLI keeps using `.wisp/session.json` for
 portability.
 
-### Local Codex runtime and Plan mode
+### Local ACP Agents
 
-A **Codex CLI** model profile uses the executable selected in that profile (or
-the Codex Desktop/PATH runtime discovered by Wisp). When the selected runtime
-supports `codex app-server`, Wisp reads its effective `config/read`,
-`model/list`, and collaboration-mode responses instead of maintaining a
-separate hard-coded model catalog.
+Wisp can launch any already-installed local agent that implements stable ACP
+v1 over stdio. Add its executable and one argument per line from the composer
+Agent picker, test the connection, then select it on a new empty session. The
+selection is locked after the first prompt. Agent authentication and session
+configuration remain protocol-managed; credentials are never stored in SQLite.
 
-- Settings provides independent **Normal** and **Plan** model/reasoning-effort
-  defaults. The composer can override either pair for the current session.
-- `/plan` enters persistent Plan mode, `/plan <request>` enters Plan mode and
-  sends immediately, and `/default` returns to normal turns.
-- Native Plan proposals can be revised, saved, or approved for execution in
-  the same Codex thread. Plan turns are forced to a read-only sandbox.
-- Each Codex turn records requested, serialized, and server-observed
-  configuration data. If a model is rerouted, requested and effective models
-  are displayed separately.
-- Wisp stores overrides in its own profile/session only; it does not edit the
-  user's global Codex `config.toml`. The isolated per-profile runtime home is
-  under `.wisp/codex-home/` and excludes Codex sessions, databases, logs,
-  caches, memories, plugins, and exec-policy rules.
-- If App Server or native Plan is unavailable, the UI explicitly labels the
-  `codex exec` path as compatibility mode and only exposes settings that path
-  can transmit. WSL projects resolve Codex and `CODEX_HOME` inside their own
-  distribution rather than mixing Windows configuration.
-
-Known model/effort combinations are validated before send. Custom identifiers
-remain available, but a Codex rejection is surfaced instead of silently
-substituting another value. Wisp inherits the selected Codex configuration on
-first use and does not poll or rewrite it in the background. External runtime
-or configuration changes are checked by the explicit **Refresh runtime** action
-and again at the send boundary; a real generation change requires confirmation
-before that turn is retried.
+Each active ACP frame owns one agent process. Wisp passes its scientific tools
+through the existing stdio MCP bridge, persists plain user/assistant transcript
+text, renders exact permission options supplied by the Agent, and reconnects
+saved sessions only when the Agent advertises resume or load. Initial support
+is local stdio only: no remote transport, registry installer, client-provided
+terminal/filesystem, image/audio blocks, or ACP rewind/fork.
 
 ### Composer references and search
 

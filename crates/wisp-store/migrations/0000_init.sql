@@ -112,6 +112,22 @@ CREATE TABLE IF NOT EXISTS codex_turn_configs (
 CREATE INDEX IF NOT EXISTS ix_codex_turn_configs_frame
     ON codex_turn_configs(frame_id, created_at DESC);
 
+-- Durable binding between a Wisp frame and the session owned by an external
+-- ACP agent. Agent credentials and private configuration are never stored here.
+CREATE TABLE IF NOT EXISTS acp_sessions (
+    frame_id            TEXT PRIMARY KEY REFERENCES frames(id) ON DELETE CASCADE,
+    agent_profile_id    TEXT NOT NULL,
+    profile_fingerprint TEXT NOT NULL,
+    agent_session_id    TEXT NOT NULL,
+    cwd                 TEXT NOT NULL,
+    protocol_version    INTEGER NOT NULL,
+    agent_info_json     TEXT NOT NULL DEFAULT '{}',
+    capabilities_json   TEXT NOT NULL DEFAULT '{}',
+    created_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL,
+    UNIQUE(agent_profile_id, agent_session_id)
+);
+
 CREATE TABLE IF NOT EXISTS execution_contexts (
     id                 TEXT PRIMARY KEY,
     kind               TEXT NOT NULL,

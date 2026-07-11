@@ -27,10 +27,10 @@ chrono = { workspace = true }
 dirs = "5"
 reqwest = { workspace = true }
 regex = { workspace = true }
+url = { workspace = true }
 glob = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
-toml = "0.8"
 base64 = "0.22"
 async-trait = "0.1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
@@ -40,5 +40,6 @@ wisp-skills = { workspace = true }
 wisp-store = { workspace = true }
 wisp-python = { workspace = true }
 wisp-mcp = { workspace = true }
+wisp-acp = { workspace = true }
 wisp-paths = { workspace = true }
 wisp-tools = { workspace = true }

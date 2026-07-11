@@ -1,4 +1,4 @@
-//! Stdio MCP bridge exposed to local runners (Codex CLI / Claude Code).
+//! Stdio MCP bridge exposed to external ACP agents.
 //!
 //! The bridge intentionally exposes Wisp's scientific capabilities (skills,
 //! bundled bio MCP, custom MCP, run contexts) without forwarding Wisp's generic
@@ -16,7 +16,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::Mutex;
 use wisp_skills::{list_resources, SkillIndex};
 use wisp_store::Store;
 use wisp_tools::{Approval, Tool, ToolEnv, ToolEvent, ToolResult};
@@ -28,7 +27,6 @@ pub(crate) struct BridgeConfig {
     pub(crate) resource_root: Option<PathBuf>,
     pub(crate) project_id: String,
     pub(crate) frame_id: Option<String>,
-    pub(crate) plan_safe: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,10 +51,6 @@ enum Route {
         description: String,
         input_schema: Value,
     },
-}
-
-fn should_load_custom_mcp(already_loaded: bool, plan_safe: bool) -> bool {
-    !already_loaded && !plan_safe
 }
 
 struct BridgeServer {
@@ -119,11 +113,6 @@ impl BridgeServer {
     }
 
     async fn tools_list(&mut self) -> Result<Value> {
-        self.tools_list_for_mode(false).await
-    }
-
-    async fn tools_list_for_mode(&mut self, plan_mode: bool) -> Result<Value> {
-        let plan_safe = self.cfg.plan_safe || plan_mode;
         let mut tools = vec![
             json!({
                 "name": "wisp_list_skills",
@@ -143,33 +132,16 @@ impl BridgeServer {
             get_run_tool_schema(),
             cancel_run_tool_schema(),
         ];
-        let remote = self.ensure_remote_tools(plan_safe).await?;
+        let remote = self.ensure_remote_tools().await?;
         tools.extend(remote);
-        if plan_safe {
-            tools.retain(|tool| {
-                tool.get("name")
-                    .and_then(Value::as_str)
-                    .is_some_and(|name| self.is_plan_safe(name))
-            });
-        }
         Ok(json!({ "tools": tools }))
     }
 
     async fn tools_call(&mut self, params: Value) -> Result<Value> {
-        self.tools_call_for_mode(params, false).await
-    }
-
-    async fn tools_call_for_mode(&mut self, params: Value, plan_mode: bool) -> Result<Value> {
-        let plan_safe = self.cfg.plan_safe || plan_mode;
         let name = params
             .get("name")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("tools/call missing name"))?;
-        if plan_safe && !self.is_plan_safe(name) {
-            return Err(anyhow!(
-                "tool '{name}' is disabled while Plan mode is read-only"
-            ));
-        }
         let args = params
             .get("arguments")
             .cloned()
@@ -193,7 +165,7 @@ impl BridgeServer {
                 (result.content, !result.success)
             }
             other => {
-                self.ensure_remote_tools(plan_safe).await?;
+                self.ensure_remote_tools().await?;
                 let Some(route) = self.routes.get(other).cloned() else {
                     return Err(anyhow!("unknown Wisp bridge tool '{other}'"));
                 };
@@ -220,15 +192,12 @@ impl BridgeServer {
         }))
     }
 
-    async fn ensure_remote_tools(&mut self, plan_safe: bool) -> Result<Vec<Value>> {
+    async fn ensure_remote_tools(&mut self) -> Result<Vec<Value>> {
         if !self.bundled_bio_tools_loaded {
             self.bundled_bio_tools_loaded = true;
             self.register_bundled_bio_tools().await;
         }
-        // Custom MCP connections are arbitrary external processes. Merely
-        // discovering Plan tools must not launch them: a native Plan and the
-        // exec compatibility bridge both expose only Wisp's read-only set.
-        if should_load_custom_mcp(self.custom_mcp_tools_loaded, plan_safe) {
+        if !self.custom_mcp_tools_loaded {
             self.custom_mcp_tools_loaded = true;
             self.register_custom_mcp_tools().await;
         }
@@ -361,11 +330,6 @@ impl BridgeServer {
         is_builtin_tool(name) || self.routes.contains_key(name)
     }
 
-    fn is_plan_safe(&self, name: &str) -> bool {
-        matches!(name, "wisp_list_skills" | "wisp_use_skill" | "wisp_get_run")
-            || matches!(self.routes.get(name), Some(Route::Bio { .. }))
-    }
-
     fn list_skills_text(&self) -> String {
         if self.skills.is_empty() {
             return "No Wisp skills are currently available. If this is a portable build, verify the skills/ resource directory is next to wisp-tauri.exe.".into();
@@ -436,103 +400,6 @@ impl BridgeServer {
             project_root: self.cfg.project_root.clone(),
         };
         tool.run(args, &env).await
-    }
-}
-
-/// Reusable in-process tool router for Codex App Server dynamic tools.  Claude
-/// Code and the exec fallback continue to use the stdio MCP facade below; both
-/// paths share the same schemas and implementations through `BridgeServer`.
-pub(crate) struct WispToolRouter {
-    server: Mutex<BridgeServer>,
-}
-
-impl WispToolRouter {
-    pub(crate) async fn new(cfg: BridgeConfig) -> Result<Self> {
-        Ok(Self {
-            server: Mutex::new(BridgeServer::new(cfg).await?),
-        })
-    }
-
-    /// DynamicToolSpec-compatible entries (`name`, `description`,
-    /// `inputSchema`). Plan mode deliberately omits execution/cancellation and
-    /// unknown custom MCP tools; bundled scientific lookup tools remain usable.
-    pub(crate) async fn specs(&self, plan_mode: bool) -> Result<Vec<Value>> {
-        let mut server = self.server.lock().await;
-        let listed = server.tools_list_for_mode(plan_mode).await?;
-        let mut tools = listed
-            .get("tools")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|mut tool| {
-                // App Server DynamicToolSpec is a tagged union. Older alpha
-                // builds tolerated bare MCP specs, but generated 0.144 schemas
-                // require the explicit function discriminator.
-                if let Some(object) = tool.as_object_mut() {
-                    object
-                        .entry("type".to_string())
-                        .or_insert_with(|| Value::String("function".into()));
-                }
-                tool
-            })
-            .collect::<Vec<_>>();
-        tools.sort_by(|left, right| {
-            left.get("name")
-                .and_then(Value::as_str)
-                .cmp(&right.get("name").and_then(Value::as_str))
-        });
-        if !plan_mode {
-            return Ok(tools);
-        }
-        Ok(tools
-            .into_iter()
-            .filter(|tool| {
-                tool.get("name")
-                    .and_then(Value::as_str)
-                    .is_some_and(|name| server.is_plan_safe(name))
-            })
-            .collect())
-    }
-
-    pub(crate) async fn call(&self, tool: &str, arguments: Value, plan_mode: bool) -> Value {
-        let mut server = self.server.lock().await;
-        if plan_mode && !server.is_plan_safe(tool) {
-            return json!({
-                "success": false,
-                "contentItems": [{
-                    "type": "inputText",
-                    "text": format!("Tool '{tool}' is disabled while Codex Plan mode is read-only.")
-                }]
-            });
-        }
-        match server
-            .tools_call_for_mode(json!({ "name": tool, "arguments": arguments }), plan_mode)
-            .await
-        {
-            Ok(result) => {
-                let failed = result
-                    .get("isError")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                let text = result
-                    .get("content")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|part| part.get("text").and_then(Value::as_str))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                json!({
-                    "success": !failed,
-                    "contentItems": [{ "type": "inputText", "text": text }]
-                })
-            }
-            Err(error) => json!({
-                "success": false,
-                "contentItems": [{ "type": "inputText", "text": error.to_string() }]
-            }),
-        }
     }
 }
 
@@ -687,9 +554,7 @@ pub(crate) async fn run_stdio(cfg: BridgeConfig) -> Result<()> {
     Ok(())
 }
 
-/// CLI args for the `--wisp-mcp-bridge` re-exec mode: the same wisp binary
-/// relaunches as a stdio MCP server inside the Codex runtime (see
-/// `codex_runtime::codex_config_block`).
+/// CLI args for the `--wisp-mcp-bridge` re-exec mode used by ACP agents.
 fn parse_mcp_bridge_cli_args() -> BridgeConfig {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let mut app_data: Option<PathBuf> = None;
@@ -697,7 +562,6 @@ fn parse_mcp_bridge_cli_args() -> BridgeConfig {
     let mut resource_root: Option<PathBuf> = None;
     let mut project_id = "default".to_string();
     let mut frame_id: Option<String> = None;
-    let mut plan_safe = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -723,7 +587,6 @@ fn parse_mcp_bridge_cli_args() -> BridgeConfig {
                 i += 1;
                 frame_id = args.get(i).filter(|s| !s.trim().is_empty()).cloned();
             }
-            "--plan-safe" => plan_safe = true,
             _ => {}
         }
         i += 1;
@@ -745,7 +608,6 @@ fn parse_mcp_bridge_cli_args() -> BridgeConfig {
         resource_root,
         project_id,
         frame_id,
-        plan_safe,
     }
 }
 
@@ -801,13 +663,5 @@ mod tests {
             assert!(is_builtin_tool(name), "{name} must be reserved");
         }
         assert!(!is_builtin_tool("third_party_run"));
-    }
-
-    #[test]
-    fn plan_safe_discovery_never_schedules_custom_mcp_startup() {
-        assert!(!should_load_custom_mcp(false, true));
-        assert!(!should_load_custom_mcp(true, true));
-        assert!(should_load_custom_mcp(false, false));
-        assert!(!should_load_custom_mcp(true, false));
     }
 }

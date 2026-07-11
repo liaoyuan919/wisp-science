@@ -12,38 +12,10 @@ use serde_wasm_bindgen::to_value;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use wasm_bindgen::JsValue;
 
-fn format_codex_runtime_updated(raw: &str, locale: Locale) -> String {
-    let raw = raw.trim();
-    if raw.is_empty() { return String::new(); }
-    let value = raw.parse::<f64>().ok().map(|number| {
-        // Accept both Unix seconds and the millisecond timestamps returned by
-        // current App Server builds.
-        JsValue::from_f64(if number.abs() < 100_000_000_000.0 { number * 1_000.0 } else { number })
-    }).unwrap_or_else(|| JsValue::from_str(raw));
-    let date = js_sys::Date::new(&value);
-    if date.get_time().is_nan() {
-        raw.to_string()
-    } else {
-        date.to_locale_string(locale.code(), &JsValue::UNDEFINED).into()
-    }
-}
-
-fn codex_runtime_source_label(raw: &str) -> String {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "codex_desktop" | "codex-desktop" | "desktop" => "Codex Desktop".into(),
-        "path" => "PATH".into(),
-        "windows" => "Windows".into(),
-        "wsl" => "WSL".into(),
-        _ => raw.trim().to_string(),
-    }
-}
-
 fn settings_provider_value(provider: &str) -> &'static str {
     match provider.trim() {
         "anthropic" => "anthropic",
         "openai_responses" | "openai-responses" | "responses" => "openai_responses",
-        "codex" | "codex_cli" | "codex_local" | "codex-local" => "codex_cli",
-        "claude_code" | "claude-code" | "claude" => "claude_code",
         _ => "openai",
     }
 }
@@ -52,9 +24,6 @@ fn settings_provider_defaults(provider: &str) -> (&'static str, &'static str) {
     match settings_provider_value(provider) {
         "anthropic" => ("https://api.anthropic.com", "claude-sonnet-5"),
         "openai_responses" => ("https://api.openai.com/v1", "gpt-5.5"),
-        // Local runners discover their model from the selected executable; an
-        // API URL/model placeholder here would falsely imply it is being used.
-        "codex_cli" | "claude_code" => ("", ""),
         _ => ("https://api.deepseek.com", "deepseek-v4-pro"),
     }
 }
@@ -98,13 +67,6 @@ pub(super) struct SettingsViewState {
     pub(super) custom_conn_tools: RwSignal<HashMap<String, Vec<ConnectorTool>>>,
     pub(super) custom_conn_tools_loading: RwSignal<HashSet<String>>,
     pub(super) custom_conn_tool_errors: RwSignal<HashMap<String, String>>,
-    pub(super) codex_runtime: RwSignal<Option<RuntimeSnapshot>>,
-    pub(super) codex_runtime_error: RwSignal<Option<String>>,
-    pub(super) codex_runtime_loading: RwSignal<bool>,
-    pub(super) codex_settings_action_loading: RwSignal<bool>,
-    pub(super) codex_profile_overrides: RwSignal<CodexModeOverrides>,
-    pub(super) codex_preview_normal: RwSignal<Option<ResolvedTurnConfig>>,
-    pub(super) codex_preview_plan: RwSignal<Option<ResolvedTurnConfig>>,
 }
 
 #[component]
@@ -127,9 +89,6 @@ pub(super) fn SettingsView(
     set_visible_skills_enabled: Callback<bool>,
     install_skill_from: Callback<String>,
     remove_specialist: Callback<String>,
-    refresh_codex_runtime: Callback<()>,
-    preview_codex_configs: Callback<()>,
-    save_codex_profile: Callback<()>,
 ) -> impl IntoView {
     let SettingsViewState {
         locale,
@@ -169,13 +128,6 @@ pub(super) fn SettingsView(
         custom_conn_tools,
         custom_conn_tools_loading,
         custom_conn_tool_errors,
-        codex_runtime,
-        codex_runtime_error,
-        codex_runtime_loading,
-        codex_settings_action_loading,
-        codex_profile_overrides,
-        codex_preview_normal,
-        codex_preview_plan,
     } = state;
 
 move || show_settings.get().then(|| view! {
@@ -317,42 +269,10 @@ move || show_settings.get().then(|| view! {
                                                 <option value="openai">{move || t(locale.get(), "settings.provider.openai")}</option>
                                                 <option value="openai_responses">{move || t(locale.get(), "settings.provider.openai_responses")}</option>
                                                 <option value="anthropic">{move || t(locale.get(), "settings.provider.anthropic")}</option>
-                                                <option value="codex_cli">{move || t(locale.get(), "settings.provider.codex")}</option>
-                                                <option value="claude_code">{move || t(locale.get(), "settings.provider.claude_code")}</option>
                                             </select>
                                         </label>
-                                        {move || model_form.get().filter(|form| matches!(settings_provider_value(&form.provider), "codex_cli" | "claude_code")).map(|form| {
-                                            let is_codex = settings_provider_value(&form.provider) == "codex_cli";
-                                            view! {
-                                                <div class="span-2 local-runner-fields">
-                                                    <label>
-                                                        {move || t(locale.get(), if is_codex { "codex.runner.command" } else { "claude.runner.command" })}
-                                                        <input prop:value=if is_codex { form.runner_command.clone() } else { form.runner_claude_command.clone() }
-                                                            placeholder=if is_codex { "codex" } else { "claude" }
-                                                            on:input=move |event| {
-                                                                let value = event_target_input(&event).value();
-                                                                model_form.update(|form| if let Some(form) = form {
-                                                                    if is_codex { form.runner_command = value.clone(); } else { form.runner_claude_command = value.clone(); }
-                                                                });
-                                                            } />
-                                                    </label>
-                                                    <label>
-                                                        {move || t(locale.get(), "codex.runner.profile")}
-                                                        <input prop:value=form.runner_profile.clone()
-                                                            placeholder=move || t(locale.get(), "codex.runner.profile_ph")
-                                                            on:input=move |event| model_form.update(|form| if let Some(form) = form { form.runner_profile = event_target_input(&event).value(); }) />
-                                                    </label>
-                                                    <label class="settings-check span-2">
-                                                        <input type="checkbox" prop:checked=form.runner_persistent
-                                                            on:change=move |event| model_form.update(|form| if let Some(form) = form { form.runner_persistent = event_target_checked(&event); }) />
-                                                        <span>{move || t(locale.get(), "codex.runner.persistent")}</span>
-                                                    </label>
-                                                </div>
-                                            }
-                                        })}
                                         <label class="span-2">{move || t(locale.get(), "settings.api_url")}
                                             <input prop:value=move || model_form.get().map(|f| f.api_url.clone()).unwrap_or_default()
-                                                prop:disabled=move || model_form.get().is_some_and(|form| matches!(settings_provider_value(&form.provider), "codex_cli" | "claude_code"))
                                                 on:input=move |ev| model_form.update(|o| if let Some(o)=o { o.api_url = event_target_input(&ev).value(); }) /></label>
                                         <label>{move || t(locale.get(), "settings.label")}
                                             <input prop:value=move || model_form.get().map(|f| f.label.clone()).unwrap_or_default()
@@ -360,7 +280,6 @@ move || show_settings.get().then(|| view! {
                                                 on:input=move |ev| model_form.update(|o| if let Some(o)=o { o.label = event_target_input(&ev).value(); }) /></label>
                                         <label>{move || t(locale.get(), "settings.model")}
                                             <input prop:value=move || model_form.get().map(|f| f.model.clone()).unwrap_or_default()
-                                                prop:disabled=move || model_form.get().is_some_and(|form| matches!(settings_provider_value(&form.provider), "codex_cli" | "claude_code"))
                                                 placeholder=move || t(locale.get(), "settings.model_ph")
                                                 on:input=move |ev| model_form.update(|o| if let Some(o)=o { o.model = event_target_input(&ev).value(); }) /></label>
                                         <label>{move || t(locale.get(), "settings.max_tokens")}
@@ -443,21 +362,7 @@ move || show_settings.get().then(|| view! {
                         }.into_view()
                     } else {
                         view! {
-                        <div class="settings-pane settings-pane-list codex-settings-pane">
-                            <CodexRuntimeSettings
-                                locale=locale
-                                runtime=codex_runtime
-                                runtime_error=codex_runtime_error
-                                runtime_loading=codex_runtime_loading
-                                action_loading=codex_settings_action_loading
-                                overrides=codex_profile_overrides
-                                preview_normal=codex_preview_normal
-                                preview_plan=codex_preview_plan
-                                on_refresh=refresh_codex_runtime
-                                on_preview=preview_codex_configs
-                                on_save=save_codex_profile
-                            />
-                            <div class="settings-section-divider"></div>
+                        <div class="settings-pane settings-pane-list model-settings-pane">
                             <div class="settings-toolbar settings-toolbar-end">
                                 <span class="settings-filter">{move || {
                                     let n = models.get().len();
@@ -482,21 +387,7 @@ move || show_settings.get().then(|| view! {
                                             <div class="settings-list-row settings-list-row-link"
                                                 class:settings-list-row-active=is_active
                                                 on:click=move |_| {
-                                                    let mut form = profile_to_form(&edit);
-                                                    form.runner_command = edit.runner_command.clone();
-                                                    form.runner_profile = edit.runner_profile.clone();
-                                                    form.runner_sandbox = edit.runner_sandbox.clone();
-                                                    form.runner_web_search_mode = edit.runner_web_search_mode.clone();
-                                                    form.runner_claude_command = edit.runner_claude_command.clone();
-                                                    form.runner_persistent = edit.runner_persistent;
-                                                    form.normal_model = edit.normal_model.clone();
-                                                    form.normal_reasoning_effort = edit.normal_reasoning_effort.clone();
-                                                    form.plan_model = edit.plan_model.clone();
-                                                    form.plan_reasoning_effort = edit.plan_reasoning_effort.clone();
-                                                    form.service_tier = edit.service_tier.clone();
-                                                    form.personality = edit.personality.clone();
-                                                    form.reasoning_summary = edit.reasoning_summary.clone();
-                                                    form.verbosity = edit.verbosity.clone();
+                                                        let form = profile_to_form(&edit);
                                                     model_form.set(Some(form));
                                                     model_form_key.set(String::new());
                                                     model_form_msg.set(None);
@@ -1482,502 +1373,4 @@ move || show_settings.get().then(|| view! {
         </div>
     </div>
 }.into_view())
-}
-
-fn codex_select_value(value: &Option<String>, allowed: &[String]) -> String {
-    match value.as_deref() {
-        None | Some("") => "__inherit__".into(),
-        Some(value) if allowed.iter().any(|item| item == value) => value.into(),
-        Some(_) => "__custom__".into(),
-    }
-}
-
-fn codex_efforts(
-    snapshot: &RuntimeSnapshot,
-    selected: Option<&str>,
-    inherited_effective_model: Option<&str>,
-) -> Vec<String> {
-    if let Some(model) = selected.filter(|value| !value.is_empty()) {
-        if let Some(info) = snapshot.models.iter().find(|item| item.id == model) {
-            return info.supported_reasoning_efforts.clone();
-        }
-        return vec!["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
-            .into_iter().map(str::to_string).collect();
-    }
-    // For an inherited model, prefer the effort list declared by the effective
-    // catalog model.  A custom model may still use these common values or the
-    // free-form input; the app server remains the final validator.
-    let effective = inherited_effective_model.unwrap_or("");
-    snapshot.models.iter().find(|item| item.id == effective)
-        .map(|item| item.supported_reasoning_efforts.clone())
-        .unwrap_or_else(|| vec!["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
-        .into_iter().map(str::to_string).collect())
-}
-
-#[component]
-fn CodexModeEditor(
-    locale: RwSignal<Locale>,
-    mode: &'static str,
-    runtime: RwSignal<Option<RuntimeSnapshot>>,
-    overrides: RwSignal<CodexModeOverrides>,
-    preview: RwSignal<Option<ResolvedTurnConfig>>,
-) -> impl IntoView {
-    let is_plan = mode == "plan";
-    let compatibility_notice = create_rw_signal(None::<String>);
-    let custom_model_editing = create_rw_signal(false);
-    let custom_effort_editing = create_rw_signal(false);
-    let title_key = if is_plan { "codex.mode.plan" } else { "codex.mode.normal" };
-    let model_options = create_memo(move |_| runtime.get().map(|snapshot| {
-        snapshot.models.into_iter().map(|model| model.id).collect::<Vec<_>>()
-    }).unwrap_or_default());
-    let effort_options = create_memo(move |_| {
-        let Some(snapshot) = runtime.get() else { return Vec::new(); };
-        let layer = overrides.get();
-        let selected = if is_plan { layer.plan.model.as_deref() } else { layer.normal.model.as_deref() };
-        let inherited_model = preview.get().map(|config| config.effective_model().to_string());
-        codex_efforts(&snapshot, selected, inherited_model.as_deref())
-    });
-    let custom_model_visible = create_memo(move |_| {
-        let layer = overrides.get();
-        let selected = if is_plan { layer.plan.model } else { layer.normal.model };
-        let allowed = model_options.get();
-        custom_model_editing.get()
-            || matches!(selected.as_deref(), Some(value) if value.is_empty() || !allowed.iter().any(|item| item == value))
-    });
-    let custom_effort_visible = create_memo(move |_| {
-        let layer = overrides.get();
-        let selected = if is_plan { layer.plan.effort } else { layer.normal.effort };
-        let allowed = effort_options.get();
-        custom_effort_editing.get()
-            || matches!(selected.as_deref(), Some(value) if value.is_empty() || !allowed.iter().any(|item| item == value))
-    });
-
-    view! {
-        <section class="codex-mode-card" data-mode=mode>
-            <div class="codex-mode-head">
-                <div>
-                    <h4>{move || t(locale.get(), title_key)}</h4>
-                    <p>{move || t(locale.get(), if is_plan { "codex.mode.plan_hint" } else { "codex.mode.normal_hint" })}</p>
-                </div>
-                {is_plan.then(|| view! { <span class="codex-lock-badge">{move || t(locale.get(), "codex.plan.read_only")}</span> })}
-            </div>
-            <div class="codex-mode-fields">
-                <label>
-                    <span>{move || t(locale.get(), "codex.model")}</span>
-                    <select data-testid=format!("codex-{mode}-model")
-                        prop:value=move || {
-                            if custom_model_editing.get() { return "__custom__".into(); }
-                            let layer = overrides.get();
-                            let value = if is_plan { &layer.plan.model } else { &layer.normal.model };
-                            codex_select_value(value, &model_options.get())
-                        }
-                        on:change=move |event| {
-                            let value = dom_value(&event);
-                            custom_model_editing.set(value == "__custom__");
-                            let selected = match value.as_str() {
-                                "__inherit__" => None,
-                                "__custom__" => Some(String::new()),
-                                _ => Some(value.clone()),
-                            };
-                            let inherited_model = preview.get_untracked().map(|config| config.effective_model().to_string());
-                            let supported = runtime.get_untracked().map(|snapshot| {
-                                codex_efforts(&snapshot, selected.as_deref(), inherited_model.as_deref())
-                            }).unwrap_or_default();
-                            let mut reset_effort = false;
-                            overrides.update(|layer| {
-                                let target = if is_plan { &mut layer.plan } else { &mut layer.normal };
-                                target.model = selected;
-                                if target.effort.as_ref().is_some_and(|effort| !supported.iter().any(|item| item == effort)) {
-                                    target.effort = None;
-                                    reset_effort = true;
-                                }
-                            });
-                            compatibility_notice.set(reset_effort.then(|| t(locale.get_untracked(), "codex.effort_reset").into()));
-                        }>
-                        <option value="__inherit__">{move || t(locale.get(), "codex.inherit")}</option>
-                        {move || runtime.get().map(|snapshot| snapshot.models.into_iter().map(|model| {
-                            let id = model.id.clone();
-                            view! { <option value=id.clone()>{format!("{} · {}", model.label(), id)}</option> }
-                        }).collect_view())}
-                        <option value="__custom__">{move || t(locale.get(), "codex.custom")}</option>
-                    </select>
-                </label>
-                <label>
-                    <span>{move || t(locale.get(), "codex.effort")}</span>
-                    <select data-testid=format!("codex-{mode}-effort")
-                        prop:value=move || {
-                            if custom_effort_editing.get() { return "__custom__".into(); }
-                            let layer = overrides.get();
-                            let value = if is_plan { &layer.plan.effort } else { &layer.normal.effort };
-                            codex_select_value(value, &effort_options.get())
-                        }
-                        on:change=move |event| {
-                            let value = dom_value(&event);
-                            custom_effort_editing.set(value == "__custom__");
-                            let selected = match value.as_str() {
-                                "__inherit__" => None,
-                                "__custom__" => Some(String::new()),
-                                _ => Some(value),
-                            };
-                            overrides.update(|layer| {
-                                let target = if is_plan { &mut layer.plan } else { &mut layer.normal };
-                                target.effort = selected;
-                            });
-                        }>
-                        <option value="__inherit__">{move || t(locale.get(), "codex.inherit")}</option>
-                        {move || effort_options.get().into_iter().map(|effort| view! {
-                            <option value=effort.clone()>{effort}</option>
-                        }).collect_view()}
-                        <option value="__custom__">{move || t(locale.get(), "codex.custom")}</option>
-                    </select>
-                </label>
-                {move || custom_model_visible.get().then(|| view! {
-                        <label class="codex-custom-input">
-                            <span>{move || t(locale.get(), "codex.custom_model")}</span>
-                            <input data-testid=format!("codex-{mode}-custom-model")
-                                prop:value=move || {
-                                    let layer = overrides.get();
-                                    if is_plan { layer.plan.model } else { layer.normal.model }.unwrap_or_default()
-                                }
-                                placeholder=move || t(locale.get(), "codex.custom_model_ph")
-                                on:input=move |event| {
-                                    let value = event_target_input(&event).value();
-                                    overrides.update(|layer| {
-                                        let target = if is_plan { &mut layer.plan } else { &mut layer.normal };
-                                        target.model = Some(value.clone());
-                                    });
-                                } />
-                        </label>
-                    })}
-                {move || custom_effort_visible.get().then(|| view! {
-                        <label class="codex-custom-input">
-                            <span>{move || t(locale.get(), "codex.custom_effort")}</span>
-                            <input data-testid=format!("codex-{mode}-custom-effort")
-                                prop:value=move || {
-                                    let layer = overrides.get();
-                                    if is_plan { layer.plan.effort } else { layer.normal.effort }.unwrap_or_default()
-                                }
-                                placeholder=move || t(locale.get(), "codex.custom_effort_ph")
-                                on:input=move |event| {
-                                    let value = event_target_input(&event).value();
-                                    overrides.update(|layer| {
-                                        let target = if is_plan { &mut layer.plan } else { &mut layer.normal };
-                                        target.effort = Some(value.clone());
-                                    });
-                                } />
-                        </label>
-                    })}
-                {move || compatibility_notice.get().map(|notice| view! {
-                    <div class="codex-inline-notice">{notice}</div>
-                })}
-            </div>
-        </section>
-    }
-}
-
-#[component]
-fn CodexPreviewCard(
-    locale: RwSignal<Locale>,
-    title: &'static str,
-    config: RwSignal<Option<ResolvedTurnConfig>>,
-) -> impl IntoView {
-    view! {
-        <div class="codex-preview-card">
-            <h5>{move || t(locale.get(), title)}</h5>
-            {move || if let Some(config) = config.get() {
-                let requested_model = config.requested_model().to_string();
-                let effective_model = config.effective_model().to_string();
-                let requested_effort = config.requested_effort().to_string();
-                let effective_effort = config.effective_effort().to_string();
-                let rerouted = !requested_model.is_empty() && !effective_model.is_empty() && requested_model != effective_model;
-                let model_source = config.sources.get("model").cloned().unwrap_or_default();
-                let sandbox_detail = if config.sandbox_policy.is_null() {
-                    config.sandbox.clone()
-                } else {
-                    config.sandbox_policy.to_string()
-                };
-                let details = [
-                    ("service tier", config.service_tier.clone(), "service_tier"),
-                    ("personality", config.personality.clone(), "personality"),
-                    ("reasoning summary", config.summary.clone(), "summary"),
-                    ("verbosity", config.verbosity.clone(), "verbosity"),
-                    ("web search", config.web_search.clone(), "web_search"),
-                ];
-                view! {
-                    <dl>
-                        <dt>{t(locale.get(), "codex.model")}</dt>
-                        <dd class:rerouted=rerouted>{if rerouted { format!("{requested_model} → {effective_model}") } else { effective_model }}</dd>
-                        <dt>{t(locale.get(), "codex.effort")}</dt>
-                        <dd>{if requested_effort != effective_effort && !requested_effort.is_empty() { format!("{requested_effort} → {effective_effort}") } else { effective_effort }}</dd>
-                        <dt>{t(locale.get(), "codex.sandbox")}</dt><dd>{sandbox_detail}</dd>
-                        {(!model_source.is_empty()).then(|| view! { <dt>{t(locale.get(), "codex.source")}</dt><dd>{model_source}</dd> })}
-                        {details.into_iter().filter(|(_, value, _)| !value.is_empty()).map(|(label, value, key)| {
-                            let source = config.effective_sources.get(key)
-                                .or_else(|| config.sources.get(key)).cloned().unwrap_or_default();
-                            view! {
-                                <dt>{label}</dt><dd>{if source.is_empty() { value } else { format!("{value} · {source}") }}</dd>
-                            }
-                        }).collect_view()}
-                        {(!config.runtime_path.is_empty()).then(|| view! { <dt>"runtime"</dt><dd><code>{config.runtime_path.clone()}</code></dd> })}
-                        {(!config.runtime_version.is_empty()).then(|| view! { <dt>"version"</dt><dd>{config.runtime_version.clone()}</dd> })}
-                        {(!config.codex_home.is_empty()).then(|| view! { <dt>"CODEX_HOME"</dt><dd><code>{config.codex_home.clone()}</code></dd> })}
-                        <dt>{t(locale.get(), "codex.generation")}</dt><dd>{config.config_version}</dd>
-                    </dl>
-                    {(!config.warnings.is_empty()).then(|| view! {
-                        <ul class="codex-warning-list">{config.warnings.into_iter().map(|warning| view! { <li>{warning}</li> }).collect_view()}</ul>
-                    })}
-                    {(!config.validation_errors.is_empty()).then(|| view! {
-                        <ul class="codex-warning-list">{config.validation_errors.into_iter().map(|error| view! { <li>{error}</li> }).collect_view()}</ul>
-                    })}
-                }.into_view()
-            } else {
-                view! { <p class="codex-preview-empty">{t(locale.get(), "codex.preview_empty")}</p> }.into_view()
-            }}
-        </div>
-    }
-}
-
-#[component]
-fn CodexRuntimeSettings(
-    locale: RwSignal<Locale>,
-    runtime: RwSignal<Option<RuntimeSnapshot>>,
-    runtime_error: RwSignal<Option<String>>,
-    runtime_loading: RwSignal<bool>,
-    action_loading: RwSignal<bool>,
-    overrides: RwSignal<CodexModeOverrides>,
-    preview_normal: RwSignal<Option<ResolvedTurnConfig>>,
-    preview_plan: RwSignal<Option<ResolvedTurnConfig>>,
-    on_refresh: Callback<()>,
-    on_preview: Callback<()>,
-    on_save: Callback<()>,
-) -> impl IntoView {
-    let select_optional = |value: String| (!value.is_empty() && value != "__inherit__").then_some(value);
-    let selected_models = create_memo(move |_| {
-        let Some(snapshot) = runtime.get() else { return Vec::new(); };
-        let profile_layer = overrides.get();
-        let normal_model = profile_layer.normal.model
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| preview_normal.get().map(|config| config.effective_model().to_string()))
-            .unwrap_or_default();
-        let plan_model = profile_layer.plan.model
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| preview_plan.get().map(|config| config.effective_model().to_string()))
-            .unwrap_or_default();
-        [normal_model, plan_model].into_iter()
-            .filter_map(|id| snapshot.models.iter().find(|model| model.id == id).cloned())
-            .collect::<Vec<_>>()
-    });
-    let personality_supported = create_memo(move |_| {
-        runtime.get().is_some_and(|snapshot| snapshot.provider_capabilities.personality)
-            && selected_models.get().iter().all(|model| model.supports_personality)
-    });
-    let service_tiers = create_memo(move |_| {
-        let models = selected_models.get();
-        let mut tiers = models.first().map(|model| model.service_tiers.clone()).unwrap_or_default();
-        for model in models.iter().skip(1) {
-            tiers.retain(|tier| model.service_tiers.contains(tier));
-        }
-        tiers.sort();
-        tiers.dedup();
-        tiers
-    });
-    let service_tier_supported = create_memo(move |_| {
-        runtime.get().is_some_and(|snapshot| snapshot.provider_capabilities.service_tier)
-            && !service_tiers.get().is_empty()
-    });
-    view! {
-        <section class="codex-runtime-settings" data-testid="codex-runtime-settings">
-            <div class="codex-runtime-titlebar">
-                <div>
-                    <h3>{move || t(locale.get(), "codex.runtime.title")}</h3>
-                    <p>{move || t(locale.get(), "codex.runtime.subtitle")}</p>
-                </div>
-                <button type="button" class="settings-add-btn codex-runtime-refresh" disabled=move || runtime_loading.get() on:click=move |_| on_refresh.call(())>
-                    {move || t(locale.get(), if runtime_loading.get() { "codex.runtime.refreshing" } else { "codex.runtime.refresh" })}
-                </button>
-            </div>
-            {move || runtime_error.get().map(|message| view! {
-                <div class="settings-status fail codex-runtime-error">{message}</div>
-            })}
-            {move || if let Some(snapshot) = runtime.get() {
-                let capabilities = snapshot.provider_capabilities.clone();
-                let runtime_source = [snapshot.runtime.source.clone(), snapshot.runtime.context.clone()]
-                    .into_iter().filter(|value| !value.trim().is_empty())
-                    .map(|value| codex_runtime_source_label(&value)).collect::<Vec<_>>().join(" · ");
-                let path = snapshot.executable_path().to_string();
-                let version = snapshot.version().to_string();
-                let home = snapshot.codex_home().to_string();
-                let updated = format_codex_runtime_updated(&snapshot.refreshed_at, locale.get());
-                let warnings = snapshot.warnings.clone();
-                view! {
-                    <details class="codex-runtime-card">
-                        <summary class="codex-runtime-summary">
-                            <span class="codex-runtime-summary-main">
-                                <strong>{if version.is_empty() { t(locale.get(), "codex.runtime.title").into() } else { version.clone() }}</strong>
-                                <span>{runtime_source.clone()}</span>
-                            </span>
-                            <span class="codex-capability-list">
-                                {[
-                                    (t(locale.get(), "codex.capability.app_server"), capabilities.app_server),
-                                    (t(locale.get(), "codex.capability.native_plan"), capabilities.native_plan),
-                                    (t(locale.get(), "codex.capability.images"), capabilities.image_input),
-                                    (t(locale.get(), "codex.capability.personality"), capabilities.personality),
-                                ].into_iter().map(|(label, supported)| view! {
-                                    <span class="codex-capability" class:supported=supported class:unsupported=!supported>
-                                        <span class="codex-capability-dot"></span>{label}
-                                    </span>
-                                }).collect_view()}
-                            </span>
-                            <span class="settings-list-chevron codex-runtime-chevron">"›"</span>
-                        </summary>
-                        <div class="codex-runtime-details-body">
-                            <div class="codex-runtime-meta">
-                                <div><span>{t(locale.get(), "codex.runtime.path")}</span><code title=path.clone()>{path}</code></div>
-                                <div><span>{t(locale.get(), "codex.runtime.version")}</span><strong>{version}</strong></div>
-                                <div><span>"CODEX_HOME"</span><code title=home.clone()>{home}</code></div>
-                                <div><span>{t(locale.get(), "codex.runtime.source")}</span><strong>{runtime_source}</strong></div>
-                                {(!updated.is_empty()).then(|| view! { <div><span>{t(locale.get(), "codex.runtime.updated")}</span><strong>{updated}</strong></div> })}
-                            </div>
-                            {(!warnings.is_empty()).then(|| view! {
-                                <ul class="codex-warning-list">{warnings.into_iter().map(|warning| view! { <li>{warning}</li> }).collect_view()}</ul>
-                            })}
-                        </div>
-                    </details>
-                    <div class="codex-mode-grid">
-                        <CodexModeEditor locale=locale mode="normal" runtime=runtime overrides=overrides preview=preview_normal />
-                        <CodexModeEditor locale=locale mode="plan" runtime=runtime overrides=overrides preview=preview_plan />
-                    </div>
-                    <section class="codex-common-card">
-                        <div class="codex-mode-head">
-                            <div><h4>{t(locale.get(), "codex.common.title")}</h4><p>{t(locale.get(), "codex.common.hint")}</p></div>
-                        </div>
-                        <div class="codex-common-grid">
-                            <label><span>{t(locale.get(), "codex.service_tier")}</span>
-                                <select disabled=move || !service_tier_supported.get()
-                                    title=move || (!service_tier_supported.get()).then(|| t(locale.get(), "codex.unsupported")).unwrap_or_default()
-                                    prop:value=move || overrides.get().service_tier.unwrap_or_else(|| "__inherit__".into())
-                                    on:change=move |event| { let value=dom_value(&event); overrides.update(|item| item.service_tier=select_optional(value)); }>
-                                    <option value="__inherit__">{t(locale.get(), "codex.inherit")}</option>
-                                    {move || service_tiers.get().into_iter().map(|tier| view! { <option value=tier.clone()>{tier}</option> }).collect_view()}
-                                </select>
-                            </label>
-                            <label><span>{t(locale.get(), "codex.personality")}</span>
-                                <select disabled=move || !personality_supported.get()
-                                    title=move || (!personality_supported.get()).then(|| t(locale.get(), "codex.unsupported")).unwrap_or_default()
-                                    prop:value=move || overrides.get().personality.unwrap_or_else(|| "__inherit__".into())
-                                    on:change=move |event| { let value=dom_value(&event); overrides.update(|item| item.personality=select_optional(value)); }>
-                                    <option value="__inherit__">{t(locale.get(), "codex.inherit")}</option><option value="none">"none"</option><option value="friendly">"friendly"</option><option value="pragmatic">"pragmatic"</option>
-                                </select>
-                            </label>
-                            <label><span>{t(locale.get(), "codex.summary")}</span>
-                                <select disabled=!capabilities.reasoning_summary
-                                    title=(!capabilities.reasoning_summary).then(|| t(locale.get(), "codex.unsupported")).unwrap_or_default()
-                                    prop:value=move || overrides.get().summary.unwrap_or_else(|| "__inherit__".into())
-                                    on:change=move |event| { let value=dom_value(&event); overrides.update(|item| item.summary=select_optional(value)); }>
-                                    <option value="__inherit__">{t(locale.get(), "codex.inherit")}</option><option value="auto">"auto"</option><option value="concise">"concise"</option><option value="detailed">"detailed"</option><option value="none">"none"</option>
-                                </select>
-                            </label>
-                            <label><span>{t(locale.get(), "codex.verbosity")}</span>
-                                <select disabled=!capabilities.verbosity
-                                    title=(!capabilities.verbosity).then(|| t(locale.get(), "codex.unsupported")).unwrap_or_default()
-                                    prop:value=move || overrides.get().verbosity.unwrap_or_else(|| "__inherit__".into())
-                                    on:change=move |event| { let value=dom_value(&event); overrides.update(|item| item.verbosity=select_optional(value)); }>
-                                    <option value="__inherit__">{t(locale.get(), "codex.inherit")}</option><option value="low">"low"</option><option value="medium">"medium"</option><option value="high">"high"</option>
-                                </select>
-                            </label>
-                            <label><span>{t(locale.get(), "codex.web_search")}</span>
-                                <select disabled=!capabilities.web_search
-                                    title=(!capabilities.web_search).then(|| t(locale.get(), "codex.unsupported")).unwrap_or_default()
-                                    prop:value=move || overrides.get().web_search.unwrap_or_else(|| "__inherit__".into())
-                                    on:change=move |event| { let value=dom_value(&event); overrides.update(|item| item.web_search=select_optional(value)); }>
-                                    <option value="__inherit__">{t(locale.get(), "codex.inherit")}</option><option value="disabled">"disabled"</option><option value="cached">"cached"</option><option value="indexed">"indexed"</option><option value="live">"live"</option>
-                                </select>
-                            </label>
-                            <label><span>{t(locale.get(), "codex.sandbox")}</span>
-                                <select disabled=!capabilities.sandbox
-                                    title=(!capabilities.sandbox).then(|| t(locale.get(), "codex.unsupported")).unwrap_or_default()
-                                    prop:value=move || overrides.get().sandbox.unwrap_or_else(|| "__inherit__".into())
-                                    on:change=move |event| { let value=dom_value(&event); overrides.update(|item| item.sandbox=select_optional(value)); }>
-                                    <option value="__inherit__">{t(locale.get(), "codex.inherit")}</option><option value="read-only">"read-only"</option><option value="workspace-write">"workspace-write"</option><option value="danger-full-access">"danger-full-access"</option>
-                                </select>
-                            </label>
-                        </div>
-                    </section>
-                    <section class="codex-preview-section">
-                        <div class="codex-preview-head"><h4>{t(locale.get(), "codex.preview.title")}</h4><p>{t(locale.get(), "codex.preview.hint")}</p></div>
-                        <div class="codex-preview-grid">
-                            <CodexPreviewCard locale=locale title="codex.mode.normal" config=preview_normal />
-                            <CodexPreviewCard locale=locale title="codex.mode.plan" config=preview_plan />
-                        </div>
-                    </section>
-                    <div class="row codex-runtime-actions">
-                        <button type="button" disabled=move || runtime_loading.get() || action_loading.get() on:click=move |_| on_preview.call(())>{t(locale.get(), "codex.preview.button")}</button>
-                        <button type="button" class="primary" disabled=move || runtime_loading.get() || action_loading.get() on:click=move |_| on_save.call(())>{t(locale.get(), "codex.save_profile")}</button>
-                    </div>
-                }.into_view()
-            } else if runtime_loading.get() {
-                view! {
-                    <div class="codex-runtime-empty codex-runtime-loading-card" aria-live="polite">
-                        <strong>{t(locale.get(), "codex.runtime.loading_short")}</strong>
-                        <p>{t(locale.get(), "codex.runtime.subtitle")}</p>
-                    </div>
-                }.into_view()
-            } else {
-                view! {
-                    <div class="codex-runtime-empty">
-                        <strong>{t(locale.get(), "codex.runtime.unavailable")}</strong>
-                        <p>{t(locale.get(), "codex.runtime.unavailable_hint")}</p>
-                    </div>
-                    <div class="codex-inline-notice">{t(locale.get(), "codex.compat_profile_hint")}</div>
-                    <div class="codex-mode-grid codex-fallback-grid">
-                        <section class="codex-mode-card" data-mode="normal">
-                            <div class="codex-mode-head"><div><h4>{t(locale.get(), "codex.mode.normal")}</h4><p>{t(locale.get(), "codex.mode.normal_hint")}</p></div></div>
-                            <div class="codex-mode-fields">
-                                <label><span>{t(locale.get(), "codex.model")}</span>
-                                    <input data-testid="codex-fallback-normal-model" prop:value=move || overrides.get().normal.model.unwrap_or_default()
-                                        placeholder=move || t(locale.get(), "codex.inherit")
-                                        on:input=move |event| {
-                                            let value=event_target_input(&event).value();
-                                            overrides.update(|item| item.normal.model=(!value.trim().is_empty()).then_some(value));
-                                        } />
-                                </label>
-                                <label><span>{t(locale.get(), "codex.effort")}</span>
-                                    <input data-testid="codex-fallback-normal-effort" prop:value=move || overrides.get().normal.effort.unwrap_or_default()
-                                        placeholder=move || t(locale.get(), "codex.inherit")
-                                        on:input=move |event| {
-                                            let value=event_target_input(&event).value();
-                                            overrides.update(|item| item.normal.effort=(!value.trim().is_empty()).then_some(value));
-                                        } />
-                                </label>
-                            </div>
-                        </section>
-                        <section class="codex-mode-card" data-mode="plan">
-                            <div class="codex-mode-head"><div><h4>{t(locale.get(), "codex.mode.plan")}</h4><p>{t(locale.get(), "codex.mode.plan_hint")}</p></div><span class="codex-lock-badge">{t(locale.get(), "codex.plan.read_only")}</span></div>
-                            <div class="codex-mode-fields">
-                                <label><span>{t(locale.get(), "codex.model")}</span>
-                                    <input data-testid="codex-fallback-plan-model" prop:value=move || overrides.get().plan.model.unwrap_or_default()
-                                        placeholder=move || t(locale.get(), "codex.inherit")
-                                        on:input=move |event| {
-                                            let value=event_target_input(&event).value();
-                                            overrides.update(|item| item.plan.model=(!value.trim().is_empty()).then_some(value));
-                                        } />
-                                </label>
-                                <label><span>{t(locale.get(), "codex.effort")}</span>
-                                    <input data-testid="codex-fallback-plan-effort" prop:value=move || overrides.get().plan.effort.unwrap_or_default()
-                                        placeholder=move || t(locale.get(), "codex.inherit")
-                                        on:input=move |event| {
-                                            let value=event_target_input(&event).value();
-                                            overrides.update(|item| item.plan.effort=(!value.trim().is_empty()).then_some(value));
-                                        } />
-                                </label>
-                            </div>
-                        </section>
-                    </div>
-                    <div class="row codex-runtime-actions">
-                        <button type="button" class="primary" disabled=move || action_loading.get() on:click=move |_| on_save.call(())>{t(locale.get(), "codex.save_profile")}</button>
-                    </div>
-                }.into_view()
-            }}
-        </section>
-    }
 }

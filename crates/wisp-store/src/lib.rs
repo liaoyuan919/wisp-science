@@ -3,18 +3,18 @@
 //! Replaces the mangopi JSON session file with a structured store. API keys
 //! live in the OS keyring (see [`secrets`]); everything else lives here.
 
+mod acp_sessions;
 mod artifacts;
-mod codex_turn_configs;
 mod execution_contexts;
 mod models;
 mod projects;
-mod proposed_plans;
 mod provenance;
 mod research;
 mod runs;
 pub mod secrets;
 mod sessions;
 
+pub use acp_sessions::AcpSessionBinding;
 pub use models::*;
 
 use anyhow::Result;
@@ -33,6 +33,7 @@ const SSH_RUN_CONTROL_MIGRATION: &str = "0003_ssh_run_control";
 const RUN_LIFECYCLE_LEASE_MIGRATION: &str = "0004_run_lifecycle_lease";
 const PROPOSED_PLANS_MIGRATION: &str = "0005_proposed_plans";
 const CODEX_TURN_CONFIGS_MIGRATION: &str = "0006_codex_turn_configs";
+const ACP_SESSIONS_MIGRATION: &str = "0007_acp_sessions";
 
 #[derive(Clone)]
 pub struct Store {
@@ -99,6 +100,10 @@ impl Store {
         if !Self::migration_applied(pool, CODEX_TURN_CONFIGS_MIGRATION).await? {
             Self::apply_codex_turn_configs(pool).await?;
             Self::record_migration(pool, CODEX_TURN_CONFIGS_MIGRATION).await?;
+        }
+        if !Self::migration_applied(pool, ACP_SESSIONS_MIGRATION).await? {
+            Self::apply_acp_sessions(pool).await?;
+            Self::record_migration(pool, ACP_SESSIONS_MIGRATION).await?;
         }
         Ok(())
     }
@@ -363,6 +368,23 @@ impl Store {
         Ok(())
     }
 
+    async fn apply_acp_sessions(pool: &SqlitePool) -> Result<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS acp_sessions (\
+             frame_id TEXT PRIMARY KEY REFERENCES frames(id) ON DELETE CASCADE, \
+             agent_profile_id TEXT NOT NULL, profile_fingerprint TEXT NOT NULL, \
+             agent_session_id TEXT NOT NULL, cwd TEXT NOT NULL, \
+             protocol_version INTEGER NOT NULL, \
+             agent_info_json TEXT NOT NULL DEFAULT '{}', \
+             capabilities_json TEXT NOT NULL DEFAULT '{}', \
+             created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, \
+             UNIQUE(agent_profile_id, agent_session_id))",
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     async fn apply_artifact_lineage(pool: &SqlitePool) -> Result<()> {
         if !Self::has_column(pool, "artifacts", "latest_version_id").await? {
             sqlx::query("ALTER TABLE artifacts ADD COLUMN latest_version_id TEXT")
@@ -439,100 +461,6 @@ impl Store {
             .bind(key).bind(value)
             .execute(&self.pool).await?;
         Ok(())
-    }
-
-    /// Remove Wisp/Codex settings scoped to a deleted frame, including keys
-    /// for profiles whose actors are not currently loaded.
-    pub async fn delete_codex_frame_settings(&self, frame_id: &str) -> Result<()> {
-        let suffix = format!(":{frame_id}");
-        sqlx::query(
-            "DELETE FROM settings WHERE key IN (?,?,?) OR ((key LIKE 'codex_app_thread:%' OR key LIKE 'codex_app_thread_tools:%') AND substr(key, -length(?)) = ?)",
-        )
-        .bind(format!("codex_session_overrides:{frame_id}"))
-        .bind(format!("codex_collaboration_mode:{frame_id}"))
-        .bind(format!("codex_session_revision:{frame_id}"))
-        .bind(&suffix)
-        .bind(&suffix)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn delete_codex_profile_settings(&self, profile_id: &str) -> Result<()> {
-        let thread_prefix = format!("codex_app_thread:{profile_id}:");
-        let tools_prefix = format!("codex_app_thread_tools:{profile_id}:");
-        sqlx::query(
-            "DELETE FROM settings WHERE substr(key,1,length(?))=? OR substr(key,1,length(?))=?",
-        )
-        .bind(&thread_prefix)
-        .bind(&thread_prefix)
-        .bind(&tools_prefix)
-        .bind(&tools_prefix)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn list_settings_with_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
-        let rows: Vec<(String, String)> =
-            sqlx::query_as("SELECT key,value FROM settings WHERE substr(key,1,length(?))=?")
-                .bind(prefix)
-                .bind(prefix)
-                .fetch_all(&self.pool)
-                .await?;
-        Ok(rows)
-    }
-
-    pub async fn save_codex_session_config(
-        &self,
-        frame_id: &str,
-        overrides_json: &str,
-        mode: Option<&str>,
-        expected_revision: Option<u64>,
-    ) -> Result<u64> {
-        let override_key = format!("codex_session_overrides:{frame_id}");
-        let mode_key = format!("codex_collaboration_mode:{frame_id}");
-        let revision_key = format!("codex_session_revision:{frame_id}");
-        let mut transaction = self.pool.begin().await?;
-        let current: Option<(String,)> = sqlx::query_as("SELECT value FROM settings WHERE key=?")
-            .bind(&revision_key)
-            .fetch_optional(&mut *transaction)
-            .await?;
-        let current = current
-            .and_then(|(value,)| value.parse::<u64>().ok())
-            .unwrap_or(0);
-        if expected_revision.is_some_and(|expected| expected != current) {
-            anyhow::bail!(
-                "Session Codex configuration changed (expected revision {}, current revision {current}); refresh before saving.",
-                expected_revision.unwrap_or_default()
-            );
-        }
-        sqlx::query(
-            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        )
-        .bind(&override_key)
-        .bind(overrides_json)
-        .execute(&mut *transaction)
-        .await?;
-        if let Some(mode) = mode {
-            sqlx::query(
-                "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            )
-            .bind(&mode_key)
-            .bind(mode)
-            .execute(&mut *transaction)
-            .await?;
-        }
-        let next = current.saturating_add(1);
-        sqlx::query(
-            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        )
-        .bind(&revision_key)
-        .bind(next.to_string())
-        .execute(&mut *transaction)
-        .await?;
-        transaction.commit().await?;
-        Ok(next)
     }
 
     pub async fn get_setting(&self, key: &str) -> Result<Option<String>> {
