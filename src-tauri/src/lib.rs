@@ -2582,6 +2582,27 @@ async fn generate_review(store: &Store, msgs: &[Message]) -> Result<review::Revi
     Ok(report)
 }
 
+async fn persist_review(
+    store: &Store,
+    frame_id: &str,
+    message_seq: usize,
+    report: &review::ReviewReport,
+) {
+    let json = match serde_json::to_string(report) {
+        Ok(json) => json,
+        Err(error) => {
+            tracing::warn!("serialize review {} failed: {error}", report.id);
+            return;
+        }
+    };
+    if let Err(error) = store
+        .upsert_session_review(frame_id, &report.id, message_seq as i64, &json)
+        .await
+    {
+        tracing::warn!("persist review {} failed: {error}", report.id);
+    }
+}
+
 fn emit_review(app: &AppHandle, frame_id: &str, report: review::ReviewReport) {
     let _ = app.emit(
         "agent",
@@ -2628,6 +2649,7 @@ async fn automatic_review(
     match generate_review(&state.store, &agent.ctx.messages).await {
         Err(error) => tracing::warn!("automatic review failed for {frame_id}: {error}"),
         Ok(mut report) => {
+            persist_review(&state.store, frame_id, agent.ctx.messages.len(), &report).await;
             emit_review(app, frame_id, report.clone());
             if report.has_findings() {
                 agent.ctx.inject_user(review::correction_prompt(&report));
@@ -2656,6 +2678,7 @@ async fn automatic_review(
                         }
                     }
                 }
+                persist_review(&state.store, frame_id, agent.ctx.messages.len(), &report).await;
                 emit_review(app, frame_id, report);
             }
         }
@@ -2709,6 +2732,7 @@ async fn review_session(
         )
         .map_err(|e| format!("{e}"))?;
         let report = generate_review(&state.store, &msgs).await?;
+        persist_review(&state.store, &frame_id, msgs.len(), &report).await;
         app.emit(
             "agent",
             AgentEvent::Review {
@@ -3595,6 +3619,11 @@ async fn load_session(
         .load_messages(&id)
         .await
         .map_err(|e| format!("{e}"))?;
+    let reviews = state
+        .store
+        .load_session_reviews(&id)
+        .await
+        .map_err(|e| format!("{e}"))?;
     // Track which session the UI is viewing. If a runtime exists for it (e.g.
     // it's mid-stream), keep the in-memory agent context authoritative — the UI
     // will render the cached streaming transcript instead of this DB snapshot.
@@ -3602,7 +3631,31 @@ async fn load_session(
     if let Some(rt) = state.sessions.lock().await.get(&id).cloned() {
         rt.set_last_seq(msgs.len() as i64);
     }
-    Ok(messages_to_items(&msgs))
+    let mut items = messages_to_items(&msgs);
+    let mut inserted = 0usize;
+    for (message_seq, report_json) in reviews {
+        let report: review::ReviewReport = serde_json::from_str(&report_json)
+            .map_err(|e| format!("invalid persisted review: {e}"))?;
+        let at = messages_to_items(&msgs[..(message_seq.max(0) as usize).min(msgs.len())]).len()
+            + inserted;
+        items.insert(
+            at,
+            UiItem {
+                role: "review".into(),
+                text: serde_json::to_string(&report).map_err(|e| format!("{e}"))?,
+                tool_name: None,
+                ok: None,
+                input: None,
+                model_name: None,
+                call_id: None,
+                kind: None,
+                status: None,
+                locations: None,
+            },
+        );
+        inserted += 1;
+    }
+    Ok(items)
 }
 
 #[tauri::command]

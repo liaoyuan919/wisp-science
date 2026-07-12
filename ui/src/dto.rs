@@ -485,6 +485,12 @@ impl LoadedItem {
         match self.role.as_str() {
             "user" => ChatItem::User(self.text),
             "reasoning" => ChatItem::Reasoning(self.text),
+            "review" => serde_json::from_str(&self.text)
+                .map(ChatItem::Review)
+                .unwrap_or_else(|_| ChatItem::Assistant {
+                    text: self.text,
+                    model: None,
+                }),
             "acp_tool" => ChatItem::AcpTool {
                 call_id: self.call_id.unwrap_or_default(),
                 title: self.tool_name.unwrap_or_else(|| "ACP tool".into()),
