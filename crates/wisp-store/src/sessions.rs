@@ -134,6 +134,17 @@ impl Store {
 
     /// Drop persisted turns after `keep` (seq is 1-based; keep=3 retains seq 1..=3).
     pub async fn truncate_messages(&self, frame_id: &str, keep: i64) -> Result<()> {
+        sqlx::query(
+            "DELETE FROM session_ui_events WHERE frame_id=? AND seq > COALESCE((\
+             SELECT MAX(seq) FROM session_ui_events WHERE frame_id=? \
+             AND json_extract(event_json,'$.kind')='MessageBoundary' \
+             AND CAST(json_extract(event_json,'$.seq') AS INTEGER)<=?), 0)",
+        )
+        .bind(frame_id)
+        .bind(frame_id)
+        .bind(keep)
+        .execute(&self.pool)
+        .await?;
         sqlx::query("DELETE FROM session_reviews WHERE frame_id = ? AND message_seq > ?")
             .bind(frame_id)
             .bind(keep)
@@ -217,6 +228,41 @@ impl Store {
         rows.into_iter()
             .map(|row| Ok((row.try_get("message_seq")?, row.try_get("report_json")?)))
             .collect()
+    }
+
+    pub async fn append_session_ui_event(
+        &self,
+        frame_id: &str,
+        seq: i64,
+        event_json: &str,
+    ) -> Result<()> {
+        sqlx::query("INSERT INTO session_ui_events(frame_id,seq,event_json) VALUES(?,?,?)")
+            .bind(frame_id)
+            .bind(seq)
+            .bind(event_json)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn load_session_ui_events(&self, frame_id: &str) -> Result<Vec<String>> {
+        let rows =
+            sqlx::query("SELECT event_json FROM session_ui_events WHERE frame_id=? ORDER BY seq")
+                .bind(frame_id)
+                .fetch_all(&self.pool)
+                .await?;
+        rows.into_iter()
+            .map(|row| row.try_get("event_json").map_err(Into::into))
+            .collect()
+    }
+
+    pub async fn next_session_ui_event_seq(&self, frame_id: &str) -> Result<i64> {
+        let row: (i64,) =
+            sqlx::query_as("SELECT COALESCE(MAX(seq),0)+1 FROM session_ui_events WHERE frame_id=?")
+                .bind(frame_id)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(row.0)
     }
 
     /// Root frames that have at least one user turn, newest first, each with a

@@ -35,6 +35,7 @@ const PROPOSED_PLANS_MIGRATION: &str = "0005_proposed_plans";
 const CODEX_TURN_CONFIGS_MIGRATION: &str = "0006_codex_turn_configs";
 const ACP_SESSIONS_MIGRATION: &str = "0007_acp_sessions";
 const SESSION_REVIEWS_MIGRATION: &str = "0008_session_reviews";
+const SESSION_UI_EVENTS_MIGRATION: &str = "0009_session_ui_events";
 
 #[derive(Clone)]
 pub struct Store {
@@ -122,6 +123,16 @@ impl Store {
             .execute(pool)
             .await?;
             Self::record_migration(pool, SESSION_REVIEWS_MIGRATION).await?;
+        }
+        if !Self::migration_applied(pool, SESSION_UI_EVENTS_MIGRATION).await? {
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS session_ui_events (\
+                 frame_id TEXT NOT NULL REFERENCES frames(id) ON DELETE CASCADE, \
+                 seq INTEGER NOT NULL, event_json TEXT NOT NULL, PRIMARY KEY(frame_id,seq))",
+            )
+            .execute(pool)
+            .await?;
+            Self::record_migration(pool, SESSION_UI_EVENTS_MIGRATION).await?;
         }
         Ok(())
     }
