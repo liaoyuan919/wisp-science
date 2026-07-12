@@ -266,7 +266,7 @@ fn approval_grant_key(message: &str) -> Option<ApprovalGrantKey> {
     })
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn should_hide_app_on_macos_close(window_label: &str, app_is_exiting: bool) -> bool {
     !app_is_exiting && window_label == "main"
 }
