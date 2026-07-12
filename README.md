@@ -137,6 +137,10 @@ Use Ctrl+K on Windows/Linux or Cmd+K on macOS to search projects, artifacts,
 sessions, and common commands. Enter opens the selected result; Shift+Enter
 attaches an artifact or session to the composer.
 
+On macOS, the native app menu mirrors the desktop command surface, including
+project/session actions plus `Check for Updates…`. The same update check is
+also available from the Settings page and the Windows in-window Help menu.
+
 ### Bundled demos
 
 ## Configuration

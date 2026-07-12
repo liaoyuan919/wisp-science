@@ -4760,6 +4760,7 @@ pub(super) fn CommandPalette(
     on_open_project: Callback<String>,
     on_open_session: Callback<(String, String)>,
     on_open_artifact: Callback<(String, String, String)>,
+    on_command: Callback<&'static str>,
     on_new_session: Callback<()>,
     on_project_settings: Callback<()>,
     on_manage_skills: Callback<()>,
@@ -4842,6 +4843,8 @@ pub(super) fn CommandPalette(
         });
         out.extend(ss.into_iter().map(CommandPaletteItem::Session));
         out.push(CommandPaletteItem::Command("new"));
+        out.push(CommandPaletteItem::Command("check-updates"));
+        out.push(CommandPaletteItem::Command("star-us"));
         if current.is_some() {
             out.push(CommandPaletteItem::Command("settings"));
             out.push(CommandPaletteItem::Command("skills"));
@@ -4864,6 +4867,8 @@ pub(super) fn CommandPalette(
             }
             CommandPaletteItem::Session(s) => on_open_session.call((s.project_id, s.id)),
             CommandPaletteItem::Command("new") => on_new_session.call(()),
+            CommandPaletteItem::Command("check-updates") => on_command.call("check-updates"),
+            CommandPaletteItem::Command("star-us") => on_command.call("star-us"),
             CommandPaletteItem::Command("settings") => on_project_settings.call(()),
             CommandPaletteItem::Command("skills") => on_manage_skills.call(()),
             CommandPaletteItem::Command(_) => {}
@@ -4938,6 +4943,8 @@ pub(super) fn CommandPalette(
                                 CommandPaletteItem::Artifact(a) => ("doc", a.name, a.project_name.unwrap_or_default()),
                                 CommandPaletteItem::Session(s) => ("bubble", s.title, s.project_name),
                                 CommandPaletteItem::Command("new") => ("plus", t(locale.get(), "projects.new").to_string(), "Command".into()),
+                                CommandPaletteItem::Command("check-updates") => ("gear", t(locale.get(), "command.check_updates").to_string(), "Command".into()),
+                                CommandPaletteItem::Command("star-us") => ("star", t(locale.get(), "command.star_us").to_string(), "Command".into()),
                                 CommandPaletteItem::Command("settings") => ("gear", t(locale.get(), "proj_settings.title").to_string(), "Command".into()),
                                 CommandPaletteItem::Command("skills") => ("grid", t(locale.get(), "skills.title").to_string(), "Command".into()),
                                 CommandPaletteItem::Command(_) => ("doc", String::new(), String::new()),
@@ -5019,6 +5026,20 @@ pub(super) fn ActionPalette(
                 "command.settings",
                 general.clone(),
                 "Ctrl/⌘ ,",
+            ),
+            (
+                "check-updates",
+                "gear",
+                "command.check_updates",
+                general.clone(),
+                "",
+            ),
+            (
+                "star-us",
+                "star",
+                "command.star_us",
+                general.clone(),
+                "",
             ),
             (
                 "project-settings",

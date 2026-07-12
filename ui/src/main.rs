@@ -1946,18 +1946,18 @@ fn App() -> impl IntoView {
 
     let composer_blocked = move || uploading.get();
 
-    let check_updates = move |_| {
+    let run_update_check = Rc::new(move || {
         if settings_busy.get() {
             return;
         }
+        let checking = t(locale.get(), "status.checking_updates").to_string();
         settings_busy.set(true);
-        settings_message.set(Some((
-            true,
-            t(locale.get(), "status.checking_updates").into(),
-        )));
+        settings_message.set(Some((true, checking.clone())));
+        status.set(checking);
         let msg = settings_message;
         let busy = settings_busy;
         let loc = locale;
+        let status_msg = status;
         spawn_local(async move {
             match invoke_checked("check_for_updates", JsValue::UNDEFINED).await {
                 Ok(v) => match serde_wasm_bindgen::from_value::<UpdateCheck>(v) {
@@ -1967,7 +1967,8 @@ fn App() -> impl IntoView {
                             "status.update_available",
                             &[("version", &update.latest_version)],
                         );
-                        msg.set(Some((true, text)));
+                        msg.set(Some((true, text.clone())));
+                        status_msg.set(text);
                         open_external_url(update.release_url);
                     }
                     Ok(update) => {
@@ -1976,20 +1977,27 @@ fn App() -> impl IntoView {
                             "status.up_to_date",
                             &[("version", &update.current_version)],
                         );
-                        msg.set(Some((true, text)));
+                        msg.set(Some((true, text.clone())));
+                        status_msg.set(text);
                     }
-                    Err(_) => msg.set(Some((
-                        true,
-                        t(loc.get(), "status.update_check_complete").into(),
-                    ))),
+                    Err(_) => {
+                        let text = t(loc.get(), "status.update_check_complete").to_string();
+                        msg.set(Some((true, text.clone())));
+                        status_msg.set(text);
+                    }
                 },
-                Err(err) => msg.set(Some((
-                    false,
-                    localize_backend(loc.get(), &js_error_text(err)),
-                ))),
+                Err(err) => {
+                    let text = localize_backend(loc.get(), &js_error_text(err));
+                    msg.set(Some((false, text.clone())));
+                    status_msg.set(text);
+                }
             }
             busy.set(false);
         });
+    });
+    let check_updates = {
+        let run_update_check = run_update_check.clone();
+        move |_| run_update_check()
     };
 
     let refresh_skills = move || {
@@ -3499,6 +3507,7 @@ fn App() -> impl IntoView {
         let new_session = palette_new_session.clone();
         let project_settings = palette_project_settings.clone();
         let manage_skills = palette_manage_skills.clone();
+        let run_update_check = run_update_check.clone();
         Callback::new(move |action: &'static str| match action {
             "new" => new_session.call(()),
             "search" => command_palette_open.set(true),
@@ -3510,6 +3519,16 @@ fn App() -> impl IntoView {
             }
             "project-settings" => project_settings.call(()),
             "skills" => manage_skills.call(()),
+            "check-updates" => run_update_check(),
+            "docs" => {
+                open_external_url("https://github.com/xuzhougeng/wisp-science#readme".into())
+            }
+            "star-us" => {
+                open_external_url("https://github.com/xuzhougeng/wisp-science".into())
+            }
+            "issues" => {
+                open_external_url("https://github.com/xuzhougeng/wisp-science/issues".into())
+            }
             "toggle-sidebar" => show_sidebar.update(|show| *show = !*show),
             "artifacts" => {
                 ensure_right_tab(RightTab::Artifacts, show_right, open_right_tabs, right_tab)
@@ -3539,6 +3558,60 @@ fn App() -> impl IntoView {
             _ => {}
         })
     };
+    {
+        let palette_action = palette_action.clone();
+        let run_update_check = run_update_check.clone();
+        let native_menu_cb = Closure::wrap(Box::new(move |payload: JsValue| {
+            let Some(action) = payload.as_string() else {
+                return;
+            };
+            match action.as_str() {
+                "check-updates" => run_update_check(),
+                "docs" => {
+                    open_external_url("https://github.com/xuzhougeng/wisp-science#readme".into())
+                }
+                "star-us" => {
+                    open_external_url("https://github.com/xuzhougeng/wisp-science".into())
+                }
+                "issues" => {
+                    open_external_url("https://github.com/xuzhougeng/wisp-science/issues".into())
+                }
+                other => {
+                    if let Some(action) = match other {
+                        "new" => Some("new"),
+                        "search" => Some("search"),
+                        "commands" => Some("commands"),
+                        "projects" => Some("projects"),
+                        "settings" => Some("settings"),
+                        "project-settings" => Some("project-settings"),
+                        "skills" => Some("skills"),
+                        "toggle-sidebar" => Some("toggle-sidebar"),
+                        "artifacts" => Some("artifacts"),
+                        "notebook" => Some("notebook"),
+                        "files" => Some("files"),
+                        "provenance" => Some("provenance"),
+                        "contexts" => Some("contexts"),
+                        "side-chat" => Some("side-chat"),
+                        "close-panel" => Some("close-panel"),
+                        "theme-light" => Some("theme-light"),
+                        "theme-dark" => Some("theme-dark"),
+                        "theme-system" => Some("theme-system"),
+                        _ => None,
+                    } {
+                        palette_action.call(action);
+                    }
+                }
+            }
+        }) as Box<dyn FnMut(JsValue)>);
+        let native_menu_js = native_menu_cb
+            .as_ref()
+            .unchecked_ref::<js_sys::Function>()
+            .clone();
+        native_menu_cb.forget();
+        spawn_local(async move {
+            let _ = listen("native-menu-action", &native_menu_js).await;
+        });
+    }
     let palette_project_id = Signal::derive(move || project_info.get().map(|p| p.id));
     let shortcut_action = palette_action.clone();
     window_event_listener(ev::keydown, move |ev| {
@@ -3620,6 +3693,7 @@ fn App() -> impl IntoView {
         <ActionPalette open=action_palette_open on_action=palette_action />
         <CommandPalette open=command_palette_open current_project_id=palette_project_id
             on_open_project=switch_project on_open_session=palette_open_session on_open_artifact=palette_open_artifact
+            on_command=palette_action
             on_new_session=palette_new_session on_project_settings=palette_project_settings
             on_manage_skills=palette_manage_skills on_attach=palette_attach />
         <ProjectLanding

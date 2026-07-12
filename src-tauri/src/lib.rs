@@ -6,6 +6,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
+#[cfg(target_os = "macos")]
+use tauri::menu::{
+    AboutMetadata, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder,
+};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 use wisp_core::{Agent, MemoryManager, Output};
@@ -1374,6 +1378,367 @@ async fn load_locale(store: &Store) -> String {
         Some(other) if !other.is_empty() => other.to_string(),
         _ => "en".into(),
     }
+}
+
+#[cfg(target_os = "macos")]
+const NATIVE_MENU_ACTION_EVENT: &str = "native-menu-action";
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AppMenuLocale {
+    En,
+    Zh,
+}
+
+#[cfg(target_os = "macos")]
+impl AppMenuLocale {
+    fn from_tag(tag: &str) -> Self {
+        match tag.trim() {
+            "zh" | "zh-CN" | "zh-TW" => Self::Zh,
+            _ => Self::En,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct MacMenuLabels {
+    app_settings: &'static str,
+    check_updates: &'static str,
+    file: &'static str,
+    edit: &'static str,
+    view: &'static str,
+    window: &'static str,
+    help: &'static str,
+    theme: &'static str,
+    new_session: &'static str,
+    projects: &'static str,
+    files: &'static str,
+    search: &'static str,
+    all_commands: &'static str,
+    project_settings: &'static str,
+    skills: &'static str,
+    toggle_sidebar: &'static str,
+    artifacts: &'static str,
+    notebook: &'static str,
+    provenance: &'static str,
+    contexts: &'static str,
+    side_chat: &'static str,
+    close_panel: &'static str,
+    theme_light: &'static str,
+    theme_dark: &'static str,
+    theme_system: &'static str,
+    docs: &'static str,
+    star_us: &'static str,
+    issues: &'static str,
+}
+
+#[cfg(target_os = "macos")]
+fn mac_menu_labels(locale: AppMenuLocale) -> MacMenuLabels {
+    match locale {
+        AppMenuLocale::Zh => MacMenuLabels {
+            app_settings: "设置…",
+            check_updates: "检查更新…",
+            file: "文件",
+            edit: "编辑",
+            view: "视图",
+            window: "窗口",
+            help: "帮助",
+            theme: "主题",
+            new_session: "新建会话",
+            projects: "项目",
+            files: "文件",
+            search: "搜索",
+            all_commands: "全部命令",
+            project_settings: "项目设置",
+            skills: "技能",
+            toggle_sidebar: "切换侧边栏",
+            artifacts: "制品",
+            notebook: "笔记本",
+            provenance: "溯源",
+            contexts: "上下文",
+            side_chat: "侧边聊天",
+            close_panel: "关闭面板",
+            theme_light: "浅色",
+            theme_dark: "深色",
+            theme_system: "跟随系统",
+            docs: "文档",
+            star_us: "点个 Star",
+            issues: "反馈问题",
+        },
+        AppMenuLocale::En => MacMenuLabels {
+            app_settings: "Settings…",
+            check_updates: "Check for Updates…",
+            file: "File",
+            edit: "Edit",
+            view: "View",
+            window: "Window",
+            help: "Help",
+            theme: "Theme",
+            new_session: "New Session",
+            projects: "Projects",
+            files: "Files",
+            search: "Search",
+            all_commands: "All Commands",
+            project_settings: "Project Settings",
+            skills: "Skills",
+            toggle_sidebar: "Toggle Sidebar",
+            artifacts: "Artifacts",
+            notebook: "Notebook",
+            provenance: "Provenance",
+            contexts: "Contexts",
+            side_chat: "Side Chat",
+            close_panel: "Close Panel",
+            theme_light: "Light",
+            theme_dark: "Dark",
+            theme_system: "System",
+            docs: "Documentation",
+            star_us: "Star us",
+            issues: "Report an Issue",
+        },
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn build_menu_item(
+    app: &AppHandle,
+    id: &str,
+    text: &str,
+    accelerator: Option<&str>,
+) -> tauri::Result<tauri::menu::MenuItem<tauri::Wry>> {
+    let builder = MenuItemBuilder::with_id(id, text);
+    let builder = if let Some(accelerator) = accelerator {
+        builder.accelerator(accelerator)
+    } else {
+        builder
+    };
+    builder.build(app)
+}
+
+#[cfg(target_os = "macos")]
+fn mac_menu_action(id: &str) -> Option<&'static str> {
+    match id {
+        "action.new" => Some("new"),
+        "action.projects" => Some("projects"),
+        "action.files" => Some("files"),
+        "action.search" => Some("search"),
+        "action.commands" => Some("commands"),
+        "action.settings" => Some("settings"),
+        "action.project-settings" => Some("project-settings"),
+        "action.skills" => Some("skills"),
+        "action.toggle-sidebar" => Some("toggle-sidebar"),
+        "action.artifacts" => Some("artifacts"),
+        "action.notebook" => Some("notebook"),
+        "action.provenance" => Some("provenance"),
+        "action.contexts" => Some("contexts"),
+        "action.side-chat" => Some("side-chat"),
+        "action.close-panel" => Some("close-panel"),
+        "action.theme-light" => Some("theme-light"),
+        "action.theme-dark" => Some("theme-dark"),
+        "action.theme-system" => Some("theme-system"),
+        "action.check-updates" => Some("check-updates"),
+        "action.docs" => Some("docs"),
+        "action.star-us" => Some("star-us"),
+        "action.issues" => Some("issues"),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn wire_macos_menu_events(window: &tauri::WebviewWindow) {
+    window.on_menu_event(|window, event| {
+        if let Some(action) = mac_menu_action(event.id().as_ref()) {
+            let _ = window.emit(NATIVE_MENU_ACTION_EVENT, action.to_string());
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos_app_menu(app: &AppHandle, locale_tag: &str) -> Result<(), String> {
+    let labels = mac_menu_labels(AppMenuLocale::from_tag(locale_tag));
+    let about = AboutMetadata {
+        name: Some("wisp-science".into()),
+        version: Some(env!("CARGO_PKG_VERSION").into()),
+        ..Default::default()
+    };
+
+    let app_menu = SubmenuBuilder::new(app, app.package_info().name.clone())
+        .item(
+            &PredefinedMenuItem::about(app, None, Some(about.clone()))
+                .map_err(|error| error.to_string())?,
+        )
+        .separator()
+        .item(
+            &build_menu_item(app, "action.check-updates", labels.check_updates, None)
+                .map_err(|error| error.to_string())?,
+        )
+        .item(
+            &build_menu_item(
+                app,
+                "action.settings",
+                labels.app_settings,
+                Some("CmdOrCtrl+,"),
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .separator()
+        .item(&PredefinedMenuItem::services(app, None).map_err(|error| error.to_string())?)
+        .separator()
+        .item(&PredefinedMenuItem::hide(app, None).map_err(|error| error.to_string())?)
+        .item(&PredefinedMenuItem::hide_others(app, None).map_err(|error| error.to_string())?)
+        .separator()
+        .item(&PredefinedMenuItem::quit(app, None).map_err(|error| error.to_string())?)
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    let file_menu = SubmenuBuilder::new(app, labels.file)
+        .item(
+            &build_menu_item(app, "action.new", labels.new_session, Some("CmdOrCtrl+N"))
+                .map_err(|error| error.to_string())?,
+        )
+        .item(
+            &build_menu_item(app, "action.projects", labels.projects, None)
+                .map_err(|error| error.to_string())?,
+        )
+        .item(
+            &build_menu_item(app, "action.files", labels.files, None)
+                .map_err(|error| error.to_string())?,
+        )
+        .separator()
+        .item(&PredefinedMenuItem::close_window(app, None).map_err(|error| error.to_string())?)
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    let edit_menu = SubmenuBuilder::new(app, labels.edit)
+        .item(
+            &build_menu_item(app, "action.search", labels.search, Some("CmdOrCtrl+K"))
+                .map_err(|error| error.to_string())?,
+        )
+        .item(
+            &build_menu_item(
+                app,
+                "action.commands",
+                labels.all_commands,
+                Some("CmdOrCtrl+P"),
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .item(
+            &build_menu_item(
+                app,
+                "action.project-settings",
+                labels.project_settings,
+                None,
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .item(
+            &build_menu_item(app, "action.skills", labels.skills, None)
+                .map_err(|error| error.to_string())?,
+        )
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    let theme_menu = SubmenuBuilder::new(app, labels.theme)
+        .item(
+            &build_menu_item(app, "action.theme-light", labels.theme_light, None)
+                .map_err(|error| error.to_string())?,
+        )
+        .item(
+            &build_menu_item(app, "action.theme-dark", labels.theme_dark, None)
+                .map_err(|error| error.to_string())?,
+        )
+        .item(
+            &build_menu_item(app, "action.theme-system", labels.theme_system, None)
+                .map_err(|error| error.to_string())?,
+        )
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    let view_menu = SubmenuBuilder::new(app, labels.view)
+        .item(
+            &build_menu_item(
+                app,
+                "action.toggle-sidebar",
+                labels.toggle_sidebar,
+                Some("CmdOrCtrl+B"),
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .item(
+            &build_menu_item(app, "action.artifacts", labels.artifacts, None)
+                .map_err(|error| error.to_string())?,
+        )
+        .item(
+            &build_menu_item(app, "action.notebook", labels.notebook, None)
+                .map_err(|error| error.to_string())?,
+        )
+        .item(
+            &build_menu_item(app, "action.files", labels.files, None)
+                .map_err(|error| error.to_string())?,
+        )
+        .item(
+            &build_menu_item(app, "action.provenance", labels.provenance, None)
+                .map_err(|error| error.to_string())?,
+        )
+        .item(
+            &build_menu_item(app, "action.contexts", labels.contexts, None)
+                .map_err(|error| error.to_string())?,
+        )
+        .item(
+            &build_menu_item(app, "action.side-chat", labels.side_chat, None)
+                .map_err(|error| error.to_string())?,
+        )
+        .item(
+            &build_menu_item(app, "action.close-panel", labels.close_panel, None)
+                .map_err(|error| error.to_string())?,
+        )
+        .separator()
+        .item(&theme_menu)
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    let window_menu = SubmenuBuilder::new(app, labels.window)
+        .item(&PredefinedMenuItem::minimize(app, None).map_err(|error| error.to_string())?)
+        .item(&PredefinedMenuItem::maximize(app, None).map_err(|error| error.to_string())?)
+        .item(&PredefinedMenuItem::fullscreen(app, None).map_err(|error| error.to_string())?)
+        .separator()
+        .item(&PredefinedMenuItem::close_window(app, None).map_err(|error| error.to_string())?)
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    let help_menu = SubmenuBuilder::new(app, labels.help)
+        .item(
+            &build_menu_item(app, "action.check-updates", labels.check_updates, None)
+                .map_err(|error| error.to_string())?,
+        )
+        .separator()
+        .item(
+            &build_menu_item(app, "action.docs", labels.docs, None)
+                .map_err(|error| error.to_string())?,
+        )
+        .item(
+            &build_menu_item(app, "action.star-us", labels.star_us, None)
+                .map_err(|error| error.to_string())?,
+        )
+        .item(
+            &build_menu_item(app, "action.issues", labels.issues, None)
+                .map_err(|error| error.to_string())?,
+        )
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    MenuBuilder::new(app)
+        .items(&[
+            &app_menu,
+            &file_menu,
+            &edit_menu,
+            &view_menu,
+            &window_menu,
+            &help_menu,
+        ])
+        .build()
+        .and_then(|menu| menu.set_as_app_menu().map(|_| ()))
+        .map_err(|error| error.to_string())
 }
 
 fn default_max_tokens(provider: &str) -> u64 {
@@ -3665,6 +4030,8 @@ async fn spawn_project_window(
     #[cfg(target_os = "windows")]
     let builder = builder.decorations(false).shadow(true);
     let win = builder.build().map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    wire_macos_menu_events(&win);
     let evt_app = app.clone();
     let evt_label = label.clone();
     let evt_id = id.to_string();
@@ -4572,6 +4939,11 @@ pub fn run() {
             let run_manager = run_context::RunManager::new();
             tauri::async_runtime::block_on(run_manager.recover(&store))
                 .expect("recover incomplete runs");
+            #[cfg(target_os = "macos")]
+            {
+                let locale = tauri::async_runtime::block_on(load_locale(&store));
+                install_macos_app_menu(app.handle(), &locale).expect("install macOS app menu");
+            }
 
             let (active_id, ws) = tauri::async_runtime::block_on(async {
                 // Legacy single-workspace installs stored one global `workspace_dir`
@@ -4664,6 +5036,7 @@ pub fn run() {
             }
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
+                wire_macos_menu_events(&window);
                 let app_handle = app.handle().clone();
                 let label = window.label().to_string();
                 let exit_in_progress = Arc::clone(&macos_exit_for_setup);
