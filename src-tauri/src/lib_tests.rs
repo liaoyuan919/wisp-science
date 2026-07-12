@@ -1,10 +1,10 @@
 use super::{
     branch_title, copy_dir_recursive, events_to_items, messages_to_items, parse_disabled_skills,
-    parse_enabled_skill_names, parse_skill_tags, resolve_acp_artifact_references,
-    resolve_composer_references, resolve_workspace, session_runtime_status,
-    should_hide_app_on_macos_close, side_chat_prompt, update_check_from_release,
-    user_message_start, AgentEvent, ComposerReferenceArg, GithubRelease, McpConnection,
-    McpTransport,
+    parse_enabled_skill_names, parse_skill_tags, parse_ssh_artifact_uri,
+    resolve_acp_artifact_references, resolve_composer_references, resolve_workspace,
+    session_runtime_status, should_hide_app_on_macos_close, side_chat_prompt,
+    update_check_from_release, user_message_start, AgentEvent, ComposerReferenceArg, GithubRelease,
+    McpConnection, McpTransport,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -57,6 +57,19 @@ fn reloaded_tool_items_keep_notebook_source() {
     assert_eq!(items[0].tool_name.as_deref(), Some("python"));
     assert_eq!(items[0].input.as_deref(), Some("print(1)"));
     assert_eq!(items[0].text, "1");
+}
+
+#[test]
+fn ssh_artifact_uri_maps_to_execution_context_and_remote_path() {
+    assert_eq!(
+        parse_ssh_artifact_uri("ssh://CPU/home/xzg/results.tar.gz"),
+        Some(("ssh:CPU".into(), "/home/xzg/results.tar.gz".into()))
+    );
+    assert_eq!(
+        parse_ssh_artifact_uri("ssh://CPU/~/results.tar.gz"),
+        Some(("ssh:CPU".into(), "~/results.tar.gz".into()))
+    );
+    assert_eq!(parse_ssh_artifact_uri("ssh://CPU"), None);
 }
 
 #[test]

@@ -3397,6 +3397,20 @@ async fn pick_directory(app: AppHandle) -> Result<Option<String>, String> {
 
 /// Copy a workspace file to a user-chosen location via the native save dialog.
 /// Returns the saved path, or `None` if the user cancelled.
+fn parse_ssh_artifact_uri(uri: &str) -> Option<(String, String)> {
+    let rest = uri.strip_prefix("ssh://")?;
+    let (context, path) = rest.split_once('/')?;
+    if context.is_empty() || path.is_empty() {
+        return None;
+    }
+    let remote_path = if path.starts_with("~/") {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    Some((format!("ssh:{context}"), remote_path))
+}
+
 #[tauri::command]
 async fn download_file(
     app: AppHandle,
@@ -3405,19 +3419,27 @@ async fn download_file(
     path: String,
 ) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
-    // Resolve + validate against the active workspace root, same as read_file.
-    let real = {
+    let remote = parse_ssh_artifact_uri(&path);
+    let local = if remote.is_none() {
         let ap = state.active(window.label());
-        wisp_tools::safety::validate_file_path(&ap.root, &path)?
+        let real = wisp_tools::safety::validate_file_path(&ap.root, &path)?;
+        if !real.is_file() {
+            return Err(format!("file not found: {path}"));
+        }
+        Some(real)
+    } else {
+        None
     };
-    if !real.is_file() {
-        return Err(format!("file not found: {path}"));
-    }
-    let default_name = real
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("download")
-        .to_string();
+    let default_name = std::path::Path::new(
+        remote
+            .as_ref()
+            .map(|(_, path)| path.as_str())
+            .unwrap_or_else(|| local.as_ref().unwrap().to_str().unwrap_or("download")),
+    )
+    .file_name()
+    .and_then(|n| n.to_str())
+    .unwrap_or("download")
+    .to_string();
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
@@ -3429,9 +3451,22 @@ async fn download_file(
         return Ok(None); // user cancelled
     };
     let dest_path = std::path::PathBuf::from(dest.to_string());
-    tokio::fs::copy(&real, &dest_path)
-        .await
-        .map_err(|e| format!("copy failed: {e}"))?;
+    if let Some((context_id, remote_path)) = remote {
+        let context = state
+            .store
+            .get_execution_context(&context_id)
+            .await
+            .map_err(|e| format!("{e}"))?
+            .ok_or_else(|| format!("SSH execution context not found: {context_id}"))?;
+        state
+            .run_manager
+            .download_ssh_file(&context, &remote_path, &dest_path)
+            .await?;
+    } else {
+        tokio::fs::copy(local.unwrap(), &dest_path)
+            .await
+            .map_err(|e| format!("copy failed: {e}"))?;
+    }
     Ok(Some(dest_path.to_string_lossy().into_owned()))
 }
 
