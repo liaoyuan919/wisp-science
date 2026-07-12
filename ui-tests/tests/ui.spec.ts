@@ -916,6 +916,33 @@ test("artifact modal switches between images with left and right arrows", async 
   await expect(page.getByRole("button", { name: "Previous image" })).toBeDisabled();
 });
 
+test("center file tabs are restored per conversation", async ({ page }) => {
+  await enterApp(page);
+
+  await page.keyboard.press("Control+K");
+  const search = commandPalette(page);
+  await search.fill("Current analysis");
+  await search.press("Enter");
+
+  await composer(page).fill("make a volcano plot volcano.png");
+  await page.getByRole("button", { name: "Send" }).click();
+  await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.locator('.rp-tile[data-artifact-name="volcano.png"] .rp-tile-main').click();
+  await page.getByRole("button", { name: "Open in center" }).click();
+  await expect(page.locator(".center-tab.active")).toContainText("volcano.png");
+
+  await page.keyboard.press("Control+K");
+  await search.fill("Older structure run");
+  await search.press("Enter");
+  await expect(page.locator(".center-tab-wrap")).toHaveCount(0);
+  await expect(page.locator(".center-tabs > .center-tab")).toHaveClass(/active/);
+
+  await page.keyboard.press("Control+K");
+  await search.fill("Current analysis");
+  await search.press("Enter");
+  await expect(page.locator(".center-tab-wrap")).toHaveCount(1);
+  await expect(page.locator(".center-tab.active")).toContainText("volcano.png");
+});
 
 test("image preview context menu copies the image", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);

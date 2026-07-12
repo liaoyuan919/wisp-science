@@ -1,5 +1,5 @@
 /* ---------- Modals ---------- */
-.overlay { position: fixed; inset: 0; z-index: 50; background: hsl(215 25% 14% / 0.28); backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center; padding: 20px; user-select: none; animation: motion-fade-in var(--motion-duration-medium) var(--motion-ease-standard) both; }
+.overlay { position: fixed; inset: 0; z-index: 100; background: hsl(215 25% 14% / 0.28); backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center; padding: 20px; user-select: none; animation: motion-fade-in var(--motion-duration-medium) var(--motion-ease-standard) both; }
 :root[data-theme="dark"] .overlay { background: hsl(30 8% 6% / 0.55); }
 @media (prefers-color-scheme: dark) {
   :root[data-theme="system"] .overlay { background: hsl(30 8% 6% / 0.55); }

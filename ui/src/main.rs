@@ -684,6 +684,33 @@ fn App() -> impl IntoView {
     let file_search_hits = create_rw_signal::<Vec<FileSearchHit>>(vec![]);
     let center_files = create_rw_signal::<Vec<String>>(vec![]);
     let center_file = create_rw_signal::<Option<String>>(None);
+    let center_tabs_by_session =
+        create_rw_signal::<HashMap<String, (Vec<String>, Option<String>)>>(HashMap::new());
+    let previous_center_session = Rc::new(RefCell::new(None::<String>));
+    create_effect(move |_| {
+        let current_session = active_session.get();
+        let mut previous_session = previous_center_session.borrow_mut();
+        if *previous_session == current_session {
+            return;
+        }
+
+        if let Some(session_id) = previous_session.as_ref() {
+            center_tabs_by_session.update(|states| {
+                states.insert(
+                    session_id.clone(),
+                    (center_files.get_untracked(), center_file.get_untracked()),
+                );
+            });
+        }
+
+        let restored = current_session.as_ref().and_then(|session_id| {
+            center_tabs_by_session.with_untracked(|states| states.get(session_id).cloned())
+        });
+        let (files, selected) = restored.unwrap_or_default();
+        center_files.set(files);
+        center_file.set(selected);
+        *previous_session = current_session;
+    });
     // Dedicated project windows use the same guarded transition as every
     // interactive project-open path. The callback is built after `load_session`.
     let dedicated_project_id = url_project_param();
