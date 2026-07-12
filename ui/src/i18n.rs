@@ -647,6 +647,8 @@ fn lookup(locale: Locale, key: &str) -> Option<&'static str> {
         (Locale::En, "projects.delete_confirm") => Some("Remove this project from Wisp? Your files on disk are kept."),
         (Locale::En, "projects.open_failed") => Some("Could not open the project: {msg}"),
         (Locale::En, "projects.back") => Some("Projects"),
+        (Locale::En, "projects.star_hint") => Some("If Wisp is helpful to your work, please"),
+        (Locale::En, "projects.star_link") => Some("give us a star on GitHub ★"),
 
         (Locale::En, "proj_menu.settings") => Some("Project settings"),
         (Locale::En, "proj_settings.title") => Some("Project Settings"),
@@ -1249,6 +1251,8 @@ fn lookup(locale: Locale, key: &str) -> Option<&'static str> {
         (Locale::Zh, "projects.delete_confirm") => Some("从 Wisp 移除该项目？磁盘上的文件会保留。"),
         (Locale::Zh, "projects.open_failed") => Some("无法打开项目：{msg}"),
         (Locale::Zh, "projects.back") => Some("项目"),
+        (Locale::Zh, "projects.star_hint") => Some("如果 Wisp 对你的工作有帮助，欢迎到"),
+        (Locale::Zh, "projects.star_link") => Some("GitHub 点个 Star ★"),
 
         (Locale::Zh, "proj_menu.settings") => Some("项目设置"),
         (Locale::Zh, "proj_settings.title") => Some("项目设置"),

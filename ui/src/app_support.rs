@@ -4693,6 +4693,13 @@ pub(super) fn ProjectsScreen(
                     }).collect_view()}
                 </div>
             </div>
+            <div class="projects-footer">
+                <span>{move || t(locale.get(), "projects.star_hint")}</span>
+                <button type="button" class="projects-star-link"
+                    on:click=move |_| open_external_url("https://github.com/xuzhougeng/wisp-science".into())>
+                    {move || t(locale.get(), "projects.star_link")}
+                </button>
+            </div>
             {move || pending_delete.get().map(|id| {
                 let confirm_del = delete_confirmed.clone();
                 view! {
