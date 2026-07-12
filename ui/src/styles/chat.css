@@ -9,7 +9,7 @@
 .center-tabs { display: flex; min-width: 0; overflow-x: auto; flex: 0 0 auto; border-bottom: 1px solid var(--border); background: var(--bg-elev); scrollbar-width: none; }
 .center-tabs::-webkit-scrollbar { display: none; }
 .center-tab-wrap { position: relative; display: flex; min-width: 0; flex: 0 0 auto; border-right: 1px solid var(--border); }
-.center-tab { min-width: 110px; max-width: 220px; height: 35px; padding: 0 32px 0 12px; border: 0; border-right: 1px solid var(--border); background: transparent; color: var(--text-muted); font: inherit; font-size: 12px; cursor: pointer; }
+.center-tab { min-width: 110px; max-width: 220px; height: 35px; padding: 0 32px 0 12px; border: 0; border-right: 1px solid var(--border); background: transparent; color: var(--text-muted); font: inherit; font-size: 12px; cursor: pointer; transition: background .16s ease, color .16s ease, box-shadow .2s ease; }
 .center-tab-wrap .center-tab { border-right: 0; }
 .center-tab.active { background: var(--bg-app); color: var(--text); box-shadow: inset 0 -2px var(--clay); }
 .center-tab-label { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -20,6 +20,17 @@
 .center-file-preview { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 16px 20px 28px; }
 .center-file-head { position: sticky; top: -16px; z-index: 1; margin: -16px -20px 16px; padding: 9px 16px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--bg-app) 92%, transparent); color: var(--text-faint); font-family: var(--font-mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .center-file-preview .rp-code { min-height: calc(100% - 20px); }
+@keyframes center-tab-content-in {
+  from { opacity: 0; transform: translateX(7px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.center-file-preview,
+.chat:not(.center-hidden) { animation: center-tab-content-in .18s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .center-tab { transition: none; }
+  .center-file-preview,
+  .chat:not(.center-hidden) { animation: none; }
+}
 
 /* ---------- Native / compatibility plan cards ---------- */
 .plan-card,
