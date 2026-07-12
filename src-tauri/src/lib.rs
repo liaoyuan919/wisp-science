@@ -969,6 +969,32 @@ fn events_to_items(events: &[AgentEvent]) -> (Vec<UiItem>, HashMap<i64, usize>) 
                     });
                 }
             }
+            AgentEvent::ReviewStarted { .. } => items.push(UiItem {
+                role: "review_transition".into(),
+                text: String::new(),
+                tool_name: None,
+                ok: None,
+                duration_ms: None,
+                input: None,
+                model_name: None,
+                call_id: None,
+                kind: Some("reviewing".into()),
+                status: None,
+                locations: None,
+            }),
+            AgentEvent::CorrectionStarted { model, .. } => items.push(UiItem {
+                role: "review_transition".into(),
+                text: String::new(),
+                tool_name: None,
+                ok: None,
+                duration_ms: None,
+                input: None,
+                model_name: (!model.is_empty()).then_some(model.clone()),
+                call_id: None,
+                kind: Some("correcting".into()),
+                status: None,
+                locations: None,
+            }),
             _ => {}
         }
     }
@@ -1187,6 +1213,8 @@ impl TauriOutput {
                 | AgentEvent::ToolCall { .. }
                 | AgentEvent::ToolResult { .. }
                 | AgentEvent::Stdout { .. }
+                | AgentEvent::ReviewStarted { .. }
+                | AgentEvent::CorrectionStarted { .. }
         ) {
             if let Some(tx) = &self.ui_events {
                 let _ = tx.send(event.clone());
@@ -2856,12 +2884,9 @@ async fn automatic_review(
         return;
     }
 
-    let _ = app.emit(
-        "agent",
-        AgentEvent::ReviewStarted {
-            frame_id: frame_id.to_string(),
-        },
-    );
+    output.emit(AgentEvent::ReviewStarted {
+        frame_id: frame_id.to_string(),
+    });
     match generate_review(&state.store, &agent.ctx.messages).await {
         Err(error) => tracing::warn!("automatic review failed for {frame_id}: {error}"),
         Ok(mut report) => {
@@ -2869,13 +2894,10 @@ async fn automatic_review(
             emit_review(app, frame_id, report.clone());
             if report.has_findings() {
                 agent.ctx.inject_user(review::correction_prompt(&report));
-                let _ = app.emit(
-                    "agent",
-                    AgentEvent::CorrectionStarted {
-                        frame_id: frame_id.to_string(),
-                        model: model_label.to_string(),
-                    },
-                );
+                output.emit(AgentEvent::CorrectionStarted {
+                    frame_id: frame_id.to_string(),
+                    model: model_label.to_string(),
+                });
                 let correction = agent.run_resume(output, Some(cancel)).await;
                 agent.ctx.clear_runtime_injections();
                 if let Err(error) = correction {

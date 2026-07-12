@@ -248,6 +248,14 @@ test("automatic reviewer separates the correction and resolves its finding", asy
   await expect(assistants.nth(0)).toContainText("5 significant genes");
   await expect(assistants.nth(1)).toContainText("Correction: the analysis found 3 significant genes");
 
+  const handoffs = page.locator(".review-transition");
+  await expect(handoffs).toHaveCount(2);
+  await expect(handoffs.nth(0)).toContainText("wisp-science nudged Reviewer");
+  await expect(handoffs.nth(0)).toHaveAttribute("data-phase", "reviewing");
+  await expect(handoffs.nth(1)).toContainText("Reviewer nudged wisp-science");
+  await expect(handoffs.nth(1)).toContainText("deepseek-v4-pro");
+  await expect(handoffs.nth(1)).toHaveAttribute("data-phase", "correcting");
+
   const review = page.locator(".review-card");
   await expect(review).toContainText("Reviewer findings");
   await expect(review.locator(".review-model")).toHaveText("claude-sonnet-5 · high");

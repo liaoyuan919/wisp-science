@@ -159,8 +159,19 @@ pub(crate) enum ChatItem {
         content: String,
         locations: String,
     },
+    /// A visible handoff between the main agent and the independent reviewer.
+    ReviewTransition {
+        phase: ReviewTransitionPhase,
+        model: Option<String>,
+    },
     Review(ReviewReport),
     Plan(PlanCard),
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+pub(crate) enum ReviewTransitionPhase {
+    Reviewing,
+    Correcting,
 }
 
 impl ChatItem {
@@ -201,6 +212,7 @@ impl ChatItem {
                 content,
                 locations,
             } => (10u8, call_id, title, kind, status, content, locations).hash(&mut h),
+            Self::ReviewTransition { phase, model } => (11u8, phase, model).hash(&mut h),
             Self::Review(report) => (5u8, report).hash(&mut h),
             Self::Plan(plan) => (7u8, plan).hash(&mut h),
         }
@@ -497,6 +509,14 @@ impl LoadedItem {
                     text: self.text,
                     model: None,
                 }),
+            "review_transition" => ChatItem::ReviewTransition {
+                phase: if self.kind.as_deref() == Some("correcting") {
+                    ReviewTransitionPhase::Correcting
+                } else {
+                    ReviewTransitionPhase::Reviewing
+                },
+                model: self.model_name.filter(|model| !model.is_empty()),
+            },
             "acp_tool" => ChatItem::AcpTool {
                 call_id: self.call_id.unwrap_or_default(),
                 title: self.tool_name.unwrap_or_else(|| "ACP tool".into()),
