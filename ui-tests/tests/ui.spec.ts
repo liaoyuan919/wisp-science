@@ -1273,6 +1273,7 @@ test("home search opens artifacts, sessions, and settings", async ({ page }) => 
   const settingsPage = page.locator(".settings-page");
   await expect(settingsPage).toBeVisible();
   await expect(page.locator(".overlay", { has: settingsPage })).toHaveCount(0);
+  const expectedSettingsTop = await page.locator(".window-titlebar").count() === 1 ? 38 : 0;
   await expect.poll(() => settingsPage.evaluate((el) => {
     const rect = el.getBoundingClientRect();
     return {
@@ -1281,7 +1282,7 @@ test("home search opens artifacts, sessions, and settings", async ({ page }) => 
       right: Math.round(rect.right),
       bottom: Math.round(rect.bottom),
     };
-  })).toEqual({ top: 38, left: 0, right: 1280, bottom: 720 });
+  })).toEqual({ top: expectedSettingsTop, left: 0, right: 1280, bottom: 720 });
   await expect(page.getByRole("button", { name: "Back to app" })).toBeVisible();
   await page.locator(".settings-head-close").click();
 
@@ -1350,6 +1351,12 @@ test("Windows uses the integrated title bar without covering the project landing
     Math.round(el.getBoundingClientRect().top)
   )).toBe(38);
 
+  await page.getByRole("button", { name: "Settings" }).click();
+  await expect.poll(async () => page.locator(".settings-page").evaluate((el) =>
+    Math.round(el.getBoundingClientRect().top)
+  )).toBe(38);
+  await page.getByRole("button", { name: "Back to app" }).click();
+
   await page.getByRole("button", { name: "File" }).click();
   await expect(page.getByRole("menuitem", { name: "Open projects" })).toBeVisible();
   await page.getByRole("menuitem", { name: "Open projects" }).click();
@@ -1377,6 +1384,11 @@ test("macOS uses the native title bar without the integrated header", async ({ b
   await expect(page.locator(".window-titlebar")).toHaveCount(0);
   await expect(page.locator(".window-controls")).toHaveCount(0);
   await expect(page.locator(".projects-screen")).toBeVisible();
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await expect.poll(async () => page.locator(".settings-page").evaluate((el) =>
+    Math.round(el.getBoundingClientRect().top)
+  )).toBe(0);
 
   await context.close();
 });
