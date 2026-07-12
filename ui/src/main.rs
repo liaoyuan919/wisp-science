@@ -385,6 +385,7 @@ fn App() -> impl IntoView {
     let project_info = create_rw_signal::<Option<ProjectInfo>>(None);
     let demo_mode = create_rw_signal(false); // true = the synthetic "Example project" is open
     let project_open_error = create_rw_signal(None::<String>);
+    let app_shell_entering = create_rw_signal(false);
     let project_transition_epoch = Rc::new(Cell::new(0u64));
     let project_transition_target = Rc::new(RefCell::new(None::<String>));
     let project_open_gate = Rc::new(RefCell::new(ProjectOpenGate::default()));
@@ -3135,6 +3136,7 @@ fn App() -> impl IntoView {
         let transition_target = project_transition_target.clone();
         let open_gate = project_open_gate.clone();
         let load_session = load_session.clone();
+        let app_shell_entering = app_shell_entering;
         Callback::new(move |(project_id, session_id): (String, Option<String>)| {
             let request_epoch = transition_epoch.get().wrapping_add(1);
             transition_epoch.set(request_epoch);
@@ -3148,6 +3150,19 @@ fn App() -> impl IntoView {
             active_session.set(None);
             collapsed_folders.set(HashSet::new());
             project_info.set(None);
+            app_shell_entering.set(true);
+            {
+                let transition_epoch = transition_epoch.clone();
+                let app_shell_entering = app_shell_entering;
+                set_timeout(
+                    move || {
+                        if transition_epoch.get() == request_epoch {
+                            app_shell_entering.set(false);
+                        }
+                    },
+                    std::time::Duration::from_millis(520),
+                );
+            }
             show_projects.set(false);
 
             let transition_epoch = transition_epoch.clone();
@@ -3539,6 +3554,7 @@ fn App() -> impl IntoView {
             open_settings=Callback::new(move |section: Option<String>| open_settings_fn(section))
         />
         <div class="app"
+            class:app-entering=move || app_shell_entering.get()
             class:app-hidden=move || show_projects.get() && !show_settings.get() && modal_artifact.get().is_none()
             on:contextmenu=on_context_menu>
         <Sidebar
@@ -5188,6 +5204,17 @@ fn App() -> impl IntoView {
                             prop:value=move || rename_session_input.get()
                             on:input=move |ev| rename_session_input.set(dom_value(&ev))
                             on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                if (ev.ctrl_key() || ev.meta_key())
+                                    && ev.key().eq_ignore_ascii_case("a")
+                                {
+                                    ev.prevent_default();
+                                    if let Some(target) = ev.target() {
+                                        if let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>() {
+                                            input.select();
+                                        }
+                                    }
+                                    return;
+                                }
                                 if ev.key() == "Enter" {
                                     ev.prevent_default();
                                     let title = rename_session_input.get().trim().to_string();
