@@ -28,6 +28,44 @@ fn settings_provider_defaults(provider: &str) -> (&'static str, &'static str) {
     }
 }
 
+fn appearance_palette_options(dark: bool) -> [(&'static str, &'static str); 5] {
+    if dark {
+        [
+            ("charcoal", "Wisp Charcoal"),
+            ("codex", "Codex"),
+            ("github", "GitHub Dark"),
+            ("catppuccin", "Catppuccin Mocha"),
+            ("gruvbox", "Gruvbox"),
+        ]
+    } else {
+        [
+            ("paper", "Wisp Paper"),
+            ("codex", "Codex"),
+            ("github", "GitHub"),
+            ("catppuccin", "Catppuccin Latte"),
+            ("everforest", "Everforest"),
+        ]
+    }
+}
+
+fn appearance_palette_meta(
+    dark: bool,
+    palette: &str,
+) -> (&'static str, &'static str, &'static str) {
+    match (dark, palette) {
+        (false, "codex") => ("#2563EB", "#F4F6F8", "#172033"),
+        (false, "github") => ("#0969DA", "#F6F8FA", "#1F2328"),
+        (false, "catppuccin") => ("#8839EF", "#EFF1F5", "#4C4F69"),
+        (false, "everforest") => ("#3A8F6B", "#F4F0D9", "#2F383E"),
+        (true, "codex") => ("#7C8CFF", "#202123", "#F3F4F6"),
+        (true, "github") => ("#58A6FF", "#0D1117", "#F0F6FC"),
+        (true, "catppuccin") => ("#CBA6F7", "#1E1E2E", "#CDD6F4"),
+        (true, "gruvbox") => ("#D79921", "#282828", "#EBDBB2"),
+        (true, _) => ("#2DA898", "#171614", "#EBE8E2"),
+        _ => ("#0D9488", "#FAF9F6", "#141413"),
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct SettingsViewState {
     pub(super) locale: RwSignal<Locale>,
@@ -280,9 +318,8 @@ pub(super) fn SettingsView(
                 }.into_view())}
                 {move || (settings_section.get() == "appearance").then(|| view! {
                     <div class="settings-pane settings-appearance-pane">
-                        <section class="appearance-section">
+                        <section class="appearance-theme-section">
                             <h3>{move || t(locale.get(), "appearance.theme")}</h3>
-                            <p>{move || t(locale.get(), "appearance.theme_hint")}</p>
                             <div class="theme-mode-grid" role="radiogroup"
                                 aria-label=move || t(locale.get(), "appearance.theme")>
                                 {[
@@ -309,85 +346,91 @@ pub(super) fn SettingsView(
                                 }).collect_view()}
                             </div>
                         </section>
-                        <div class="appearance-palette-columns">
-                            <section class="appearance-section palette-section">
-                                <h3>{move || t(locale.get(), "appearance.light_palette")}</h3>
-                                <p>{move || t(locale.get(), "appearance.light_palette_hint")}</p>
-                                <div class="palette-grid">
-                                    {[
-                                        ("paper", "Wisp Paper", "#faf9f6", "#ffffff", "#0d9488"),
-                                        ("codex", "Codex", "#f4f6f8", "#ffffff", "#2563eb"),
-                                        ("github", "GitHub", "#f6f8fa", "#ffffff", "#0969da"),
-                                        ("catppuccin", "Catppuccin Latte", "#eff1f5", "#e6e9ef", "#8839ef"),
-                                        ("everforest", "Everforest", "#f4f0d9", "#fffbef", "#3a8f6b"),
-                                    ].into_iter().map(|(id, name, bg, surface, accent)| view! {
-                                        <button type="button" class="palette-option"
-                                            class:active=move || light_palette.get() == id
-                                            aria-pressed=move || light_palette.get() == id
-                                            data-testid=format!("light-palette-{id}")
-                                            on:click=move |_| light_palette.set(id.into())>
-                                            <span class="palette-swatches" style=format!("--swatch-bg:{bg};--swatch-surface:{surface};--swatch-accent:{accent}") aria-hidden="true">
-                                                <i></i><i></i><i></i>
-                                            </span>
-                                            <span>{name}</span>
-                                        </button>
-                                    }).collect_view()}
-                                </div>
-                            </section>
-                            <section class="appearance-section palette-section">
-                                <h3>{move || t(locale.get(), "appearance.dark_palette")}</h3>
-                                <p>{move || t(locale.get(), "appearance.dark_palette_hint")}</p>
-                                <div class="palette-grid">
-                                    {[
-                                        ("charcoal", "Wisp Charcoal", "#171614", "#262521", "#2da898"),
-                                        ("codex", "Codex", "#202123", "#2b2c2f", "#7c8cff"),
-                                        ("github", "GitHub Dark", "#0d1117", "#161b22", "#58a6ff"),
-                                        ("catppuccin", "Catppuccin Mocha", "#1e1e2e", "#313244", "#cba6f7"),
-                                        ("gruvbox", "Gruvbox", "#282828", "#3c3836", "#d79921"),
-                                    ].into_iter().map(|(id, name, bg, surface, accent)| view! {
-                                        <button type="button" class="palette-option"
-                                            class:active=move || dark_palette.get() == id
-                                            aria-pressed=move || dark_palette.get() == id
-                                            data-testid=format!("dark-palette-{id}")
-                                            on:click=move |_| dark_palette.set(id.into())>
-                                            <span class="palette-swatches" style=format!("--swatch-bg:{bg};--swatch-surface:{surface};--swatch-accent:{accent}") aria-hidden="true">
-                                                <i></i><i></i><i></i>
-                                            </span>
-                                            <span>{name}</span>
-                                        </button>
-                                    }).collect_view()}
-                                </div>
-                            </section>
+                        <div class="appearance-diff-preview" aria-hidden="true">
+                            <div class="appearance-diff-column is-removed">
+                                <div><b>"1"</b><code><em>"const"</em> " themePreview: "<i>"ThemeConfig"</i>" = {"</code></div>
+                                <div><b>"2"</b><code>"  surface: "<span>"\"sidebar\""</span>","</code></div>
+                                <div><b>"3"</b><code>"  accent: "<span>"\"#2563eb\""</span>","</code></div>
+                                <div><b>"4"</b><code>"  contrast: "<strong>"42"</strong>","</code></div>
+                                <div><b>"5"</b><code>"};"</code></div>
+                            </div>
+                            <div class="appearance-diff-column is-added">
+                                <div><b>"1"</b><code><em>"const"</em> " themePreview: "<i>"ThemeConfig"</i>" = {"</code></div>
+                                <div><b>"2"</b><code>"  surface: "<span>"\"sidebar-elevated\""</span>","</code></div>
+                                <div><b>"3"</b><code>"  accent: "<span>"\"#0ea5e9\""</span>","</code></div>
+                                <div><b>"4"</b><code>"  contrast: "<strong>"68"</strong>","</code></div>
+                                <div><b>"5"</b><code>"};"</code></div>
+                            </div>
                         </div>
-                        <section class="appearance-section appearance-preferences">
-                            <h3>{move || t(locale.get(), "appearance.preferences")}</h3>
-                            <div class="appearance-preference-row">
-                                <div>
-                                    <strong>{move || t(locale.get(), "appearance.ui_font_size")}</strong>
-                                    <span>{move || t(locale.get(), "appearance.ui_font_size_hint")}</span>
-                                </div>
-                                <label class="font-size-control">
-                                    <input type="range" min="12" max="18" step="1"
-                                        aria-label=move || t(locale.get(), "appearance.ui_font_size")
-                                        prop:value=move || ui_font_size.get().to_string()
-                                        on:input=move |ev| ui_font_size.set(event_target_value(&ev).parse().unwrap_or(14)) />
-                                    <output>{move || format!("{} px", ui_font_size.get())}</output>
-                                </label>
-                            </div>
-                            <div class="appearance-preference-row">
-                                <div>
-                                    <strong>{move || t(locale.get(), "appearance.code_font_size")}</strong>
-                                    <span>{move || t(locale.get(), "appearance.code_font_size_hint")}</span>
-                                </div>
-                                <label class="font-size-control">
-                                    <input type="range" min="10" max="18" step="1"
-                                        aria-label=move || t(locale.get(), "appearance.code_font_size")
-                                        prop:value=move || code_font_size.get().to_string()
-                                        on:input=move |ev| code_font_size.set(event_target_value(&ev).parse().unwrap_or(12)) />
-                                    <output>{move || format!("{} px", code_font_size.get())}</output>
-                                </label>
-                            </div>
-                        </section>
+                        {move || {
+                            let dark = theme_mode.get() == "dark";
+                            let palette = if dark { dark_palette.get() } else { light_palette.get() };
+                            let (accent, background, foreground) = appearance_palette_meta(dark, &palette);
+                            let accent_ink = if dark && palette == "gruvbox" { "#1D2021" } else { "#FFFFFF" };
+                            let background_ink = if dark { "#FFFFFF" } else { "#1F2328" };
+                            let foreground_ink = if dark { "#1F2328" } else { "#FFFFFF" };
+                            let options = appearance_palette_options(dark);
+                            view! {
+                                <section class="appearance-config-card">
+                                    <div class="appearance-config-head">
+                                        <strong>{t(locale.get(), if dark { "appearance.dark_theme" } else { "appearance.light_theme" })}</strong>
+                                        <select data-testid="appearance-palette-select"
+                                            aria-label=t(locale.get(), "appearance.palette")
+                                            on:change=move |ev| {
+                                                let value = dom_value(&ev);
+                                                if dark { dark_palette.set(value); } else { light_palette.set(value); }
+                                            }>
+                                            {options.into_iter().map(|(value, name)| view! {
+                                                <option value=value
+                                                    prop:selected=move || if dark {
+                                                        dark_palette.get() == value
+                                                    } else {
+                                                        light_palette.get() == value
+                                                    }>{name}</option>
+                                            }).collect_view()}
+                                        </select>
+                                    </div>
+                                    <div class="appearance-config-row">
+                                        <strong>{t(locale.get(), "appearance.accent")}</strong>
+                                        <output class="appearance-color-value" style=format!("--appearance-color:{accent};--appearance-ink:{accent_ink}")><i></i>{accent}</output>
+                                    </div>
+                                    <div class="appearance-config-row">
+                                        <strong>{t(locale.get(), "appearance.background")}</strong>
+                                        <output class="appearance-color-value" style=format!("--appearance-color:{background};--appearance-ink:{background_ink}")><i></i>{background}</output>
+                                    </div>
+                                    <div class="appearance-config-row">
+                                        <strong>{t(locale.get(), "appearance.foreground")}</strong>
+                                        <output class="appearance-color-value" style=format!("--appearance-color:{foreground};--appearance-ink:{foreground_ink}")><i></i>{foreground}</output>
+                                    </div>
+                                    <div class="appearance-config-row">
+                                        <div>
+                                            <strong>{t(locale.get(), "appearance.ui_font_size")}</strong>
+                                            <span>{t(locale.get(), "appearance.ui_font_size_hint")}</span>
+                                        </div>
+                                        <label class="font-size-control">
+                                            <input type="range" min="12" max="18" step="1"
+                                                aria-label=t(locale.get(), "appearance.ui_font_size")
+                                                prop:value=move || ui_font_size.get().to_string()
+                                                on:input=move |ev| ui_font_size.set(event_target_value(&ev).parse().unwrap_or(14)) />
+                                            <output>{move || format!("{} px", ui_font_size.get())}</output>
+                                        </label>
+                                    </div>
+                                    <div class="appearance-config-row">
+                                        <div>
+                                            <strong>{t(locale.get(), "appearance.code_font_size")}</strong>
+                                            <span>{t(locale.get(), "appearance.code_font_size_hint")}</span>
+                                        </div>
+                                        <label class="font-size-control">
+                                            <input type="range" min="10" max="18" step="1"
+                                                aria-label=t(locale.get(), "appearance.code_font_size")
+                                                prop:value=move || code_font_size.get().to_string()
+                                                on:input=move |ev| code_font_size.set(event_target_value(&ev).parse().unwrap_or(12)) />
+                                            <output>{move || format!("{} px", code_font_size.get())}</output>
+                                        </label>
+                                    </div>
+                                </section>
+                            }
+                        }}
                     </div>
                 }.into_view())}
                 {move || (settings_section.get() == "models").then(|| {

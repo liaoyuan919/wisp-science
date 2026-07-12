@@ -968,12 +968,14 @@ test("appearance settings persist separate light and dark palettes and font size
 
   await page.getByTestId("theme-mode-light").click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-  await page.getByTestId("light-palette-catppuccin").click();
+  await page.getByTestId("appearance-palette-select").selectOption("catppuccin");
+  await expect(page.getByTestId("appearance-palette-select")).toHaveValue("catppuccin");
   await expect(page.locator("html")).toHaveAttribute("data-light-palette", "catppuccin");
 
   await page.getByTestId("theme-mode-dark").click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  await page.getByTestId("dark-palette-gruvbox").click();
+  await page.getByTestId("appearance-palette-select").selectOption("gruvbox");
+  await expect(page.getByTestId("appearance-palette-select")).toHaveValue("gruvbox");
   await expect(page.locator("html")).toHaveAttribute("data-dark-palette", "gruvbox");
 
   await page.getByRole("slider", { name: "UI font size" }).fill("16");
