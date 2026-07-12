@@ -3318,6 +3318,7 @@ pub(super) fn ArtifactModal(
     on_prev: Callback<()>,
     on_next: Callback<()>,
     on_close: Callback<()>,
+    on_open_center: Callback<String>,
     on_open_path: Callback<(String, String)>, // open an input file (path, kind)
 ) -> impl IntoView {
     let locale = use_locale();
@@ -3340,6 +3341,7 @@ pub(super) fn ArtifactModal(
     }
     let path_head = path.clone();
     let path_dl = path.clone();
+    let path_center = path.clone();
     view! {
         <div class="overlay" on:click=move |_| on_close.call(())>
             <div class="modal artifact-modal" on:click=|ev| ev.stop_propagation()>
@@ -3360,6 +3362,8 @@ pub(super) fn ArtifactModal(
                         </div>
                     })}
                     <div class="spacer"></div>
+                    <button class="icon-btn" title=move || t(locale.get(), "center.open_file")
+                        on:click=move |_| on_open_center.call(path_center.clone())>{compose_icon("expand")}</button>
                     <button class="icon-btn" title=move || t(locale.get(), "artifact.download")
                         on:click=move |_| download_artifact(path_dl.clone())>{compose_icon("download")}</button>
                     <button class="icon-btn" title=move || t(locale.get(), "right.close")

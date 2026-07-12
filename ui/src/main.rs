@@ -2815,6 +2815,29 @@ fn App() -> impl IntoView {
                 center_file.set(Some(payload));
                 return;
             }
+            if action == "closeCenterCurrent" {
+                center_files.update(|files| files.retain(|path| path != &payload));
+                if center_file.get_untracked().as_ref() == Some(&payload) {
+                    center_file.set(None);
+                }
+                return;
+            }
+            if action == "closeCenterRight" {
+                center_files.update(|files| {
+                    if let Some(index) = files.iter().position(|path| path == &payload) {
+                        files.truncate(index + 1);
+                    }
+                });
+                if !center_files.get_untracked().contains(&center_file.get_untracked().unwrap_or_default()) {
+                    center_file.set(Some(payload));
+                }
+                return;
+            }
+            if action == "closeCenterAll" {
+                center_files.set(vec![]);
+                center_file.set(None);
+                return;
+            }
             if action == "exportSession" {
                 let session_id = if payload.is_empty() {
                     let Some(id) = active_session.get() else {
@@ -3555,7 +3578,8 @@ fn App() -> impl IntoView {
                         view! {
                             <div class="center-tab-wrap">
                                 <button type="button" class="center-tab" class:active=move || center_file.get().as_ref() == Some(&path)
-                                    title=path.clone() on:click=move |_| center_file.set(Some(select_path.clone()))>
+                                    title=path.clone() data-center-path=path.clone()
+                                    on:click=move |_| center_file.set(Some(select_path.clone()))>
                                     <span class="center-tab-label">{label}</span>
                                 </button>
                                 <button type="button" class="center-tab-close"
@@ -4574,7 +4598,7 @@ fn App() -> impl IntoView {
                                                 let (mi, cx, cy) = artifact_menu.get()?;
                                                 (mi == i).then(|| {
                                                 let (p, n, k) = (path.clone(), vn.clone(), fkind.clone());
-                                                let (mv, sp, dw) = (p.clone(), p.clone(), p.clone());
+                                                let (mv, sp, dw, oc) = (p.clone(), p.clone(), p.clone(), p.clone());
                                                 let (mvn, mvk) = (n.clone(), k.clone());
                                                 view! {
                                                     <div class="rp-tile-menu-backdrop" on:click=move |_| artifact_menu.set(None)></div>
@@ -4583,6 +4607,15 @@ fn App() -> impl IntoView {
                                                         <button type="button" class="rp-tile-menu-item"
                                                             on:click=move |_| { artifact_menu.set(None); modal_artifact.set(Some((mv.clone(), mvn.clone(), mvk.clone()))); }>
                                                             {move || t(locale.get(), "artifact.open_viewer")}</button>
+                                                        <button type="button" class="rp-tile-menu-item"
+                                                            on:click=move |_| {
+                                                                artifact_menu.set(None);
+                                                                center_files.update(|files| {
+                                                                    if !files.contains(&oc) { files.push(oc.clone()); }
+                                                                });
+                                                                center_file.set(Some(oc.clone()));
+                                                            }>
+                                                            {move || t(locale.get(), "center.open_file")}</button>
                                                         <button type="button" class="rp-tile-menu-item"
                                                             on:click=move |_| {
                                                                 artifact_menu.set(None);
@@ -5353,6 +5386,13 @@ fn App() -> impl IntoView {
                         }
                     })
                     on_close=Callback::new(move |_| modal_artifact.set(None))
+                    on_open_center=Callback::new(move |path: String| {
+                        center_files.update(|files| {
+                            if !files.contains(&path) { files.push(path.clone()); }
+                        });
+                        center_file.set(Some(path));
+                        modal_artifact.set(None);
+                    })
                     on_open_path=Callback::new(move |(p, _k): (String, String)| {
                         reveal_in_files(&p, file_cwd, file_query, file_entries, show_right, open_right_tabs, right_tab);
                         modal_artifact.set(None);

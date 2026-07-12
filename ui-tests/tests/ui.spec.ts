@@ -544,28 +544,18 @@ test("branch on an earlier user message opens a new session from that point", as
   });
 });
 
-test("right-click export invokes active session export", async ({ page }) => {
+test("generic content menus do not expose session export", async ({ page }) => {
   await enterApp(page);
   await composer(page).fill("hello there");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("Hello from mock wisp-science.")).toBeVisible({ timeout: 10_000 });
 
   await page.getByText("Hello from mock wisp-science.").click({ button: "right" });
-  await page.getByRole("button", { name: "Export session" }).click();
-
-  await expect.poll(async () => page.evaluate(() => {
-    const calls = ((window as any).__skillInvokeLog ?? []).map((c: any) => ({
-      cmd: c.cmd,
-      args: c.args instanceof Map ? Object.fromEntries(c.args) : (c.args ?? {}),
-    }));
-    return calls.find((c: any) => c.cmd === "export_session") ?? null;
-  })).toMatchObject({
-    cmd: "export_session",
-    args: {
-      sessionId: expect.stringMatching(/^s-/),
-      artifactPaths: expect.any(Array),
-    },
-  });
+  await expect(page.getByRole("button", { name: "Export session" })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.locator(".rightpane").click({ button: "right", position: { x: 5, y: 100 } });
+  await expect(page.locator(".ctx-menu")).toHaveCount(0);
 });
 
 test("uploaded file shows up in the artifacts panel after send", async ({ page }) => {
@@ -594,6 +584,11 @@ test("uploaded file shows up in the artifacts panel after send", async ({ page }
   // The upload path lives in the user turn; the panel must pick it up from there.
   const tile = page.locator('.rp-tile[data-artifact-name="counts.csv"]');
   await expect(tile).toBeVisible();
+  await tile.click({ button: "right" });
+  await page.locator(".ctx-menu").getByRole("button", { name: "Open in center" }).click();
+  await expect(page.locator(".center-tab.active")).toContainText("counts.csv");
+  await expect(page.locator(".center-file-preview")).toContainText("a");
+  await page.getByRole("button", { name: "Conversation" }).click();
   await tile.click({ button: "right" });
   await page.locator(".ctx-menu").getByRole("button", { name: "Download" }).click();
   await expect.poll(() => lastInvokeArgs(page, "download_file")).toMatchObject({ path: "uploads/counts.csv" });
@@ -643,11 +638,28 @@ test("workspace file context menu attaches its path to the composer", async ({ p
   await page.getByRole("button", { name: "Open in center" }).click();
   await expect(page.locator(".center-file-preview")).toContainText("a");
   await expect(page.locator(".center-tab.active")).toContainText("report.csv");
-  await page.getByRole("button", { name: "Conversation" }).click();
-  await expect(composer(page)).toBeVisible();
-  await page.locator(".center-tabs").getByRole("button", { name: "report.csv" }).click();
-  await page.locator(".center-tabs").getByRole("button", { name: "Close tab" }).click();
+
+  const search = page.locator(".fb-search");
+  await search.fill("counts");
+  const counts = page.locator('.fb-row[data-workspace-path="counts.csv"]');
+  await expect(counts).toBeVisible();
+  await counts.click({ button: "right" });
+  await page.getByRole("button", { name: "Open in center" }).click();
+  await page.locator('.center-tab[data-center-path="report.csv"]').click({ button: "right" });
+  await page.getByRole("button", { name: "Close tabs to the right" }).click();
+  await expect(page.locator('.center-tab[data-center-path="counts.csv"]')).toHaveCount(0);
+  await page.locator('.center-tab[data-center-path="report.csv"]').click({ button: "right" });
+  await page.getByRole("button", { name: "Close current" }).click();
   await expect(page.locator(".center-file-preview")).toHaveCount(0);
+
+  await counts.click({ button: "right" });
+  await page.getByRole("button", { name: "Open in center" }).click();
+  await page.locator('.center-tab[data-center-path="counts.csv"]').click({ button: "right" });
+  await page.getByRole("button", { name: "Close all files" }).click();
+  await expect(page.locator('.center-tab[data-center-path]')).toHaveCount(0);
+  await expect(composer(page)).toBeVisible();
+  await search.fill("");
+  await expect(file).toBeVisible();
   await file.click({ button: "right" });
   await page.locator(".ctx-menu").getByRole("button", { name: "Download" }).click();
   await expect.poll(() => lastInvokeArgs(page, "download_file")).toMatchObject({ path: "report.csv" });
@@ -736,6 +748,9 @@ test("clicking a figure opens the artifact modal with provenance", async ({ page
   // Environment tab renders the captured package list.
   await page.locator(".am-tab", { hasText: "Environment" }).click();
   await expect(page.locator(".am-env")).toContainText("matplotlib");
+  await page.getByRole("button", { name: "Open in center" }).click();
+  await expect(page.locator(".artifact-modal")).toHaveCount(0);
+  await expect(page.locator(".center-tab.active")).toContainText("volcano.png");
 });
 
 test("artifact modal switches between images with left and right arrows", async ({ page }) => {
