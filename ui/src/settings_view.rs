@@ -145,9 +145,14 @@ pub(super) fn SettingsView(
 
     move || {
         show_settings.get().then(|| view! {
-    <div class="overlay">
-        <div class="modal settings-modal">
+        <div class="settings-page">
             <div class="settings-nav">
+                <button type="button" class="settings-app-back settings-head-close"
+                    on:click=move |_| show_settings.set(false)>
+                    {compose_icon("chevron-left")}
+                    <span>{move || t(locale.get(), "settings.back_to_app")}</span>
+                </button>
+                <div class="settings-nav-title">{move || t(locale.get(), "settings.title")}</div>
                 <div class="settings-nav-group">
                     <span class="settings-nav-label">{move || t(locale.get(), "settings.nav.workspace")}</span>
                     <button class:active=move || settings_section.get()=="general"
@@ -220,9 +225,6 @@ pub(super) fn SettingsView(
                                     view! { <h2>{parent.clone()}</h2> }.into_view()
                                 }}
                             </div>
-                            <button type="button" class="settings-head-close icon-btn"
-                                title=move || t(locale.get(), "settings.cancel")
-                                on:click=move |_| show_settings.set(false)>{compose_icon("close")}</button>
                         </div>
                     }
                 }}
@@ -1608,7 +1610,6 @@ pub(super) fn SettingsView(
                 })}
             </div>
         </div>
-    </div>
 }.into_view())
     }
 }

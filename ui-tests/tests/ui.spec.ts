@@ -396,7 +396,7 @@ test("Ctrl+P command palette runs commands and switches themes", async ({ page }
   await page.keyboard.press("Control+b");
   await expect(page.locator(".sidebar")).toHaveClass(/collapsed/);
   await page.keyboard.press("Control+,");
-  await expect(page.locator(".settings-modal")).toBeVisible();
+  await expect(page.locator(".settings-page")).toBeVisible();
   await page.keyboard.press("Escape");
   const before = await page.evaluate(() => ((window as any).__skillInvokeLog ?? []).filter((c: any) => c.cmd === "new_session").length);
   await page.keyboard.press("Control+n");
@@ -769,8 +769,30 @@ test("clicking a figure opens the artifact modal with provenance", async ({ page
       height: Math.round(rect.height),
     };
   });
+  const modalFigure = page.locator(".artifact-modal .am-figure");
+  const figureHeightAt100 = await modalFigure.evaluate((el) =>
+    Math.round(el.getBoundingClientRect().height),
+  );
   const modalImage = page.locator(".artifact-modal .rp-img");
   const modalWidthAt100 = await modalImage.evaluate((el) => el.getBoundingClientRect().width);
+  for (let i = 0; i < 3; i += 1) {
+    await page.getByRole("button", { name: "Zoom out" }).click();
+  }
+  await expect(page.getByRole("button", { name: "Reset zoom" })).toHaveText("25%");
+  const modalBoundsAt25 = await page.locator(".artifact-modal").evaluate((el) => {
+    const rect = el.getBoundingClientRect();
+    return {
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+    };
+  });
+  expect(Math.abs(modalBoundsAt25.width - modalBoundsAt100.width)).toBeLessThanOrEqual(12);
+  expect(Math.abs(modalBoundsAt25.height - modalBoundsAt100.height)).toBeLessThanOrEqual(12);
+  await expect.poll(async () => Math.abs(
+    await modalFigure.evaluate((el) => Math.round(el.getBoundingClientRect().height))
+      - figureHeightAt100,
+  )).toBeLessThanOrEqual(12);
+  await page.getByRole("button", { name: "Reset zoom" }).click();
   for (let i = 0; i < 8; i += 1) {
     await page.getByRole("button", { name: "Zoom in" }).click();
   }
@@ -931,7 +953,7 @@ test("artifact panel normalizes png/pdf shorthand to the previewable image", asy
   await expect(page.locator('.rp-tile[data-artifact-name="panel_I_heatmap_4genes_median.png/.pdf"]')).toHaveCount(0);
 });
 
-test("settings modal shows the saved provider", async ({ page }) => {
+test("settings page shows the saved provider", async ({ page }) => {
   await enterApp(page);
   await openModelsSettings(page);
   await expect(providerSelect(page)).toHaveValue("openai");
@@ -1185,7 +1207,19 @@ test("home search opens artifacts, sessions, and settings", async ({ page }) => 
   await page.goto("/");
 
   await page.getByRole("button", { name: "Settings" }).click();
-  await expect(page.locator(".settings-modal")).toBeVisible();
+  const settingsPage = page.locator(".settings-page");
+  await expect(settingsPage).toBeVisible();
+  await expect(page.locator(".overlay", { has: settingsPage })).toHaveCount(0);
+  await expect.poll(() => settingsPage.evaluate((el) => {
+    const rect = el.getBoundingClientRect();
+    return {
+      top: Math.round(rect.top),
+      left: Math.round(rect.left),
+      right: Math.round(rect.right),
+      bottom: Math.round(rect.bottom),
+    };
+  })).toEqual({ top: 38, left: 0, right: 1280, bottom: 720 });
+  await expect(page.getByRole("button", { name: "Back to app" })).toBeVisible();
   await page.locator(".settings-head-close").click();
 
   await page.getByRole("button", { name: "Search" }).click();
@@ -1294,9 +1328,9 @@ test("project cards use semantic buttons for keyboard access", async ({ page }) 
 test("Escape closes settings on the projects landing and the right pane from the composer", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Settings" }).click();
-  await expect(page.locator(".settings-modal")).toBeVisible();
+  await expect(page.locator(".settings-page")).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(page.locator(".settings-modal")).toHaveCount(0);
+  await expect(page.locator(".settings-page")).toHaveCount(0);
 
   await enterApp(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
@@ -1667,7 +1701,7 @@ test("chat-with-claude creation opens a new session with the interview prompt", 
   await page.getByText("Add specialist").click();
   await page.getByText("Chat with Claude").click();
   // settings closed, a session is active, and send_message was invoked with the template
-  await expect(page.locator(".settings-modal")).toHaveCount(0);
+  await expect(page.locator(".settings-page")).toHaveCount(0);
   await expect.poll(async () => page.evaluate(() =>
     ((window as any).__skillInvokeLog ?? []).filter((c: any) => c.cmd === "send_message").length,
   )).toBeGreaterThan(0);

@@ -206,6 +206,7 @@ textarea.host-input { min-height:64px; resize:vertical; }
   max-height: 52vh; overflow: hidden; display: flex; justify-content: flex-start; align-items: flex-start;
   background: var(--bg-sunken); border-radius: var(--radius-sm); padding: 8px;
 }
+.artifact-modal .am-figure.zoomable-preview { height: 52vh; }
 .artifact-modal.html-preview .am-figure { overflow: auto; }
 .artifact-modal .am-figure > * { flex: 1 1 auto; min-width: 0; min-height: 0; }
 .artifact-modal .am-figure img,

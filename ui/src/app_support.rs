@@ -3450,6 +3450,7 @@ pub(super) fn ArtifactModal(
     let path_dl = path.clone();
     let path_center = path.clone();
     let is_html = kind == "html";
+    let is_zoomable = matches!(kind.as_str(), "image" | "pdf");
     view! {
         <div class="overlay" on:click=move |_| on_close.call(())>
             <div class="modal artifact-modal" class:html-preview=is_html on:click=|ev| ev.stop_propagation()>
@@ -3477,7 +3478,7 @@ pub(super) fn ArtifactModal(
                     <button class="icon-btn" title=move || t(locale.get(), "right.close")
                         on:click=move |_| on_close.call(())>{compose_icon("close")}</button>
                 </div>
-                <div class="am-figure">
+                <div class="am-figure" class:zoomable-preview=is_zoomable>
                     <WorkspaceFilePreview dom_id=dom_id path=path_head.clone() kind=kind.clone() />
                 </div>
                 <div class="am-tabs">
