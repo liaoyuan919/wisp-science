@@ -172,6 +172,7 @@ pub(crate) enum ChatItem {
 pub(crate) enum ReviewTransitionPhase {
     Reviewing,
     Correcting,
+    Passed,
 }
 
 impl ChatItem {
@@ -509,14 +510,6 @@ impl LoadedItem {
                     text: self.text,
                     model: None,
                 }),
-            "review_transition" => ChatItem::ReviewTransition {
-                phase: if self.kind.as_deref() == Some("correcting") {
-                    ReviewTransitionPhase::Correcting
-                } else {
-                    ReviewTransitionPhase::Reviewing
-                },
-                model: self.model_name.filter(|model| !model.is_empty()),
-            },
             "acp_tool" => ChatItem::AcpTool {
                 call_id: self.call_id.unwrap_or_default(),
                 title: self.tool_name.unwrap_or_else(|| "ACP tool".into()),

@@ -969,32 +969,6 @@ fn events_to_items(events: &[AgentEvent]) -> (Vec<UiItem>, HashMap<i64, usize>) 
                     });
                 }
             }
-            AgentEvent::ReviewStarted { .. } => items.push(UiItem {
-                role: "review_transition".into(),
-                text: String::new(),
-                tool_name: None,
-                ok: None,
-                duration_ms: None,
-                input: None,
-                model_name: None,
-                call_id: None,
-                kind: Some("reviewing".into()),
-                status: None,
-                locations: None,
-            }),
-            AgentEvent::CorrectionStarted { model, .. } => items.push(UiItem {
-                role: "review_transition".into(),
-                text: String::new(),
-                tool_name: None,
-                ok: None,
-                duration_ms: None,
-                input: None,
-                model_name: (!model.is_empty()).then_some(model.clone()),
-                call_id: None,
-                kind: Some("correcting".into()),
-                status: None,
-                locations: None,
-            }),
             _ => {}
         }
     }
@@ -1213,8 +1187,6 @@ impl TauriOutput {
                 | AgentEvent::ToolCall { .. }
                 | AgentEvent::ToolResult { .. }
                 | AgentEvent::Stdout { .. }
-                | AgentEvent::ReviewStarted { .. }
-                | AgentEvent::CorrectionStarted { .. }
         ) {
             if let Some(tx) = &self.ui_events {
                 let _ = tx.send(event.clone());

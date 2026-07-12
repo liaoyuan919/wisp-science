@@ -265,6 +265,20 @@ test("automatic reviewer separates the correction and resolves its finding", asy
   await review.getByRole("button", { name: "Go to transcript" }).click();
 });
 
+test("automatic reviewer visibly returns a clean response without correction", async ({ page }) => {
+  await enterApp(page);
+  await composer(page).fill("AUTOREVIEWCLEAN inspect the result");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await expect(page.locator(".msg.assistant")).toHaveCount(1);
+  const handoffs = page.locator(".review-transition");
+  await expect(handoffs).toHaveCount(2);
+  await expect(handoffs.nth(0)).toHaveAttribute("data-phase", "reviewing");
+  await expect(handoffs.nth(1)).toContainText("no issues found, please continue");
+  await expect(handoffs.nth(1)).toHaveAttribute("data-phase", "passed");
+  await expect(page.locator(".review-card")).toContainText("No traceability problems found");
+});
+
 test("assistant markdown table can be copied separately", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await enterApp(page);

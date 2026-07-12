@@ -124,7 +124,7 @@ fn persisted_ui_events_keep_live_step_order_and_boundaries() {
 }
 
 #[test]
-fn persisted_ui_events_keep_reviewer_handoffs() {
+fn persisted_ui_events_ignore_ephemeral_reviewer_handoffs() {
     let frame_id = "f".to_string();
     let events = vec![
         AgentEvent::ReviewStarted {
@@ -137,11 +137,7 @@ fn persisted_ui_events_keep_reviewer_handoffs() {
     ];
 
     let (items, _) = events_to_items(&events);
-    assert_eq!(items.len(), 2);
-    assert_eq!(items[0].role, "review_transition");
-    assert_eq!(items[0].kind.as_deref(), Some("reviewing"));
-    assert_eq!(items[1].kind.as_deref(), Some("correcting"));
-    assert_eq!(items[1].model_name.as_deref(), Some("main-model"));
+    assert!(items.is_empty());
 }
 
 #[tokio::test]

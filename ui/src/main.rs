@@ -1183,8 +1183,19 @@ fn App() -> impl IntoView {
             }
             AgentEvent::Review { frame_id, report } => {
                 flush_now();
+                let passed = report.findings.is_empty();
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
-                    upsert_review(v, report)
+                    upsert_review(v, report);
+                    if passed {
+                        let index = trailing_queue_start(v);
+                        v.insert(
+                            index,
+                            ChatItem::ReviewTransition {
+                                phase: ReviewTransitionPhase::Passed,
+                                model: None,
+                            },
+                        );
+                    }
                 });
                 if active_cb.get().as_deref() == Some(&frame_id) {
                     status_cb.set(t(locale_cb.get(), "status.review_done"));
@@ -5951,6 +5962,9 @@ fn render_item(
                 }
                 ReviewTransitionPhase::Correcting => {
                     ("↩", "review.transition_to_agent", "correcting")
+                }
+                ReviewTransitionPhase::Passed => {
+                    ("✓", "review.transition_passed", "passed")
                 }
             };
             let model = model.clone();
