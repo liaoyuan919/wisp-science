@@ -274,6 +274,11 @@ pub fn build(ev: &web_sys::MouseEvent, locale: Locale, can_export: bool) -> Opti
                 y,
                 items: vec![
                     item(
+                        "openWorkspaceFileCenter",
+                        i18n::t(locale, "center.open_file"),
+                        path.clone(),
+                    ),
+                    item(
                         "attachWorkspaceFile",
                         i18n::t(locale, "ctx.attach_file"),
                         path.clone(),

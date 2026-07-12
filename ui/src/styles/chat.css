@@ -6,6 +6,20 @@
   /* Scale with the center pane; cap keeps prose readable on ultra-wide layouts. */
   --chat-col-max: min(100%, 920px);
 }
+.center-tabs { display: flex; min-width: 0; overflow-x: auto; flex: 0 0 auto; border-bottom: 1px solid var(--border); background: var(--bg-elev); scrollbar-width: none; }
+.center-tabs::-webkit-scrollbar { display: none; }
+.center-tab-wrap { position: relative; display: flex; min-width: 0; flex: 0 0 auto; border-right: 1px solid var(--border); }
+.center-tab { min-width: 110px; max-width: 220px; height: 35px; padding: 0 32px 0 12px; border: 0; border-right: 1px solid var(--border); background: transparent; color: var(--text-muted); font: inherit; font-size: 12px; cursor: pointer; }
+.center-tab-wrap .center-tab { border-right: 0; }
+.center-tab.active { background: var(--bg-app); color: var(--text); box-shadow: inset 0 -2px var(--clay); }
+.center-tab-label { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.center-tab-close { position: absolute; top: 7px; right: 6px; display: grid; place-items: center; width: 21px; height: 21px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--text-faint); cursor: pointer; }
+.center-tab-close:hover { background: var(--surface-hover); color: var(--text); }
+.center-tab-close .gi { width: 12px; height: 12px; }
+.center-hidden { display: none !important; }
+.center-file-preview { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 16px 20px 28px; }
+.center-file-head { position: sticky; top: -16px; z-index: 1; margin: -16px -20px 16px; padding: 9px 16px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--bg-app) 92%, transparent); color: var(--text-faint); font-family: var(--font-mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.center-file-preview .rp-code { min-height: calc(100% - 20px); }
 
 /* ---------- Native / compatibility plan cards ---------- */
 .plan-card,

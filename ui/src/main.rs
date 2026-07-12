@@ -34,9 +34,9 @@ use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use text::{
-    dom_value, event_target_checked, event_target_value, format_bytes, format_duration_ms,
-    group_artifact_indices, join_path, md_to_html, opens_in_system_browser, parent_path,
-    provider_defaults, provider_value,
+    dom_value, event_target_checked, event_target_value, file_kind, format_bytes,
+    format_duration_ms, group_artifact_indices, join_path, md_to_html, opens_in_system_browser,
+    parent_path, provider_defaults, provider_value,
 };
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -675,6 +675,8 @@ fn App() -> impl IntoView {
     let file_cwd = create_rw_signal(".".to_string());
     let file_entries = create_rw_signal::<Vec<DirEntry>>(vec![]);
     let file_search_hits = create_rw_signal::<Vec<FileSearchHit>>(vec![]);
+    let center_files = create_rw_signal::<Vec<String>>(vec![]);
+    let center_file = create_rw_signal::<Option<String>>(None);
     // Dedicated project windows use the same guarded transition as every
     // interactive project-open path. The callback is built after `load_session`.
     let dedicated_project_id = url_project_param();
@@ -2804,6 +2806,15 @@ fn App() -> impl IntoView {
                 focus_composer();
                 return;
             }
+            if action == "openWorkspaceFileCenter" {
+                center_files.update(|files| {
+                    if !files.contains(&payload) {
+                        files.push(payload.clone());
+                    }
+                });
+                center_file.set(Some(payload));
+                return;
+            }
             if action == "exportSession" {
                 let session_id = if payload.is_empty() {
                     let Some(id) = active_session.get() else {
@@ -3529,6 +3540,37 @@ fn App() -> impl IntoView {
         />
 
         <main class="center">
+            <div class="center-tabs" role="tablist">
+                <button type="button" class="center-tab" class:active=move || center_file.get().is_none()
+                    on:click=move |_| center_file.set(None)>
+                    <span class="center-tab-label">{move || t(locale.get(), "center.chat_tab")}</span>
+                </button>
+                <For
+                    each=move || center_files.get()
+                    key=|path| path.clone()
+                    children=move |path| {
+                        let select_path = path.clone();
+                        let close_path = path.clone();
+                        let label = path.rsplit(['/', '\\']).next().unwrap_or(&path).to_string();
+                        view! {
+                            <div class="center-tab-wrap">
+                                <button type="button" class="center-tab" class:active=move || center_file.get().as_ref() == Some(&path)
+                                    title=path.clone() on:click=move |_| center_file.set(Some(select_path.clone()))>
+                                    <span class="center-tab-label">{label}</span>
+                                </button>
+                                <button type="button" class="center-tab-close"
+                                    aria-label=move || t(locale.get(), "center.close_tab")
+                                    on:click=move |ev| {
+                                        ev.stop_propagation();
+                                        let was_active = center_file.get_untracked().as_ref() == Some(&close_path);
+                                        center_files.update(|files| files.retain(|p| p != &close_path));
+                                        if was_active { center_file.set(None); }
+                                    }>{compose_icon("close")}</button>
+                            </div>
+                        }
+                    }
+                />
+            </div>
             <div class="topbar">
                 {move || (!show_sidebar.get()).then(|| view! {
                     <button class="icon-btn" title=move || t(locale.get(), "sidebar.show") on:click=move |_| show_sidebar.set(true)>{compose_icon("chevron")}</button>
@@ -3583,7 +3625,21 @@ fn App() -> impl IntoView {
                     }><span class="gi panel"></span></button>
             </div>
 
-            <div class="chat" id=CHAT_SCROLLER_ID>
+            {move || center_file.get().map(|path| {
+                let kind = file_kind(&path).unwrap_or("text").to_string();
+                let dom_id = format!("center-file-{path}");
+                view! {
+                    <div class="center-file-preview">
+                        <div class="center-file-head"><span>{path.clone()}</span></div>
+                        {if kind == "csv" {
+                            view! { <CsvFilePreview path=path /> }.into_view()
+                        } else {
+                            view! { <FilePreview dom_id=dom_id path=path kind=kind /> }.into_view()
+                        }}
+                    </div>
+                }
+            })}
+            <div class="chat" id=CHAT_SCROLLER_ID class:center-hidden=move || center_file.get().is_some()>
                 <div class="thread" id=CHAT_THREAD_ID>
                     {move || items.with(|l| l.is_empty()).then(|| view! {
                         <div class="empty">
@@ -3695,7 +3751,7 @@ fn App() -> impl IntoView {
                 </div>
             </div>
 
-            <div class="composer">
+            <div class="composer" class:center-hidden=move || center_file.get().is_some()>
                 {move || stopping_session.get().is_some().then(|| view! {
                     <div class="stopping-toast">
                         <span class="stopping-spinner"></span>

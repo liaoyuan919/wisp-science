@@ -640,6 +640,15 @@ test("workspace file context menu attaches its path to the composer", async ({ p
   const file = page.locator('.fb-row[data-workspace-path="report.csv"]');
   await expect(file).toBeVisible();
   await file.click({ button: "right" });
+  await page.getByRole("button", { name: "Open in center" }).click();
+  await expect(page.locator(".center-file-preview")).toContainText("a");
+  await expect(page.locator(".center-tab.active")).toContainText("report.csv");
+  await page.getByRole("button", { name: "Conversation" }).click();
+  await expect(composer(page)).toBeVisible();
+  await page.locator(".center-tabs").getByRole("button", { name: "report.csv" }).click();
+  await page.locator(".center-tabs").getByRole("button", { name: "Close tab" }).click();
+  await expect(page.locator(".center-file-preview")).toHaveCount(0);
+  await file.click({ button: "right" });
   await page.locator(".ctx-menu").getByRole("button", { name: "Download" }).click();
   await expect.poll(() => lastInvokeArgs(page, "download_file")).toMatchObject({ path: "report.csv" });
   await file.click({ button: "right" });
