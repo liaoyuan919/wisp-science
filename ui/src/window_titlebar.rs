@@ -38,7 +38,13 @@ const VIEW_ITEMS: &[MenuItem] = &[
     ("theme-system", "command.theme_system", ""),
 ];
 
-const HELP_ITEMS: &[MenuItem] = &[("docs", "menu.docs", ""), ("issues", "menu.issues", "")];
+const HELP_ITEMS: &[MenuItem] = &[
+    ("check-updates", "settings.check_updates", ""),
+    ("", "", ""),
+    ("docs", "menu.docs", ""),
+    ("star-us", "menu.star_us", ""),
+    ("issues", "menu.issues", ""),
+];
 
 #[component]
 pub(super) fn WindowTitlebar(
@@ -55,6 +61,9 @@ pub(super) fn WindowTitlebar(
                 "quit" => spawn_local(async { window_control("close").await }),
                 "docs" => {
                     open_external_url("https://github.com/xuzhougeng/wisp-science#readme".into())
+                }
+                "star-us" => {
+                    open_external_url("https://github.com/xuzhougeng/wisp-science".into())
                 }
                 "issues" => {
                     open_external_url("https://github.com/xuzhougeng/wisp-science/issues".into())

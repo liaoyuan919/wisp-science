@@ -38,6 +38,26 @@ fn update_check_does_not_downgrade() {
     assert!(!result.update_available);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn mac_menu_locale_uses_saved_zh_labels() {
+    let labels = super::mac_menu_labels(super::AppMenuLocale::from_tag("zh-CN"));
+    assert_eq!(labels.help, "帮助");
+    assert_eq!(labels.check_updates, "检查更新…");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn mac_menu_action_maps_update_and_settings_ids() {
+    assert_eq!(
+        super::mac_menu_action("action.check-updates"),
+        Some("check-updates")
+    );
+    assert_eq!(super::mac_menu_action("action.star-us"), Some("star-us"));
+    assert_eq!(super::mac_menu_action("action.settings"), Some("settings"));
+    assert_eq!(super::mac_menu_action("action.unknown"), None);
+}
+
 #[test]
 fn reloaded_tool_items_keep_notebook_source() {
     let mut assistant = wisp_llm::Message::assistant("");

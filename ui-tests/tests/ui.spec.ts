@@ -1312,6 +1312,10 @@ test("home search opens artifacts, sessions, and settings", async ({ page }) => 
   const search = commandPalette(page);
   await expect(search).toBeVisible();
   await expect(page.locator(".project-search-row", { hasText: "nif3.treefile" })).toBeVisible();
+  await search.fill("update");
+  await expect(page.locator(".project-search-row", { hasText: "Check for updates" })).toBeVisible();
+  await search.fill("star");
+  await expect(page.locator(".project-search-row", { hasText: "Star us on GitHub" })).toBeVisible();
   await search.fill("file");
   await expect(page.locator(".project-search-row", { hasText: "nif3.treefile" })).toBeVisible();
   await search.press("Enter");

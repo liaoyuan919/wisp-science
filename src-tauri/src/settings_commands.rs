@@ -41,6 +41,7 @@ pub(super) async fn get_settings(state: State<'_, AppState>) -> Result<Settings,
 
 #[tauri::command]
 pub(super) async fn set_settings(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     settings: Settings,
 ) -> Result<(), String> {
@@ -80,6 +81,8 @@ pub(super) async fn set_settings(
         .set_setting("locale", locale)
         .await
         .map_err(|e| format!("{e}"))?;
+    #[cfg(target_os = "macos")]
+    super::install_macos_app_menu(&app, locale)?;
 
     // Workspace directory: persist an absolute, creatable path. Takes effect on
     // next launch (AppState.root is fixed at startup — restart, not hot-swap).
