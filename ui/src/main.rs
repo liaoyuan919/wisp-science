@@ -3655,11 +3655,7 @@ fn App() -> impl IntoView {
                 view! {
                     <div class="center-file-preview">
                         <div class="center-file-head"><span>{path.clone()}</span></div>
-                        {if kind == "csv" {
-                            view! { <CsvFilePreview path=path /> }.into_view()
-                        } else {
-                            view! { <FilePreview dom_id=dom_id path=path kind=kind /> }.into_view()
-                        }}
+                        <WorkspaceFilePreview dom_id=dom_id path=path kind=kind />
                     </div>
                 }
             })}

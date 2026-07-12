@@ -634,6 +634,13 @@ test("workspace file context menu attaches its path to the composer", async ({ p
   await page.getByRole("button", { name: "Files" }).click();
   const file = page.locator('.fb-row[data-workspace-path="report.csv"]');
   await expect(file).toBeVisible();
+  const json = page.locator('.fb-row[data-workspace-path="config.json"]');
+  await json.click({ button: "right" });
+  await page.getByRole("button", { name: "Open in center" }).click();
+  await expect(page.locator(".center-file-preview .rp-code")).toBeVisible();
+  await expect(page.locator(".center-file-preview")).toContainText('"model"');
+  await page.locator('.center-tab[data-center-path="config.json"]').click({ button: "right" });
+  await page.getByRole("button", { name: "Close current" }).click();
   await file.click({ button: "right" });
   await page.getByRole("button", { name: "Open in center" }).click();
   await expect(page.locator(".center-file-preview")).toContainText("a");
@@ -742,6 +749,10 @@ test("clicking a figure opens the artifact modal with provenance", async ({ page
   // Clicking an image artifact opens the modal viewer directly (no expand step).
   await page.locator('.rp-tile[data-artifact-name="volcano.png"] .rp-tile-main').click();
   await expect(page.locator(".artifact-modal")).toBeVisible();
+  await page.getByRole("button", { name: "Zoom in" }).click();
+  await expect(page.getByRole("button", { name: "Reset zoom" })).toHaveText("125%");
+  await page.getByRole("button", { name: "Reset zoom" }).click();
+  await expect(page.getByRole("button", { name: "Reset zoom" })).toHaveText("100%");
   // Code tab renders the recorded source (from get_artifact_provenance).
   await page.locator(".am-tab", { hasText: "Code" }).click();
   await expect(page.locator(".artifact-modal")).toContainText("savefig");

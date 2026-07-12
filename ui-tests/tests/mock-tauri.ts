@@ -467,6 +467,7 @@ export function tauriMock(): void {
             return [
               { name: "data", is_dir: true, size: 0 },
               { name: "report.csv", is_dir: false, size: 4096 },
+              { name: "config.json", is_dir: false, size: 64 },
             ];
           case "search_files": {
             const q = String(arg("query") ?? "").toLowerCase();
@@ -494,6 +495,9 @@ export function tauriMock(): void {
             const path = String(arg("path") ?? "report.csv");
             if (path.toLowerCase().includes(".png")) {
               return { path, mime: "image/png", text: null, base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z0mAAAAAASUVORK5CYII=" };
+            }
+            if (path.toLowerCase().includes(".json")) {
+              return { path, mime: "application/json", text: '{"model":{"name":"wisp","enabled":true}}', base64: null };
             }
             return { path, mime: "text/csv", text: "a,b\n1,2", base64: null };
           }

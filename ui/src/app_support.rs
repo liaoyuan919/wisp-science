@@ -3081,6 +3081,47 @@ pub(super) fn JsonFilePreview(path: String) -> impl IntoView {
 }
 
 #[component]
+pub(super) fn WorkspaceFilePreview(
+    dom_id: String,
+    path: String,
+    kind: String,
+) -> impl IntoView {
+    match kind.as_str() {
+        "csv" => view! { <CsvFilePreview path=path /> }.into_view(),
+        "json" => view! { <JsonFilePreview path=path /> }.into_view(),
+        "image" | "pdf" => {
+            view! { <ZoomableFilePreview dom_id=dom_id path=path kind=kind /> }.into_view()
+        }
+        _ => view! { <FilePreview dom_id=dom_id path=path kind=kind /> }.into_view(),
+    }
+}
+
+#[component]
+fn ZoomableFilePreview(dom_id: String, path: String, kind: String) -> impl IntoView {
+    let locale = use_locale();
+    let zoom = create_rw_signal(100u16);
+    view! {
+        <div class="file-preview-zoom">
+            <div class="file-preview-zoom-bar">
+                <button type="button" aria-label=move || t(locale.get(), "preview.zoom_out")
+                    disabled=move || { zoom.get() <= 25 }
+                    on:click=move |_| zoom.update(|value| *value = value.saturating_sub(25).max(25))>"−"</button>
+                <button type="button" aria-label=move || t(locale.get(), "preview.zoom_reset")
+                    on:click=move |_| zoom.set(100)>{move || format!("{}%", zoom.get())}</button>
+                <button type="button" aria-label=move || t(locale.get(), "preview.zoom_in")
+                    disabled=move || { zoom.get() >= 400 }
+                    on:click=move |_| zoom.update(|value| *value = value.saturating_add(25).min(400))>"+"</button>
+            </div>
+            <div class="file-preview-zoom-viewport">
+                <div class="file-preview-zoom-content" style=move || format!("zoom:{}%", zoom.get())>
+                    <FilePreview dom_id=dom_id path=path kind=kind />
+                </div>
+            </div>
+        </div>
+    }
+}
+
+#[component]
 pub(super) fn FilePreview(dom_id: String, path: String, kind: String) -> impl IntoView {
     let locale = use_locale();
     let id_for_effect = dom_id.clone();
@@ -3194,25 +3235,11 @@ pub(super) fn artifact_preview(a: &Artifact, dom_id: String, locale: Locale) -> 
                 .into_view()
         }
         PreviewData::File { path, kind } => {
-            if kind == "csv" {
-                view! {
-                    <p class="rp-path hint">{path.clone()}</p>
-                    <CsvFilePreview path=path.clone() />
-                }
-                .into_view()
-            } else if kind == "json" {
-                view! {
-                    <p class="rp-path hint">{path.clone()}</p>
-                    <JsonFilePreview path=path.clone() />
-                }
-                .into_view()
-            } else {
-                view! {
-                    <p class="rp-path hint">{path.clone()}</p>
-                    <FilePreview dom_id=dom_id path=path.clone() kind=kind.clone() />
-                }
-                .into_view()
+            view! {
+                <p class="rp-path hint">{path.clone()}</p>
+                <WorkspaceFilePreview dom_id=dom_id path=path.clone() kind=kind.clone() />
             }
+            .into_view()
         }
     }
 }
@@ -3370,13 +3397,7 @@ pub(super) fn ArtifactModal(
                         on:click=move |_| on_close.call(())>{compose_icon("close")}</button>
                 </div>
                 <div class="am-figure">
-                    {if kind == "csv" {
-                        view! { <CsvFilePreview path=path_head.clone() /> }.into_view()
-                    } else if kind == "image" || kind == "pdf" {
-                        view! { <FilePreview dom_id=dom_id path=path_head.clone() kind=kind.clone() /> }.into_view()
-                    } else {
-                        view! { <FilePreview dom_id=dom_id path=path_head.clone() kind=kind.clone() /> }.into_view()
-                    }}
+                    <WorkspaceFilePreview dom_id=dom_id path=path_head.clone() kind=kind.clone() />
                 </div>
                 <div class="am-tabs">
                     {["code","log","inputs","env"].iter().map(|k| {
