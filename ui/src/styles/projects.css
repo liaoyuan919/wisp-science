@@ -18,6 +18,11 @@ body:has(.window-titlebar) .projects-screen { top: 38px; }
 .projects-icon-btn .gi { width: 18px; height: 18px; opacity: .95; }
 .new-plus { margin-right: 2px; font-size: 18px; line-height: 0; }
 .projects-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; width: min(100%, 1200px); }
+.projects-footer { margin-top: auto; padding-top: 40px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  justify-content: center; font-size: 13px; color: var(--text-faint); }
+.projects-star-link { background: transparent; border: none; padding: 0; font-size: 13px; color: var(--clay);
+  cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.projects-star-link:hover { opacity: .8; }
 .projects-col:first-child { animation: motion-surface-in var(--motion-duration-medium) var(--motion-ease-decelerate) 70ms both; }
 .projects-col:last-child { animation: motion-surface-in var(--motion-duration-medium) var(--motion-ease-decelerate) 120ms both; }
 .projects-col h2 { font-size: 18px; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; color: var(--text); }
