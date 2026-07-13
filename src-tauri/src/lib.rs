@@ -593,6 +593,7 @@ struct SessionInfo {
     ts: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     folder_id: Option<String>,
+    running: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -3532,9 +3533,11 @@ async fn list_sessions(
         .list_sessions(&ap.id)
         .await
         .map_err(|e| format!("{e}"))?;
+    let running = state.running_turns.lock().await.clone();
     Ok(rows
         .into_iter()
         .map(|(id, title, ts, folder_id)| SessionInfo {
+            running: running.contains(&id),
             id,
             title,
             ts,
