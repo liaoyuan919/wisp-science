@@ -668,10 +668,15 @@ fn App() -> impl IntoView {
     let right_tab = create_rw_signal(RightTab::Artifacts);
     let open_right_tabs = create_rw_signal(vec![RightTab::Artifacts, RightTab::Notebook]);
     let right_tab_add_menu_open = create_rw_signal(false);
+    let file_source = create_rw_signal("local".to_string());
     let file_query = create_rw_signal(String::new());
     let file_cwd = create_rw_signal(".".to_string());
     let file_entries = create_rw_signal::<Vec<DirEntry>>(vec![]);
     let file_search_hits = create_rw_signal::<Vec<FileSearchHit>>(vec![]);
+    let remote_file_cwd = create_rw_signal("~".to_string());
+    let remote_file_entries = create_rw_signal::<Vec<DirEntry>>(vec![]);
+    let remote_file_loading = create_rw_signal(false);
+    let remote_file_error = create_rw_signal::<Option<String>>(None);
     let center_files = create_rw_signal::<Vec<CenterFileTab>>(vec![]);
     let center_file = create_rw_signal::<Option<String>>(None);
     let center_tabs_by_session =
@@ -714,6 +719,10 @@ fn App() -> impl IntoView {
     let onboard_key = create_rw_signal(String::new());
 
     create_effect(move |_| {
+        if file_source.get() != "local" {
+            file_search_hits.set(vec![]);
+            return;
+        }
         let q = file_query.get();
         if q.trim().is_empty() {
             file_search_hits.set(vec![]);
@@ -2677,7 +2686,15 @@ fn App() -> impl IntoView {
 
     let open_files = move |_| {
         ensure_right_tab(RightTab::File, show_right, open_right_tabs, right_tab);
-        refresh_dir(file_cwd, file_entries);
+        refresh_active_file_dir(
+            file_source,
+            file_cwd,
+            file_entries,
+            remote_file_cwd,
+            remote_file_entries,
+            remote_file_loading,
+            remote_file_error,
+        );
     };
 
     let open_capabilities = move |_| {
@@ -3584,7 +3601,15 @@ fn App() -> impl IntoView {
             }
             "files" => {
                 ensure_right_tab(RightTab::File, show_right, open_right_tabs, right_tab);
-                refresh_dir(file_cwd, file_entries);
+                refresh_active_file_dir(
+                    file_source,
+                    file_cwd,
+                    file_entries,
+                    remote_file_cwd,
+                    remote_file_entries,
+                    remote_file_loading,
+                    remote_file_error,
+                );
             }
             "provenance" => {
                 ensure_right_tab(RightTab::Provenance, show_right, open_right_tabs, right_tab)
@@ -4758,7 +4783,15 @@ fn App() -> impl IntoView {
                                         on:click=move |_| {
                                             right_tab.set(tab);
                                             match tab {
-                                                RightTab::File => refresh_dir(file_cwd, file_entries),
+                                                RightTab::File => refresh_active_file_dir(
+                                                    file_source,
+                                                    file_cwd,
+                                                    file_entries,
+                                                    remote_file_cwd,
+                                                    remote_file_entries,
+                                                    remote_file_loading,
+                                                    remote_file_error,
+                                                ),
                                                 RightTab::Hosts => {
                                                     refresh_execution_contexts(execution_contexts);
                                                     refresh_runs(run_records);
@@ -4806,7 +4839,15 @@ fn App() -> impl IntoView {
                                                     right_tab_add_menu_open.set(false);
                                                     ensure_right_tab(tab, show_right, open_right_tabs, right_tab);
                                                     match tab {
-                                                        RightTab::File => refresh_dir(file_cwd, file_entries),
+                                                        RightTab::File => refresh_active_file_dir(
+                                                            file_source,
+                                                            file_cwd,
+                                                            file_entries,
+                                                            remote_file_cwd,
+                                                            remote_file_entries,
+                                                            remote_file_loading,
+                                                            remote_file_error,
+                                                        ),
                                                         RightTab::Hosts => {
                                                             refresh_execution_contexts(execution_contexts);
                                                             refresh_runs(run_records);
@@ -4921,7 +4962,7 @@ fn App() -> impl IntoView {
                                                         <button type="button" class="rp-tile-menu-item"
                                                             on:click=move |_| {
                                                                 artifact_menu.set(None);
-                                                                reveal_in_files(&sp, file_cwd, file_query, file_entries, show_right, open_right_tabs, right_tab);
+                                                                reveal_in_files(&sp, file_source, file_cwd, file_query, file_entries, show_right, open_right_tabs, right_tab);
                                                             }>
                                                             {move || t(locale.get(), "artifact.reveal_in_files")}</button>
                                                         <button type="button" class="rp-tile-menu-item"
@@ -5038,105 +5079,254 @@ fn App() -> impl IntoView {
                         }
                         RightTab::File => {
                             let loc = locale.get();
-                            let cwd = file_cwd.get();
-                            let parent = if cwd == "." { None } else { Some(parent_path(&cwd)) };
+                            let source = file_source.get();
+                            let ssh_contexts = execution_contexts
+                                .get()
+                                .into_iter()
+                                .filter(|context| context.kind == "ssh")
+                                .collect::<Vec<_>>();
                             view! {
                                 <div class="rp-files">
-                                    <div class="fb-crumb">
-                                        {parent.map(|p| {
-                                            let p_click = p.clone();
-                                            view! {
-                                                <button class="fb-up" on:click=move |_| {
-                                                    file_query.set(String::new());
-                                                    file_cwd.set(p_click.clone());
+                                    <label class="fb-source-label">
+                                        <span>{t(loc, "files.source")}</span>
+                                        <select class="fb-source" aria-label=t(loc, "files.source")
+                                            prop:value=source.clone()
+                                            on:change=move |event| {
+                                                let next = dom_value(&event);
+                                                file_source.set(next.clone());
+                                                file_query.set(String::new());
+                                                if next == "local" {
                                                     refresh_dir(file_cwd, file_entries);
-                                                }>{compose_icon("up")}</button>
-                                            }.into_view()
-                                        })}
-                                        <span class="fb-path">{cwd.clone()}</span>
-                                    </div>
-                                    <input class="fb-search" type="text"
-                                        placeholder=move || t(locale.get(), "files.search")
-                                        prop:value=move || file_query.get()
-                                        on:input=move |ev| file_query.set(event_target_value(&ev)) />
-                                    <div class="fb-list" class:grid=move || rp_grid.get()>
-                                        {move || {
-                                            let q = file_query.get();
-                                            if !q.trim().is_empty() {
-                                                let hits = file_search_hits.get();
-                                                if hits.is_empty() {
-                                                    return view! {
-                                                        <div class="rp-empty rp-files-empty">
-                                                            <p>{t(loc, "files.no_matches")}</p>
-                                                        </div>
-                                                    }.into_view();
+                                                } else {
+                                                    remote_file_cwd.set("~".into());
+                                                    refresh_remote_dir(
+                                                        next,
+                                                        remote_file_cwd,
+                                                        remote_file_entries,
+                                                        remote_file_loading,
+                                                        remote_file_error,
+                                                        file_source,
+                                                    );
                                                 }
-                                                hits.into_iter().map(|hit| {
-                                                    let name = hit.name.clone();
-                                                    let path = hit.path.clone();
-                                                    let dir = file_dir_label(&path);
-                                                    if hit.is_dir {
-                                                        let path_click = path.clone();
-                                                        view! {
-                                                            <button class="fb-row dir" on:click=move |_| {
-                                                                file_query.set(String::new());
-                                                                file_cwd.set(path_click.clone());
-                                                                refresh_dir(file_cwd, file_entries);
-                                                            }>
-                                                                <span class="fb-icon">{compose_icon("folder")}</span>
-                                                                <span class="fb-name">{name}</span>
-                                                                <span class="fb-path-rel">{dir}</span>
-                                                            </button>
-                                                        }.into_view()
+                                            }>
+                                            <option value="local">{t(loc, "files.local_project")}</option>
+                                            {ssh_contexts.into_iter().map(|context| {
+                                                let label = if context.label.trim().is_empty() {
+                                                    context.id.trim_start_matches("ssh:").to_string()
+                                                } else {
+                                                    context.label
+                                                };
+                                                view! { <option value=context.id>{format!("{label} · SSH")}</option> }
+                                            }).collect_view()}
+                                        </select>
+                                    </label>
+                                    {if source == "local" {
+                                        let cwd = file_cwd.get();
+                                        let parent = if cwd == "." { None } else { Some(parent_path(&cwd)) };
+                                        view! {
+                                            <div class="fb-crumb">
+                                                {parent.map(|p| {
+                                                    let p_click = p.clone();
+                                                    view! {
+                                                        <button class="fb-up" on:click=move |_| {
+                                                            file_query.set(String::new());
+                                                            file_cwd.set(p_click.clone());
+                                                            refresh_dir(file_cwd, file_entries);
+                                                        }>{compose_icon("up")}</button>
+                                                    }.into_view()
+                                                })}
+                                                <span class="fb-path">{cwd.clone()}</span>
+                                            </div>
+                                            <input class="fb-search" type="text"
+                                                placeholder=move || t(locale.get(), "files.search")
+                                                prop:value=move || file_query.get()
+                                                on:input=move |ev| file_query.set(event_target_value(&ev)) />
+                                            <div class="fb-list" class:grid=move || rp_grid.get()>
+                                                {move || {
+                                                    let q = file_query.get();
+                                                    if !q.trim().is_empty() {
+                                                        let hits = file_search_hits.get();
+                                                        if hits.is_empty() {
+                                                            return view! {
+                                                                <div class="rp-empty rp-files-empty">
+                                                                    <p>{t(loc, "files.no_matches")}</p>
+                                                                </div>
+                                                            }.into_view();
+                                                        }
+                                                        hits.into_iter().map(|hit| {
+                                                            let name = hit.name.clone();
+                                                            let path = hit.path.clone();
+                                                            let dir = file_dir_label(&path);
+                                                            if hit.is_dir {
+                                                                let path_click = path.clone();
+                                                                view! {
+                                                                    <button class="fb-row dir" on:click=move |_| {
+                                                                        file_query.set(String::new());
+                                                                        file_cwd.set(path_click.clone());
+                                                                        refresh_dir(file_cwd, file_entries);
+                                                                    }>
+                                                                        <span class="fb-icon">{compose_icon("folder")}</span>
+                                                                        <span class="fb-name">{name}</span>
+                                                                        <span class="fb-path-rel">{dir}</span>
+                                                                    </button>
+                                                                }.into_view()
+                                                            } else {
+                                                                let path_open = path.clone();
+                                                                view! {
+                                                                    <button class="fb-row" data-workspace-path=path.clone() on:click=move |_| {
+                                                                        open_workspace_file(path_open.clone(), modal_artifact);
+                                                                    }>
+                                                                        <span class="fb-icon">{compose_icon("doc")}</span>
+                                                                        <span class="fb-name">{name}</span>
+                                                                        <span class="fb-path-rel">{dir}</span>
+                                                                        <span class="fb-size">{format_bytes(hit.size)}</span>
+                                                                    </button>
+                                                                }.into_view()
+                                                            }
+                                                        }).collect_view()
                                                     } else {
-                                                        let path_open = path.clone();
-                                                        view! {
-                                                            <button class="fb-row" data-workspace-path=path.clone() on:click=move |_| {
-                                                                open_workspace_file(path_open.clone(), modal_artifact);
-                                                            }>
-                                                                <span class="fb-icon">{compose_icon("doc")}</span>
-                                                                <span class="fb-name">{name}</span>
-                                                                <span class="fb-path-rel">{dir}</span>
-                                                                <span class="fb-size">{format_bytes(hit.size)}</span>
-                                                            </button>
-                                                        }.into_view()
+                                                        file_entries.get().into_iter().map(|e| {
+                                                            let name = e.name.clone();
+                                                            let full = join_path(&file_cwd.get(), &name);
+                                                            if e.is_dir {
+                                                                let full_click = full.clone();
+                                                                view! {
+                                                                    <button class="fb-row dir" on:click=move |_| {
+                                                                        file_query.set(String::new());
+                                                                        file_cwd.set(full_click.clone());
+                                                                        refresh_dir(file_cwd, file_entries);
+                                                                    }>
+                                                                        <span class="fb-icon">{compose_icon("folder")}</span>
+                                                                        <span class="fb-name">{name}</span>
+                                                                    </button>
+                                                                }.into_view()
+                                                            } else {
+                                                                let full_open = full.clone();
+                                                                view! {
+                                                                    <button class="fb-row" data-workspace-path=full.clone() on:click=move |_| {
+                                                                        open_workspace_file(full_open.clone(), modal_artifact);
+                                                                    }>
+                                                                        <span class="fb-icon">{compose_icon("doc")}</span>
+                                                                        <span class="fb-name">{name}</span>
+                                                                        <span class="fb-size">{format_bytes(e.size)}</span>
+                                                                    </button>
+                                                                }.into_view()
+                                                            }
+                                                        }).collect_view()
                                                     }
-                                                }).collect_view()
-                                            } else {
-                                                file_entries.get().into_iter().map(|e| {
-                                                    let name = e.name.clone();
-                                                    let full = join_path(&file_cwd.get(), &name);
-                                                    if e.is_dir {
-                                                        let full_click = full.clone();
-                                                        view! {
-                                                            <button class="fb-row dir" on:click=move |_| {
-                                                                file_query.set(String::new());
-                                                                file_cwd.set(full_click.clone());
-                                                                refresh_dir(file_cwd, file_entries);
-                                                            }>
-                                                                <span class="fb-icon">{compose_icon("folder")}</span>
-                                                                <span class="fb-name">{name}</span>
-                                                            </button>
-                                                        }.into_view()
-                                                    } else {
-                                                        let full_open = full.clone();
-                                                        view! {
-                                                            <button class="fb-row" data-workspace-path=full.clone() on:click=move |_| {
-                                                                open_workspace_file(full_open.clone(), modal_artifact);
-                                                            }>
-                                                                <span class="fb-icon">{compose_icon("doc")}</span>
-                                                                <span class="fb-name">{name}</span>
-                                                                <span class="fb-size">{format_bytes(e.size)}</span>
-                                                            </button>
-                                                        }.into_view()
-                                                    }
-                                                }).collect_view()
-                                            }
-                                        }}
-                                    </div>
-                                    {move || project_info.get().map(|p| view! {
-                                        <div class="hint fb-root">{tf(loc, "files.root", &[("path", &p.root)])}</div>
-                                    })}
+                                                }}
+                                            </div>
+                                            {move || project_info.get().map(|p| view! {
+                                                <div class="hint fb-root">{tf(loc, "files.root", &[("path", &p.root)])}</div>
+                                            })}
+                                        }.into_view()
+                                    } else {
+                                        let cwd = remote_file_cwd.get();
+                                        let parent = if cwd == "/" || cwd == "~" {
+                                            None
+                                        } else {
+                                            Some(parent_path(&cwd))
+                                        };
+                                        let source_for_up = source.clone();
+                                        let source_for_path = source.clone();
+                                        view! {
+                                            <div class="fb-crumb remote">
+                                                {parent.map(|path| {
+                                                    let path_click = path.clone();
+                                                    let context_id = source_for_up.clone();
+                                                    view! {
+                                                        <button class="fb-up" aria-label=t(loc, "files.up") on:click=move |_| {
+                                                            remote_file_cwd.set(path_click.clone());
+                                                            refresh_remote_dir(
+                                                                context_id.clone(),
+                                                                remote_file_cwd,
+                                                                remote_file_entries,
+                                                                remote_file_loading,
+                                                                remote_file_error,
+                                                                file_source,
+                                                            );
+                                                        }>{compose_icon("up")}</button>
+                                                    }.into_view()
+                                                })}
+                                                <input class="fb-path fb-path-input" type="text"
+                                                    aria-label=t(loc, "files.go_to")
+                                                    prop:value=move || remote_file_cwd.get()
+                                                    on:input=move |event| remote_file_cwd.set(event_target_value(&event))
+                                                    on:keydown=move |event: web_sys::KeyboardEvent| {
+                                                        if event.key() == "Enter" {
+                                                            event.prevent_default();
+                                                            refresh_remote_dir(
+                                                                source_for_path.clone(),
+                                                                remote_file_cwd,
+                                                                remote_file_entries,
+                                                                remote_file_loading,
+                                                                remote_file_error,
+                                                                file_source,
+                                                            );
+                                                        }
+                                                    } />
+                                            </div>
+                                            <div class="fb-list" class:grid=move || rp_grid.get()>
+                                                {if remote_file_loading.get() {
+                                                    view! { <div class="rp-empty rp-files-empty"><p>{t(loc, "loading")}</p></div> }.into_view()
+                                                } else if let Some(error) = remote_file_error.get() {
+                                                    let retry_context = source.clone();
+                                                    view! {
+                                                        <div class="rp-empty rp-files-empty fb-remote-error">
+                                                            <p>{localize_backend(loc, &error)}</p>
+                                                            <button type="button" class="fb-retry" on:click=move |_| {
+                                                                refresh_remote_dir(
+                                                                    retry_context.clone(),
+                                                                    remote_file_cwd,
+                                                                    remote_file_entries,
+                                                                    remote_file_loading,
+                                                                    remote_file_error,
+                                                                    file_source,
+                                                                );
+                                                            }>{t(loc, "files.retry")}</button>
+                                                        </div>
+                                                    }.into_view()
+                                                } else if remote_file_entries.get().is_empty() {
+                                                    view! { <div class="rp-empty rp-files-empty"><p>{t(loc, "files.empty_remote")}</p></div> }.into_view()
+                                                } else {
+                                                    remote_file_entries.get().into_iter().map(|entry| {
+                                                        let name = entry.name.clone();
+                                                        let full = join_path(&remote_file_cwd.get(), &name);
+                                                        if entry.is_dir {
+                                                            let full_click = full.clone();
+                                                            let context_id = source.clone();
+                                                            view! {
+                                                                <button class="fb-row dir remote-dir" data-remote-path=full.clone() on:click=move |_| {
+                                                                    remote_file_cwd.set(full_click.clone());
+                                                                    refresh_remote_dir(
+                                                                        context_id.clone(),
+                                                                        remote_file_cwd,
+                                                                        remote_file_entries,
+                                                                        remote_file_loading,
+                                                                        remote_file_error,
+                                                                        file_source,
+                                                                    );
+                                                                }>
+                                                                    <span class="fb-icon">{compose_icon("folder")}</span>
+                                                                    <span class="fb-name">{name}</span>
+                                                                </button>
+                                                            }.into_view()
+                                                        } else {
+                                                            view! {
+                                                                <div class="fb-row remote-file" data-remote-path=full
+                                                                    title=t(loc, "files.remote_read_only")>
+                                                                    <span class="fb-icon">{compose_icon("doc")}</span>
+                                                                    <span class="fb-name">{name}</span>
+                                                                    <span class="fb-size">{format_bytes(entry.size)}</span>
+                                                                </div>
+                                                            }.into_view()
+                                                        }
+                                                    }).collect_view()
+                                                }}
+                                            </div>
+                                            <div class="hint fb-root">{t(loc, "files.remote_read_only")}</div>
+                                        }.into_view()
+                                    }}
                                 </div>
                             }.into_view()
                         }
@@ -5744,7 +5934,7 @@ fn App() -> impl IntoView {
                         modal_artifact.set(None);
                     })
                     on_open_path=Callback::new(move |(p, _k): (String, String)| {
-                        reveal_in_files(&p, file_cwd, file_query, file_entries, show_right, open_right_tabs, right_tab);
+                        reveal_in_files(&p, file_source, file_cwd, file_query, file_entries, show_right, open_right_tabs, right_tab);
                         modal_artifact.set(None);
                     }) />
             }

@@ -1965,6 +1965,71 @@ pub(super) fn refresh_dir(cwd: RwSignal<String>, entries: RwSignal<Vec<DirEntry>
     });
 }
 
+pub(super) fn refresh_remote_dir(
+    context_id: String,
+    cwd: RwSignal<String>,
+    entries: RwSignal<Vec<DirEntry>>,
+    loading: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+    active_source: RwSignal<String>,
+) {
+    let requested_path = cwd.get_untracked();
+    entries.set(vec![]);
+    error.set(None);
+    loading.set(true);
+    spawn_local(async move {
+        let result = invoke_checked(
+            "list_remote_dir",
+            to_value(&serde_json::json!({
+                "contextId": context_id.clone(),
+                "path": requested_path.clone(),
+            }))
+            .unwrap(),
+        )
+        .await;
+        if active_source.get_untracked() != context_id
+            || cwd.get_untracked() != requested_path
+        {
+            return;
+        }
+        loading.set(false);
+        match result {
+            Ok(value) => match serde_wasm_bindgen::from_value::<DirectoryListing>(value) {
+                Ok(listing) => {
+                    cwd.set(listing.path);
+                    entries.set(listing.entries);
+                }
+                Err(parse_error) => error.set(Some(parse_error.to_string())),
+            },
+            Err(invoke_error) => error.set(Some(js_error_text(invoke_error))),
+        }
+    });
+}
+
+pub(super) fn refresh_active_file_dir(
+    source: RwSignal<String>,
+    local_cwd: RwSignal<String>,
+    local_entries: RwSignal<Vec<DirEntry>>,
+    remote_cwd: RwSignal<String>,
+    remote_entries: RwSignal<Vec<DirEntry>>,
+    remote_loading: RwSignal<bool>,
+    remote_error: RwSignal<Option<String>>,
+) {
+    let context_id = source.get_untracked();
+    if context_id == "local" {
+        refresh_dir(local_cwd, local_entries);
+    } else {
+        refresh_remote_dir(
+            context_id,
+            remote_cwd,
+            remote_entries,
+            remote_loading,
+            remote_error,
+            source,
+        );
+    }
+}
+
 pub(super) fn refresh_file_search(query: RwSignal<String>, hits: RwSignal<Vec<FileSearchHit>>) {
     spawn_local(async move {
         let q = query.get().trim().to_string();
@@ -2121,6 +2186,7 @@ pub(super) fn close_right_tab(
 
 pub(super) fn reveal_in_files(
     path: &str,
+    file_source: RwSignal<String>,
     file_cwd: RwSignal<String>,
     file_query: RwSignal<String>,
     file_entries: RwSignal<Vec<DirEntry>>,
@@ -2128,6 +2194,7 @@ pub(super) fn reveal_in_files(
     open_right_tabs: RwSignal<Vec<RightTab>>,
     right_tab: RwSignal<RightTab>,
 ) {
+    file_source.set("local".into());
     file_query.set(String::new());
     file_cwd.set(parent_path(path));
     refresh_dir(file_cwd, file_entries);

@@ -543,6 +543,25 @@ export function tauriMock(): void {
               { name: "report.csv", is_dir: false, size: 4096 },
               { name: "config.json", is_dir: false, size: 64 },
             ];
+          case "list_remote_dir": {
+            const path = String(arg("path") ?? "~");
+            if (path === "/home/research/projects") {
+              return {
+                path,
+                entries: [
+                  { name: "rna-seq", is_dir: true, size: 0 },
+                  { name: "README.md", is_dir: false, size: 512 },
+                ],
+              };
+            }
+            return {
+              path: "/home/research",
+              entries: [
+                { name: "projects", is_dir: true, size: 0 },
+                { name: "notes.txt", is_dir: false, size: 128 },
+              ],
+            };
+          }
           case "search_files": {
             const q = String(arg("query") ?? "").toLowerCase();
             const all = [

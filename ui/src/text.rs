@@ -53,9 +53,12 @@ pub(crate) fn parent_path(path: &str) -> String {
         return ".".into();
     }
     let p = path.replace('\\', "/");
+    if p == "/" {
+        return "/".into();
+    }
     match p.rsplit_once('/') {
-        None | Some(("", _)) => ".".into(),
-        Some((a, _)) if a.is_empty() => ".".into(),
+        Some(("", _)) => "/".into(),
+        None => ".".into(),
         Some((a, _)) => a.to_string(),
     }
 }
@@ -548,7 +551,15 @@ pub(crate) fn fasta_seq_count(text: &str) -> usize {
 
 #[cfg(test)]
 mod md_catalog_tests {
-    use super::{fence_identifier_line_runs, file_kind, md_to_html, pretty_json};
+    use super::{fence_identifier_line_runs, file_kind, md_to_html, parent_path, pretty_json};
+
+    #[test]
+    fn finds_parents_for_relative_and_absolute_paths() {
+        assert_eq!(parent_path("data/results"), "data");
+        assert_eq!(parent_path("/home/research"), "/home");
+        assert_eq!(parent_path("/home"), "/");
+        assert_eq!(parent_path("/"), "/");
+    }
 
     #[test]
     fn fences_long_identifier_runs() {
