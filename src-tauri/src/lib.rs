@@ -2694,7 +2694,22 @@ async fn send_message(
     if !resume && message.trim().is_empty() {
         return Err("message is empty".into());
     }
-    let ap = state.active(window.label());
+    let mut ap = state.active(window.label());
+    // A session belongs to one project for life, but the per-window active slot
+    // can drift while it keeps running (another project opened in this window,
+    // the "main" fallback, an agent rebuild). For explicit session ids, always
+    // run the turn in the owner project — never error out on a mismatch or,
+    // worse, run tools in a stranger's workspace (#182, #194).
+    if let Some(id) = session_id.as_deref().filter(|id| !id.is_empty()) {
+        let owner = state
+            .store
+            .frame_project_id(id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if let Some(owner_id) = owner.filter(|owner_id| owner_id != &ap.id) {
+            ap = load_active_project(&state, &owner_id).await?.0;
+        }
+    }
     let _project_activity = state.begin_project_activity(&ap.id)?;
     let saved_binding = match session_id.as_deref().filter(|id| !id.is_empty()) {
         Some(id) => state
@@ -2852,6 +2867,12 @@ async fn send_message(
     let mut guard = rt.agent.lock().await;
     if rt.deleted.load(Ordering::SeqCst) {
         return Err("This session was deleted while the turn was queued.".into());
+    }
+    if guard.as_ref().is_some_and(|agent| agent.root != ap.root) {
+        // The cached agent was built from a stale window slot — its shell CWD
+        // and session file point into another project. Rebuild it below on the
+        // session's own root (#182).
+        *guard = None;
     }
     if guard.is_none() {
         let skills = active_skill_index(&state.store, &ap).await;
@@ -4031,11 +4052,13 @@ async fn cancel_project_sessions(state: &AppState, project_id: &str) {
 /// each session's agent already captured its own root/skills/memory at creation,
 /// so cross-project turns run in parallel and stay monitorable on the dashboard
 /// (#52). Deleting a project stops only *its* sessions (see `delete_project`).
-async fn set_active_project(
+/// Build a project's ActiveProject bundle (root, skills, memory) by id, plus
+/// its (name, workspace) for callers that need them. Pure load — does not touch
+/// the per-window active slot.
+async fn load_active_project(
     state: &AppState,
-    label: &str,
     id: &str,
-) -> Result<(String, String), String> {
+) -> Result<(ActiveProject, String, String), String> {
     let (name, ws) = state
         .store
         .get_project(id)
@@ -4045,15 +4068,26 @@ async fn set_active_project(
     let root = ensure_writable(PathBuf::from(&ws), &state.app_data);
     let skills = Arc::new(SkillIndex::load(&skill_paths(&root)));
     let memory = Arc::new(MemoryManager::new(&root));
-    state.set_active(
-        label,
+    Ok((
         ActiveProject {
             id: id.to_string(),
-            root: root.clone(),
+            root,
             skills,
             memory,
         },
-    );
+        name,
+        ws,
+    ))
+}
+
+async fn set_active_project(
+    state: &AppState,
+    label: &str,
+    id: &str,
+) -> Result<(String, String), String> {
+    let (ap, name, ws) = load_active_project(state, id).await?;
+    let root = ap.root.clone();
+    state.set_active(label, ap);
     state.set_active_frame(label, None);
     {
         state.bootstrap.lock().unwrap().workspace = root.to_string_lossy().into_owned();
