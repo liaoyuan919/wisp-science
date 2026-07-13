@@ -610,6 +610,12 @@ pub(crate) struct DirEntry {
 }
 
 #[derive(Deserialize, Clone)]
+pub(crate) struct DirectoryListing {
+    pub(crate) path: String,
+    pub(crate) entries: Vec<DirEntry>,
+}
+
+#[derive(Deserialize, Clone)]
 pub(crate) struct FileSearchHit {
     pub(crate) path: String,
     pub(crate) name: String,

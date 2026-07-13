@@ -4,11 +4,54 @@ use serde::Serialize;
 use std::path::Path;
 use tauri::{State, WebviewWindow};
 
-#[derive(Serialize, Clone)]
+const REMOTE_DIR_PROTOCOL: &[u8] = b"WISP_REMOTE_DIR_V1\0";
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub(super) struct DirEntry {
     name: String,
     is_dir: bool,
     size: u64,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub(super) struct DirectoryListing {
+    path: String,
+    entries: Vec<DirEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteDirectoryCommand {
+    program: String,
+    args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteDirectoryOutput {
+    status: i32,
+    stdout: Vec<u8>,
+    stderr: String,
+}
+
+trait RemoteDirectoryRunner: Send {
+    fn run(&mut self, command: &RemoteDirectoryCommand) -> Result<RemoteDirectoryOutput, String>;
+}
+
+struct ProcessRemoteDirectoryRunner;
+
+impl RemoteDirectoryRunner for ProcessRemoteDirectoryRunner {
+    fn run(&mut self, command: &RemoteDirectoryCommand) -> Result<RemoteDirectoryOutput, String> {
+        let mut process = std::process::Command::new(&command.program);
+        process.args(&command.args);
+        wisp_tools::process::hide_console(&mut process);
+        let output = process
+            .output()
+            .map_err(|e| format!("failed to run {}: {e}", command.program))?;
+        Ok(RemoteDirectoryOutput {
+            status: output.status.code().unwrap_or(-1),
+            stdout: output.stdout,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        })
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -170,6 +213,173 @@ pub(super) fn list_dir(
     Ok(entries)
 }
 
+fn validate_remote_path(path: &str) -> Result<(), String> {
+    if path.len() > 4096 {
+        return Err("Remote directory path exceeds 4096 bytes".into());
+    }
+    if path.contains(['\0', '\n', '\r']) {
+        return Err("Remote directory path must not contain NUL or line breaks".into());
+    }
+    Ok(())
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn remote_path_expression(path: Option<&str>) -> Result<String, String> {
+    let path = path
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .unwrap_or("~");
+    validate_remote_path(path)?;
+    if path == "~" {
+        Ok("\"$HOME\"".into())
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        Ok(format!("\"$HOME\"/{}", shell_single_quote(rest)))
+    } else {
+        Ok(shell_single_quote(path))
+    }
+}
+
+fn remote_directory_script(path: Option<&str>) -> Result<String, String> {
+    let path = remote_path_expression(path)?;
+    Ok(format!(
+        r#"LC_ALL=C
+dir={path}
+case "$dir" in -*) dir="./$dir" ;; esac
+if ! CDPATH= cd "$dir" 2>/dev/null; then
+  printf 'Cannot open remote directory: %s\n' "$dir" >&2
+  exit 66
+fi
+printf 'WISP_REMOTE_DIR_V1\000%s\000' "$(pwd -P)"
+for entry in ./*; do
+  if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then
+    continue
+  fi
+  name=${{entry#./}}
+  if [ -d "$entry" ]; then
+    kind=d
+    size=0
+  else
+    kind=f
+    size=$(stat -c '%s' "$entry" 2>/dev/null) ||
+      size=$(stat -f '%z' "$entry" 2>/dev/null) ||
+      size=0
+  fi
+  printf '%s\000%s\000%s\000' "$kind" "$size" "$name"
+done"#
+    ))
+}
+
+fn build_remote_directory_command(
+    context: &wisp_store::ExecutionContext,
+    path: Option<&str>,
+) -> Result<RemoteDirectoryCommand, String> {
+    let connection = crate::ssh_hosts::SshConnection::from_execution_context(context)?;
+    let mut args = connection.ssh_args()?;
+    args.push(remote_directory_script(path)?);
+    Ok(RemoteDirectoryCommand {
+        program: "ssh".into(),
+        args,
+    })
+}
+
+fn protocol_payload(stdout: &[u8]) -> Result<&[u8], String> {
+    stdout
+        .windows(REMOTE_DIR_PROTOCOL.len())
+        .position(|window| window == REMOTE_DIR_PROTOCOL)
+        .map(|start| &stdout[start + REMOTE_DIR_PROTOCOL.len()..])
+        .ok_or_else(|| {
+            "Remote directory response did not contain the expected protocol marker".into()
+        })
+}
+
+fn parse_remote_directory(stdout: &[u8]) -> Result<DirectoryListing, String> {
+    let fields = protocol_payload(stdout)?
+        .split(|byte| *byte == 0)
+        .collect::<Vec<_>>();
+    let Some(path) = fields.first().filter(|field| !field.is_empty()) else {
+        return Err("Remote directory response omitted its path".into());
+    };
+    let records = &fields[1..];
+    let records = if records.last().is_some_and(|field| field.is_empty()) {
+        &records[..records.len() - 1]
+    } else {
+        records
+    };
+    if records.len() % 3 != 0 {
+        return Err("Remote directory response contained an incomplete entry".into());
+    }
+    let mut entries = Vec::with_capacity(records.len() / 3);
+    for record in records.chunks_exact(3) {
+        let is_dir = match record[0] {
+            b"d" => true,
+            b"f" => false,
+            _ => return Err("Remote directory response contained an invalid entry kind".into()),
+        };
+        let size = String::from_utf8_lossy(record[1])
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| "Remote directory response contained an invalid file size".to_string())?;
+        entries.push(DirEntry {
+            name: String::from_utf8_lossy(record[2]).into_owned(),
+            is_dir,
+            size,
+        });
+    }
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(DirectoryListing {
+        path: String::from_utf8_lossy(path).into_owned(),
+        entries,
+    })
+}
+
+fn list_remote_dir_with_runner(
+    context: &wisp_store::ExecutionContext,
+    path: Option<&str>,
+    runner: &mut dyn RemoteDirectoryRunner,
+) -> Result<DirectoryListing, String> {
+    let command = build_remote_directory_command(context, path)?;
+    let output = runner.run(&command)?;
+    if output.status != 0 {
+        let detail = if output.stderr.is_empty() {
+            "no error details returned".to_string()
+        } else {
+            output.stderr
+        };
+        return Err(format!(
+            "Remote directory request failed (exit {}): {detail}",
+            output.status
+        ));
+    }
+    parse_remote_directory(&output.stdout)
+}
+
+#[tauri::command]
+pub(super) async fn list_remote_dir(
+    state: State<'_, AppState>,
+    context_id: String,
+    path: Option<String>,
+) -> Result<DirectoryListing, String> {
+    let context = state
+        .store
+        .get_execution_context(&context_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Execution context not found: {context_id}"))?;
+    tokio::task::spawn_blocking(move || {
+        let mut runner = ProcessRemoteDirectoryRunner;
+        list_remote_dir_with_runner(&context, path.as_deref(), &mut runner)
+    })
+    .await
+    .map_err(|e| format!("Remote directory task failed: {e}"))?
+}
+
 pub(super) fn read_file_at(
     root: &Path,
     path: String,
@@ -225,6 +435,117 @@ pub(super) fn read_file(
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    struct FakeRemoteDirectoryRunner {
+        output: Option<Result<RemoteDirectoryOutput, String>>,
+        commands: Vec<RemoteDirectoryCommand>,
+    }
+
+    impl FakeRemoteDirectoryRunner {
+        fn returning(output: RemoteDirectoryOutput) -> Self {
+            Self {
+                output: Some(Ok(output)),
+                commands: Vec::new(),
+            }
+        }
+    }
+
+    impl RemoteDirectoryRunner for FakeRemoteDirectoryRunner {
+        fn run(
+            &mut self,
+            command: &RemoteDirectoryCommand,
+        ) -> Result<RemoteDirectoryOutput, String> {
+            self.commands.push(command.clone());
+            self.output.take().expect("fake output configured")
+        }
+    }
+
+    fn ssh_context() -> wisp_store::ExecutionContext {
+        let mut context = wisp_store::ExecutionContext::new("ssh:gpu", "GPU").unwrap();
+        context.config_json = serde_json::json!({
+            "alias": "gpu.example",
+            "user": "researcher",
+            "port": 2222,
+            "identity_file": "/tmp/test-key"
+        })
+        .to_string();
+        context
+    }
+
+    #[test]
+    fn remote_directory_command_uses_context_connection_and_quotes_path() {
+        let command =
+            build_remote_directory_command(&ssh_context(), Some("/work/O'Brien; printf unsafe"))
+                .unwrap();
+        assert_eq!(command.program, "ssh");
+        assert!(command.args.windows(2).any(|args| args == ["-p", "2222"]));
+        assert!(command
+            .args
+            .windows(2)
+            .any(|args| args == ["-i", "/tmp/test-key"]));
+        assert!(command
+            .args
+            .iter()
+            .any(|arg| arg == "researcher@gpu.example"));
+        let script = command.args.last().unwrap();
+        assert!(script.contains("dir='/work/O'\"'\"'Brien; printf unsafe'"));
+        assert!(script.contains("WISP_REMOTE_DIR_V1\\000"));
+        assert!(script.contains("stat -c '%s'"));
+        assert!(script.contains("stat -f '%z'"));
+        assert!(!script.contains("wc -c"));
+    }
+
+    #[test]
+    fn remote_directory_rejects_paths_with_line_breaks() {
+        let error = remote_directory_script(Some("/work\nmalformed")).unwrap_err();
+        assert!(error.contains("line breaks"));
+    }
+
+    #[test]
+    fn remote_directory_runner_parses_banner_and_sorts_directories_first() {
+        let stdout = b"login banner\nWISP_REMOTE_DIR_V1\0/home/research\0f\012\0notes.txt\0d\00\0projects\0f\03\0a.csv\0".to_vec();
+        let mut runner = FakeRemoteDirectoryRunner::returning(RemoteDirectoryOutput {
+            status: 0,
+            stdout,
+            stderr: String::new(),
+        });
+        let listing = list_remote_dir_with_runner(&ssh_context(), Some("~"), &mut runner).unwrap();
+        assert_eq!(listing.path, "/home/research");
+        assert_eq!(
+            listing.entries,
+            vec![
+                DirEntry {
+                    name: "projects".into(),
+                    is_dir: true,
+                    size: 0,
+                },
+                DirEntry {
+                    name: "a.csv".into(),
+                    is_dir: false,
+                    size: 3,
+                },
+                DirEntry {
+                    name: "notes.txt".into(),
+                    is_dir: false,
+                    size: 12,
+                },
+            ]
+        );
+        assert_eq!(runner.commands.len(), 1);
+    }
+
+    #[test]
+    fn remote_directory_runner_surfaces_ssh_failure() {
+        let mut runner = FakeRemoteDirectoryRunner::returning(RemoteDirectoryOutput {
+            status: 255,
+            stdout: Vec::new(),
+            stderr: "Permission denied".into(),
+        });
+        let error =
+            list_remote_dir_with_runner(&ssh_context(), Some("~"), &mut runner).unwrap_err();
+        assert!(error.contains("exit 255"));
+        assert!(error.contains("Permission denied"));
+    }
 
     #[test]
     fn collect_file_search_hits_matches_by_name_across_dirs() {

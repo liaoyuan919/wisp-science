@@ -44,7 +44,7 @@ mod workspace_manifest;
 mod wsl_contexts;
 
 use artifact_commands::{register_artifact, save_workspace_file_by_kind, upload_file};
-use file_browser::{list_dir, read_file, read_file_at, search_files, FileContent};
+use file_browser::{list_dir, list_remote_dir, read_file, read_file_at, search_files, FileContent};
 use session_export::{capture_env, export_session, get_artifact_provenance};
 #[cfg(test)]
 use skill_commands::{copy_dir_recursive, validate_skill_name};
@@ -5325,6 +5325,7 @@ pub fn run() {
             models::set_active_model,
             settings_commands::validate_settings,
             list_dir,
+            list_remote_dir,
             search_files,
             read_file,
             list_artifacts,

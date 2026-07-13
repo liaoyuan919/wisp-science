@@ -786,6 +786,36 @@ test("workspace file context menu attaches its path to the composer", async ({ p
   await expect(composer(page)).toHaveValue("");
 });
 
+test("Files browses registered SSH contexts without a real remote host", async ({ page }) => {
+  await enterApp(page);
+  await page.getByRole("button", { name: "Files" }).click();
+
+  await page.getByRole("combobox", { name: "File location" }).selectOption("ssh:gpu-server");
+  await expect(page.getByRole("textbox", { name: "Remote path" })).toHaveValue("/home/research");
+  await expect(page.locator('.remote-dir[data-remote-path="/home/research/projects"]')).toBeVisible();
+  const remoteFile = page.locator('.remote-file[data-remote-path="/home/research/notes.txt"]');
+  await expect(remoteFile).toContainText("notes.txt");
+  await expect.poll(() => lastInvokeArgs(page, "list_remote_dir")).toMatchObject({
+    contextId: "ssh:gpu-server",
+    path: "~",
+  });
+
+  await remoteFile.click({ button: "right" });
+  await expect(page.locator(".ctx-menu").getByRole("button", { name: "Download" })).toBeVisible();
+  await expect(page.locator(".ctx-menu").getByRole("button", { name: "Open in center" })).toHaveCount(0);
+  await page.locator(".ctx-menu").getByRole("button", { name: "Download" }).click();
+  await expect.poll(() => lastInvokeArgs(page, "download_file")).toMatchObject({
+    path: "ssh://gpu-server/home/research/notes.txt",
+  });
+
+  await page.locator('.remote-dir[data-remote-path="/home/research/projects"]').click();
+  await expect(page.getByRole("textbox", { name: "Remote path" })).toHaveValue("/home/research/projects");
+  await expect(page.locator('.remote-file[data-remote-path="/home/research/projects/README.md"]')).toBeVisible();
+
+  await page.getByRole("button", { name: "Parent directory" }).click();
+  await expect(page.getByRole("textbox", { name: "Remote path" })).toHaveValue("/home/research");
+});
+
 test("pasted image attaches to the composer", async ({ page }) => {
   await enterApp(page);
   await composer(page).evaluate((el) => {

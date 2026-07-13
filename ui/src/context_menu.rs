@@ -40,6 +40,21 @@ fn item(action: &str, label: String, payload: String) -> CtxItem {
     }
 }
 
+fn remote_file_download_uri(context_id: &str, path: &str) -> Option<String> {
+    let alias = context_id.strip_prefix("ssh:")?;
+    if alias.is_empty()
+        || !alias
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        || path.is_empty()
+        || path.contains(['\0', '\n', '\r'])
+    {
+        return None;
+    }
+    let separator = if path.starts_with('/') { "" } else { "/" };
+    Some(format!("ssh://{alias}{separator}{path}"))
+}
+
 fn event_target(ev: &web_sys::MouseEvent) -> Option<web_sys::Element> {
     ev.target()?.dyn_into::<web_sys::Element>().ok()
 }
@@ -288,6 +303,27 @@ pub fn build(ev: &web_sys::MouseEvent, locale: Locale, _can_export: bool) -> Opt
         }
     }
 
+    if let Some(file) = closest(
+        &target,
+        ".fb-row.remote-file[data-remote-path][data-remote-context]",
+    ) {
+        let path = file.get_attribute("data-remote-path").unwrap_or_default();
+        let context_id = file
+            .get_attribute("data-remote-context")
+            .unwrap_or_default();
+        if let Some(uri) = remote_file_download_uri(&context_id, &path) {
+            return Some(CtxMenu {
+                x,
+                y,
+                items: vec![item(
+                    "downloadFile",
+                    i18n::t(locale, "artifact.download"),
+                    uri,
+                )],
+            });
+        }
+    }
+
     if let Some(file) = closest(&target, ".fb-row[data-workspace-path]") {
         let path = file
             .get_attribute("data-workspace-path")
@@ -339,6 +375,28 @@ pub fn run_action(action: &str, payload: &str, copy: impl Fn(String)) {
             copy(payload.to_string());
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod remote_file_tests {
+    use super::remote_file_download_uri;
+
+    #[test]
+    fn builds_download_uri_for_absolute_and_home_paths() {
+        assert_eq!(
+            remote_file_download_uri("ssh:gpu-server", "/home/research/results.csv"),
+            Some("ssh://gpu-server/home/research/results.csv".into())
+        );
+        assert_eq!(
+            remote_file_download_uri("ssh:gpu-server", "~/results.csv"),
+            Some("ssh://gpu-server/~/results.csv".into())
+        );
+        assert_eq!(remote_file_download_uri("local", "/tmp/results.csv"), None);
+        assert_eq!(
+            remote_file_download_uri("ssh:bad/alias", "/tmp/results.csv"),
+            None
+        );
     }
 }
 
