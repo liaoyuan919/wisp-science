@@ -155,7 +155,9 @@ attaches an artifact or session to the composer.
 
 On macOS, the native app menu mirrors the desktop command surface, including
 project/session actions plus `Check for Updates…`. The same update check is
-also available from the Settings page and the Windows in-window Help menu.
+also available from the Settings page and the Windows in-window Help menu. It
+now reports the result in an in-app dialog, including whether you are already
+up to date or a newer release is available on GitHub Releases.
 
 ### Bundled demos
 

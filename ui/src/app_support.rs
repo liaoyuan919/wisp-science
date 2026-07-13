@@ -206,6 +206,14 @@ pub(super) enum UiConfirm {
     DeleteSession(String),
 }
 
+#[derive(Clone)]
+pub(super) enum UpdateCheckModal {
+    Checking,
+    Available { version: String, release_url: String },
+    UpToDate { version: String },
+    Failed { message: String },
+}
+
 pub(super) fn now_ms() -> u64 {
     js_sys::Date::now() as u64
 }

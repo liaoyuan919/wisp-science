@@ -65,6 +65,24 @@ async function invokeArgsList(page: Page, cmd: string) {
   }, cmd);
 }
 
+async function setMockUpdateCheck(page: Page, value: Record<string, unknown>) {
+  await page.evaluate((payload) => {
+    (window as any).__setMockUpdateCheck(payload);
+  }, value);
+}
+
+async function setMockUpdateCheckPending(page: Page, pending: boolean) {
+  await page.evaluate((value) => {
+    (window as any).__setMockUpdateCheckPending(value);
+  }, pending);
+}
+
+async function resolveMockUpdateCheck(page: Page) {
+  await page.evaluate(() => {
+    (window as any).__resolveMockUpdateCheck();
+  });
+}
+
 test.beforeEach(async ({ page }) => {
   // Install the Tauri bridge mock before the page's wasm runs.
   await page.addInitScript(tauriMock);
@@ -1116,6 +1134,81 @@ test("settings can validate current API config", async ({ page }) => {
   await openModelsSettings(page);
   await page.getByRole("button", { name: "Valid" }).click();
   await expect(page.locator(".settings-status")).toHaveText("Validated openai with deepseek-v4-pro");
+});
+
+test("check for updates shows an up-to-date modal", async ({ page }) => {
+  await enterApp(page);
+  await page.getByRole("button", { name: "Settings" }).click();
+  await setMockUpdateCheck(page, {
+    current_version: "0.9.0",
+    latest_version: "0.9.0",
+    update_available: false,
+  });
+
+  await page.getByRole("button", { name: "Check for updates" }).click();
+  const modal = page.getByTestId("update-check-modal");
+  await expect(modal).toBeVisible();
+  await expect(modal).toContainText("You're up to date");
+  await expect(modal).toContainText("Wisp 0.9.0 is already the latest version.");
+  await modal.getByRole("button", { name: "OK" }).click();
+  await expect(modal).toHaveCount(0);
+});
+
+test("check for updates shows an available-update modal before opening releases", async ({ page }) => {
+  await enterApp(page);
+  await page.getByRole("button", { name: "Settings" }).click();
+  await setMockUpdateCheck(page, {
+    current_version: "0.9.0",
+    latest_version: "1.2.3",
+    update_available: true,
+    release_url: "https://github.com/xuzhougeng/wisp-science/releases/tag/v1.2.3",
+  });
+
+  await page.getByRole("button", { name: "Check for updates" }).click();
+  const modal = page.getByTestId("update-check-modal");
+  await expect(modal).toBeVisible();
+  await expect(modal).toContainText("Update available");
+  await expect(modal).toContainText("Wisp 1.2.3 is available.");
+  await expect(await lastInvokeArgs(page, "open_external_url")).toBeNull();
+  await page.getByTestId("update-check-open-releases").click();
+  await expect(modal).toHaveCount(0);
+  await expect.poll(() => lastInvokeArgs(page, "open_external_url")).toMatchObject({
+    url: "https://github.com/xuzhougeng/wisp-science/releases/tag/v1.2.3",
+  });
+});
+
+test("command palette check for updates also shows the result modal", async ({ page }) => {
+  await enterApp(page);
+  await setMockUpdateCheck(page, {
+    current_version: "0.9.0",
+    latest_version: "0.9.0",
+    update_available: false,
+  });
+
+  await page.keyboard.press("Control+p");
+  const input = page.locator("#action-palette-input");
+  await input.fill("check for updates");
+  await input.press("Enter");
+
+  const modal = page.getByTestId("update-check-modal");
+  await expect(modal).toBeVisible();
+  await expect(modal).toContainText("You're up to date");
+});
+
+test("command palette click shows checking feedback immediately", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".proj-card-main")).not.toHaveCount(0);
+  await setMockUpdateCheckPending(page, true);
+
+  await page.keyboard.press("Control+p");
+  await page.getByRole("button", { name: "Check for updates" }).click();
+
+  const modal = page.getByTestId("update-check-modal");
+  await expect(modal).toBeVisible();
+  await expect(modal).toContainText("Checking for updates");
+  await expect(modal).toContainText("Contacting GitHub Releases");
+  await resolveMockUpdateCheck(page);
+  await expect(modal).toContainText("You're up to date", { timeout: 2_000 });
 });
 
 test("credentials settings include SCIMaster and save its key", async ({ page }) => {

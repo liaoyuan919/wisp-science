@@ -404,18 +404,8 @@ fn App() -> impl IntoView {
     let side_chat_model_menu_open = create_rw_signal(false);
     let settings_busy = create_rw_signal(false);
     let settings_message = create_rw_signal::<Option<(bool, String)>>(None);
-    // Check asynchronously on every launch. Network failures stay silent so an
-    // offline GitHub request can never delay or interrupt the local-first app.
-    spawn_local(async move {
-        let Ok(value) = invoke_checked("check_for_updates", JsValue::UNDEFINED).await else {
-            return;
-        };
-        if let Ok(update) = serde_wasm_bindgen::from_value::<UpdateCheck>(value) {
-            if update.update_available {
-                open_external_url(update.release_url);
-            }
-        }
-    });
+    let update_check_busy = create_rw_signal(false);
+    let update_check_modal = create_rw_signal::<Option<UpdateCheckModal>>(None);
     // Set when a send fails because no API key is configured, so the status bar
     // can offer a one-click jump to Settings instead of a dead-end message.
     let needs_api_key = create_rw_signal(false);
@@ -1947,16 +1937,19 @@ fn App() -> impl IntoView {
     let composer_blocked = move || uploading.get();
 
     let run_update_check = Rc::new(move || {
-        if settings_busy.get() {
+        if update_check_busy.get() {
+            update_check_modal.set(Some(UpdateCheckModal::Checking));
             return;
         }
         let checking = t(locale.get(), "status.checking_updates").to_string();
-        settings_busy.set(true);
+        update_check_busy.set(true);
+        update_check_modal.set(Some(UpdateCheckModal::Checking));
         settings_message.set(Some((true, checking.clone())));
         status.set(checking);
         let msg = settings_message;
-        let busy = settings_busy;
+        let busy = update_check_busy;
         let loc = locale;
+        let modal = update_check_modal;
         let status_msg = status;
         spawn_local(async move {
             match invoke_checked("check_for_updates", JsValue::UNDEFINED).await {
@@ -1969,7 +1962,10 @@ fn App() -> impl IntoView {
                         );
                         msg.set(Some((true, text.clone())));
                         status_msg.set(text);
-                        open_external_url(update.release_url);
+                        modal.set(Some(UpdateCheckModal::Available {
+                            version: update.latest_version,
+                            release_url: update.release_url,
+                        }));
                     }
                     Ok(update) => {
                         let text = tf(
@@ -1979,17 +1975,22 @@ fn App() -> impl IntoView {
                         );
                         msg.set(Some((true, text.clone())));
                         status_msg.set(text);
+                        modal.set(Some(UpdateCheckModal::UpToDate {
+                            version: update.current_version,
+                        }));
                     }
                     Err(_) => {
                         let text = t(loc.get(), "status.update_check_complete").to_string();
                         msg.set(Some((true, text.clone())));
-                        status_msg.set(text);
+                        status_msg.set(text.clone());
+                        modal.set(Some(UpdateCheckModal::Failed { message: text }));
                     }
                 },
                 Err(err) => {
                     let text = localize_backend(loc.get(), &js_error_text(err));
                     msg.set(Some((false, text.clone())));
-                    status_msg.set(text);
+                    status_msg.set(text.clone());
+                    modal.set(Some(UpdateCheckModal::Failed { message: text }));
                 }
             }
             busy.set(false);
@@ -3028,6 +3029,11 @@ fn App() -> impl IntoView {
         if ev.key() != "Escape" || ev.default_prevented() || ev.is_composing() {
             return;
         }
+        if update_check_modal.get().is_some() {
+            ev.prevent_default();
+            update_check_modal.set(None);
+            return;
+        }
         if action_palette_open.get() {
             ev.prevent_default();
             action_palette_open.set(false);
@@ -3710,6 +3716,87 @@ fn App() -> impl IntoView {
             open_project_session=palette_open_session
             open_settings=Callback::new(move |section: Option<String>| open_settings_fn(section))
         />
+        {move || update_check_modal.get().map(|modal| match modal {
+            UpdateCheckModal::Checking => view! {
+                <div class="overlay">
+                    <div class="modal confirm-modal update-check-modal" data-testid="update-check-modal">
+                        <h2>{move || t(locale.get(), "update_modal.checking_title")}</h2>
+                        <div class="hint">{move || t(locale.get(), "update_modal.checking_body")}</div>
+                    </div>
+                </div>
+            }
+            .into_view(),
+            UpdateCheckModal::Available { version, release_url } => {
+                let body = tf(locale.get(), "update_modal.available_body", &[("version", &version)]);
+                view! {
+                    <div class="overlay">
+                        <div class="modal confirm-modal update-check-modal" data-testid="update-check-modal">
+                            <h2>{move || t(locale.get(), "update_modal.available_title")}</h2>
+                            <div class="hint">{body}</div>
+                            <div class="row">
+                                <button
+                                    type="button"
+                                    on:click=move |_| update_check_modal.set(None)
+                                >
+                                    {move || t(locale.get(), "update_modal.later")}
+                                </button>
+                                <button
+                                    type="button"
+                                    class="primary"
+                                    data-testid="update-check-open-releases"
+                                    on:click=move |_| {
+                                        open_external_url(release_url.clone());
+                                        update_check_modal.set(None);
+                                    }
+                                >
+                                    {move || t(locale.get(), "update_modal.open_releases")}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                }
+                .into_view()
+            }
+            UpdateCheckModal::UpToDate { version } => {
+                let body = tf(locale.get(), "update_modal.up_to_date_body", &[("version", &version)]);
+                view! {
+                    <div class="overlay">
+                        <div class="modal confirm-modal update-check-modal" data-testid="update-check-modal">
+                            <h2>{move || t(locale.get(), "update_modal.up_to_date_title")}</h2>
+                            <div class="hint">{body}</div>
+                            <div class="row">
+                                <button
+                                    type="button"
+                                    class="primary"
+                                    on:click=move |_| update_check_modal.set(None)
+                                >
+                                    {move || t(locale.get(), "update_modal.ok")}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                }
+                .into_view()
+            }
+            UpdateCheckModal::Failed { message } => view! {
+                <div class="overlay">
+                    <div class="modal confirm-modal update-check-modal" data-testid="update-check-modal">
+                        <h2>{move || t(locale.get(), "update_modal.failed_title")}</h2>
+                        <div class="hint">{message}</div>
+                        <div class="row">
+                            <button
+                                type="button"
+                                class="primary"
+                                on:click=move |_| update_check_modal.set(None)
+                            >
+                                {move || t(locale.get(), "update_modal.ok")}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            }
+            .into_view(),
+        })}
         <div class="app"
             class:app-entering=move || app_shell_entering.get()
             class:app-hidden=move || show_projects.get() && !show_settings.get() && modal_artifact.get().is_none()
