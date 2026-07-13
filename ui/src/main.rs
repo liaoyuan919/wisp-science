@@ -3243,6 +3243,13 @@ fn App() -> impl IntoView {
             status.set(String::new());
             show_proj_menu.set(false);
             demo_mode.set(false);
+            // Stash the transcript we're leaving, like every other switch path —
+            // dropping it made running sessions "roll back" on return (#194).
+            if let Some(old) = active_session.get() {
+                transcripts.update(|m| {
+                    m.insert(old, items.get());
+                });
+            }
             items.set(vec![]);
             active_session.set(None);
             collapsed_folders.set(HashSet::new());
