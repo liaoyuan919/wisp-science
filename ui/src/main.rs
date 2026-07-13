@@ -2515,6 +2515,16 @@ fn App() -> impl IntoView {
             // session switching and restart semantics identical.
             items.set(transcripts.with(|m| m.get(&id).cloned().unwrap_or_default()));
             force_chat_bottom();
+            // Still retarget the backend's viewed-session marker so uploads
+            // attach here (#194). Not `load_session`: that would overwrite the
+            // running turn's persisted seq with the DB snapshot.
+            spawn_local(async move {
+                let _ = invoke(
+                    "set_viewed_session",
+                    to_value(&serde_json::json!({ "id": id })).unwrap(),
+                )
+                .await;
+            });
             return;
         }
         // Idle session: load from DB and overwrite any stale cache entry.
