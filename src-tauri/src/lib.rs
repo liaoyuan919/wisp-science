@@ -4408,6 +4408,16 @@ async fn load_session(
     Ok(items)
 }
 
+/// Mark which session this window is viewing without loading it. The UI calls
+/// this instead of `load_session` when switching to a *running* session (it
+/// renders the cached streaming transcript), so uploads still attach to the
+/// viewed session (#194) — `load_session` would clobber the runtime's
+/// `last_seq` with the DB snapshot mid-stream.
+#[tauri::command]
+fn set_viewed_session(state: State<'_, AppState>, window: tauri::WebviewWindow, id: String) {
+    state.set_active_frame(window.label(), Some(id));
+}
+
 #[tauri::command]
 async fn list_artifacts(
     state: State<'_, AppState>,
@@ -5272,6 +5282,7 @@ pub fn run() {
             search_sessions,
             read_artifact,
             missing_files,
+            set_viewed_session,
             upload_file,
             register_artifact,
             save_workspace_file_by_kind,
