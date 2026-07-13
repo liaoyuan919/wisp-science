@@ -543,7 +543,7 @@ fn App() -> impl IntoView {
             active_acp_agent_id.set(next);
         });
     });
-    refresh_sessions(sessions);
+    refresh_sessions(sessions, pending_turns, running);
     refresh_folders(folders);
 
     // `busy` is "the active session is currently streaming" — derived from the
@@ -1112,7 +1112,7 @@ fn App() -> impl IntoView {
                 if stopping_session.get().as_deref() == Some(&frame_id) {
                     stopping_session.set(None);
                 }
-                refresh_sessions(sessions);
+                refresh_sessions(sessions, pending_turns, running);
             }
             AgentEvent::Error { frame_id, message } => {
                 flush_now();
@@ -1577,7 +1577,7 @@ fn App() -> impl IntoView {
                     if let Some(agent_id) = agent_id {
                         active_acp_agent_id.set(Some(agent_id));
                     }
-                    refresh_sessions(sessions);
+                    refresh_sessions(sessions, pending_turns, running);
                 }
                 Err(error) => {
                     let raw = js_error_text(error);
@@ -1765,7 +1765,7 @@ fn App() -> impl IntoView {
                 items.set(prefix_items);
                 input.set(draft);
                 active_session.set(Some(id));
-                refresh_sessions(sessions);
+                refresh_sessions(sessions, pending_turns, running);
                 focus_composer();
             });
         }
@@ -1850,7 +1850,7 @@ fn App() -> impl IntoView {
                                 }
                             }
                         }
-                        refresh_sessions(sessions);
+                        refresh_sessions(sessions, pending_turns, running);
                     }
                     Err(err) => {
                         let loc = locale.get();
@@ -2410,7 +2410,7 @@ fn App() -> impl IntoView {
             };
             active_session.set(Some(id));
             items.set(vec![]);
-            refresh_sessions(sessions);
+            refresh_sessions(sessions, pending_turns, running);
             focus_composer();
         });
     };
@@ -2457,7 +2457,7 @@ fn App() -> impl IntoView {
                 running.update(|r| {
                     r.insert(id.clone());
                 });
-                refresh_sessions(sessions);
+                refresh_sessions(sessions, pending_turns, running);
                 let arg = to_value(&SendMessageArgs {
                     session_id: Some(id.clone()),
                     message: text,
@@ -2475,7 +2475,7 @@ fn App() -> impl IntoView {
                         running.update(|r| {
                             r.remove(&id);
                         });
-                        refresh_sessions(sessions);
+                        refresh_sessions(sessions, pending_turns, running);
                     }
                     Err(err) => {
                         let loc = locale.get();
@@ -2688,7 +2688,7 @@ fn App() -> impl IntoView {
             };
             active_session.set(Some(id.clone()));
             items.set(vec![]);
-            refresh_sessions(sessions);
+            refresh_sessions(sessions, pending_turns, running);
             let arg = to_value(&SendMessageArgs {
                 session_id: Some(id.clone()),
                 message: prompt,
@@ -2700,7 +2700,7 @@ fn App() -> impl IntoView {
             .unwrap();
             begin_pending_turn(pending_turns, running, &id);
             match invoke_checked("send_message", arg).await {
-                Ok(_) => refresh_sessions(sessions),
+                Ok(_) => refresh_sessions(sessions, pending_turns, running),
                 Err(err) => {
                     let raw = js_error_text(err);
                     if raw.contains(NO_API_KEY_MARK) {
@@ -2989,7 +2989,7 @@ fn App() -> impl IntoView {
                                 to_value(&serde_json::json!({ "id": id, "folderId": folder_id }))
                                     .unwrap();
                             if invoke_checked("move_session", arg).await.is_ok() {
-                                refresh_sessions(sessions);
+                                refresh_sessions(sessions, pending_turns, running);
                             }
                         });
                     }
@@ -3346,7 +3346,7 @@ fn App() -> impl IntoView {
                 if let Some(session_id) = session_id {
                     load_session.call(session_id);
                 }
-                refresh_sessions(sessions);
+                refresh_sessions(sessions, pending_turns, running);
                 refresh_folders(folders);
             });
         })
@@ -3417,7 +3417,7 @@ fn App() -> impl IntoView {
                 let arg = to_value(&serde_json::json!({ "id": session_id, "folderId": folder_id }))
                     .unwrap();
                 if invoke_checked("move_session", arg).await.is_ok() {
-                    refresh_sessions(sessions);
+                    refresh_sessions(sessions, pending_turns, running);
                 }
             });
         })
@@ -3481,7 +3481,7 @@ fn App() -> impl IntoView {
             };
             active_session.set(Some(id));
             items.set(vec![]);
-            refresh_sessions(sessions);
+            refresh_sessions(sessions, pending_turns, running);
             focus_composer();
         });
     });
@@ -4595,7 +4595,7 @@ fn App() -> impl IntoView {
                                                                         active_acp_agent_id.set(Some(agent_id));
                                                                         active_session.set(Some(frame_id));
                                                                         items.set(vec![]);
-                                                                        refresh_sessions(sessions);
+                                                                        refresh_sessions(sessions, pending_turns, running);
                                                                         focus_composer();
                                                                         show_toast(&t(locale.get(), "composer.acp_new_session_toast"));
                                                                     });
@@ -5498,7 +5498,7 @@ fn App() -> impl IntoView {
                                     spawn_local(async move {
                                         let arg = to_value(&serde_json::json!({ "id": id, "title": title })).unwrap();
                                         if invoke_checked("rename_session", arg).await.is_ok() {
-                                            refresh_sessions(sessions);
+                                            refresh_sessions(sessions, pending_turns, running);
                                         }
                                     });
                                 }
@@ -5516,7 +5516,7 @@ fn App() -> impl IntoView {
                             spawn_local(async move {
                                 let arg = to_value(&serde_json::json!({ "id": id, "title": title })).unwrap();
                                 if invoke_checked("rename_session", arg).await.is_ok() {
-                                    refresh_sessions(sessions);
+                                    refresh_sessions(sessions, pending_turns, running);
                                 }
                             });
                         }>{move || t(locale.get(), "settings.save")}</button>
@@ -5589,7 +5589,7 @@ fn App() -> impl IntoView {
                                         let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
                                         if invoke_checked("delete_folder", arg).await.is_ok() {
                                             refresh_folders(folders);
-                                            refresh_sessions(sessions);
+                                            refresh_sessions(sessions, pending_turns, running);
                                         }
                                     });
                                 }
@@ -5610,7 +5610,7 @@ fn App() -> impl IntoView {
                                                 active_session.set(None);
                                                 items.set(vec![]);
                                             }
-                                            refresh_sessions(sessions);
+                                            refresh_sessions(sessions, pending_turns, running);
                                         }
                                     });
                                 }

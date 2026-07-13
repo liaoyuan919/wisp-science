@@ -496,6 +496,8 @@ pub(crate) struct SessionInfo {
     pub(crate) ts: i64,
     #[serde(default)]
     pub(crate) folder_id: Option<String>,
+    #[serde(default)]
+    pub(crate) running: bool,
 }
 
 #[derive(Deserialize, Clone)]

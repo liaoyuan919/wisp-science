@@ -2507,13 +2507,60 @@ pub(super) fn handle_md_click(
     }
 }
 
-pub(super) fn refresh_sessions(sessions: RwSignal<Vec<SessionInfo>>) {
+pub(super) fn refresh_sessions(
+    sessions: RwSignal<Vec<SessionInfo>>,
+    pending: RwSignal<HashMap<String, usize>>,
+    running: RwSignal<HashSet<String>>,
+) {
     spawn_local(async move {
         let v = invoke("list_sessions", JsValue::UNDEFINED).await;
         if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<SessionInfo>>(v) {
+            let set = pending.with_untracked(|m| rebuilt_running_set(&list, m));
+            running.set(set);
             sessions.set(list);
         }
     });
+}
+
+/// Rebuild the local `running` set from the backend's `list_sessions` snapshot
+/// so restarts, project switches and other windows' turns are reflected. Keeps
+/// locally pending sends the backend may not have registered yet.
+pub(super) fn rebuilt_running_set(
+    list: &[SessionInfo],
+    pending: &HashMap<String, usize>,
+) -> HashSet<String> {
+    let mut set: HashSet<String> = list
+        .iter()
+        .filter(|s| s.running)
+        .map(|s| s.id.clone())
+        .collect();
+    set.extend(pending.keys().cloned());
+    set
+}
+
+#[cfg(test)]
+mod rebuilt_running_set_tests {
+    use super::*;
+
+    fn session(id: &str, running: bool) -> SessionInfo {
+        SessionInfo {
+            id: id.into(),
+            title: String::new(),
+            ts: 0,
+            folder_id: None,
+            running,
+        }
+    }
+
+    #[test]
+    fn keeps_server_running_and_local_pending() {
+        let list = vec![session("a", true), session("b", false)];
+        let pending = HashMap::from([("c".to_string(), 1)]);
+        let set = rebuilt_running_set(&list, &pending);
+        assert!(set.contains("a"), "server-running kept");
+        assert!(!set.contains("b"), "stale local state dropped");
+        assert!(set.contains("c"), "local pending send kept");
+    }
 }
 
 pub(super) fn refresh_folders(folders: RwSignal<Vec<FolderInfo>>) {
