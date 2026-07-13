@@ -5314,6 +5314,7 @@ fn App() -> impl IntoView {
                                                         } else {
                                                             view! {
                                                                 <div class="fb-row remote-file" data-remote-path=full
+                                                                    data-remote-context=source.clone()
                                                                     title=t(loc, "files.remote_read_only")>
                                                                     <span class="fb-icon">{compose_icon("doc")}</span>
                                                                     <span class="fb-name">{name}</span>
