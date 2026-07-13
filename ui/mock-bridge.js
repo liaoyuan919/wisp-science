@@ -22,6 +22,12 @@
     memory_file_count: 0,
     has_api_key: true,
   };
+  let mockUpdateCheck = {
+    current_version: "0.9.0",
+    latest_version: "0.9.0",
+    update_available: false,
+    release_url: "https://github.com/xuzhougeng/wisp-science/releases",
+  };
   const memoryFiles = [{ name: "2026-07-01.md", preview: "User prefers DeepSeek.", bytes: 128 }];
   let memoryEnabled = true;
   const mockModels = [
@@ -164,8 +170,9 @@
           case "confirm_response":
           case "dismiss_onboarding":
           case "stop_agent":
-          case "check_for_updates":
             return null;
+          case "check_for_updates":
+            return mockUpdateCheck;
           case "validate_settings":
             return "Validated openai with deepseek-v4-pro";
           case "get_memory_view":
@@ -210,8 +217,6 @@
             }, 80);
             return fid;
           }
-          case "check_for_updates":
-            return "mock: up to date";
           case "open_external_url":
             if (args?.url) window.open(args.url, "_blank", "noopener,noreferrer");
             return null;

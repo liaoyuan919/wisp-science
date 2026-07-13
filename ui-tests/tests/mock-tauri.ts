@@ -37,6 +37,14 @@ export function tauriMock(): void {
     has_api_key: true,
   };
   let activeProjectId = "default";
+  let mockUpdateCheck = {
+    current_version: "0.9.0",
+    latest_version: "0.9.0",
+    update_available: false,
+    release_url: "https://github.com/xuzhougeng/wisp-science/releases",
+  };
+  let mockUpdateCheckPending = false;
+  let resolveMockUpdateCheck: (() => void) | null = null;
   const nextProjectOpenDelayMs: Record<string, number> = {};
   let failNextProjectOpenId: string | null = null;
   (window as any).__delayNextProjectOpen = (projectId: string, milliseconds: number) => {
@@ -44,6 +52,16 @@ export function tauriMock(): void {
   };
   (window as any).__failNextProjectOpen = (projectId: string) => {
     failNextProjectOpenId = String(projectId);
+  };
+  (window as any).__setMockUpdateCheck = (value: Record<string, unknown>) => {
+    mockUpdateCheck = { ...mockUpdateCheck, ...(value ?? {}) };
+  };
+  (window as any).__setMockUpdateCheckPending = (pending: boolean) => {
+    mockUpdateCheckPending = Boolean(pending);
+  };
+  (window as any).__resolveMockUpdateCheck = () => {
+    resolveMockUpdateCheck?.();
+    resolveMockUpdateCheck = null;
   };
   let skills = [
     { name: "remote-compute-modal", description: "Run jobs on Modal", tags: ["compute"], enabled: true, builtin: true, dir: "/skills/remote-compute-modal" },
@@ -540,6 +558,14 @@ export function tauriMock(): void {
           case "set_settings":
           case "set_api_key":
             return null;
+          case "check_for_updates":
+            if (mockUpdateCheckPending) {
+              await new Promise<void>((resolve) => {
+                resolveMockUpdateCheck = resolve;
+              });
+              mockUpdateCheckPending = false;
+            }
+            return mockUpdateCheck;
           case "validate_settings":
             return "Validated openai with deepseek-v4-pro";
           case "get_memory_view":
@@ -899,6 +925,13 @@ export function parallelMock(): void {
           case "dismiss_onboarding":
             return null;
           case "validate_settings": return "ok";
+          case "check_for_updates":
+            return {
+              current_version: "0.9.0",
+              latest_version: "0.9.0",
+              update_available: false,
+              release_url: "https://github.com/xuzhougeng/wisp-science/releases",
+            };
           case "send_message": {
             const fid = (args && (args.sessionId ?? args.session_id)) || "t1";
             const msg = (args && args.message) || "";
