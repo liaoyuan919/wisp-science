@@ -3563,6 +3563,8 @@ pub(super) fn FilePreview(dom_id: String, path: String, kind: String) -> impl In
                         "loading": t(loc, "loading"),
                         "error": t(loc, "preview.pdf_error"),
                         "pageLabel": t(loc, "preview.pdf_page"),
+                        "prevPage": t(loc, "preview.pdf_prev_page"),
+                        "nextPage": t(loc, "preview.pdf_next_page"),
                     })
                     .to_string(),
                 ),
