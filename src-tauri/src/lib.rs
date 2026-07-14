@@ -28,6 +28,7 @@ mod library_commands;
 mod mcp_bridge;
 pub use mcp_bridge::run_mcp_bridge_cli;
 mod models;
+mod pet_commands;
 mod project_sync;
 mod project_transfer;
 mod research_graph;
@@ -1030,6 +1031,10 @@ struct Settings {
     sync_relay_token: String,
     #[serde(default)]
     has_sync_relay_token: bool,
+    #[serde(default)]
+    pet_enabled: bool,
+    #[serde(default)]
+    pet_directory: String,
 }
 
 /// Drop cached per-session agents so the next turn picks up new model settings.
@@ -5591,6 +5596,7 @@ pub fn run() {
             settings_commands::set_api_key,
             settings_commands::credential_status,
             settings_commands::set_credential,
+            pet_commands::get_pet,
             models::list_models,
             models::save_model,
             models::remove_model,
