@@ -265,6 +265,112 @@ async function ensureMsa() {
   }
 }
 
+let pdfjsLib;
+async function pdfjs() {
+  if (!pdfjsLib) {
+    pdfjsLib = import("/vendor/pdf.min.mjs").then((mod) => {
+      // WebView2 does not ship a browser PDF plugin, so PDFs are rendered to
+      // canvas with the worker bundled alongside the application.
+      mod.GlobalWorkerOptions.workerSrc = "/vendor/pdf.worker.min.mjs";
+      return mod;
+    });
+  }
+  return pdfjsLib;
+}
+
+function base64Bytes(value) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function pdfPageLabel(template, page, total) {
+  return String(template || `Page ${page} of ${total}`)
+    .replace("{page}", String(page))
+    .replace("{total}", String(total));
+}
+
+async function renderPdf(el, payload) {
+  const renderToken = Symbol("pdf-preview");
+  el.__wispPreviewToken = renderToken;
+
+  const loading = document.createElement("div");
+  loading.className = "rp-pdf-loading";
+  loading.textContent = payload.loading || "Loading…";
+  el.replaceChildren(loading);
+
+  let task;
+  let pdf;
+  try {
+    const lib = await pdfjs();
+    const source = payload.b64 ? { data: base64Bytes(payload.b64) } : payload.url;
+    if (!source) throw new Error("PDF data is empty");
+
+    task = lib.getDocument(source);
+    pdf = await task.promise;
+    if (!el.isConnected || el.__wispPreviewToken !== renderToken) {
+      return;
+    }
+
+    const pages = document.createElement("div");
+    pages.className = "rp-pdf";
+    pages.setAttribute("data-page-count", String(pdf.numPages));
+    el.replaceChildren(pages);
+
+    // Render at up to 2x the displayed width so text remains crisp on HiDPI
+    // screens without making long papers consume unbounded canvas memory.
+    const availableWidth = Math.max(240, Math.min(el.clientWidth || 800, 1000));
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      if (!el.isConnected || el.__wispPreviewToken !== renderToken) {
+        return;
+      }
+
+      const page = await pdf.getPage(pageNumber);
+      const natural = page.getViewport({ scale: 1 });
+      const cssScale = availableWidth / natural.width;
+      const viewport = page.getViewport({ scale: cssScale * pixelRatio });
+      const wrapper = document.createElement("div");
+      wrapper.className = "rp-pdf-page";
+      wrapper.dataset.page = String(pageNumber);
+      wrapper.setAttribute(
+        "aria-label",
+        pdfPageLabel(payload.pageLabel, pageNumber, pdf.numPages),
+      );
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.floor(viewport.width));
+      canvas.height = Math.max(1, Math.floor(viewport.height));
+      canvas.setAttribute("role", "img");
+      wrapper.appendChild(canvas);
+      pages.appendChild(wrapper);
+
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context) throw new Error("Canvas is not available");
+      await page.render({ canvasContext: context, viewport }).promise;
+      wrapper.dataset.rendered = "true";
+      page.cleanup();
+    }
+  } catch (error) {
+    console.error("Failed to render PDF preview", error);
+    if (el.isConnected && el.__wispPreviewToken === renderToken) {
+      const message = document.createElement("div");
+      message.className = "rp-error rp-pdf-error";
+      message.textContent = payload.error || "Unable to preview this PDF.";
+      el.replaceChildren(message);
+    }
+  } finally {
+    try {
+      if (pdf) await pdf.destroy();
+      else if (task) await task.destroy();
+    } catch (error) {
+      console.warn("Failed to release PDF preview resources", error);
+    }
+  }
+}
+
 function escHtml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
@@ -401,8 +507,7 @@ export async function mount_preview(kind, elId, payloadJson) {
       break;
     }
     case "pdf": {
-      const src = p.b64 ? `data:application/pdf;base64,${p.b64}` : p.url;
-      el.innerHTML = `<embed class="rp-pdf" src="${src}" type="application/pdf"/>`;
+      await renderPdf(el, p);
       break;
     }
     case "image": {

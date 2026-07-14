@@ -3556,7 +3556,16 @@ pub(super) fn FilePreview(dom_id: String, path: String, kind: String) -> impl In
                 return;
             }
             let (mount_kind, payload) = match kind.as_str() {
-                "pdf" => ("pdf", serde_json::json!({ "b64": fc.base64 }).to_string()),
+                "pdf" => (
+                    "pdf",
+                    serde_json::json!({
+                        "b64": fc.base64,
+                        "loading": t(loc, "loading"),
+                        "error": t(loc, "preview.pdf_error"),
+                        "pageLabel": t(loc, "preview.pdf_page"),
+                    })
+                    .to_string(),
+                ),
                 "image" => (
                     "image",
                     serde_json::json!({ "b64": fc.base64, "mime": fc.mime }).to_string(),
