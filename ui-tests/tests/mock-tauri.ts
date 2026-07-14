@@ -491,6 +491,24 @@ export function tauriMock(): void {
             ) ?? null;
           case "list_runtimes":
             return runtimeInfos;
+          case "inspect_runtime":
+            return {
+              objects: [
+                {
+                  name: "counts",
+                  typeName: "DataFrame",
+                  summary: "12000000 × 48",
+                  sizeBytes: 4 * 1024 * 1024 * 1024,
+                },
+                {
+                  name: "model",
+                  typeName: "RandomForestClassifier",
+                  summary: "",
+                  sizeBytes: null,
+                },
+              ],
+              totalCount: 2,
+            };
           case "start_runtime": {
             const contextId = String(arg("contextId") ?? arg("context_id"));
             const language = String(arg("language"));
@@ -731,6 +749,8 @@ export function tauriMock(): void {
               { name: "data", is_dir: true, size: 0 },
               { name: "report.csv", is_dir: false, size: 4096 },
               { name: "config.json", is_dir: false, size: 64 },
+              { name: "model.pdb", is_dir: false, size: 256 },
+              { name: "sequences.fasta", is_dir: false, size: 256 },
             ];
           case "list_remote_dir": {
             const path = String(arg("path") ?? "~");
@@ -775,6 +795,12 @@ export function tauriMock(): void {
           }
           case "read_file": {
             const path = String(arg("path") ?? "report.csv");
+            if (path.toLowerCase().endsWith(".pdb")) {
+              return { path, mime: "chemical/x-pdb", text: "ATOM      1  CA  ALA A   1      11.104  13.207   9.132  1.00 20.00           C\nEND\n", base64: null };
+            }
+            if (path.toLowerCase().endsWith(".fasta")) {
+              return { path, mime: "text/plain", text: ">seq1\nMKTIIALSYIFCLVFADYKDDDDK\n>seq2\nMKTIIALSYIFCLVFADYKDDDDK\n", base64: null };
+            }
             if (path.toLowerCase().includes(".pdf")) {
               return { path, mime: "application/pdf", text: null, base64: pdfBase64 };
             }

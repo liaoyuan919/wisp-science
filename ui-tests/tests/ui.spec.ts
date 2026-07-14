@@ -946,6 +946,30 @@ test("text-entry context menu pastes into the field that was clicked", async ({ 
   await expect(description).toHaveValue("context-target");
 });
 
+test("center structure and FASTA previews fill the available height", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1200 });
+  await enterApp(page);
+  await page.getByRole("button", { name: "Files" }).click();
+
+  const openInCenter = async (path: string) => {
+    await page.locator(`[data-workspace-path="${path}"]`).click({ button: "right" });
+    await page.locator(".ctx-menu").getByRole("button", { name: "Open in center" }).click();
+  };
+  const heightRatio = (selector: string) => page.locator(".center-file-preview").evaluate((preview, childSelector) => {
+    const child = preview.querySelector<HTMLElement>(childSelector);
+    return child ? child.getBoundingClientRect().height / preview.getBoundingClientRect().height : 0;
+  }, selector);
+
+  await openInCenter("model.pdb");
+  await expect(page.locator('.center-file-preview[data-preview-kind="structure"] .rp-3dmol')).toBeVisible();
+  await expect(page.locator('.center-file-preview[data-preview-kind="structure"] .rp-3dmol canvas')).toBeVisible();
+  await expect.poll(() => heightRatio(".rp-3dmol")).toBeGreaterThan(0.75);
+
+  await openInCenter("sequences.fasta");
+  await expect(page.locator('.center-file-preview[data-preview-kind="fasta"] .rp-fasta-wrap')).toBeVisible();
+  await expect.poll(() => heightRatio(".rp-fasta-wrap")).toBeGreaterThan(0.75);
+});
+
 test("Files browses registered SSH contexts without a real remote host", async ({ page }) => {
   await enterApp(page);
   await page.getByRole("button", { name: "Files" }).click();
@@ -1095,6 +1119,26 @@ test("runtime panel shows lifecycle state and controls start stop restart", asyn
   await expect.poll(() => lastInvokeArgs(page, "start_runtime")).toMatchObject({
     contextId: "ssh:gpu-server",
     language: "r",
+  });
+});
+
+test("runtime inspector lists object metadata without loading object contents", async ({ page }) => {
+  await enterApp(page);
+  await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.getByRole("button", { name: "Add panel" }).click();
+  await page.getByRole("button", { name: "Contexts" }).click();
+
+  const runtime = page.locator('.runtime-card[data-runtime-language="python"][data-runtime-context="local"]');
+  await runtime.getByRole("button", { name: "Refresh objects" }).click();
+
+  await expect(runtime.locator(".runtime-object-row", { hasText: "counts" })).toContainText("DataFrame");
+  await expect(runtime.locator(".runtime-object-row", { hasText: "counts" })).toContainText("12000000 × 48");
+  await expect(runtime.locator(".runtime-object-row", { hasText: "counts" })).toContainText("4.0 GB");
+  await expect(runtime.locator(".runtime-object-row", { hasText: "model" })).toContainText("RandomForestClassifier");
+  await expect.poll(() => lastInvokeArgs(page, "inspect_runtime")).toMatchObject({
+    projectId: "default",
+    contextId: "local",
+    language: "python",
   });
 });
 
@@ -1533,6 +1577,25 @@ test("settings can validate current API config", async ({ page }) => {
   await openModelsSettings(page);
   await page.getByRole("button", { name: "Valid" }).click();
   await expect(page.locator(".settings-status")).toHaveText("Validated openai with deepseek-v4-pro");
+});
+
+test("editing a saved model validates with that model profile id", async ({ page }) => {
+  await enterApp(page);
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Models" }).click();
+  await page.locator(".settings-list-row", { hasText: "opus-4.8" }).click();
+  await expect(providerSelect(page)).toBeVisible();
+  await expect(page.getByLabel("Model ID")).toHaveValue("opus-4.8");
+
+  await page.getByRole("button", { name: "Valid" }).click();
+  await expect(page.locator(".settings-status")).toHaveText("Validated openai with deepseek-v4-pro");
+  await expect.poll(() => lastInvokeArgs(page, "validate_settings")).toMatchObject({
+    profileId: "opus",
+    key: "",
+    settings: {
+      model: "opus-4.8",
+    },
+  });
 });
 
 test("check for updates shows an up-to-date modal", async ({ page }) => {
