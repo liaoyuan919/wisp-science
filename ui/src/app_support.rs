@@ -3727,6 +3727,8 @@ pub(super) fn ArtifactModal(
     on_close: Callback<()>,
     on_open_center: Callback<ModalArtifact>,
     on_open_path: Callback<(String, String)>, // open an input file (path, kind)
+    library_items: ReadSignal<Vec<LibraryItem>>,
+    on_library_changed: Callback<()>,
 ) -> impl IntoView {
     let locale = use_locale();
     let prov = create_rw_signal(None::<ArtifactProvenance>);
@@ -3735,6 +3737,7 @@ pub(super) fn ArtifactModal(
     let dom_id = unique_dom_id("amodal");
     {
         let path = path.clone();
+        let session = session.clone();
         spawn_local(async move {
             let arg = to_value(&serde_json::json!({ "sessionId": session, "path": path })).unwrap();
             let v = invoke("get_artifact_provenance", arg).await;
@@ -3749,8 +3752,22 @@ pub(super) fn ArtifactModal(
     let path_head = path.clone();
     let path_dl = path.clone();
     let center_artifact = (path.clone(), name.clone(), kind.clone());
+    let star_path = path.clone();
+    let star_session = session.clone();
+    let starred = create_memo(move |_| {
+        star_session.as_deref().is_some_and(|session| {
+            library_items
+                .get()
+                .iter()
+                .any(|item| item.matches_figure(session, &star_path))
+        })
+    });
+    let click_path = path.clone();
+    let click_name = name.clone();
+    let click_session = session.clone();
     let is_html = kind == "html";
     let is_zoomable = matches!(kind.as_str(), "image" | "pdf");
+    let can_star = kind == "image";
     view! {
         <div class="overlay" on:click=move |_| on_close.call(())>
             <div class="modal artifact-modal" class:html-preview=is_html on:click=|ev| ev.stop_propagation()>
@@ -3771,6 +3788,42 @@ pub(super) fn ArtifactModal(
                         </div>
                     })}
                     <div class="spacer"></div>
+                    {can_star.then(|| view! {
+                        <button type="button" class="icon-btn" class:starred=move || starred.get()
+                            disabled=click_session.is_none()
+                            title=move || t(locale.get(), if starred.get() { "library.remove" } else { "library.add" })
+                            aria-label=move || t(locale.get(), if starred.get() { "library.remove" } else { "library.add" })
+                            aria-pressed=move || starred.get().to_string()
+                            on:click=move |_| {
+                                let Some(session_id) = click_session.clone() else { return; };
+                                let existing = library_items.get_untracked().into_iter().find(|item| {
+                                    item.matches_figure(&session_id, &click_path)
+                                });
+                                let path = click_path.clone();
+                                let name = click_name.clone();
+                                spawn_local(async move {
+                                    let (command, args) = match existing {
+                                        Some(item) => (
+                                            "delete_library_item",
+                                            serde_json::json!({ "id": item.id }),
+                                        ),
+                                        None => (
+                                            "star_library_figure",
+                                            serde_json::json!({
+                                                "sessionId": session_id,
+                                                "path": path,
+                                                "name": name,
+                                            }),
+                                        ),
+                                    };
+                                    if invoke_checked(command, to_value(&args).unwrap()).await.is_ok() {
+                                        on_library_changed.call(());
+                                    }
+                                });
+                            }>
+                            {move || compose_icon(if starred.get() { "star-filled" } else { "star" })}
+                        </button>
+                    })}
                     <button type="button" class="icon-btn"
                         aria-label=move || t(locale.get(), "center.open_file")
                         title=move || t(locale.get(), "center.open_file")
@@ -3946,6 +3999,8 @@ pub(super) fn compose_icon(kind: &str) -> impl IntoView {
         "plus" => view! { <path d="M12 5v14"/><path d="M5 12h14"/> }.into_view(),
         "up" => view! { <path d="m18 15-6-6-6 6"/> }.into_view(),
         "copy" => view! { <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/> }.into_view(),
+        "star" => view! { <path d="m12 2.7 2.85 5.77 6.37.93-4.61 4.49 1.09 6.34L12 17.23l-5.7 3 1.09-6.34L2.78 9.4l6.37-.93Z"/> }.into_view(),
+        "star-filled" => view! { <path d="m12 2.7 2.85 5.77 6.37.93-4.61 4.49 1.09 6.34L12 17.23l-5.7 3 1.09-6.34L2.78 9.4l6.37-.93Z" fill="currentColor"/> }.into_view(),
         "edit" => view! { <path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/> }.into_view(),
         "doc" => view! { <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/> }.into_view(),
         "image" => view! { <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/> }.into_view(),
@@ -4488,6 +4543,7 @@ pub(super) fn ProjectsScreen(
     on_open_session: Callback<(String, String)>,
     on_open_artifact: Callback<(String, String, String)>,
     on_open_settings: Callback<()>,
+    on_open_library: Callback<()>,
     on_open_demo: Callback<()>,
     on_search: Callback<()>,
 ) -> impl IntoView {
@@ -4784,6 +4840,12 @@ pub(super) fn ProjectsScreen(
             <div class="projects-head">
                 <div class="projects-title">"Wisp Science"<span class="beta">"Beta"</span></div>
                 <div class="projects-actions">
+                    <button type="button" class="projects-icon-btn"
+                        title=move || t(locale.get(), "sidebar.library")
+                        aria-label=move || t(locale.get(), "sidebar.library")
+                        on:click=move |_| on_open_library.call(())>
+                        {compose_icon("star")}
+                    </button>
                     <button type="button" class="projects-icon-btn"
                         title=move || t(locale.get(), "projects.search")
                         aria-label=move || t(locale.get(), "projects.search")

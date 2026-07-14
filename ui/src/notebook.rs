@@ -1,8 +1,10 @@
 use crate::app_support::{compose_icon, copy_text, RpCodeView};
-use crate::dto::ChatItem;
+use crate::bindings::invoke_checked;
+use crate::dto::{ChatItem, LibraryItem};
 use crate::i18n::{t, Locale};
 use crate::text::fenced_blocks;
 use leptos::*;
+use serde_wasm_bindgen::to_value;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -124,7 +126,13 @@ pub(super) fn collect_notebook_cells(
 }
 
 #[component]
-pub(super) fn NotebookView(cells: Vec<NotebookCell>, locale: Locale) -> impl IntoView {
+pub(super) fn NotebookView(
+    cells: Vec<NotebookCell>,
+    locale: Locale,
+    active_session: ReadSignal<Option<String>>,
+    library_items: ReadSignal<Vec<LibraryItem>>,
+    on_library_changed: Callback<()>,
+) -> impl IntoView {
     if cells.is_empty() {
         return view! {
             <div class="rp-empty notebook-empty">
@@ -142,6 +150,17 @@ pub(super) fn NotebookView(cells: Vec<NotebookCell>, locale: Locale) -> impl Int
                 let copy = cell.source.clone();
                 let language = cell.language.clone();
                 let source = cell.source.clone();
+                let star_language = cell.language.clone();
+                let star_source = cell.source.clone();
+                let starred = create_memo(move |_| {
+                    active_session.get().is_some_and(|session| {
+                        library_items.get().iter().any(|item| {
+                            item.matches_code(&session, &star_language, &star_source)
+                        })
+                    })
+                });
+                let click_language = cell.language.clone();
+                let click_source = cell.source.clone();
                 let has_output = !cell.output.is_empty();
                 let output = cell.output.clone();
                 let output_open = cell.ok == Some(false);
@@ -164,6 +183,40 @@ pub(super) fn NotebookView(cells: Vec<NotebookCell>, locale: Locale) -> impl Int
                             <span class="spacer"></span>
                             <span class=format!("notebook-status {status}") title=status></span>
                             <span class="notebook-runtime">{format!("{runtime} · wisp-science")}</span>
+                            <button type="button" class="notebook-star" class:starred=move || starred.get()
+                                disabled=move || active_session.get().is_none()
+                                title=move || t(locale, if starred.get() { "library.remove" } else { "library.add" })
+                                aria-label=move || t(locale, if starred.get() { "library.remove" } else { "library.add" })
+                                aria-pressed=move || starred.get().to_string()
+                                on:click=move |_| {
+                                    let Some(session_id) = active_session.get_untracked() else { return; };
+                                    let existing = library_items.get_untracked().into_iter().find(|item| {
+                                        item.matches_code(&session_id, &click_language, &click_source)
+                                    });
+                                    let language = click_language.clone();
+                                    let code = click_source.clone();
+                                    spawn_local(async move {
+                                        let (command, args) = match existing {
+                                            Some(item) => (
+                                                "delete_library_item",
+                                                serde_json::json!({ "id": item.id }),
+                                            ),
+                                            None => (
+                                                "star_library_code",
+                                                serde_json::json!({
+                                                    "sessionId": session_id,
+                                                    "language": language,
+                                                    "code": code,
+                                                }),
+                                            ),
+                                        };
+                                        if invoke_checked(command, to_value(&args).unwrap()).await.is_ok() {
+                                            on_library_changed.call(());
+                                        }
+                                    });
+                                }>
+                                {move || compose_icon(if starred.get() { "star-filled" } else { "star" })}
+                            </button>
                             <button type="button" class="notebook-copy"
                                 title=t(locale, "tool.copy_code")
                                 aria-label=t(locale, "tool.copy_code")

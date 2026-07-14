@@ -2,6 +2,7 @@ mod bindings;
 mod context_menu;
 mod dto;
 mod i18n;
+mod library;
 mod notebook;
 mod overlays;
 mod project_landing;
@@ -23,6 +24,7 @@ use i18n::{
     Locale, EMPTY_SUBTITLE_COUNT, EMPTY_TITLE_COUNT,
 };
 use leptos::{ev, window_event_listener, *};
+use library::{refresh_library, LibraryScreen};
 use notebook::{collect_notebook_cells, NotebookCache, NotebookView};
 use overlays::{AddHostOverlay, CapabilitiesOverlay, OnboardingOverlay};
 use project_landing::{ProjectLanding, ProjectLandingState};
@@ -388,6 +390,10 @@ fn App() -> impl IntoView {
     let acp_session_modes = create_rw_signal::<HashMap<String, serde_json::Value>>(HashMap::new());
     let acp_config_menu_open = create_rw_signal::<Option<String>>(None);
     let show_projects = create_rw_signal(true); // app lands on the Projects screen
+    let show_library = create_rw_signal(false);
+    let library_items = create_rw_signal::<Vec<LibraryItem>>(vec![]);
+    let refresh_library_items = Callback::new(move |_: ()| refresh_library(library_items));
+    refresh_library_items.call(());
     let project_info = create_rw_signal::<Option<ProjectInfo>>(None);
     let demo_mode = create_rw_signal(false); // true = the synthetic "Example project" is open
     let project_open_error = create_rw_signal(None::<String>);
@@ -3781,7 +3787,17 @@ fn App() -> impl IntoView {
             open_project=switch_project
             open_project_session=palette_open_session
             open_settings=Callback::new(move |section: Option<String>| open_settings_fn(section))
+            open_library=Callback::new(move |_| show_library.set(true))
         />
+        {move || show_library.get().then(|| view! {
+            <LibraryScreen
+                locale=locale.read_only()
+                items=library_items.read_only()
+                on_close=Callback::new(move |_| show_library.set(false))
+                on_open_source=palette_open_session
+                on_changed=refresh_library_items
+            />
+        })}
         {move || update_check_modal.get().map(|modal| match modal {
             UpdateCheckModal::Checking => view! {
                 <div class="overlay">
@@ -3880,6 +3896,7 @@ fn App() -> impl IntoView {
             new_session=Callback::new(new_session)
             new_folder=Callback::new(new_folder)
             open_files=Callback::new(open_files)
+            open_library=Callback::new(move |_| show_library.set(true))
             load_demo=Callback::new(load_demo)
             load_session=load_session
             move_session_to=move_session_to
@@ -5107,7 +5124,10 @@ fn App() -> impl IntoView {
                         }
                         RightTab::Notebook => {
                             view! {
-                                <NotebookView cells=notebook_cells.get() locale=locale.get() />
+                                <NotebookView cells=notebook_cells.get() locale=locale.get()
+                                    active_session=active_session.read_only()
+                                    library_items=library_items.read_only()
+                                    on_library_changed=refresh_library_items />
                             }.into_view()
                         }
                         RightTab::File => {
@@ -5970,7 +5990,9 @@ fn App() -> impl IntoView {
                     on_open_path=Callback::new(move |(p, _k): (String, String)| {
                         reveal_in_files(&p, file_source, file_cwd, file_query, file_entries, show_right, open_right_tabs, right_tab);
                         modal_artifact.set(None);
-                    }) />
+                    })
+                    library_items=library_items.read_only()
+                    on_library_changed=refresh_library_items />
             }
         })}
         <SettingsView

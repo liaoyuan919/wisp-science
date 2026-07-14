@@ -26,6 +26,7 @@ pub(super) fn ProjectLanding(
     open_project: Callback<String>,
     open_project_session: Callback<(String, String)>,
     open_settings: Callback<Option<String>>,
+    open_library: Callback<()>,
 ) -> impl IntoView {
     let ProjectLandingState {
         show_projects,
@@ -71,6 +72,7 @@ pub(super) fn ProjectLanding(
                     on_open_session=open_project_session
                     on_open_artifact=on_open_artifact
                     on_open_settings=on_open_settings
+                    on_open_library=open_library
                     on_open_demo=on_open_demo
                     on_search=Callback::new(move |_| command_palette_open.set(true))
                 />
