@@ -2343,7 +2343,15 @@ fn kernel_worker_path() -> PathBuf {
     wisp_runtime::resolve_bundled_script(&configured)
 }
 
-/// Wire Python REPL, bundled bio-tools MCP, and user-configured MCP
+fn r_kernel_worker_path() -> PathBuf {
+    let configured = std::env::var("WISP_R_KERNEL_WORKER")
+        .ok()
+        .or_else(|| wisp_runtime::bundled_r_worker_path().map(|path| path.to_string_lossy().into()))
+        .unwrap_or_default();
+    wisp_runtime::resolve_bundled_script(&configured)
+}
+
+/// Wire language runtimes, bundled bio-tools MCP, and user-configured MCP
 /// connections into a freshly built agent.
 async fn wire_python_and_mcp(
     agent: &mut wisp_core::Agent,
@@ -2373,6 +2381,19 @@ async fn wire_python_and_mcp(
         errors.push(format!(
             "Kernel worker not found at {}",
             worker_path.display()
+        ));
+    }
+
+    let r_worker_path = r_kernel_worker_path();
+    if r_worker_path.is_file() {
+        agent.add_tool(Box::new(wisp_runtime::RTool::new(
+            runtime_manager.clone(),
+            project_id,
+        )));
+    } else {
+        errors.push(format!(
+            "R runtime worker not found at {}",
+            r_worker_path.display()
         ));
     }
 
@@ -5152,6 +5173,7 @@ pub fn run() {
                     store.clone(),
                     app_data.clone(),
                     kernel_worker_path(),
+                    r_kernel_worker_path(),
                     models::service_env(),
                 ),
             ));

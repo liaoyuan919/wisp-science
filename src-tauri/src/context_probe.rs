@@ -15,6 +15,7 @@ pub struct ProbeResult {
     pub python_version: Option<String>,
     pub rscript_executable: Option<String>,
     pub r_version: Option<String>,
+    pub r_jsonlite: Option<bool>,
     pub conda: Option<String>,
     pub mamba: Option<String>,
     pub modulecmd: Option<String>,
@@ -199,6 +200,16 @@ pub fn probe_context_with_runner(
         runner,
         platform_script(ctx, "Rscript --version 2>&1", "Rscript --version 2>&1"),
     );
+    let r_jsonlite = run_optional(
+        ctx,
+        runner,
+        platform_script(
+            ctx,
+            "Rscript --vanilla -e 'cat(requireNamespace(\"jsonlite\", quietly=TRUE))' 2>/dev/null",
+            "Rscript --vanilla -e \"cat(requireNamespace('jsonlite', quietly=TRUE))\" 2>$null",
+        ),
+    )
+    .map(|value| value.eq_ignore_ascii_case("true"));
     let conda = run_optional(
         ctx,
         runner,
@@ -249,6 +260,7 @@ pub fn probe_context_with_runner(
         python_version,
         rscript_executable,
         r_version,
+        r_jsonlite,
         conda,
         mamba,
         modulecmd,
@@ -452,6 +464,10 @@ mod tests {
                 "Rscript --version 2>&1",
                 "R scripting front-end version 4.4.1",
             ),
+            (
+                "Rscript --vanilla -e 'cat(requireNamespace(\"jsonlite\", quietly=TRUE))' 2>/dev/null",
+                "TRUE",
+            ),
             ("command -v conda", "/opt/conda/bin/conda"),
             ("command -v mamba", ""),
             ("command -v modulecmd", "/usr/bin/modulecmd"),
@@ -483,6 +499,7 @@ mod tests {
             probe.r_version.as_deref(),
             Some("R scripting front-end version 4.4.1")
         );
+        assert_eq!(probe.r_jsonlite, Some(true));
         assert_eq!(probe.conda.as_deref(), Some("/opt/conda/bin/conda"));
         assert_eq!(probe.mamba, None);
         assert_eq!(probe.modulecmd.as_deref(), Some("/usr/bin/modulecmd"));

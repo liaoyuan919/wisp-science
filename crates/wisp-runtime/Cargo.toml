@@ -1,6 +1,6 @@
 [package]
 name = "wisp-runtime"
-description = "Managed language runtime support; currently uv Python + persistent REPL."
+description = "Managed project-scoped Python and R runtimes."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

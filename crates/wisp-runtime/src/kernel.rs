@@ -1,4 +1,4 @@
-//! Persistent Python worker client and versioned JSON-lines protocol.
+//! Persistent worker client and versioned JSON-lines protocol for Python and R.
 
 use crate::manager::{RuntimeKernel, RuntimeOutput};
 use anyhow::{anyhow, bail, Context, Result};
@@ -220,11 +220,23 @@ async fn read_ready<R: AsyncBufRead + Unpin>(
     let frame = tokio::time::timeout(timeout, read_protocol_line(reader))
         .await
         .map_err(|_| anyhow!("timed out waiting for ready frame"))??;
+    let kind = frame
+        .get("type")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("startup frame is missing string field 'type'"))?;
+    if kind == "startup_error" {
+        let message = frame
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("worker initialization failed");
+        bail!("worker startup failed: {message}");
+    }
+    if kind != "ready" {
+        bail!("expected ready frame, received '{kind}'");
+    }
     let ready: ReadyFrame =
         serde_json::from_value(frame).context("malformed ready frame fields")?;
-    if ready.kind != "ready" {
-        bail!("expected ready frame, received '{}'", ready.kind);
-    }
+    debug_assert_eq!(ready.kind, "ready");
     if ready.protocol != PROTOCOL_VERSION {
         bail!(
             "worker protocol {} is incompatible with host protocol {}",
@@ -315,24 +327,43 @@ mod tests {
     use tokio::sync::mpsc;
 
     #[tokio::test]
-    async fn ready_handshake_accepts_protocol_one_python() {
-        let (reader, mut writer) = duplex(1024);
-        writer
-            .write_all(
-                br#"{"type":"ready","protocol":1,"language":"python","pid":42,"version":"3.13.1"}
-"#,
+    async fn ready_handshake_accepts_protocol_one_python_and_r() {
+        for (language, version) in [("python", "3.13.1"), ("r", "4.5.1")] {
+            let (reader, mut writer) = duplex(1024);
+            writer
+                .write_all(
+                    format!(
+                        "{{\"type\":\"ready\",\"protocol\":1,\"language\":\"{language}\",\"pid\":42,\"version\":\"{version}\"}}\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let ready = read_ready(
+                &mut BufReader::new(reader),
+                language,
+                Duration::from_secs(1),
             )
             .await
             .unwrap();
-        let ready = read_ready(
-            &mut BufReader::new(reader),
-            "python",
-            Duration::from_secs(1),
-        )
-        .await
-        .unwrap();
-        assert_eq!(ready.pid, 42);
-        assert_eq!(ready.version, "3.13.1");
+            assert_eq!(ready.pid, 42);
+            assert_eq!(ready.version, version);
+        }
+    }
+
+    #[tokio::test]
+    async fn ready_handshake_surfaces_worker_startup_errors() {
+        let (reader, mut writer) = duplex(1024);
+        writer
+            .write_all(
+                b"{\"type\":\"startup_error\",\"error\":\"R package 'jsonlite' is required\"}\n",
+            )
+            .await
+            .unwrap();
+        let error = read_ready(&mut BufReader::new(reader), "r", Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("jsonlite"));
     }
 
     #[tokio::test]

@@ -296,8 +296,19 @@ async fn main() -> Result<()> {
         .or_else(|| wisp_runtime::bundled_worker_path().map(|p| p.to_string_lossy().to_string()))
         .unwrap_or_default();
     let worker_path = wisp_runtime::resolve_bundled_script(&worker);
-    let runtime_manager =
-        wisp_runtime::RuntimeManager::local_python(app_data.clone(), worker_path.clone(), vec![]);
+    let r_worker = std::env::var("WISP_R_KERNEL_WORKER")
+        .ok()
+        .or_else(|| {
+            wisp_runtime::bundled_r_worker_path().map(|path| path.to_string_lossy().into_owned())
+        })
+        .unwrap_or_default();
+    let r_worker_path = wisp_runtime::resolve_bundled_script(&r_worker);
+    let runtime_manager = wisp_runtime::RuntimeManager::local(
+        app_data.clone(),
+        worker_path.clone(),
+        Some(r_worker_path.clone()),
+        vec![],
+    );
     if worker_path.is_file() {
         if py_env.is_some() {
             agent.add_tool(Box::new(wisp_runtime::ReplTool::new(
@@ -310,6 +321,16 @@ async fn main() -> Result<()> {
         }
     } else {
         println!("(kernel worker not found at {worker}; set WISP_KERNEL_WORKER=<path>)");
+    }
+
+    if r_worker_path.is_file() {
+        agent.add_tool(Box::new(wisp_runtime::RTool::new(
+            runtime_manager.clone(),
+            root.to_string_lossy(),
+        )));
+        println!("r repl wired ({r_worker}).");
+    } else {
+        println!("(R worker not found at {r_worker}; set WISP_R_KERNEL_WORKER=<path>)");
     }
 
     // MCP server: WISP_MCP_COMMAND overrides; otherwise WISP_MCP_PKG launches

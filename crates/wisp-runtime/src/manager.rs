@@ -1,11 +1,12 @@
 //! Project-scoped interactive runtime ownership and execution serialization.
 
-use crate::{KernelClient, KernelResp, PythonEnv};
+use crate::{find_rscript, KernelClient, KernelResp, PythonEnv};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    ffi::OsString,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -14,10 +15,11 @@ use tokio::sync::{mpsc, watch};
 
 pub const LOCAL_CONTEXT_ID: &str = "local";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeLanguage {
     Python,
+    R,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -39,6 +41,18 @@ impl RuntimeKey {
 
     pub fn local_python(project_id: impl Into<String>) -> Self {
         Self::python(project_id, LOCAL_CONTEXT_ID)
+    }
+
+    pub fn r(project_id: impl Into<String>, context_id: impl Into<String>) -> Self {
+        Self {
+            project_id: project_id.into(),
+            context_id: context_id.into(),
+            language: RuntimeLanguage::R,
+        }
+    }
+
+    pub fn local_r(project_id: impl Into<String>) -> Self {
+        Self::r(project_id, LOCAL_CONTEXT_ID)
     }
 }
 
@@ -224,14 +238,24 @@ impl RuntimeManager {
         }
     }
 
-    /// Build the current local-Python launcher. Environment provisioning remains
-    /// shared with MCP bootstrap; this launcher only consumes its interpreter.
-    pub fn local_python(app_data: PathBuf, worker: PathBuf, envs: Vec<(String, String)>) -> Self {
-        Self::new(Arc::new(LocalPythonLauncher {
+    /// Build a local launcher for the two explicit runtime adapters.
+    pub fn local(
+        app_data: PathBuf,
+        python_worker: PathBuf,
+        r_worker: Option<PathBuf>,
+        envs: Vec<(String, String)>,
+    ) -> Self {
+        Self::new(Arc::new(LocalRuntimeLauncher {
             app_data,
-            worker,
+            python_worker,
+            r_worker,
             envs,
         }))
+    }
+
+    /// Compatibility constructor for callers that only wire local Python.
+    pub fn local_python(app_data: PathBuf, worker: PathBuf, envs: Vec<(String, String)>) -> Self {
+        Self::local(app_data, worker, None, envs)
     }
 
     pub async fn start(&self, key: RuntimeKey, cwd: PathBuf) -> Result<RuntimeInfo> {
@@ -271,6 +295,7 @@ impl RuntimeManager {
                 .project_id
                 .cmp(&b.key.project_id)
                 .then_with(|| a.key.context_id.cmp(&b.key.context_id))
+                .then_with(|| a.key.language.cmp(&b.key.language))
         });
         infos
     }
@@ -403,39 +428,76 @@ impl RuntimeManager {
     }
 }
 
-struct LocalPythonLauncher {
+struct LocalRuntimeLauncher {
     app_data: PathBuf,
-    worker: PathBuf,
+    python_worker: PathBuf,
+    r_worker: Option<PathBuf>,
     envs: Vec<(String, String)>,
 }
 
 #[async_trait]
-impl RuntimeLauncher for LocalPythonLauncher {
+impl RuntimeLauncher for LocalRuntimeLauncher {
     async fn launch(&self, key: &RuntimeKey, cwd: &Path) -> Result<LaunchedRuntime> {
-        if key.language != RuntimeLanguage::Python || key.context_id != LOCAL_CONTEXT_ID {
-            return Err(anyhow!(
-                "local launcher only supports local Python runtimes"
-            ));
+        if key.context_id != LOCAL_CONTEXT_ID {
+            return Err(anyhow!("local launcher only supports the local context"));
         }
-        let python = PythonEnv::managed(&self.app_data).python();
-        if !python.is_file() {
-            return Err(anyhow!(
-                "managed Python interpreter not found at {}; wait for Python bootstrap",
-                python.display()
-            ));
-        }
-        if !self.worker.is_file() {
-            return Err(anyhow!(
-                "kernel worker not found at {}",
-                self.worker.display()
-            ));
-        }
-        let client = KernelClient::spawn_in(&python, &self.worker, &self.envs, cwd).await?;
+
+        let (interpreter, args, envs, language) = match key.language {
+            RuntimeLanguage::Python => {
+                let python = PythonEnv::managed(&self.app_data).python();
+                if !python.is_file() {
+                    return Err(anyhow!(
+                        "managed Python interpreter not found at {}; wait for Python bootstrap",
+                        python.display()
+                    ));
+                }
+                if !self.python_worker.is_file() {
+                    return Err(anyhow!(
+                        "Python runtime worker not found at {}",
+                        self.python_worker.display()
+                    ));
+                }
+                (
+                    python,
+                    vec![self.python_worker.as_os_str().to_os_string()],
+                    self.envs.as_slice(),
+                    "python",
+                )
+            }
+            RuntimeLanguage::R => {
+                let rscript = find_rscript().ok_or_else(|| {
+                    anyhow!(
+                        "Rscript not found on PATH; install R or set WISP_RSCRIPT to the selected interpreter"
+                    )
+                })?;
+                let worker = self
+                    .r_worker
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("R runtime worker is not configured for this host"))?;
+                if !worker.is_file() {
+                    return Err(anyhow!(
+                        "R runtime worker not found at {}",
+                        worker.display()
+                    ));
+                }
+                (
+                    rscript,
+                    vec![
+                        OsString::from("--vanilla"),
+                        worker.as_os_str().to_os_string(),
+                    ],
+                    &[][..],
+                    "r",
+                )
+            }
+        };
+        let client =
+            KernelClient::spawn_command(&interpreter, &args, envs, Some(cwd), language).await?;
         let ready = client.ready().clone();
         Ok(LaunchedRuntime::new(
             Box::new(client),
             RuntimeMetadata {
-                interpreter: Some(python.to_string_lossy().into_owned()),
+                interpreter: Some(interpreter.to_string_lossy().into_owned()),
                 version: Some(ready.version),
                 process_id: Some(ready.pid),
             },
@@ -758,6 +820,33 @@ mod tests {
         let b = manager.execute(&key_b, &cwd_b, "delay").await.unwrap();
         let _ = tokio::join!(finished(a), finished(b));
         assert_eq!(launcher.max_active.load(Ordering::SeqCst), 2);
+        manager.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn fake_python_and_r_workers_keep_independent_persistent_state() {
+        let launcher = FakeLauncher::default();
+        let manager = manager(&launcher);
+        let python = RuntimeKey::local_python("project-a");
+        let r = RuntimeKey::local_r("project-a");
+        let cwd = PathBuf::from("project-a");
+
+        finished(manager.execute(&python, &cwd, "set:3").await.unwrap())
+            .await
+            .unwrap();
+        finished(manager.execute(&r, &cwd, "set:7").await.unwrap())
+            .await
+            .unwrap();
+
+        let python_value = finished(manager.execute(&python, &cwd, "get").await.unwrap())
+            .await
+            .unwrap();
+        let r_value = finished(manager.execute(&r, &cwd, "get").await.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(python_value.stdout, "3");
+        assert_eq!(r_value.stdout, "7");
+        assert_eq!(launcher.launches.load(Ordering::SeqCst), 2);
         manager.shutdown_all().await;
     }
 
