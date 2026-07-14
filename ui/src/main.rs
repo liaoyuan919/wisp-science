@@ -3635,10 +3635,8 @@ fn App() -> impl IntoView {
                     session_transfer.set(None);
                 }
                 Err(error) => {
-                    session_transfer_error.set(Some(localize_backend(
-                        locale.get(),
-                        &js_error_text(error),
-                    )));
+                    session_transfer_error
+                        .set(Some(localize_backend(locale.get(), &js_error_text(error))));
                 }
             }
             session_transfer_busy.set(false);
