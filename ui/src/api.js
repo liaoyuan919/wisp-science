@@ -293,7 +293,40 @@ function pdfPageLabel(template, page, total) {
     .replace("{total}", String(total));
 }
 
+function cleanupPreview(el) {
+  if (typeof el?.__wispPreviewCleanup === "function") {
+    try {
+      el.__wispPreviewCleanup();
+    } catch (error) {
+      console.warn("Failed to clean up preview", error);
+    }
+  }
+  delete el.__wispPreviewCleanup;
+  delete el.__wispPreviewToken;
+}
+
+function pdfNavIcon(direction) {
+  const path = direction < 0 ? "m15 18-6-6 6-6" : "m9 18 6-6-6-6";
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${path}"></path></svg>`;
+}
+
+function eventTargetsEditable(target) {
+  for (let node = target; node; node = node.parentElement) {
+    const tag = node.tagName?.toLowerCase?.();
+    if (
+      tag === "input" ||
+      tag === "textarea" ||
+      tag === "select" ||
+      node.hasAttribute?.("contenteditable")
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function renderPdf(el, payload) {
+  cleanupPreview(el);
   const renderToken = Symbol("pdf-preview");
   el.__wispPreviewToken = renderToken;
 
@@ -304,6 +337,11 @@ async function renderPdf(el, payload) {
 
   let task;
   let pdf;
+  let renderTask;
+  let disconnectObserver;
+  let currentPage = 1;
+  let rendering = false;
+  let disposed = false;
   try {
     const lib = await pdfjs();
     const source = payload.b64 ? { data: base64Bytes(payload.b64) } : payload.url;
@@ -315,58 +353,207 @@ async function renderPdf(el, payload) {
       return;
     }
 
-    const pages = document.createElement("div");
-    pages.className = "rp-pdf";
-    pages.setAttribute("data-page-count", String(pdf.numPages));
-    el.replaceChildren(pages);
+    const root = document.createElement("div");
+    root.className = "rp-pdf";
+    root.setAttribute("data-page-count", String(pdf.numPages));
 
-    // Render at up to 2x the displayed width so text remains crisp on HiDPI
-    // screens without making long papers consume unbounded canvas memory.
-    const availableWidth = Math.max(240, Math.min(el.clientWidth || 800, 1000));
-    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
-    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-      if (!el.isConnected || el.__wispPreviewToken !== renderToken) {
+    const toolbar = document.createElement("div");
+    toolbar.className = "rp-pdf-toolbar";
+
+    const nav = document.createElement("div");
+    nav.className = "rp-pdf-nav";
+
+    const prevButton = document.createElement("button");
+    prevButton.type = "button";
+    prevButton.className = "rp-pdf-nav-btn";
+    prevButton.setAttribute("aria-label", payload.prevPage || "Previous page");
+    prevButton.setAttribute(
+      "title",
+      `${payload.prevPage || "Previous page"} (Page Up)`,
+    );
+    prevButton.innerHTML = pdfNavIcon(-1);
+
+    const pageIndicator = document.createElement("div");
+    pageIndicator.className = "rp-pdf-page-indicator";
+    pageIndicator.setAttribute("role", "status");
+    pageIndicator.setAttribute("aria-live", "polite");
+
+    const nextButton = document.createElement("button");
+    nextButton.type = "button";
+    nextButton.className = "rp-pdf-nav-btn";
+    nextButton.setAttribute("aria-label", payload.nextPage || "Next page");
+    nextButton.setAttribute(
+      "title",
+      `${payload.nextPage || "Next page"} (Page Down)`,
+    );
+    nextButton.innerHTML = pdfNavIcon(1);
+
+    nav.append(prevButton, pageIndicator, nextButton);
+    toolbar.appendChild(nav);
+
+    const viewer = document.createElement("div");
+    viewer.className = "rp-pdf-viewer";
+
+    root.append(toolbar, viewer);
+    el.replaceChildren(root);
+
+    const syncControls = () => {
+      root.setAttribute("data-current-page", String(currentPage));
+      pageIndicator.textContent = pdfPageLabel(payload.pageLabel, currentPage, pdf.numPages);
+      prevButton.disabled = rendering || currentPage <= 1;
+      nextButton.disabled = rendering || currentPage >= pdf.numPages;
+    };
+
+    const showPageError = (error) => {
+      if (error?.name === "RenderingCancelledException" || disposed) {
         return;
       }
+      console.error("Failed to render PDF page", error);
+      const message = document.createElement("div");
+      message.className = "rp-error rp-pdf-error";
+      message.textContent = payload.error || "Unable to preview this PDF.";
+      el.replaceChildren(message);
+      el.__wispPreviewCleanup?.();
+    };
+
+    const renderPage = async (pageNumber) => {
+      rendering = true;
+      syncControls();
 
       const page = await pdf.getPage(pageNumber);
-      const natural = page.getViewport({ scale: 1 });
-      const cssScale = availableWidth / natural.width;
-      const viewport = page.getViewport({ scale: cssScale * pixelRatio });
-      const wrapper = document.createElement("div");
-      wrapper.className = "rp-pdf-page";
-      wrapper.dataset.page = String(pageNumber);
-      wrapper.setAttribute(
-        "aria-label",
-        pdfPageLabel(payload.pageLabel, pageNumber, pdf.numPages),
-      );
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.max(1, Math.floor(viewport.width));
-      canvas.height = Math.max(1, Math.floor(viewport.height));
-      canvas.setAttribute("role", "img");
-      wrapper.appendChild(canvas);
-      pages.appendChild(wrapper);
+      try {
+        // Render at up to 2x the displayed width so text remains crisp on HiDPI
+        // screens without making the single-page preview consume unbounded canvas memory.
+        const availableWidth = Math.max(
+          240,
+          Math.min(viewer.clientWidth || el.clientWidth || 800, 1000),
+        );
+        const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+        const natural = page.getViewport({ scale: 1 });
+        const cssScale = availableWidth / natural.width;
+        const viewport = page.getViewport({ scale: cssScale * pixelRatio });
+        const wrapper = document.createElement("div");
+        wrapper.className = "rp-pdf-page";
+        wrapper.dataset.page = String(pageNumber);
+        wrapper.setAttribute(
+          "aria-label",
+          pdfPageLabel(payload.pageLabel, pageNumber, pdf.numPages),
+        );
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.floor(viewport.width));
+        canvas.height = Math.max(1, Math.floor(viewport.height));
+        canvas.setAttribute("role", "img");
+        wrapper.appendChild(canvas);
 
-      const context = canvas.getContext("2d", { alpha: false });
-      if (!context) throw new Error("Canvas is not available");
-      await page.render({ canvasContext: context, viewport }).promise;
-      wrapper.dataset.rendered = "true";
-      page.cleanup();
+        const context = canvas.getContext("2d", { alpha: false });
+        if (!context) throw new Error("Canvas is not available");
+
+        renderTask = page.render({ canvasContext: context, viewport });
+        await renderTask.promise;
+        if (!el.isConnected || el.__wispPreviewToken !== renderToken || disposed) {
+          return;
+        }
+
+        wrapper.dataset.rendered = "true";
+        viewer.replaceChildren(wrapper);
+      } finally {
+        renderTask = undefined;
+        rendering = false;
+        syncControls();
+        page.cleanup();
+      }
+    };
+
+    const setPage = (pageNumber) => {
+      if (
+        rendering ||
+        pageNumber < 1 ||
+        pageNumber > pdf.numPages ||
+        pageNumber === currentPage
+      ) {
+        return;
+      }
+      currentPage = pageNumber;
+      void renderPage(pageNumber).catch(showPageError);
+    };
+
+    const stepPage = (delta) => setPage(currentPage + delta);
+    prevButton.addEventListener("click", () => stepPage(-1));
+    nextButton.addEventListener("click", () => stepPage(1));
+
+    const onKeyDown = (event) => {
+      if (
+        event.defaultPrevented ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.shiftKey ||
+        eventTargetsEditable(event.target)
+      ) {
+        return;
+      }
+      if (event.key === "PageUp") {
+        event.preventDefault();
+        stepPage(-1);
+      } else if (event.key === "PageDown") {
+        event.preventDefault();
+        stepPage(1);
+      }
+    };
+
+    if (el.closest(".artifact-modal")) {
+      document.addEventListener("keydown", onKeyDown);
     }
+
+    const cleanup = () => {
+      if (disposed) return;
+      disposed = true;
+      document.removeEventListener("keydown", onKeyDown);
+      disconnectObserver?.disconnect();
+      if (renderTask) {
+        try {
+          renderTask.cancel();
+        } catch {
+          /* ignore cancellation races */
+        }
+      }
+      if (pdf) {
+        const currentPdf = pdf;
+        pdf = undefined;
+        void currentPdf.destroy().catch((error) => {
+          console.warn("Failed to release PDF preview resources", error);
+        });
+      } else if (task) {
+        const currentTask = task;
+        task = undefined;
+        void currentTask.destroy().catch((error) => {
+          console.warn("Failed to release PDF loading task", error);
+        });
+      }
+    };
+    el.__wispPreviewCleanup = cleanup;
+
+    const observerTarget = document.body || document.documentElement;
+    if (observerTarget) {
+      disconnectObserver = new MutationObserver(() => {
+        if (!el.isConnected) cleanup();
+      });
+      disconnectObserver.observe(observerTarget, { childList: true, subtree: true });
+    }
+
+    syncControls();
+    await renderPage(currentPage);
   } catch (error) {
+    if (error?.name === "RenderingCancelledException") {
+      return;
+    }
     console.error("Failed to render PDF preview", error);
+    el.__wispPreviewCleanup?.();
     if (el.isConnected && el.__wispPreviewToken === renderToken) {
       const message = document.createElement("div");
       message.className = "rp-error rp-pdf-error";
       message.textContent = payload.error || "Unable to preview this PDF.";
       el.replaceChildren(message);
-    }
-  } finally {
-    try {
-      if (pdf) await pdf.destroy();
-      else if (task) await task.destroy();
-    } catch (error) {
-      console.warn("Failed to release PDF preview resources", error);
     }
   }
 }
@@ -496,6 +683,7 @@ function renderFasta(el, text) {
 export async function mount_preview(kind, elId, payloadJson) {
   const el = document.getElementById(elId);
   if (!el) return;
+  cleanupPreview(el);
   const p = JSON.parse(payloadJson);
   el.innerHTML = "";
   el.classList.add("rp-heavy");
