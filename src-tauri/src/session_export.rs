@@ -35,6 +35,12 @@ pub(super) struct ArtifactProvenance {
     env: Option<ProvEnv>,
 }
 
+impl ArtifactProvenance {
+    pub(super) fn into_source(self) -> (String, String) {
+        (self.code, self.language)
+    }
+}
+
 #[derive(serde::Serialize)]
 struct ExportToolResult {
     tool_call_id: String,
@@ -352,7 +358,7 @@ pub(super) async fn get_artifact_provenance(
     artifact_provenance_for_path(&state.store, &fid, &ap.root, &path).await
 }
 
-async fn artifact_provenance_for_path(
+pub(super) async fn artifact_provenance_for_path(
     store: &Store,
     frame_id: &str,
     root: &std::path::Path,

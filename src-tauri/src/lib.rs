@@ -15,7 +15,7 @@ use uuid::Uuid;
 use wisp_core::{Agent, MemoryManager, Output};
 use wisp_llm::{Message, ProviderConfig};
 use wisp_skills::SkillIndex;
-use wisp_store::Store;
+use wisp_store::{LibraryStore, Store};
 
 mod acp;
 mod approval_commands;
@@ -24,6 +24,7 @@ mod connector_commands;
 mod context_probe;
 mod file_browser;
 mod harvest;
+mod library_commands;
 mod mcp_bridge;
 pub use mcp_bridge::run_mcp_bridge_cli;
 mod models;
@@ -1113,6 +1114,7 @@ struct ActiveProject {
 struct AppState {
     app_data: PathBuf,
     store: Store,
+    library: LibraryStore,
     run_manager: run_context::RunManager,
     active: std::sync::RwLock<HashMap<String, ActiveProject>>,
     /// One runtime per conversation frame id. Locked only briefly to clone the
@@ -5128,6 +5130,10 @@ pub fn run() {
             std::fs::create_dir_all(&app_data).expect("create app data dir");
             let db_path = app_data.join("wisp.sqlite");
             let store = tauri::async_runtime::block_on(Store::open(&db_path)).expect("open store");
+            let library = tauri::async_runtime::block_on(LibraryStore::open(
+                &app_data.join("library.sqlite"),
+            ))
+            .expect("open global library");
             let run_manager = run_context::RunManager::new();
             tauri::async_runtime::block_on(run_manager.recover(&store))
                 .expect("recover incomplete runs");
@@ -5196,6 +5202,7 @@ pub fn run() {
             let state = AppState {
                 app_data,
                 store,
+                library,
                 run_manager,
                 active: std::sync::RwLock::new(HashMap::from([(
                     "main".to_string(),
@@ -5370,6 +5377,11 @@ pub fn run() {
             register_artifact,
             save_workspace_file_by_kind,
             get_artifact_provenance,
+            library_commands::list_library_items,
+            library_commands::star_library_code,
+            library_commands::star_library_figure,
+            library_commands::get_library_item,
+            library_commands::delete_library_item,
             get_project_info,
             get_capabilities,
             list_memory,

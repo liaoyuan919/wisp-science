@@ -6,6 +6,7 @@
 mod acp_sessions;
 mod artifacts;
 mod execution_contexts;
+mod library;
 mod models;
 mod project_sync;
 mod project_transfer;
@@ -17,6 +18,7 @@ pub mod secrets;
 mod sessions;
 
 pub use acp_sessions::AcpSessionBinding;
+pub use library::{LibraryItem, LibraryItemDetail, LibraryStore, NewLibraryItem};
 pub use models::*;
 pub use project_sync::ProjectSyncState;
 pub use project_transfer::ProjectTransferStats;

@@ -2088,6 +2088,62 @@ test("code lives in Notebook instead of Artifacts", async ({ page }) => {
   await expect(page.locator(".rp-badge.code")).toHaveCount(0);
 });
 
+test("an SVG star saves a Notebook cell in the global library", async ({ page }) => {
+  await enterApp(page);
+  await composer(page).fill("STEPSDEMO");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText(/60,675 genes/)).toBeVisible({ timeout: 10_000 });
+  await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.getByRole("button", { name: "Notebook (2)", exact: true }).click();
+
+  const cell = page.locator(".notebook-cell").first();
+  const star = cell.getByRole("button", { name: "Add to library" });
+  await expect(star.locator("svg path")).toHaveCount(1);
+  await expect(star).toHaveText("");
+  const copy = cell.getByRole("button", { name: "Copy code" });
+  await expect.poll(() => copy.evaluate((node) =>
+    node.previousElementSibling?.classList.contains("notebook-star") ?? false,
+  )).toBe(true);
+  await star.click();
+  await expect(cell.getByRole("button", { name: "Remove from library" })).toHaveAttribute("aria-pressed", "true");
+
+  await page.getByRole("button", { name: "Library", exact: true }).click();
+  await expect(page.getByTestId("library-screen")).toBeVisible();
+  await expect(page.locator('.library-card[data-library-kind="code"]')).toContainText("zcat counts.txt.gz");
+  await expect(page.locator('.library-card[data-library-kind="code"]')).toContainText("wisp-science / Current analysis");
+});
+
+test("a starred figure keeps its image and generating code", async ({ page }) => {
+  await enterApp(page);
+  await composer(page).fill("make a volcano plot volcano.png");
+  await page.getByRole("button", { name: "Send" }).click();
+  await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.locator('.rp-tile[data-artifact-name="volcano.png"] .rp-tile-main').click();
+
+  const modal = page.locator(".artifact-modal");
+  const star = modal.getByRole("button", { name: "Add to library" });
+  await expect(star.locator("svg path")).toHaveCount(1);
+  const openCenter = modal.getByRole("button", { name: "Open in center" });
+  await expect.poll(() => openCenter.evaluate((node) =>
+    node.previousElementSibling?.getAttribute("aria-label"),
+  )).toBe("Add to library");
+  await star.click();
+  await expect(modal.getByRole("button", { name: "Remove from library" })).toHaveAttribute("aria-pressed", "true");
+  await modal.getByRole("button", { name: "Close panel" }).click();
+
+  await page.getByRole("button", { name: "Library", exact: true }).click();
+  const figure = page.locator('.library-card[data-library-kind="figure"]');
+  await expect(figure).toContainText("volcano.png");
+  await figure.locator(".library-card-main").click();
+  const detail = page.locator(".library-detail");
+  await expect(detail.locator(".library-figure img")).toBeVisible();
+  await expect(detail).toContainText("Generating code");
+  await expect(detail).toContainText("savefig");
+
+  await detail.getByRole("button", { name: "Remove from library" }).click();
+  await expect(page.locator('.library-card[data-library-kind="figure"]')).toHaveCount(0);
+});
+
 test("a project card can open its project in a new window (#52)", async ({ page }) => {
   await page.goto("/");
   await page.locator(".proj-card:not(.proj-example) .pc-window").first().click();

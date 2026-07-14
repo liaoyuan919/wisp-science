@@ -256,6 +256,55 @@ pub(crate) struct ArtifactInfo {
     pub(crate) origin: Option<String>,
 }
 
+/// Immutable item in the app-global library database. Source names are
+/// snapshots, so this remains useful after its project or session is deleted.
+#[derive(Deserialize, Clone, PartialEq)]
+pub(crate) struct LibraryItem {
+    pub(crate) id: String,
+    pub(crate) kind: String,
+    pub(crate) title: String,
+    pub(crate) language: Option<String>,
+    #[serde(default)]
+    pub(crate) code: String,
+    pub(crate) content_type: Option<String>,
+    pub(crate) source_project_id: String,
+    pub(crate) source_project_name: String,
+    pub(crate) source_session_id: String,
+    pub(crate) source_session_title: String,
+    pub(crate) source_path: Option<String>,
+    pub(crate) created_at: i64,
+}
+
+impl LibraryItem {
+    pub(crate) fn matches_code(&self, session: &str, language: &str, code: &str) -> bool {
+        self.kind == "code"
+            && self.source_session_id == session
+            && self.language.as_deref().unwrap_or_default() == language
+            && self.code == code
+    }
+
+    pub(crate) fn matches_figure(&self, session: &str, path: &str) -> bool {
+        self.kind == "figure"
+            && self.source_session_id == session
+            && self.source_path.as_deref().map(normalize_library_path)
+                == Some(normalize_library_path(path))
+    }
+}
+
+fn normalize_library_path(path: &str) -> String {
+    path.strip_prefix("./")
+        .or_else(|| path.strip_prefix(".\\"))
+        .unwrap_or(path)
+        .replace('\\', "/")
+}
+
+#[derive(Deserialize, Clone)]
+pub(crate) struct LibraryItemDetail {
+    #[serde(flatten)]
+    pub(crate) item: LibraryItem,
+    pub(crate) base64: Option<String>,
+}
+
 #[derive(Deserialize, Clone, PartialEq)]
 pub(crate) struct SessionSearchInfo {
     pub(crate) id: String,

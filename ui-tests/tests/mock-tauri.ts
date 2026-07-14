@@ -226,6 +226,7 @@ export function tauriMock(): void {
     { id: "art-html", name: "dashboard.html", kind: "text/html", path: "dashboard.html", ts: Math.floor(Date.now() / 1000), project_id: "default", project_name: "wisp-science", session_id: "s-current", session_title: "Current analysis", origin: "output" },
     { id: "art-markdown", name: "analysis-report.md", kind: "text/markdown", path: "analysis-report.md", ts: Math.floor(Date.now() / 1000), project_id: "default", project_name: "wisp-science", session_id: "s-current", session_title: "Current analysis", origin: "output" },
   ];
+  let libraryItems: any[] = [];
 
   (window as any).__TAURI__ = {
     core: {
@@ -239,6 +240,67 @@ export function tauriMock(): void {
           return value;
         };
         switch (cmd) {
+          case "list_library_items":
+            return libraryItems.map(({ base64: _base64, ...item }) => item);
+          case "star_library_code": {
+            const sessionId = String(arg("sessionId") ?? "");
+            const language = String(arg("language") ?? "");
+            const code = String(arg("code") ?? "");
+            const existing = libraryItems.find((item) => item.kind === "code"
+              && item.source_session_id === sessionId && item.language === language && item.code === code);
+            if (existing) return existing;
+            const item = {
+              id: `library-${libraryItems.length + 1}`,
+              kind: "code",
+              title: code.split("\n").find((line) => line.trim())?.trim() ?? "Code",
+              language,
+              code,
+              content_type: null,
+              source_project_id: activeProjectId,
+              source_project_name: activeProjectId === "other" ? "Other project" : project.name,
+              source_session_id: sessionId,
+              source_session_title: "Current analysis",
+              source_path: null,
+              created_at: Math.floor(Date.now() / 1000),
+              base64: null,
+            };
+            libraryItems.unshift(item);
+            return item;
+          }
+          case "star_library_figure": {
+            const sessionId = String(arg("sessionId") ?? "");
+            const path = String(arg("path") ?? "").replaceAll("\\", "/").replace(/^\.\//, "");
+            const existing = libraryItems.find((item) => item.kind === "figure"
+              && item.source_session_id === sessionId && item.source_path === path);
+            if (existing) return existing;
+            const item = {
+              id: `library-${libraryItems.length + 1}`,
+              kind: "figure",
+              title: String(arg("name") ?? "Figure"),
+              language: "python",
+              code: "import matplotlib\nplt.savefig('volcano.png')",
+              content_type: "image/png",
+              source_project_id: activeProjectId,
+              source_project_name: activeProjectId === "other" ? "Other project" : project.name,
+              source_session_id: sessionId,
+              source_session_title: "Current analysis",
+              source_path: path,
+              created_at: Math.floor(Date.now() / 1000),
+              base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z0mAAAAAASUVORK5CYII=",
+            };
+            libraryItems.unshift(item);
+            return item;
+          }
+          case "get_library_item": {
+            const item = libraryItems.find((entry) => entry.id === arg("id"));
+            if (!item) throw new Error("Library item not found");
+            return item;
+          }
+          case "delete_library_item": {
+            const before = libraryItems.length;
+            libraryItems = libraryItems.filter((entry) => entry.id !== arg("id"));
+            return libraryItems.length !== before;
+          }
           case "list_demos":
             return demos;
           case "load_demo":

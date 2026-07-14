@@ -1,0 +1,219 @@
+use crate::app_support::{compose_icon, copy_text, RpCodeView};
+use crate::bindings::{invoke, invoke_checked};
+use crate::dto::{LibraryItem, LibraryItemDetail};
+use crate::i18n::{t, Locale};
+use crate::text::event_target_value;
+use leptos::*;
+use serde_wasm_bindgen::to_value;
+use wasm_bindgen::JsValue;
+
+#[component]
+pub(super) fn LibraryScreen(
+    locale: ReadSignal<Locale>,
+    items: ReadSignal<Vec<LibraryItem>>,
+    on_close: Callback<()>,
+    on_open_source: Callback<(String, String)>,
+    on_changed: Callback<()>,
+) -> impl IntoView {
+    let query = create_rw_signal(String::new());
+    let filter = create_rw_signal("all");
+    let selected = create_rw_signal(None::<LibraryItemDetail>);
+    let loading = create_rw_signal(false);
+    let error = create_rw_signal(None::<String>);
+
+    let open_item = Callback::new(move |id: String| {
+        loading.set(true);
+        error.set(None);
+        spawn_local(async move {
+            let args = to_value(&serde_json::json!({ "id": id })).unwrap();
+            match invoke_checked("get_library_item", args).await {
+                Ok(value) => match serde_wasm_bindgen::from_value::<LibraryItemDetail>(value) {
+                    Ok(detail) => selected.set(Some(detail)),
+                    Err(_) => error.set(Some(
+                        t(locale.get_untracked(), "library.read_failed").into(),
+                    )),
+                },
+                Err(_) => error.set(Some(
+                    t(locale.get_untracked(), "library.read_failed").into(),
+                )),
+            }
+            loading.set(false);
+        });
+    });
+
+    let delete_item = Callback::new(move |id: String| {
+        spawn_local(async move {
+            let args = to_value(&serde_json::json!({ "id": id })).unwrap();
+            if invoke_checked("delete_library_item", args).await.is_ok() {
+                selected.set(None);
+                on_changed.call(());
+            }
+        });
+    });
+
+    view! {
+        <section class="library-screen" data-testid="library-screen">
+            <header class="library-head">
+                <div>
+                    <h1>{move || t(locale.get(), "library.title")}</h1>
+                    <p>{move || t(locale.get(), "library.subtitle")}</p>
+                </div>
+                <button type="button" class="icon-btn library-close"
+                    title=move || t(locale.get(), "library.close")
+                    aria-label=move || t(locale.get(), "library.close")
+                    on:click=move |_| on_close.call(())>{compose_icon("close")}</button>
+            </header>
+            <div class="library-toolbar">
+                <label class="library-search">
+                    <span class="gi search" aria-hidden="true"></span>
+                    <input type="search"
+                        aria-label=move || t(locale.get(), "library.search")
+                        placeholder=move || t(locale.get(), "library.search")
+                        prop:value=move || query.get()
+                        on:input=move |event| query.set(event_target_value(&event)) />
+                </label>
+                <div class="library-filters" role="group" aria-label=move || t(locale.get(), "library.filter")>
+                    {[ ("all", "library.all"), ("figure", "library.figures"), ("code", "library.code") ]
+                        .into_iter()
+                        .map(|(value, key)| view! {
+                            <button type="button" class:active=move || filter.get() == value
+                                on:click=move |_| filter.set(value)>{move || t(locale.get(), key)}</button>
+                        }).collect_view()}
+                </div>
+            </div>
+            {move || error.get().map(|message| view! { <div class="library-error" role="alert">{message}</div> })}
+            <div class="library-list">
+                {move || {
+                    let needle = query.get().trim().to_lowercase();
+                    let selected_filter = filter.get();
+                    let visible = items.get().into_iter().filter(|item| {
+                        (selected_filter == "all" || item.kind == selected_filter)
+                            && (needle.is_empty()
+                                || item.title.to_lowercase().contains(&needle)
+                                || item.code.to_lowercase().contains(&needle)
+                                || item.source_project_name.to_lowercase().contains(&needle)
+                                || item.source_session_title.to_lowercase().contains(&needle))
+                    }).collect::<Vec<_>>();
+                    if visible.is_empty() {
+                        return view! {
+                            <div class="library-empty">
+                                {compose_icon("star")}
+                                <h2>{t(locale.get(), "library.empty.title")}</h2>
+                                <p>{t(locale.get(), "library.empty.body")}</p>
+                            </div>
+                        }.into_view();
+                    }
+                    visible.into_iter().map(|item| {
+                        let id = item.id.clone();
+                        let source_project = item.source_project_id.clone();
+                        let source_session = item.source_session_id.clone();
+                        let is_figure = item.kind == "figure";
+                        let excerpt = item.code.lines().take(4).collect::<Vec<_>>().join("\n");
+                        view! {
+                            <article class="library-card" data-library-kind=item.kind.clone()>
+                                <button type="button" class="library-card-main"
+                                    on:click=move |_| open_item.call(id.clone())>
+                                    <span class="library-card-icon">
+                                        {compose_icon(if is_figure { "image" } else { "doc" })}
+                                    </span>
+                                    <span class="library-card-body">
+                                        <span class="library-card-title">{item.title.clone()}</span>
+                                        {(!excerpt.is_empty()).then(|| view! { <pre>{excerpt.clone()}</pre> })}
+                                        <span class="library-card-meta">
+                                            {format!("{} / {}", item.source_project_name, item.source_session_title)}
+                                        </span>
+                                    </span>
+                                    <span class="library-card-kind">
+                                        {if is_figure { t(locale.get_untracked(), "library.figure") } else { item.language.as_deref().unwrap_or("code").to_string() }}
+                                    </span>
+                                </button>
+                                <button type="button" class="library-source"
+                                    title=move || t(locale.get(), "library.open_source")
+                                    on:click=move |_| {
+                                        on_close.call(());
+                                        on_open_source.call((source_project.clone(), source_session.clone()));
+                                    }>
+                                    {move || t(locale.get(), "library.open_source")}
+                                </button>
+                            </article>
+                        }
+                    }).collect_view().into_view()
+                }}
+            </div>
+            {move || loading.get().then(|| view! { <div class="library-loading">{t(locale.get(), "loading")}</div> })}
+            {move || selected.get().map(|detail| {
+                let item = detail.item;
+                let delete_id = item.id.clone();
+                let project_id = item.source_project_id.clone();
+                let session_id = item.source_session_id.clone();
+                let code_copy = item.code.clone();
+                let image_src = detail.base64.map(|base64| format!(
+                    "data:{};base64,{base64}",
+                    item.content_type.as_deref().unwrap_or("application/octet-stream")
+                ));
+                let is_figure = item.kind == "figure";
+                view! {
+                    <div class="overlay library-detail-overlay" on:click=move |_| selected.set(None)>
+                        <div class="modal library-detail" on:click=|event| event.stop_propagation()>
+                            <header>
+                                <div>
+                                    <h2>{item.title.clone()}</h2>
+                                    <span>{format!("{} / {}", item.source_project_name, item.source_session_title)}</span>
+                                </div>
+                                <div class="library-detail-actions">
+                                    <button type="button" class="icon-btn starred"
+                                        title=move || t(locale.get(), "library.remove")
+                                        aria-label=move || t(locale.get(), "library.remove")
+                                        on:click=move |_| delete_item.call(delete_id.clone())>
+                                        {compose_icon("star-filled")}
+                                    </button>
+                                    <button type="button" class="icon-btn"
+                                        title=move || t(locale.get(), "library.close")
+                                        aria-label=move || t(locale.get(), "library.close")
+                                        on:click=move |_| selected.set(None)>{compose_icon("close")}</button>
+                                </div>
+                            </header>
+                            {if is_figure {
+                                image_src.map(|src| view! {
+                                    <div class="library-figure"><img src=src alt=item.title.clone() /></div>
+                                }).unwrap_or_else(|| view! {
+                                    <div class="library-error">{t(locale.get_untracked(), "library.read_failed")}</div>
+                                }).into_view()
+                            } else {
+                                view! { <RpCodeView lang=item.language.clone().unwrap_or_default() body=item.code.clone() /> }.into_view()
+                            }}
+                            {(is_figure && !item.code.is_empty()).then(|| view! {
+                                <section class="library-generating-code">
+                                    <div class="library-code-head">
+                                        <h3>{move || t(locale.get(), "library.generating_code")}</h3>
+                                        <button type="button" class="icon-btn"
+                                            title=move || t(locale.get(), "tool.copy_code")
+                                            aria-label=move || t(locale.get(), "tool.copy_code")
+                                            on:click=move |_| copy_text(code_copy.clone())>{compose_icon("copy")}</button>
+                                    </div>
+                                    <RpCodeView lang=item.language.clone().unwrap_or_default() body=item.code.clone() />
+                                </section>
+                            })}
+                            <footer>
+                                <button type="button" class="btn-ghost" on:click=move |_| {
+                                    selected.set(None);
+                                    on_close.call(());
+                                    on_open_source.call((project_id.clone(), session_id.clone()));
+                                }>{move || t(locale.get(), "library.open_source")}</button>
+                            </footer>
+                        </div>
+                    </div>
+                }
+            })}
+        </section>
+    }
+}
+
+pub(super) fn refresh_library(items: RwSignal<Vec<LibraryItem>>) {
+    spawn_local(async move {
+        let value = invoke("list_library_items", JsValue::UNDEFINED).await;
+        if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<LibraryItem>>(value) {
+            items.set(list);
+        }
+    });
+}

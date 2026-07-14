@@ -95,9 +95,10 @@
 .notebook-status.ok { background:hsl(152 42% 42%); }
 .notebook-status.error { background:var(--err); }
 .notebook-status.running { background:var(--clay-strong); }
-.notebook-copy { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; padding:0; border:1px solid transparent; border-radius:7px; background:transparent; color:var(--text-faint); cursor:pointer; }
-.notebook-copy:hover { border-color:var(--border); background:var(--bg-sunken); color:var(--text); }
-.notebook-copy svg { width:15px; height:15px; }
+.notebook-copy, .notebook-star { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; padding:0; border:1px solid transparent; border-radius:7px; background:transparent; color:var(--text-faint); cursor:pointer; }
+.notebook-copy:hover, .notebook-star:hover { border-color:var(--border); background:var(--bg-sunken); color:var(--text); }
+.notebook-copy svg, .notebook-star svg { width:15px; height:15px; }
+.notebook-star:disabled { opacity:.35; cursor:default; }
 .notebook-source .rp-code { max-height:none; border-radius:0; background:var(--bg-app); }
 .notebook-output { margin-top:8px; color:var(--text-muted); font-size:12px; }
 .notebook-output > summary { cursor:pointer; user-select:none; }
