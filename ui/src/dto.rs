@@ -1015,6 +1015,22 @@ pub(crate) struct ExecutionContext {
     pub(crate) updated_at: i64,
 }
 
+#[derive(Deserialize, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalSessionSummary {
+    pub(crate) id: String,
+    #[serde(rename = "projectId", alias = "project_id")]
+    pub(crate) project_id: String,
+    #[serde(rename = "contextId", alias = "context_id")]
+    pub(crate) context_id: String,
+    pub(crate) title: String,
+    pub(crate) kind: String,
+    #[serde(rename = "displayCwd", alias = "display_cwd")]
+    pub(crate) display_cwd: String,
+    #[serde(default, rename = "processId", alias = "process_id")]
+    pub(crate) process_id: Option<u32>,
+    pub(crate) running: bool,
+}
+
 #[derive(Deserialize, Clone)]
 #[allow(dead_code)]
 pub(crate) struct RunRecord {
