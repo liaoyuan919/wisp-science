@@ -230,6 +230,28 @@ fn normalize_tool_calls(msg: &Value) -> Vec<ToolCall> {
     out
 }
 
+fn merge_stream_tool_call_delta(entry: &mut (String, String, String), tc: &Value) {
+    if let Some(id) = tc
+        .get("id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        entry.0 = id.to_string();
+    }
+    if let Some(f) = tc.get("function").and_then(|v| v.as_object()) {
+        if let Some(n) = f
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            entry.1 = n.to_string();
+        }
+        if let Some(a) = f.get("arguments").and_then(|v| v.as_str()) {
+            entry.2.push_str(a);
+        }
+    }
+}
+
 #[async_trait]
 impl Provider for OpenAiProvider {
     fn name(&self) -> &str {
@@ -340,17 +362,7 @@ impl Provider for OpenAiProvider {
                             let entry = tool_calls
                                 .entry(i)
                                 .or_insert_with(|| (String::new(), String::new(), String::new()));
-                            if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
-                                entry.0 = id.to_string();
-                            }
-                            if let Some(f) = tc.get("function").and_then(|v| v.as_object()) {
-                                if let Some(n) = f.get("name").and_then(|v| v.as_str()) {
-                                    entry.1 = n.to_string();
-                                }
-                                if let Some(a) = f.get("arguments").and_then(|v| v.as_str()) {
-                                    entry.2.push_str(a);
-                                }
-                            }
+                            merge_stream_tool_call_delta(entry, tc);
                             sink.on_tool_call(i, &entry.1, &entry.2);
                         }
                     }
@@ -480,5 +492,31 @@ mod tests {
         let out = OpenAiProvider::sanitize(&msgs);
         assert_eq!(out[0]["tool_calls"].as_array().unwrap().len(), 1);
         assert_eq!(out[1]["tool_call_id"], "a");
+    }
+
+    #[test]
+    fn stream_delta_keeps_first_non_empty_tool_name() {
+        let mut entry = ("".to_string(), "".to_string(), "".to_string());
+        merge_stream_tool_call_delta(
+            &mut entry,
+            &json!({
+                "index": 0,
+                "id": "call_1",
+                "type": "function",
+                "function": { "name": "read", "arguments": "" }
+            }),
+        );
+        merge_stream_tool_call_delta(
+            &mut entry,
+            &json!({
+                "index": 0,
+                "id": null,
+                "type": null,
+                "function": { "name": "", "arguments": "{\"file_path\":\"C:/test.txt\"}" }
+            }),
+        );
+        assert_eq!(entry.0, "call_1");
+        assert_eq!(entry.1, "read");
+        assert_eq!(entry.2, "{\"file_path\":\"C:/test.txt\"}");
     }
 }
