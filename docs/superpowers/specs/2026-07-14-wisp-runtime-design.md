@@ -1,7 +1,7 @@
 # Wisp Runtime: Persistent Local/Remote Python and R Sessions
 
 **Date:** 2026-07-14
-**Status:** Approved design, implementation in progress
+**Status:** Implemented (PR 1–5)
 **Scope:** Rename `wisp-python` to `wisp-runtime` and evolve it into the
 project-level manager for persistent exploratory Python and R sessions running in
 local, WSL, or SSH execution contexts.

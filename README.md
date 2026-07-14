@@ -254,7 +254,9 @@ correctly.
 - **Python/R REPLs** (`wisp-runtime`): one manager-owned process per
   project/execution context/language keeps its namespace across cells and
   conversations; local, WSL, and SSH contexts use the same versioned protocol.
-  R is optional and uses an existing `Rscript` plus `jsonlite`.
+  R is optional and uses an existing `Rscript` plus `jsonlite`. The Contexts
+  panel probes interpreter capabilities and shows runtime status, memory, last
+  activity, and destructive Stop/Restart controls.
 - **MCP** (`wisp-mcp`): a minimal newline-JSON-RPC client launches any stdio
   MCP server and exposes each remote tool as a first-class agent tool.
 
@@ -337,7 +339,7 @@ line notes what wisp ships today versus the reference behaviour.
   plus figure↔caption pairing (a plot alongside a structured caption doc:
   *Panels / Artifacts / what is real vs. illustrative*). wisp today: a text
   tile list with a single active preview; code is kept out of this list.
-- **Notebook panel.** Python/Shell tool executions and assistant code blocks
+- **Notebook panel.** Python/R/Shell tool executions and assistant code blocks
   render as numbered, line-highlighted cells with collapsible output. The view
   is transcript-backed and read-only; it is not an editable live-kernel notebook.
 - **Projects home.** Multiple projects, each with session/artifact counts and

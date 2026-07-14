@@ -134,7 +134,7 @@ enum AgentEvent {
 struct ConfirmRequest {
     frame_id: String,
     message: String,
-    /// Tool name when known (`python`, `shell`, …).
+    /// Tool name when known (`python`, `r`, `shell`, …).
     #[serde(default)]
     tool: String,
     /// Code / command preview for the inline approval card.
@@ -749,7 +749,7 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
         .filter_map(|call| {
             let args = call.args_value();
             let input = match call.function.name.as_str() {
-                "python" => args.get("code").and_then(|v| v.as_str()),
+                "python" | "r" => args.get("code").and_then(|v| v.as_str()),
                 "shell" => args.get("cmd").and_then(|v| v.as_str()),
                 _ => None,
             }?;
@@ -2353,7 +2353,7 @@ fn r_kernel_worker_path() -> PathBuf {
 
 /// Wire language runtimes, bundled bio-tools MCP, and user-configured MCP
 /// connections into a freshly built agent.
-async fn wire_python_and_mcp(
+async fn wire_runtimes_and_mcp(
     agent: &mut wisp_core::Agent,
     runtime_manager: &wisp_runtime::RuntimeManager,
     project_id: &str,
@@ -3005,7 +3005,7 @@ async fn send_message(
             .as_ref()
             .and_then(|s| s.connectors.as_ref())
             .map(|v| v.iter().cloned().collect());
-        let wire_errors = wire_python_and_mcp(
+        let wire_errors = wire_runtimes_and_mcp(
             &mut agent,
             &state.runtime_manager,
             &ap.id,
@@ -3084,9 +3084,16 @@ async fn send_message(
         let handle = tokio::spawn(async move {
             let mut env_hash: Option<String> = None;
             while let Some(rec) = rx.recv().await {
-                if env_hash.is_none() {
+                if rec.language != "r" && env_hash.is_none() {
                     env_hash = capture_env(&store, &app_data).await;
                 }
+                // The current environment snapshot contains Python packages.
+                // Do not attach it to R provenance and imply the wrong library state.
+                let record_env_hash = if rec.language == "r" {
+                    None
+                } else {
+                    env_hash.clone()
+                };
                 let cell_index = store.next_cell_index(&fid).await.unwrap_or(0);
                 let e = wisp_store::ExecLog {
                     id: Uuid::new_v4().to_string(),
@@ -3105,7 +3112,7 @@ async fn send_message(
                     wall_s: None,
                     files_written: rec.files_written,
                     files_read: rec.files_read,
-                    env_hash: env_hash.clone(),
+                    env_hash: record_env_hash,
                 };
                 if let Err(e) = store.insert_execution_log(&e).await {
                     tracing::warn!("provenance persist failed: {e}");
@@ -3646,6 +3653,78 @@ async fn list_execution_contexts(
         .list_execution_contexts()
         .await
         .map_err(|e| format!("{e}"))
+}
+
+#[tauri::command]
+fn list_runtimes(state: State<'_, AppState>) -> Vec<wisp_runtime::RuntimeInfo> {
+    state.runtime_manager.list()
+}
+
+#[tauri::command]
+async fn start_runtime(
+    state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
+    context_id: String,
+    language: wisp_runtime::RuntimeLanguage,
+) -> Result<wisp_runtime::RuntimeInfo, String> {
+    let project = state.active(window.label());
+    state
+        .runtime_manager
+        .start(
+            wisp_runtime::RuntimeKey {
+                project_id: project.id,
+                context_id,
+                language,
+            },
+            project.root,
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn stop_runtime(
+    state: State<'_, AppState>,
+    project_id: String,
+    context_id: String,
+    language: wisp_runtime::RuntimeLanguage,
+) -> Result<Option<wisp_runtime::RuntimeInfo>, String> {
+    Ok(state
+        .runtime_manager
+        .stop(&wisp_runtime::RuntimeKey {
+            project_id,
+            context_id,
+            language,
+        })
+        .await)
+}
+
+#[tauri::command]
+async fn restart_runtime(
+    state: State<'_, AppState>,
+    project_id: String,
+    context_id: String,
+    language: wisp_runtime::RuntimeLanguage,
+) -> Result<wisp_runtime::RuntimeInfo, String> {
+    let (_, workspace) = state
+        .store
+        .get_project(&project_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("Project not found: {project_id}"))?;
+    let root = ensure_writable(PathBuf::from(workspace), &state.app_data);
+    state
+        .runtime_manager
+        .restart(
+            wisp_runtime::RuntimeKey {
+                project_id,
+                context_id,
+                language,
+            },
+            root,
+        )
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -5350,6 +5429,10 @@ pub fn run() {
             branch_session,
             list_sessions,
             list_execution_contexts,
+            list_runtimes,
+            start_runtime,
+            stop_runtime,
+            restart_runtime,
             list_runs,
             get_run,
             cancel_run,
