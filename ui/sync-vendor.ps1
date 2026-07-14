@@ -18,7 +18,6 @@ $files = @(
   "assets\3Dmol-DfD4xImO.js",
   "assets\katex-Dn761jRB.js",
   "assets\katex-DwwF5kvc.css",
-  "assets\pdf.worker.min-qwK7q_zL.mjs",
   "vendor\nightingale-msa-5.6.0.js"
 )
 foreach ($f in $files) {
@@ -26,6 +25,16 @@ foreach ($f in $files) {
   if (-not (Test-Path $from)) { Write-Warning "skip missing $f"; continue }
   $name = Split-Path $f -Leaf
   Copy-Item $from (Join-Path $dst $name) -Force
+}
+
+# PDF.js 5.4.296 is kept as a stable, committed module/worker pair because the
+# upstream web-dist only contains the main library folded into a React chunk.
+# Update both files together when upgrading PDF.js.
+foreach ($pdfAsset in @("pdf.min.mjs", "pdf.worker.min.mjs")) {
+  $pdfPath = Join-Path $dst $pdfAsset
+  if (-not (Test-Path $pdfPath)) {
+    throw "Missing committed PDF.js asset: $pdfPath"
+  }
 }
 
 # KaTeX fonts (referenced by katex css)

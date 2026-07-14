@@ -1065,6 +1065,26 @@ test("clicking a figure opens the artifact modal with provenance", async ({ page
   await expect.poll(() => centerViewport.evaluate((el) => el.scrollLeft)).toBeGreaterThan(0);
 });
 
+test("PDF artifacts render inside the app without a browser PDF plugin", async ({ page }) => {
+  await enterApp(page);
+  await composer(page).fill("open paper.pdf");
+  await page.getByRole("button", { name: "Send" }).click();
+  await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.locator('.rp-tile[data-artifact-name="paper.pdf"] .rp-tile-main').click();
+
+  const modal = page.locator(".artifact-modal");
+  await expect(modal).toBeVisible();
+  await expect(modal.locator('.rp-pdf[data-page-count="1"]')).toBeVisible();
+  const renderedPage = modal.locator('.rp-pdf-page[data-page="1"][data-rendered="true"]');
+  await expect(renderedPage).toBeVisible();
+  const canvas = renderedPage.locator("canvas");
+  await expect(canvas).toBeVisible();
+  await expect.poll(() => canvas.evaluate(
+    (el: HTMLCanvasElement) => el.width * el.height,
+  )).toBeGreaterThan(0);
+  await expect(modal.locator('embed[type="application/pdf"]')).toHaveCount(0);
+});
+
 test("artifact modal switches between images with left and right arrows", async ({ page }) => {
   await enterApp(page);
   await composer(page).fill("make plots first.png second.png third.png");
