@@ -628,6 +628,8 @@ export function tauriMock(): void {
             return activeProjectId === "other"
               ? { ...project, id: "other", name: "Other project", root: "/mock/other" }
               : project;
+          case "get_project_settings":
+            return { name: project.name, description: "", agent_context: "" };
           case "get_onboarding_state":
             return { show: false, has_api_key: true };
           case "get_capabilities":
@@ -1158,6 +1160,7 @@ export function parallelMock(): void {
     try { listeners[event]?.({ payload }); } catch { /* not registered yet */ }
   };
   const sessions: { id: string; title: string; ts: number }[] = [];
+  const folders: { id: string; name: string }[] = [];
   const queues: Record<string, Promise<void>> = {};
 
   const project = { id: "default", name: "wisp-science", root: "/mock/root", skill_count: 12, mcp_server_count: 8, memory_file_count: 2, has_api_key: true };
@@ -1172,7 +1175,22 @@ export function parallelMock(): void {
           case "load_demo": return { id: "x", title: "x", request: "x", response: "x" };
           case "load_session": return [];
           case "list_sessions": return sessions.slice();
-          case "list_folders": return [];
+          case "list_folders": return folders.slice();
+          case "create_folder": {
+            const folder = { id: `folder-${folders.length + 1}`, name: String(arg("name") ?? "") };
+            folders.push(folder);
+            return folder;
+          }
+          case "rename_folder": {
+            const folder = folders.find((entry) => entry.id === arg("id"));
+            if (folder) folder.name = String(arg("name") ?? folder.name);
+            return null;
+          }
+          case "delete_folder": {
+            const index = folders.findIndex((entry) => entry.id === arg("id"));
+            if (index >= 0) folders.splice(index, 1);
+            return null;
+          }
           case "list_projects":
             return [
               { id: "default", name: project.name, workspace_dir: project.root, session_count: 0, updated_at: 1, running_count: 0, needs_you_count: 0 },

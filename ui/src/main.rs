@@ -12,8 +12,8 @@ mod text;
 mod window_titlebar;
 
 use bindings::{
-    attach_chat_autoscroll, force_chat_bottom, invoke, invoke_checked, invoke_timeout, is_windows,
-    listen, listen_native_file_drop, native_drop_in_composer, open_external_url,
+    attach_chat_autoscroll, force_chat_bottom, invoke, invoke_checked, invoke_timeout, is_mac,
+    is_windows, listen, listen_native_file_drop, native_drop_in_composer, open_external_url,
     pasted_image_count, schedule_chat_follow, CHAT_SCROLLER_ID, CHAT_THREAD_ID,
 };
 use context_menu::{ContextMenuPortal, CtxMenu};
@@ -4056,6 +4056,15 @@ fn App() -> impl IntoView {
                     locale.get(),
                 )));
             })
+            open_folder_actions=Callback::new(move |(ev, id, name): (web_sys::MouseEvent, String, String)| {
+                ctx_menu.set(Some(context_menu::folder_menu(
+                    ev.client_x() as f64,
+                    ev.client_y() as f64,
+                    &id,
+                    &name,
+                    locale.get(),
+                )));
+            })
             open_capabilities=Callback::new(open_capabilities)
             open_settings=Callback::new(open_settings)
             on_sidebar_resize_start=Callback::new(on_sidebar_resize_start)
@@ -4407,7 +4416,11 @@ fn App() -> impl IntoView {
                             }
                             on:keydown=on_send
                             on:paste=on_paste
-                            prop:placeholder=move || t(locale.get(), "composer.placeholder")
+                            prop:placeholder=move || tf(
+                                locale.get(),
+                                "composer.placeholder",
+                                &[("modifier", if is_mac() { "Cmd" } else { "Ctrl" })],
+                            )
                         ></textarea>
                         {move || picker_mode.get().map(|mode| {
                             let loc = locale.get();
@@ -5525,6 +5538,7 @@ fn App() -> impl IntoView {
                                                                 </button>
                                                             }.into_view()
                                                         } else {
+                                                            let download_uri = context_menu::remote_file_download_uri(&source, &full);
                                                             view! {
                                                                 <div class="fb-row remote-file" data-remote-path=full
                                                                     data-remote-context=source.clone()
@@ -5532,6 +5546,19 @@ fn App() -> impl IntoView {
                                                                     <span class="fb-icon">{compose_icon("doc")}</span>
                                                                     <span class="fb-name">{name}</span>
                                                                     <span class="fb-size">{format_bytes(entry.size)}</span>
+                                                                    {download_uri.map(|uri| {
+                                                                        let download = uri.clone();
+                                                                        view! {
+                                                                            <button type="button" class="fb-row-action"
+                                                                                title=move || t(locale.get(), "artifact.download")
+                                                                                aria-label=move || t(locale.get(), "artifact.download")
+                                                                                on:click=move |ev: web_sys::MouseEvent| {
+                                                                                    ev.prevent_default();
+                                                                                    ev.stop_propagation();
+                                                                                    download_artifact(download.clone());
+                                                                                }>{compose_icon("download")}</button>
+                                                                        }
+                                                                    })}
                                                                 </div>
                                                             }.into_view()
                                                         }

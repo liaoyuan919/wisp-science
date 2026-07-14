@@ -6,7 +6,10 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen(module = "/src/context_menu.js")]
 extern "C" {
     fn isDevMode() -> bool;
-    fn textareaCommand(kind: &str, id: &str);
+    #[wasm_bindgen(js_name = captureTextEntryTarget)]
+    fn capture_text_entry_target(target: web_sys::Element);
+    #[wasm_bindgen(js_name = textEntryCommand)]
+    fn text_entry_command(kind: &str);
     #[wasm_bindgen(catch, js_name = copyImage)]
     async fn copy_image_js(src: &str) -> Result<JsValue, JsValue>;
 }
@@ -41,7 +44,7 @@ fn item(action: &str, label: String, payload: String) -> CtxItem {
     }
 }
 
-fn remote_file_download_uri(context_id: &str, path: &str) -> Option<String> {
+pub fn remote_file_download_uri(context_id: &str, path: &str) -> Option<String> {
     let alias = context_id.strip_prefix("ssh:")?;
     if alias.is_empty()
         || !alias
@@ -62,6 +65,32 @@ fn event_target(ev: &web_sys::MouseEvent) -> Option<web_sys::Element> {
 
 fn closest(el: &web_sys::Element, selector: &str) -> Option<web_sys::Element> {
     el.closest(selector).ok().flatten()
+}
+
+fn editable_text_entry(el: &web_sys::Element) -> Option<web_sys::Element> {
+    let entry = closest(el, "textarea, input, [contenteditable=\"true\"]")?;
+    if entry.tag_name().eq_ignore_ascii_case("input") {
+        let input_type = entry
+            .get_attribute("type")
+            .unwrap_or_else(|| "text".into())
+            .to_ascii_lowercase();
+        if matches!(
+            input_type.as_str(),
+            "button"
+                | "checkbox"
+                | "color"
+                | "file"
+                | "hidden"
+                | "image"
+                | "radio"
+                | "range"
+                | "reset"
+                | "submit"
+        ) {
+            return None;
+        }
+    }
+    Some(entry)
 }
 
 fn selection_text() -> Option<String> {
@@ -157,13 +186,7 @@ fn session_move_items(session_id: &str, locale: Locale) -> Vec<CtxItem> {
     items
 }
 
-pub fn session_menu(
-    x: f64,
-    y: f64,
-    session_id: &str,
-    title: &str,
-    locale: Locale,
-) -> CtxMenu {
+pub fn session_menu(x: f64, y: f64, session_id: &str, title: &str, locale: Locale) -> CtxMenu {
     let mut items = vec![item(
         "copyTitle",
         i18n::t(locale, "ctx.copy_title"),
@@ -205,6 +228,23 @@ pub fn session_menu(
     CtxMenu { x, y, items }
 }
 
+pub fn folder_menu(x: f64, y: f64, id: &str, name: &str, locale: Locale) -> CtxMenu {
+    let mut items = Vec::new();
+    if !id.is_empty() {
+        items.push(item(
+            "renameFolder",
+            i18n::t(locale, "ctx.rename_folder"),
+            format!("{id}\u{1e}{name}"),
+        ));
+        items.push(item(
+            "deleteFolder",
+            i18n::t(locale, "ctx.delete_folder"),
+            id.to_string(),
+        ));
+    }
+    CtxMenu { x, y, items }
+}
+
 pub fn build(ev: &web_sys::MouseEvent, locale: Locale, _can_export: bool) -> Option<CtxMenu> {
     let target = event_target(ev)?;
     let x = ev.client_x() as f64;
@@ -233,7 +273,8 @@ pub fn build(ev: &web_sys::MouseEvent, locale: Locale, _can_export: bool) -> Opt
         }
     }
 
-    if closest(&target, "textarea").is_none() {
+    let text_entry = editable_text_entry(&target);
+    if text_entry.is_none() {
         if let Some(text) = selection_text() {
             return Some(CtxMenu {
                 x,
@@ -243,7 +284,8 @@ pub fn build(ev: &web_sys::MouseEvent, locale: Locale, _can_export: bool) -> Opt
         }
     }
 
-    if closest(&target, "textarea").is_some() {
+    if let Some(entry) = text_entry {
+        capture_text_entry_target(entry);
         return Some(CtxMenu {
             x,
             y,
@@ -278,18 +320,7 @@ pub fn build(ev: &web_sys::MouseEvent, locale: Locale, _can_export: bool) -> Opt
         let name = folder.get_attribute("data-folder-name").unwrap_or_default();
         let id = folder.get_attribute("data-folder-id").unwrap_or_default();
         if !id.is_empty() {
-            return Some(CtxMenu {
-                x,
-                y,
-                items: vec![
-                    item(
-                        "renameFolder",
-                        i18n::t(locale, "ctx.rename_folder"),
-                        format!("{id}\u{1e}{name}"),
-                    ),
-                    item("deleteFolder", i18n::t(locale, "ctx.delete_folder"), id),
-                ],
-            });
+            return Some(folder_menu(x, y, &id, &name, locale));
         }
     }
 
@@ -394,8 +425,8 @@ pub fn build(ev: &web_sys::MouseEvent, locale: Locale, _can_export: bool) -> Opt
 
 pub fn run_action(action: &str, payload: &str, copy: impl Fn(String)) {
     match action {
-        "cut" | "paste" | "selectAll" => textareaCommand(action, "composer-input"),
-        "copy" if payload.is_empty() => textareaCommand("copy", "composer-input"),
+        "cut" | "paste" | "selectAll" => text_entry_command(action),
+        "copy" if payload.is_empty() => text_entry_command("copy"),
         "copy" | "copyCode" | "copyTitle" | "copyName" | "copyMessage" if !payload.is_empty() => {
             copy(payload.to_string());
         }
@@ -482,11 +513,20 @@ pub fn ContextMenuPortal(
                 return None;
             }
             let items = m.items.clone();
+            let item_count = items.len() as f64;
+            let (viewport_width, viewport_height) = web_sys::window()
+                .and_then(|window| Some((window.inner_width().ok()?.as_f64()?, window.inner_height().ok()?.as_f64()?)))
+                .unwrap_or((m.x + 280.0, m.y + item_count * 38.0 + 12.0));
+            let estimated_width = 280.0_f64.min((viewport_width - 16.0).max(168.0));
+            let estimated_height = (item_count * 38.0 + 12.0).min((viewport_height - 16.0).max(50.0));
+            let left = m.x.max(8.0).min((viewport_width - estimated_width - 8.0).max(8.0));
+            let top = m.y.max(8.0).min((viewport_height - estimated_height - 8.0).max(8.0));
             Some(view! {
                 <div class="ctx-backdrop" on:click=move |_| set_menu.set(None)></div>
                 <div
                     class="ctx-menu"
-                    style=format!("left:{}px;top:{}px", m.x, m.y)
+                    role="menu"
+                    style=format!("left:{left}px;top:{top}px")
                     on:click=|ev: web_sys::MouseEvent| ev.stop_propagation()
                 >
                     {items.into_iter().map(|it| {

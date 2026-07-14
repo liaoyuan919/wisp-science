@@ -45,6 +45,7 @@ pub(super) fn Sidebar(
     load_session: Callback<String>,
     move_session_to: Callback<(String, Option<String>)>,
     open_session_actions: Callback<(web_sys::MouseEvent, String, String)>,
+    open_folder_actions: Callback<(web_sys::MouseEvent, String, String)>,
     open_capabilities: Callback<web_sys::MouseEvent>,
     open_settings: Callback<web_sys::MouseEvent>,
     on_sidebar_resize_start: Callback<web_sys::MouseEvent>,
@@ -242,6 +243,9 @@ pub(super) fn Sidebar(
                         let fid_target_over_enter = fid_target_over.clone();
                         let fid_rename = fid.clone();
                         let fname_rename = fname.clone();
+                        let fid_actions = fid.clone();
+                        let fname_actions = fname.clone();
+                        let show_folder_actions = open_folder_actions.clone();
                         view! {
                             <div class="side-folder-wrap"
                                 class:drop-target=is_target
@@ -288,6 +292,14 @@ pub(super) fn Sidebar(
                                     <span class="gi folder"></span>
                                     <span class="side-folder-name">{fname}</span>
                                     <span class="side-folder-count">{in_folder.len()}</span>
+                                    <button type="button" class="folder-actions"
+                                        title=move || t(locale.get(), "folder.actions")
+                                        aria-label=move || t(locale.get(), "folder.actions")
+                                        on:click=move |ev: web_sys::MouseEvent| {
+                                            ev.prevent_default();
+                                            ev.stop_propagation();
+                                            show_folder_actions.call((ev, fid_actions.clone(), fname_actions.clone()));
+                                        }>"⋯"</button>
                                 </div>
                                 {(!collapsed).then(|| view! {
                                     <div class="side-folder-sessions">
