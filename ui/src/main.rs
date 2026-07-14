@@ -3589,12 +3589,8 @@ fn App() -> impl IntoView {
             "export-current-project" => export_current_project.call(()),
             "skills" => manage_skills.call(()),
             "check-updates" => run_update_check(),
-            "docs" => {
-                open_external_url("https://github.com/xuzhougeng/wisp-science#readme".into())
-            }
-            "star-us" => {
-                open_external_url("https://github.com/xuzhougeng/wisp-science".into())
-            }
+            "docs" => open_external_url("https://github.com/xuzhougeng/wisp-science#readme".into()),
+            "star-us" => open_external_url("https://github.com/xuzhougeng/wisp-science".into()),
             "issues" => {
                 open_external_url("https://github.com/xuzhougeng/wisp-science/issues".into())
             }
@@ -3647,9 +3643,7 @@ fn App() -> impl IntoView {
                 "docs" => {
                     open_external_url("https://github.com/xuzhougeng/wisp-science#readme".into())
                 }
-                "star-us" => {
-                    open_external_url("https://github.com/xuzhougeng/wisp-science".into())
-                }
+                "star-us" => open_external_url("https://github.com/xuzhougeng/wisp-science".into()),
                 "issues" => {
                     open_external_url("https://github.com/xuzhougeng/wisp-science/issues".into())
                 }

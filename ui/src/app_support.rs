@@ -217,9 +217,16 @@ pub(super) enum UiConfirm {
 #[derive(Clone)]
 pub(super) enum UpdateCheckModal {
     Checking,
-    Available { version: String, release_url: String },
-    UpToDate { version: String },
-    Failed { message: String },
+    Available {
+        version: String,
+        release_url: String,
+    },
+    UpToDate {
+        version: String,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 pub(super) fn now_ms() -> u64 {
@@ -295,6 +302,10 @@ pub(super) fn composer_attachment_key(name: &str, idx: usize) -> String {
     format!("att-{idx}-{name}")
 }
 
+fn ready_attachment_key(path: &str) -> String {
+    format!("path:{path}")
+}
+
 /// Attach an already-project-relative (or absolute native) path as a chip.
 /// Returns false when the path was already attached.
 pub(super) fn attach_ready_path(
@@ -316,7 +327,7 @@ pub(super) fn attach_ready_path(
         .filter(|name| !name.is_empty())
         .unwrap_or(path.as_str())
         .to_string();
-    let key = format!("path:{path}");
+    let key = ready_attachment_key(&path);
     attachments.update(|items| {
         items.push(ComposerAttachment::Ready { key, name, path });
     });
@@ -412,32 +423,47 @@ pub(super) fn finish_uploads(
 ) {
     uploading.set(false);
     attachments.update(|items| {
-        items.retain(|a| !matches!(a, ComposerAttachment::Uploading { .. }));
-        for result in results {
-            let name = result
-                .info
-                .as_ref()
-                .map(|i| i.name.clone())
-                .or(result.filename.clone())
-                .unwrap_or_else(|| "file".into());
-            let key = composer_attachment_key(&name, items.len());
-            if result.ok {
-                if let Some(info) = result.info {
-                    items.push(ComposerAttachment::Ready {
-                        key,
-                        name,
-                        path: info.path,
-                    });
+        merge_finished_uploads(items, results);
+    });
+}
+
+fn merge_finished_uploads(items: &mut Vec<ComposerAttachment>, results: Vec<UploadFileResult>) {
+    items.retain(|a| !matches!(a, ComposerAttachment::Uploading { .. }));
+    let mut ready_paths = items
+        .iter()
+        .filter_map(|attachment| match attachment {
+            ComposerAttachment::Ready { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+
+    for result in results {
+        let name = result
+            .info
+            .as_ref()
+            .map(|i| i.name.clone())
+            .or(result.filename.clone())
+            .unwrap_or_else(|| "file".into());
+        if result.ok {
+            if let Some(info) = result.info {
+                let path = info.path;
+                if !ready_paths.insert(path.clone()) {
+                    continue;
                 }
-            } else {
-                items.push(ComposerAttachment::Error {
-                    key,
+                items.push(ComposerAttachment::Ready {
+                    key: ready_attachment_key(&path),
                     name,
-                    error: result.error.unwrap_or_else(|| "Upload failed".into()),
+                    path,
                 });
             }
+        } else {
+            items.push(ComposerAttachment::Error {
+                key: composer_attachment_key(&name, items.len()),
+                name,
+                error: result.error.unwrap_or_else(|| "Upload failed".into()),
+            });
         }
-    });
+    }
 }
 
 // Closes the `<details class="settings-add-menu">` a menu button lives in,
@@ -1590,6 +1616,75 @@ mod start_user_turn_tests {
     }
 }
 
+#[cfg(test)]
+mod upload_attachment_tests {
+    use super::{merge_finished_uploads, ready_attachment_key};
+    use crate::dto::{ArtifactInfo, ComposerAttachment, UploadFileResult};
+
+    fn ok_result(path: &str) -> UploadFileResult {
+        let name = path.rsplit(['/', '\\']).next().unwrap_or(path).to_string();
+        UploadFileResult {
+            ok: true,
+            info: Some(ArtifactInfo {
+                id: "artifact-1".into(),
+                name: name.clone(),
+                kind: "file".into(),
+                path: path.into(),
+                ts: 0,
+                project_id: None,
+                project_name: None,
+                session_id: None,
+                session_title: None,
+                size_bytes: None,
+                origin: None,
+            }),
+            filename: Some(name),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn merge_finished_uploads_dedupes_duplicate_ready_paths() {
+        let mut items = vec![ComposerAttachment::Uploading {
+            key: "up-1".into(),
+            name: String::new(),
+        }];
+
+        merge_finished_uploads(
+            &mut items,
+            vec![
+                ok_result("uploads/s41467-026-73270-2_reference.pdf"),
+                ok_result("uploads/s41467-026-73270-2_reference.pdf"),
+            ],
+        );
+
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            &items[0],
+            ComposerAttachment::Ready { path, .. }
+                if path == "uploads/s41467-026-73270-2_reference.pdf"
+        ));
+    }
+
+    #[test]
+    fn merge_finished_uploads_keeps_existing_ready_path_unique() {
+        let path = "uploads/existing.pdf";
+        let mut items = vec![ComposerAttachment::Ready {
+            key: ready_attachment_key(path),
+            name: "existing.pdf".into(),
+            path: path.into(),
+        }];
+
+        merge_finished_uploads(&mut items, vec![ok_result(path)]);
+
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            &items[0],
+            ComposerAttachment::Ready { path, .. } if path == "uploads/existing.pdf"
+        ));
+    }
+}
+
 pub(super) fn append_assistant_delta(
     items: &mut Vec<ChatItem>,
     delta: String,
@@ -2060,9 +2155,7 @@ pub(super) fn refresh_remote_dir(
             .unwrap(),
         )
         .await;
-        if active_source.get_untracked() != context_id
-            || cwd.get_untracked() != requested_path
-        {
+        if active_source.get_untracked() != context_id || cwd.get_untracked() != requested_path {
             return;
         }
         loading.set(false);
@@ -4776,17 +4869,29 @@ pub(super) fn ProjectsScreen(
             ids.insert(id.clone());
         });
         open_error.set(None);
-        sync_notice.set(Some((true, t(locale.get_untracked(), "projects.sync.running").into())));
+        sync_notice.set(Some((
+            true,
+            t(locale.get_untracked(), "projects.sync.running").into(),
+        )));
         spawn_local(async move {
-            let args = to_value(&serde_json::json!({ "id": id.clone(), "strategy": strategy })).unwrap();
+            let args =
+                to_value(&serde_json::json!({ "id": id.clone(), "strategy": strategy })).unwrap();
             match invoke_checked("resolve_project_sync", args).await {
                 Ok(value) => {
                     if let Ok(result) = serde_wasm_bindgen::from_value::<ProjectSyncResult>(value) {
                         let loc = locale.get_untracked();
                         let text = if result.direction == "pull" {
-                            tf(loc, "projects.sync.pulled", &[("n", &result.downloaded_files.to_string())])
+                            tf(
+                                loc,
+                                "projects.sync.pulled",
+                                &[("n", &result.downloaded_files.to_string())],
+                            )
                         } else {
-                            tf(loc, "projects.sync.pushed", &[("n", &result.uploaded_files.to_string())])
+                            tf(
+                                loc,
+                                "projects.sync.pushed",
+                                &[("n", &result.uploaded_files.to_string())],
+                            )
                         };
                         sync_notice.set(Some((true, text)));
                     }
@@ -5626,13 +5731,7 @@ pub(super) fn ActionPalette(
                 general.clone(),
                 "",
             ),
-            (
-                "star-us",
-                "star",
-                "command.star_us",
-                general.clone(),
-                "",
-            ),
+            ("star-us", "star", "command.star_us", general.clone(), ""),
             (
                 "project-settings",
                 "gear",
