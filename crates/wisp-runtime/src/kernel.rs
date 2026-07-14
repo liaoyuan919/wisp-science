@@ -4,13 +4,13 @@ use crate::manager::{RuntimeKernel, RuntimeOutput};
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::{path::Path, time::Duration};
+use std::{ffi::OsString, path::Path, time::Duration};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout},
 };
 
-const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 1;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Default)]
@@ -93,9 +93,30 @@ impl KernelClient {
         envs: &[(String, String)],
         cwd: &Path,
     ) -> Result<Self> {
-        let mut cmd = tokio::process::Command::new(python);
-        cmd.arg(worker);
-        cmd.current_dir(cwd);
+        Self::spawn_command(
+            python,
+            &[worker.as_os_str().to_os_string()],
+            envs,
+            Some(cwd),
+            "python",
+        )
+        .await
+    }
+
+    /// Spawn any attached local transport (direct process, `wsl.exe`, or
+    /// `ssh`) and wait for the selected language's ready frame.
+    pub async fn spawn_command(
+        program: &Path,
+        args: &[OsString],
+        envs: &[(String, String)],
+        cwd: Option<&Path>,
+        expected_language: &str,
+    ) -> Result<Self> {
+        let mut cmd = tokio::process::Command::new(program);
+        cmd.args(args);
+        if let Some(cwd) = cwd {
+            cmd.current_dir(cwd);
+        }
         cmd.envs(
             envs.iter()
                 .map(|(key, value)| (key.as_str(), value.as_str())),
@@ -107,7 +128,7 @@ impl KernelClient {
         wisp_tools::process::hide_console_async(&mut cmd);
         let mut child = cmd
             .spawn()
-            .map_err(|error| anyhow!("spawn kernel worker: {error}"))?;
+            .map_err(|error| anyhow!("spawn runtime transport {}: {error}", program.display()))?;
         let stdin = child
             .stdin
             .take()
@@ -117,7 +138,7 @@ impl KernelClient {
             .take()
             .ok_or_else(|| anyhow!("no kernel stdout"))?;
         let mut stdout = BufReader::new(stdout);
-        let ready = match read_ready(&mut stdout, "python", STARTUP_TIMEOUT).await {
+        let ready = match read_ready(&mut stdout, expected_language, STARTUP_TIMEOUT).await {
             Ok(ready) => ready,
             Err(error) => {
                 let _ = child.kill().await;

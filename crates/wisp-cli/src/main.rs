@@ -302,7 +302,7 @@ async fn main() -> Result<()> {
         if py_env.is_some() {
             agent.add_tool(Box::new(wisp_runtime::ReplTool::new(
                 runtime_manager.clone(),
-                wisp_runtime::RuntimeKey::local_python(root.to_string_lossy()),
+                root.to_string_lossy(),
             )));
             println!("python repl wired ({worker}).");
         } else {

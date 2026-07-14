@@ -29,12 +29,16 @@ pub struct RuntimeKey {
 }
 
 impl RuntimeKey {
-    pub fn local_python(project_id: impl Into<String>) -> Self {
+    pub fn python(project_id: impl Into<String>, context_id: impl Into<String>) -> Self {
         Self {
             project_id: project_id.into(),
-            context_id: LOCAL_CONTEXT_ID.into(),
+            context_id: context_id.into(),
             language: RuntimeLanguage::Python,
         }
+    }
+
+    pub fn local_python(project_id: impl Into<String>) -> Self {
+        Self::python(project_id, LOCAL_CONTEXT_ID)
     }
 }
 

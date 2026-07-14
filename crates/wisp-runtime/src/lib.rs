@@ -6,7 +6,7 @@ pub mod manager;
 pub mod tool;
 
 pub use env::{bundled_mock_mcp_path, bundled_worker_path, resolve_bundled_script, PythonEnv};
-pub use kernel::{KernelClient, KernelReady, KernelResp};
+pub use kernel::{KernelClient, KernelReady, KernelResp, PROTOCOL_VERSION};
 pub use manager::{
     LaunchedRuntime, RuntimeEvent, RuntimeExecution, RuntimeInfo, RuntimeKernel, RuntimeKey,
     RuntimeLanguage, RuntimeLauncher, RuntimeManager, RuntimeMetadata, RuntimeOutput,

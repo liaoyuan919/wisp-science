@@ -247,8 +247,8 @@ correctly.
   dangerous-command gating and a `dunce`-canonicalized path sandbox rooted at
   the project directory.
 - **Python REPL** (`wisp-runtime`): one manager-owned `kernel_worker.py` process
-  per project keeps its namespace across cells and conversations;
-  `stdout_chunk` frames stream live to the UI.
+  per project/execution context keeps its namespace across cells and
+  conversations; local, WSL, and SSH contexts use the same streamed protocol.
 - **MCP** (`wisp-mcp`): a minimal newline-JSON-RPC client launches any stdio
   MCP server and exposes each remote tool as a first-class agent tool.
 

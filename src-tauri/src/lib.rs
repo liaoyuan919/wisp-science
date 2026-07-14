@@ -33,6 +33,7 @@ mod project_transfer;
 mod research_graph;
 mod review;
 mod run_context;
+mod runtime_launcher;
 mod seed;
 mod session_export;
 mod settings_commands;
@@ -2364,12 +2365,10 @@ async fn wire_python_and_mcp(
     let service_env = models::service_env();
     let worker_path = kernel_worker_path();
     if worker_path.is_file() {
-        if py_env.is_some() {
-            agent.add_tool(Box::new(wisp_runtime::ReplTool::new(
-                runtime_manager.clone(),
-                wisp_runtime::RuntimeKey::local_python(project_id),
-            )));
-        }
+        agent.add_tool(Box::new(wisp_runtime::ReplTool::new(
+            runtime_manager.clone(),
+            project_id,
+        )));
     } else {
         errors.push(format!(
             "Kernel worker not found at {}",
@@ -5148,11 +5147,14 @@ pub fn run() {
             let run_manager = run_context::RunManager::new();
             tauri::async_runtime::block_on(run_manager.recover(&store))
                 .expect("recover incomplete runs");
-            let runtime_manager = wisp_runtime::RuntimeManager::local_python(
-                app_data.clone(),
-                kernel_worker_path(),
-                models::service_env(),
-            );
+            let runtime_manager = wisp_runtime::RuntimeManager::new(Arc::new(
+                runtime_launcher::TauriRuntimeLauncher::new(
+                    store.clone(),
+                    app_data.clone(),
+                    kernel_worker_path(),
+                    models::service_env(),
+                ),
+            ));
             #[cfg(target_os = "macos")]
             {
                 let locale = tauri::async_runtime::block_on(load_locale(&store));
