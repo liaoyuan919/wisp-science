@@ -11,7 +11,11 @@ const FILE_ITEMS: &[MenuItem] = &[
     ("new", "command.new_session", "Ctrl+N"),
     ("projects", "command.projects", ""),
     ("files", "command.files", ""),
-    ("export-current-project", "command.export_current_project", ""),
+    (
+        "export-current-project",
+        "command.export_current_project",
+        "",
+    ),
     ("settings", "command.settings", "Ctrl+,"),
     ("", "", ""), // separator
     ("quit", "menu.quit", ""),
@@ -64,9 +68,7 @@ pub(super) fn WindowTitlebar(
                 "docs" => {
                     open_external_url("https://github.com/xuzhougeng/wisp-science#readme".into())
                 }
-                "star-us" => {
-                    open_external_url("https://github.com/xuzhougeng/wisp-science".into())
-                }
+                "star-us" => open_external_url("https://github.com/xuzhougeng/wisp-science".into()),
                 "issues" => {
                     open_external_url("https://github.com/xuzhougeng/wisp-science/issues".into())
                 }

@@ -1,6 +1,6 @@
 use crate::app_support::{
-    build_conn_json, close_details_ancestor, compose_icon, conn_form_from_row, join_tags,
-    focus_element_soon, js_error_text, new_acp_form, new_model_form, profile_to_form,
+    build_conn_json, close_details_ancestor, compose_icon, conn_form_from_row, focus_element_soon,
+    join_tags, js_error_text, new_acp_form, new_model_form, profile_to_form,
     settings_section_label, settings_subpage_label, skill_matches_filter, CRED_GROUPS,
 };
 use crate::bindings::{invoke, invoke_checked};
