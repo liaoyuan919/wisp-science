@@ -10,6 +10,13 @@ pub struct PythonEnv {
 }
 
 impl PythonEnv {
+    /// The app-managed environment location without creating or modifying it.
+    pub fn managed(app_data: &Path) -> Self {
+        Self {
+            venv: app_data.join("python").join(".venv"),
+        }
+    }
+
     /// Locate `uv` on PATH (or via `UV_PATH` env).
     pub fn find_uv() -> Option<PathBuf> {
         if let Ok(p) = std::env::var("UV_PATH") {
@@ -53,7 +60,7 @@ impl PythonEnv {
     /// Ensure a venv exists under `app_data/python/.venv`, create with `uv venv`,
     /// and install MCP/kernel deps from the bundled requirements file when needed.
     pub fn ensure(app_data: &Path) -> Result<Self> {
-        let venv = app_data.join("python").join(".venv");
+        let venv = Self::managed(app_data).venv;
         let python = if cfg!(target_os = "windows") {
             venv.join("Scripts").join("python.exe")
         } else {

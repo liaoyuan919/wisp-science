@@ -35,7 +35,7 @@ wisp-science/
 │  ├─ wisp-tools/   read/write/edit/search/grep/shell/attempt_completion + Windows safety
 │  ├─ wisp-store/   sqlx SQLite (projects/frames/messages/artifacts/settings) + OS keyring
 │  ├─ wisp-skills/  SKILL.md discovery + use_skill tool (bundled catalog at skills/)
-│  ├─ wisp-python/  uv venv provisioning + Windows kernel_worker + `python` REPL tool
+│  ├─ wisp-runtime/ uv venv provisioning + Windows kernel_worker + `python` REPL tool
 │  ├─ wisp-mcp/     stdio JSON-RPC MCP client + McpTool adapter (bundled bio-tools)
 │  ├─ wisp-acp/     ACP v1 stdio client for external coding agents
 │  ├─ wisp-sync/    Encrypted snapshot protocol + self-hosted relay server
@@ -246,9 +246,9 @@ correctly.
 - **Tools** (`wisp-tools`): filesystem + shell tools with Windows-aware
   dangerous-command gating and a `dunce`-canonicalized path sandbox rooted at
   the project directory.
-- **Python REPL** (`wisp-python`): a long-lived `kernel_worker.py` subprocess
-  keeps a persistent namespace across cells; `stdout_chunk` lines stream live
-  to the UI.
+- **Python REPL** (`wisp-runtime`): one manager-owned `kernel_worker.py` process
+  per project keeps its namespace across cells and conversations;
+  `stdout_chunk` frames stream live to the UI.
 - **MCP** (`wisp-mcp`): a minimal newline-JSON-RPC client launches any stdio
   MCP server and exposes each remote tool as a first-class agent tool.
 

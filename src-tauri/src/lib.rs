@@ -1071,10 +1071,11 @@ struct BootstrapStatus {
     errors: Vec<String>,
 }
 
-/// Per-session runtime: one agent (with its own Python kernel + MCP), one
-/// cancel flag, and the persisted-seq cursor. Keyed by frame id in
-/// `AppState.sessions`, so different conversations run concurrently on
-/// independent mutexes.
+/// Per-session runtime: one agent (with its own MCP clients), one cancel flag,
+/// and the persisted-seq cursor. Python processes live in the project-scoped
+/// `RuntimeManager`, so rebuilding or deleting a conversation preserves them.
+/// Keyed by frame id in `AppState.sessions`, so different conversations run
+/// concurrently on independent mutexes.
 struct SessionRuntime {
     agent: tokio::sync::Mutex<Option<Agent>>,
     /// Serializes an entire user workflow (primary turn + automatic review +
@@ -1116,6 +1117,7 @@ struct AppState {
     store: Store,
     library: LibraryStore,
     run_manager: run_context::RunManager,
+    runtime_manager: wisp_runtime::RuntimeManager,
     active: std::sync::RwLock<HashMap<String, ActiveProject>>,
     /// One runtime per conversation frame id. Locked only briefly to clone the
     /// `Arc`; the per-session `agent` mutex is what serializes turns *within*
@@ -2332,16 +2334,26 @@ fn skill_paths(root: &std::path::Path) -> Vec<PathBuf> {
     paths
 }
 
+fn kernel_worker_path() -> PathBuf {
+    let configured = std::env::var("WISP_KERNEL_WORKER")
+        .ok()
+        .or_else(|| wisp_runtime::bundled_worker_path().map(|path| path.to_string_lossy().into()))
+        .unwrap_or_default();
+    wisp_runtime::resolve_bundled_script(&configured)
+}
+
 /// Wire Python REPL, bundled bio-tools MCP, and user-configured MCP
 /// connections into a freshly built agent.
 async fn wire_python_and_mcp(
     agent: &mut wisp_core::Agent,
+    runtime_manager: &wisp_runtime::RuntimeManager,
+    project_id: &str,
     app_data: &std::path::Path,
     store: &Store,
     connector_allow: Option<&HashSet<String>>,
 ) -> Vec<String> {
     let mut errors = vec![];
-    let py_env = match wisp_python::PythonEnv::ensure(app_data) {
+    let py_env = match wisp_runtime::PythonEnv::ensure(app_data) {
         Ok(env) => Some(env),
         Err(e) => {
             errors.push(format!("Python environment: {e}"));
@@ -2349,18 +2361,14 @@ async fn wire_python_and_mcp(
         }
     };
 
-    let worker = std::env::var("WISP_KERNEL_WORKER")
-        .ok()
-        .or_else(|| wisp_python::bundled_worker_path().map(|p| p.to_string_lossy().to_string()))
-        .unwrap_or_default();
     let service_env = models::service_env();
-    let worker_path = wisp_python::resolve_bundled_script(&worker);
+    let worker_path = kernel_worker_path();
     if worker_path.is_file() {
-        if let Some(env) = &py_env {
-            match wisp_python::KernelClient::spawn(&env.python(), &worker_path, &service_env) {
-                Ok(client) => agent.add_tool(Box::new(wisp_python::ReplTool::new(client))),
-                Err(e) => errors.push(format!("Python REPL: {e}")),
-            }
+        if py_env.is_some() {
+            agent.add_tool(Box::new(wisp_runtime::ReplTool::new(
+                runtime_manager.clone(),
+                wisp_runtime::RuntimeKey::local_python(project_id),
+            )));
         }
     } else {
         errors.push(format!(
@@ -2377,7 +2385,7 @@ async fn wire_python_and_mcp(
             .split_whitespace()
             .map(|s| {
                 if s.ends_with(".py") {
-                    wisp_python::resolve_bundled_script(s)
+                    wisp_runtime::resolve_bundled_script(s)
                         .to_string_lossy()
                         .to_string()
                 } else {
@@ -2979,6 +2987,8 @@ async fn send_message(
             .map(|v| v.iter().cloned().collect());
         let wire_errors = wire_python_and_mcp(
             &mut agent,
+            &state.runtime_manager,
+            &ap.id,
             &state.app_data,
             &state.store,
             connector_allow.as_ref(),
@@ -4252,6 +4262,7 @@ async fn delete_project(
     // Stop the deleted project's own running sessions (gather frame ids before
     // the store cascade removes them); other projects keep running (#52).
     cancel_project_sessions(state.inner(), &id).await;
+    state.runtime_manager.stop_project(&id).await;
     state
         .store
         .delete_project(&id)
@@ -4889,11 +4900,11 @@ fn initial_bootstrap(workspace: &std::path::Path, skills: usize) -> BootstrapSta
         python_ok: false,
         python_initializing: true,
         mcp_catalog: list_mcp_servers(workspace).len(),
-        uv_ok: wisp_python::PythonEnv::find_uv().is_some(),
-        node_ok: wisp_python::PythonEnv::find_node().is_some(),
-        npm_ok: wisp_python::PythonEnv::find_npm().is_some(),
-        sci_ok: wisp_python::PythonEnv::find_sci().is_some(),
-        pixi_ok: wisp_python::PythonEnv::find_pixi().is_some(),
+        uv_ok: wisp_runtime::PythonEnv::find_uv().is_some(),
+        node_ok: wisp_runtime::PythonEnv::find_node().is_some(),
+        npm_ok: wisp_runtime::PythonEnv::find_npm().is_some(),
+        sci_ok: wisp_runtime::PythonEnv::find_sci().is_some(),
+        pixi_ok: wisp_runtime::PythonEnv::find_pixi().is_some(),
         app_version: env!("CARGO_PKG_VERSION").into(),
         workspace: workspace.to_string_lossy().into_owned(),
         errors: vec![],
@@ -4951,7 +4962,7 @@ fn start_python_bootstrap(app: &tauri::AppHandle) {
         // Keep all of it off Tauri's event-loop thread so the first window stays
         // responsive while the one-time bootstrap runs.
         let result = tokio::task::spawn_blocking(move || {
-            wisp_python::PythonEnv::ensure(&app_data)
+            wisp_runtime::PythonEnv::ensure(&app_data)
                 .map(|_| ())
                 .map_err(|error| error.to_string())
         })
@@ -5137,6 +5148,11 @@ pub fn run() {
             let run_manager = run_context::RunManager::new();
             tauri::async_runtime::block_on(run_manager.recover(&store))
                 .expect("recover incomplete runs");
+            let runtime_manager = wisp_runtime::RuntimeManager::local_python(
+                app_data.clone(),
+                kernel_worker_path(),
+                models::service_env(),
+            );
             #[cfg(target_os = "macos")]
             {
                 let locale = tauri::async_runtime::block_on(load_locale(&store));
@@ -5204,6 +5220,7 @@ pub fn run() {
                 store,
                 library,
                 run_manager,
+                runtime_manager,
                 active: std::sync::RwLock::new(HashMap::from([(
                     "main".to_string(),
                     ActiveProject {
@@ -5421,6 +5438,8 @@ pub fn run() {
                 macos_exit_in_progress.store(true, Ordering::SeqCst);
             }
             if matches!(_event, tauri::RunEvent::Exit) {
+                let runtime_manager = _app.state::<AppState>().runtime_manager.clone();
+                tauri::async_runtime::block_on(runtime_manager.shutdown_all());
                 _app.state::<terminal_sessions::TerminalManager>()
                     .shutdown_all();
             }

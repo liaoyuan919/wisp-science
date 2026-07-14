@@ -1,24 +1,21 @@
-//! `python` — persistent Python REPL tool backed by `KernelClient`.
+//! `python` — persistent Python REPL tool backed by `RuntimeManager`.
 
-use crate::kernel::{KernelClient, KernelResp};
+use crate::{KernelResp, RuntimeEvent, RuntimeKey, RuntimeManager};
 use async_trait::async_trait;
 use serde_json::json;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use wisp_llm::ToolSchema;
-use wisp_tools::{Tool, ToolEnv, ToolResult};
+use wisp_tools::{Tool, ToolEnv, ToolEvent, ToolResult};
 
 pub struct ReplTool {
-    client: Arc<Mutex<KernelClient>>,
+    manager: RuntimeManager,
+    key: RuntimeKey,
 }
 
 const PYTHON_TOOL_DESCRIPTION: &str = "Execute Python code in a persistent REPL. Variables, imports, and loaded data persist across calls. Return values of expressions are printed. Use this for analysis, data loading, plotting, and computation when required packages already exist. Do not use this as a package installer; if dependencies are missing, set up a project-local pixi environment or use local-env-setup first.";
 
 impl ReplTool {
-    pub fn new(client: KernelClient) -> Self {
-        Self {
-            client: Arc::new(Mutex::new(client)),
-        }
+    pub fn new(manager: RuntimeManager, key: RuntimeKey) -> Self {
+        Self { manager, key }
     }
 
     fn format(resp: &KernelResp) -> String {
@@ -76,18 +73,44 @@ impl Tool for ReplTool {
             Some(c) => c.to_string(),
             None => return ToolResult::fail("missing required argument 'code'"),
         };
-        let id = uuid::Uuid::new_v4().to_string();
-        let mut client = self.client.lock().await;
-        match client.execute(&id, &code, env).await {
-            Ok(resp) => {
-                let success = resp.error.is_none();
-                ToolResult {
-                    success,
-                    content: Self::format(&resp),
-                    image: None,
+        let mut execution = match self
+            .manager
+            .execute(&self.key, env.project_root(), code)
+            .await
+        {
+            Ok(execution) => execution,
+            Err(error) => return ToolResult::fail(format!("python error: {error}")),
+        };
+        let mut cancel_poll = tokio::time::interval(std::time::Duration::from_millis(50));
+        loop {
+            tokio::select! {
+                event = execution.recv() => match event {
+                    Some(RuntimeEvent::Stdout(chunk)) => {
+                        env.emit(ToolEvent::Stdout { chunk }).await;
+                    }
+                    Some(RuntimeEvent::Finished(Ok(response))) => {
+                        let success = response.error.is_none();
+                        return ToolResult {
+                            success,
+                            content: Self::format(&response),
+                            image: None,
+                        };
+                    }
+                    Some(RuntimeEvent::Finished(Err(error))) => {
+                        return ToolResult::fail(format!("python error: {error}"));
+                    }
+                    None => {
+                        return ToolResult::fail("python error: runtime ended before returning a result");
+                    }
+                },
+                _ = cancel_poll.tick() => {
+                    if env.is_cancelled() {
+                        // Dropping this receiver abandons only the caller. The
+                        // manager-owned protocol task still drains the cell.
+                        return ToolResult::fail("python error: interrupted by user");
+                    }
                 }
             }
-            Err(e) => ToolResult::fail(format!("python error: {e}")),
         }
     }
 }

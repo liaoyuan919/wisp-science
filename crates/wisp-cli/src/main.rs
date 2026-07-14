@@ -288,23 +288,23 @@ async fn main() -> Result<()> {
     // Provision a uv venv once; shared by the Python REPL and the bundled
     // bio-tools MCP server. Skipped silently if uv isn't installed.
     let app_data = root.join(".wisp");
-    let py_env = wisp_python::PythonEnv::ensure(&app_data).ok();
+    let py_env = wisp_runtime::PythonEnv::ensure(&app_data).ok();
 
     // Python REPL: needs a kernel_worker path. Default to the bundled worker.
     let worker = std::env::var("WISP_KERNEL_WORKER")
         .ok()
-        .or_else(|| wisp_python::bundled_worker_path().map(|p| p.to_string_lossy().to_string()))
+        .or_else(|| wisp_runtime::bundled_worker_path().map(|p| p.to_string_lossy().to_string()))
         .unwrap_or_default();
-    let worker_path = wisp_python::resolve_bundled_script(&worker);
+    let worker_path = wisp_runtime::resolve_bundled_script(&worker);
+    let runtime_manager =
+        wisp_runtime::RuntimeManager::local_python(app_data.clone(), worker_path.clone(), vec![]);
     if worker_path.is_file() {
-        if let Some(env) = &py_env {
-            match wisp_python::KernelClient::spawn(&env.python(), &worker_path, &[]) {
-                Ok(client) => {
-                    agent.add_tool(Box::new(wisp_python::ReplTool::new(client)));
-                    println!("python repl wired ({worker}).");
-                }
-                Err(e) => println!("python repl skipped: {e}"),
-            }
+        if py_env.is_some() {
+            agent.add_tool(Box::new(wisp_runtime::ReplTool::new(
+                runtime_manager.clone(),
+                wisp_runtime::RuntimeKey::local_python(root.to_string_lossy()),
+            )));
+            println!("python repl wired ({worker}).");
         } else {
             println!("python repl skipped: uv venv unavailable");
         }
@@ -319,7 +319,7 @@ async fn main() -> Result<()> {
             .split_whitespace()
             .map(|s| {
                 if s.ends_with(".py") {
-                    wisp_python::resolve_bundled_script(s)
+                    wisp_runtime::resolve_bundled_script(s)
                         .to_string_lossy()
                         .to_string()
                 } else {
@@ -412,5 +412,6 @@ async fn main() -> Result<()> {
         agent.ctx.clear_runtime_injections();
         agent.save();
     }
+    runtime_manager.shutdown_all().await;
     Ok(())
 }
