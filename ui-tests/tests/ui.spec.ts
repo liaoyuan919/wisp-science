@@ -137,6 +137,11 @@ test("terminal window attaches, accepts input, pins, and terminates", async ({ p
   await expect(page.locator("#terminal-title")).toHaveText("gpu-server — Terminal");
   await expect(page.locator("#terminal-context")).toHaveText("ssh:gpu-server");
   await expect(page.locator(".xterm-rows")).toContainText("terminal ready");
+  await expect.poll(() => page.evaluate(() =>
+    (window as any).__terminalInvokeLog
+      .filter((call: any) => call.cmd === "resize_terminal")
+      .some((call: any) => call.args.rows > 0 && call.args.cols > 0),
+  )).toBe(true);
 
   await page.locator("#terminal-container").click();
   await page.keyboard.type("echo hello");
@@ -1056,15 +1061,28 @@ test("right panel shows execution contexts and runs", async ({ page }) => {
   const terminalDock = page.getByTestId("terminal-dock");
   await expect(terminalDock).toBeVisible();
   await expect(terminalDock).toContainText("ssh:gpu-server — Terminal");
-  await expect(terminalDock.locator("iframe")).toHaveAttribute("src", /terminal\.html\?session=terminal-mock&embedded=1/);
-  await expect(terminalDock.locator("iframe").contentFrame().locator(".xterm-rows")).toContainText("terminal ready");
+  await expect(terminalDock.locator("iframe.active")).toHaveAttribute("src", /terminal\.html\?session=terminal-mock-1&embedded=1/);
+  await expect(terminalDock.locator("iframe.active").contentFrame().locator(".xterm-rows")).toContainText("terminal ready");
+
+  await terminalDock.getByRole("button", { name: "New terminal" }).click();
+  await terminalDock.getByRole("button", { name: /Local machine/ }).click();
+  await expect.poll(() => lastInvokeArgs(page, "open_terminal")).toMatchObject({
+    contextId: "local",
+  });
+  await expect(terminalDock.getByRole("tab")).toHaveCount(2);
+  await expect(terminalDock.locator("iframe")).toHaveCount(2);
+  await expect(terminalDock.locator("iframe.active")).toHaveAttribute("src", /terminal\.html\?session=terminal-mock-2&embedded=1/);
+
+  await terminalDock.getByRole("tab", { name: "ssh:gpu-server — Terminal" }).click();
+  await expect(terminalDock.locator("iframe.active")).toHaveAttribute("src", /terminal\.html\?session=terminal-mock-1&embedded=1/);
   await terminalDock.getByRole("button", { name: "Close terminal panel" }).click();
   await expect(terminalDock).toBeHidden();
   await sshContext.getByRole("button", { name: "Open terminal" }).click();
   await expect(terminalDock).toBeVisible();
+  await expect(terminalDock.getByRole("tab")).toHaveCount(3);
   await terminalDock.getByRole("button", { name: "Terminate" }).click();
   await expect.poll(() => lastInvokeArgs(page, "terminate_terminal")).toMatchObject({
-    sessionId: "terminal-mock",
+    sessionId: "terminal-mock-3",
   });
   await expect(terminalDock.getByRole("button", { name: "Terminate" })).toBeDisabled();
   await expect(page.locator(".run-card", { hasText: "Kinase screen QC" })).toContainText("succeeded");

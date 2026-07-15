@@ -14,11 +14,14 @@ conversation and right panel, keeping the active research context visible.
   continues to honor SSH config, ssh-agent, ProxyJump, host-key prompts, and
   interactive authentication.
 
-One live terminal is reused for each project/context pair. Closing its panel
-detaches the view without terminating the shell; choosing **Open terminal** for
-the same context reattaches it. Use the terminal panel's **Terminate** action
-to end the process explicitly. Terminal sessions and scrollback are ephemeral
-and are not written to SQLite or included in project sync.
+Each **Open terminal** action creates an independent live terminal, including
+when another terminal already uses the same context. The dock keeps concurrent
+sessions in tabs; use **New terminal (+)** to choose any registered execution
+context. Switching tabs keeps every terminal attached so background output is
+not interrupted. Closing the panel detaches its views without terminating the
+shells, while **Terminate** ends the active tab's process explicitly. Terminal
+sessions and scrollback are ephemeral and are not written to SQLite or included
+in project sync.
 
 Interactive terminals are deliberately separate from Runs. Use a terminal for
 human-driven exploration, editors, monitors, and debugging. Use the Run Manager
@@ -34,14 +37,15 @@ harvesting, or provenance.
   project-to-remote workspace bindings are not modeled yet.
 - WSL path handling relies on `wsl.exe --cd`; custom automount layouts should be
   verified on the target Windows installation.
-- Terminal tabs are not yet persisted across an application restart, and only
-  one terminal panel is displayed at a time.
+- Terminal tabs are not yet persisted across an application restart. They share
+  one resizable bottom dock rather than opening separate desktop windows.
 
 ## Manual smoke checks
 
 On Windows, verify local PowerShell and an installed WSL distribution can open
-in the bottom dock, resize, accept input, run a full-screen application,
-close/reopen without losing the shell, and terminate explicitly. For SSH, use a
-test alias from SSH config and verify host-key/password prompts, resize,
-`Ctrl+C`, and disconnect handling.
+in parallel tabs, resize, accept input immediately, run a full-screen
+application, switch tabs without losing output, close/reopen the dock without
+losing the shells, and terminate the active tab explicitly. For SSH, use a test
+alias from SSH config and verify host-key/password prompts, resize, `Ctrl+C`,
+and disconnect handling.
 Automated tests must not require a real WSL distribution or SSH host.

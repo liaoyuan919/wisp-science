@@ -1,10 +1,15 @@
 import { Terminal } from "/vendor/xterm.mjs";
 import { FitAddon } from "/vendor/xterm-addon-fit.mjs";
 
-const core = window.__TAURI__?.core;
-const currentWindow = window.__TAURI__?.window?.getCurrentWindow?.();
-const sessionId = new URLSearchParams(window.location.search).get("session");
-const embedded = new URLSearchParams(window.location.search).get("embedded") === "1";
+const params = new URLSearchParams(window.location.search);
+const sessionId = params.get("session");
+const embedded = params.get("embedded") === "1";
+// WebView2 does not consistently inject Tauri's initialization script into a
+// same-origin child frame. The parent app always has the bridge, so embedded
+// terminals use it as a fallback instead of rendering a disconnected xterm.
+const tauri = window.__TAURI__ ?? (embedded && window.parent !== window ? window.parent.__TAURI__ : undefined);
+const core = tauri?.core;
+const currentWindow = tauri?.window?.getCurrentWindow?.();
 document.body.classList.toggle("embedded", embedded);
 const title = document.getElementById("terminal-title");
 const context = document.getElementById("terminal-context");
@@ -76,20 +81,46 @@ function queueInput(data) {
 
 let resizeTimer;
 function resizePty({ rows, cols }) {
+  if (!rows || !cols) return;
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
     core.invoke("resize_terminal", { sessionId, rows, cols }).catch(showError);
   }, 30);
 }
 
+let fitFrame;
+function scheduleFit(focus = false) {
+  cancelAnimationFrame(fitFrame);
+  fitFrame = requestAnimationFrame(() => {
+    // A second frame lets the iframe finish applying a newly selected tab's
+    // display/height before FitAddon measures its character grid.
+    fitFrame = requestAnimationFrame(() => {
+      const container = document.getElementById("terminal-container");
+      if (container.clientWidth === 0 || container.clientHeight === 0) return;
+      try {
+        fit.fit();
+        if (focus) terminal.focus();
+      } catch (error) {
+        showError(error);
+      }
+    });
+  });
+}
+
 async function start() {
   if (!core || !sessionId) {
     throw new Error("Terminal session bridge is unavailable.");
   }
-  fit.fit();
   terminal.onData(queueInput);
   terminal.onResize(resizePty);
-  new ResizeObserver(() => fit.fit()).observe(document.getElementById("terminal-container"));
+  const container = document.getElementById("terminal-container");
+  new ResizeObserver(() => scheduleFit(true)).observe(container);
+  window.addEventListener("resize", () => scheduleFit(false));
+  window.addEventListener("focus", () => scheduleFit(true));
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) scheduleFit(true);
+  });
+  container.addEventListener("pointerdown", () => terminal.focus());
 
   const onEvent = new core.Channel();
   onEvent.onmessage = (message) => {
@@ -105,8 +136,7 @@ async function start() {
   };
   const summary = await core.invoke("attach_terminal", { sessionId, onEvent });
   applySummary(summary);
-  resizePty({ rows: terminal.rows, cols: terminal.cols });
-  terminal.focus();
+  scheduleFit(true);
 }
 
 terminateButton.addEventListener("click", async () => {

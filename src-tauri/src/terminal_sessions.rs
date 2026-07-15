@@ -2,8 +2,9 @@
 //!
 //! `ExecutionContext` selects what is launched (local shell, WSL, or OpenSSH),
 //! while `Run` remains the durable abstraction for tracked computation. A
-//! terminal panel is only a view: closing it detaches from the session and a
-//! later `open_terminal` call reuses the still-running PTY.
+//! terminal panel is only a view: closing it detaches from the session. Each
+//! `open_terminal` call creates an independent PTY so multiple terminals can
+//! run concurrently, including multiple shells in the same context.
 
 use base64::Engine;
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -185,7 +186,6 @@ impl TerminalSession {
 #[derive(Default)]
 struct TerminalManagerState {
     sessions: HashMap<String, Arc<TerminalSession>>,
-    active: HashMap<(String, String), String>,
 }
 
 #[derive(Clone, Default)]
@@ -198,33 +198,18 @@ impl TerminalManager {
         Self::default()
     }
 
-    fn open_or_reuse(
+    fn open(
         &self,
         project_id: &str,
         project_root: &Path,
         context: &wisp_store::ExecutionContext,
     ) -> Result<TerminalSessionSummary, String> {
-        let key = (project_id.to_string(), context.id.clone());
-        let mut state = lock(&self.state);
-        if let Some(session_id) = state.active.get(&key).cloned() {
-            if let Some(session) = state
-                .sessions
-                .get(&session_id)
-                .filter(|session| session.running())
-            {
-                return Ok(session.summary());
-            }
-            state.sessions.remove(&session_id);
-        }
-
         let spec = build_terminal_launch_spec(context, project_root)?;
         let (session, reader, child) = spawn_session(project_id, context, spec)?;
         let summary = session.summary();
-        state.active.insert(key, session.id.clone());
-        state
+        lock(&self.state)
             .sessions
             .insert(session.id.clone(), Arc::clone(&session));
-        drop(state);
 
         start_terminal_workers(Arc::clone(&session), reader, child);
         Ok(summary)
@@ -444,7 +429,7 @@ pub async fn open_terminal(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("Execution context not found: {context_id}"))?;
-    terminals.open_or_reuse(&project.id, &project.root, &context)
+    terminals.open(&project.id, &project.root, &context)
 }
 
 #[tauri::command]
