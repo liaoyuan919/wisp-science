@@ -247,11 +247,22 @@ fn restored_project_path(workspace: &Path, archived: &str) -> Result<String> {
     if absolute {
         anyhow::bail!("archive contains a non-portable absolute project path");
     }
-    let mut path = workspace.to_path_buf();
-    for part in relative.split('/').filter(|part| !part.is_empty()) {
-        path.push(part);
+    let workspace = workspace.to_string_lossy();
+    let separator = if workspace.contains('\\') && !workspace.contains('/') {
+        '\\'
+    } else {
+        '/'
+    };
+    let workspace = workspace.trim_end_matches(['/', '\\']);
+    if relative.is_empty() {
+        return Ok(workspace.to_string());
     }
-    Ok(path.to_string_lossy().into_owned())
+    let relative = if separator == '\\' {
+        relative.replace('/', "\\")
+    } else {
+        relative
+    };
+    Ok(format!("{workspace}{separator}{relative}"))
 }
 
 async fn rewrite_export_paths(
@@ -762,6 +773,10 @@ mod tests {
         assert_eq!(
             restored_project_path(Path::new("/Users/alice/Study"), "figures/plot.png").unwrap(),
             "/Users/alice/Study/figures/plot.png"
+        );
+        assert_eq!(
+            restored_project_path(Path::new(r"C:\Users\Alice\Study"), "figures/plot.png").unwrap(),
+            r"C:\Users\Alice\Study\figures\plot.png"
         );
         assert!(restored_project_path(Path::new("/tmp/study"), "../escape").is_err());
     }

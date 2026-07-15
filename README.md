@@ -1,5 +1,11 @@
 # wisp-science
 
+[English](README.md) | [简体中文](README_zh.md)
+
+> **Our manifesto:** Wisp Science is open source and borderless. We are building
+> a scientific workbench that anyone, anywhere can use, study, improve, and
+> share.
+
 <p>
 <a href="https://github.com/xuzhougeng/wisp-science/releases"><img src="https://img.shields.io/badge/Windows-supported-0078D4" alt="Windows supported"></a>
 <a href="https://github.com/xuzhougeng/wisp-science/releases"><img src="https://img.shields.io/badge/macOS-supported-000000" alt="macOS supported"></a>
@@ -8,11 +14,6 @@
 <br>
 <a href="https://github.com/xuzhougeng/wisp-science/stargazers"><img src="https://img.shields.io/github/stars/xuzhougeng/wisp-science?style=social" alt="Stars"></a>
 </p>
-
-A Windows- and macOS-ready, open-source scientific computing agent — a Rust rewrite of
-the Claude Science (Operon) concept, with the agent core ported from
-[`m4n9H/mangopi-cli`](https://github.com/w4n9H/mangopi-cli) and the biology
-tooling vendored from the upstream `wisp-science` asset bundle.
 
 wisp-science is a local-first desktop copilot for science: it talks to any
 OpenAI-compatible or Anthropic model, runs persistent Python and R REPLs, calls
@@ -48,11 +49,6 @@ wisp-science/
 ├─ mcp-servers/     Bundled MCP servers (bio-tools: ~80 DB clients)
 └─ seed/            Bundled demo session recordings (CRISPR / enzyme / extremophile / immunotherapy)
 ```
-
-> The upstream `drizzle/` (TypeScript ORM migrations) is **not** used —
-> `wisp-store` ships its own `sqlx` SQLite schema
-> (`crates/wisp-store/migrations/0000_init.sql`). The desktop app persists
-> conversations, settings, and artifacts there; API keys go to the OS keyring.
 
 ## Prerequisites
 
@@ -277,9 +273,12 @@ correctly.
 - **MCP** (`wisp-mcp`): a minimal newline-JSON-RPC client launches any stdio
   MCP server and exposes each remote tool as a first-class agent tool.
 
-## Attribution
+## Acknowledgements
 
-- Agent core ported from `w4n9H/mangopi-cli` (Apache-2.0).
+- **Claude Science (Operon)** is referenced in product comparison and
+  compatibility research.
+- The agent core is based on
+  [`w4n9H/mangopi-cli`](https://github.com/w4n9H/mangopi-cli) (Apache-2.0).
 - `skills/` and `mcp-servers/bio-tools/` vendored from the upstream
   `wisp-science` asset bundle (Apache-2.0).
 - `skills/bear-*` from [bear-research-skills](https://github.com/fei0810/bear-research-skills)
@@ -318,55 +317,6 @@ If you use wisp-science in your research, please cite:
 - `RoutedProvider` LLM-score tier selection (keyword tier is already wired).
 - Bundling `skills/` and `mcp-servers/` into the Tauri installer so releases
   are fully self-contained without the source tree.
-
-### Claude Science UX parity
-
-Feature-design targets drawn from the upstream Claude Science walkthrough. Each
-line notes what wisp ships today versus the reference behaviour.
-
-- **Multi-step onboarding.** Reference: *Connect to the scientific web*
-  (per-category database toggles) → *Connectors & skills* (toggle each
-  connector/skill) → *What do you work on?* (free-text profile that seeds
-  suggested starter tasks). wisp today: a minimal welcome + API-key step
-  (`get_onboarding_state` / `dismiss_onboarding`).
-- **Connectors panel.** Per-category on/off switches over the ~80 bundled MCP
-  bio-tools (Cancer Models, CellGuide, Clinical Genomics, Expression, Genomes,
-  Human Genetics, Literature Graph, Protein Annotation, …) instead of the
-  current env-var launch (`WISP_MCP_PKG`). Pairs with a **Network →
-  allowed-domains** allowlist gating agent web access.
-- **Workspace settings sections.** Reference groups config into Skills,
-  Connectors, Specialists, Memory, Compute, Network, Permissions, Credentials,
-  Storage, Logs, General. wisp today: a standalone Settings page covering
-  General, Appearance, Models, Specialists, Memory, Skills, Connections,
-  Credentials, and Permissions. Appearance keeps separate light/dark palettes,
-  follows the system theme when requested, and persists UI/code font sizes.
-- **Inline tool-approval card.** Approval prompts render in the conversation
-  flow with once / conversation / project / global allow scopes. Remembered
-  approvals can be reviewed and revoked under **Settings -> Permissions**.
-- **Automatic independent review.** Tool-backed or substantial analysis turns
-  are checked by the tool-free Reviewer specialist. Structured findings appear
-  inline, with visible handoff markers when the main agent invokes Reviewer and
-  when Reviewer returns either a clean result or findings for correction. These
-  handoff markers are live UI animation only and are not stored in the session.
-  When findings exist, the main agent gets one correction pass and the Reviewer
-  rechecks it once. Reviewer
-  failures do not discard the original answer, and manual **Request review**
-  remains available.
-- **Artifacts gallery.** Thumbnail grid for figure artifacts (PNG/plots),
-  plus figure↔caption pairing (a plot alongside a structured caption doc:
-  *Panels / Artifacts / what is real vs. illustrative*). wisp today: a text
-  tile list with a single active preview; code is kept out of this list.
-- **Notebook panel.** Python/R/Shell tool executions and assistant code blocks
-  render as numbered, line-highlighted cells with collapsible output. The view
-  is transcript-backed and read-only; it is not an editable live-kernel notebook.
-- **Projects home.** Multiple projects, each with session/artifact counts and
-  a "+ New project" action, versus today's single project + flat session list.
-- **Web-search toggle** surfaced directly in the composer.
-
-The reference is a general computational-research environment (the walkthrough
-also runs an economics/tariff pass-through analysis), consistent with wisp's
-provider- and domain-agnostic core — the science tooling is bundled, not
-hard-wired.
 
 ## Star History
 
