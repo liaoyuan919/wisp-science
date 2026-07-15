@@ -1,11 +1,11 @@
 use super::desktop_lifecycle::should_hide_workspace_on_close;
 use super::{
-    branch_title, copy_dir_recursive, events_to_items, messages_to_items, parse_disabled_skills,
-    parse_enabled_skill_names, parse_skill_tags, parse_ssh_artifact_uri,
-    resolve_acp_artifact_references, resolve_composer_references, resolve_workspace,
-    session_runtime_status, should_hide_app_on_macos_close, side_chat_prompt,
+    branch_title, copy_dir_recursive, events_to_items, merge_pending_ui_event, messages_to_items,
+    parse_disabled_skills, parse_enabled_skill_names, parse_skill_tags, parse_ssh_artifact_uri,
+    persist_ui_events, resolve_acp_artifact_references, resolve_composer_references,
+    resolve_workspace, session_runtime_status, should_hide_app_on_macos_close, side_chat_prompt,
     update_check_from_release, user_message_start, AgentEvent, ComposerReferenceArg, GithubRelease,
-    McpConnection, McpTransport,
+    McpConnection, McpTransport, MAX_PENDING_UI_EVENT_BYTES,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -188,6 +188,79 @@ fn persisted_ui_events_ignore_ephemeral_reviewer_handoffs() {
 
     let (items, _) = events_to_items(&events);
     assert!(items.is_empty());
+}
+
+#[test]
+fn pending_ui_event_merge_stays_bounded() {
+    let frame_id = "f".to_string();
+    let mut pending = Some(AgentEvent::Text {
+        frame_id: frame_id.clone(),
+        delta: "a".repeat(MAX_PENDING_UI_EVENT_BYTES - 1),
+    });
+    assert!(merge_pending_ui_event(
+        &mut pending,
+        AgentEvent::Text {
+            frame_id: frame_id.clone(),
+            delta: "b".into(),
+        }
+    )
+    .is_none());
+    let flushed = merge_pending_ui_event(
+        &mut pending,
+        AgentEvent::Text {
+            frame_id,
+            delta: "c".into(),
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(flushed, AgentEvent::Text { delta, .. } if delta.len() == MAX_PENDING_UI_EVENT_BYTES)
+    );
+    assert!(matches!(pending, Some(AgentEvent::Text { ref delta, .. }) if delta == "c"));
+}
+
+#[tokio::test]
+async fn ui_events_are_persisted_before_the_turn_ends() {
+    let base = std::env::temp_dir().join(format!("wisp_ui_flush_{}", uuid::Uuid::new_v4()));
+    let store = wisp_store::Store::open(&base.join("wisp.sqlite"))
+        .await
+        .unwrap();
+    store
+        .create_project("p", "Project", &base.to_string_lossy())
+        .await
+        .unwrap();
+    store
+        .create_frame("f", "p", "OPERON", "model")
+        .await
+        .unwrap();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let handle = tokio::spawn(persist_ui_events(
+        store.clone(),
+        "f".into(),
+        1,
+        rx,
+        std::time::Duration::from_millis(5),
+    ));
+    tx.send(AgentEvent::Text {
+        frame_id: "f".into(),
+        delta: "still running".into(),
+    })
+    .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if !store.load_session_ui_events("f").await.unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!handle.is_finished());
+    drop(tx);
+    handle.await.unwrap();
+    let _ = std::fs::remove_dir_all(base);
 }
 
 #[tokio::test]

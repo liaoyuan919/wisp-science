@@ -998,6 +998,77 @@ fn events_to_items(events: &[AgentEvent]) -> (Vec<UiItem>, HashMap<i64, usize>) 
     (items, boundaries)
 }
 
+const MAX_PENDING_UI_EVENT_BYTES: usize = 64 * 1024;
+const UI_EVENT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+fn merge_pending_ui_event(
+    pending: &mut Option<AgentEvent>,
+    event: AgentEvent,
+) -> Option<AgentEvent> {
+    let merged = match (pending.as_mut(), &event) {
+        (Some(AgentEvent::Text { delta, .. }), AgentEvent::Text { delta: next, .. })
+        | (Some(AgentEvent::Reasoning { delta, .. }), AgentEvent::Reasoning { delta: next, .. })
+        | (Some(AgentEvent::Stdout { chunk: delta, .. }), AgentEvent::Stdout { chunk: next, .. })
+            if delta.len().saturating_add(next.len()) <= MAX_PENDING_UI_EVENT_BYTES =>
+        {
+            delta.push_str(next);
+            true
+        }
+        _ => false,
+    };
+    if merged {
+        None
+    } else {
+        pending.replace(event)
+    }
+}
+
+async fn append_ui_event(store: &Store, frame_id: &str, seq: &mut i64, event: AgentEvent) {
+    let json = match serde_json::to_string(&event) {
+        Ok(json) => json,
+        Err(error) => {
+            tracing::warn!("serialize UI event failed: {error}");
+            return;
+        }
+    };
+    if let Err(error) = store.append_session_ui_event(frame_id, *seq, &json).await {
+        tracing::warn!("persist UI event {} failed: {error}", *seq);
+    } else {
+        *seq += 1;
+    }
+}
+
+async fn persist_ui_events(
+    store: Store,
+    frame_id: String,
+    mut seq: i64,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
+    flush_interval: std::time::Duration,
+) {
+    let mut pending = None;
+    let mut ticker = tokio::time::interval(flush_interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await;
+    loop {
+        tokio::select! {
+            event = rx.recv() => match event {
+                Some(event) => {
+                    if let Some(event) = merge_pending_ui_event(&mut pending, event) {
+                        append_ui_event(&store, &frame_id, &mut seq, event).await;
+                    }
+                }
+                None => break,
+            },
+            _ = ticker.tick(), if pending.is_some() => {
+                append_ui_event(&store, &frame_id, &mut seq, pending.take().unwrap()).await;
+            }
+        }
+    }
+    if let Some(event) = pending {
+        append_ui_event(&store, &frame_id, &mut seq, event).await;
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 struct Settings {
     provider: String,
@@ -3137,53 +3208,20 @@ async fn send_message(
     };
 
     let (ui_event_handle, ui_event_tx) = {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
         let store = state.store.clone();
         let fid = frame_id.clone();
-        let mut seq = store
+        let seq = store
             .next_session_ui_event_seq(&fid)
             .await
             .map_err(|e| format!("{e}"))?;
-        let handle = tokio::spawn(async move {
-            let mut events: Vec<AgentEvent> = Vec::new();
-            while let Some(event) = rx.recv().await {
-                let merged = match (events.last_mut(), &event) {
-                    (
-                        Some(AgentEvent::Text { delta, .. }),
-                        AgentEvent::Text { delta: next, .. },
-                    )
-                    | (
-                        Some(AgentEvent::Reasoning { delta, .. }),
-                        AgentEvent::Reasoning { delta: next, .. },
-                    )
-                    | (
-                        Some(AgentEvent::Stdout { chunk: delta, .. }),
-                        AgentEvent::Stdout { chunk: next, .. },
-                    ) => {
-                        delta.push_str(next);
-                        true
-                    }
-                    _ => false,
-                };
-                if !merged {
-                    events.push(event);
-                }
-            }
-            for event in events {
-                let json = match serde_json::to_string(&event) {
-                    Ok(json) => json,
-                    Err(error) => {
-                        tracing::warn!("serialize UI event failed: {error}");
-                        continue;
-                    }
-                };
-                if let Err(error) = store.append_session_ui_event(&fid, seq, &json).await {
-                    tracing::warn!("persist UI event {seq} failed: {error}");
-                } else {
-                    seq += 1;
-                }
-            }
-        });
+        let handle = tokio::spawn(persist_ui_events(
+            store,
+            fid,
+            seq,
+            rx,
+            UI_EVENT_FLUSH_INTERVAL,
+        ));
         (handle, tx)
     };
 
