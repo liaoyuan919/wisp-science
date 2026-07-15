@@ -4446,6 +4446,22 @@ fn App() -> impl IntoView {
                     view! { <span class="hint">{move || status.get()}</span> }.into_view()
                 }}
                 <div class="spacer"></div>
+                <button class="icon-btn" title=move || t(locale.get(), "contexts.open_terminal")
+                    class:active=move || terminal_panel_open.get()
+                    on:click=move |_| {
+                        if terminal_sessions.get_untracked().is_empty() {
+                            open_terminal_for_context.call("local".into());
+                        } else {
+                            let should_open = !terminal_panel_open.get_untracked();
+                            if should_open && active_terminal_id.get_untracked().is_none() {
+                                if let Some(session) = terminal_sessions.get_untracked().first() {
+                                    active_terminal_id.set(Some(session.id.clone()));
+                                }
+                            }
+                            terminal_add_menu_open.set(false);
+                            terminal_panel_open.set(should_open);
+                        }
+                    }>{compose_icon("terminal")}</button>
                 <button class="icon-btn" title=move || t(locale.get(), "center.toggle_panel")
                     class:active=move || show_right.get()
                     on:click=move |_| {
@@ -5156,18 +5172,8 @@ fn App() -> impl IntoView {
                                 let open_details_context_id = context.id.clone();
                                 let open_terminal_context_id = context.id.clone();
                                 let refresh_probe_context_id = context.id.clone();
-                                let active_project_id = project_info.get().map(|project| project.id);
-                                let runtime_count = runtime_infos.get().into_iter()
-                                    .filter(|runtime| {
-                                        runtime.key.context_id == context.id
-                                            && active_project_id.as_ref().is_none_or(|project_id| {
-                                                runtime.key.project_id == *project_id
-                                            })
-                                    })
-                                    .count();
-                                let run_count = run_records.get().into_iter()
-                                    .filter(|run| run.context_id == context.id)
-                                    .count();
+                                let runtime_count_context_id = context.id.clone();
+                                let run_count_context_id = context.id.clone();
                                 view! {
                                     <div class="compute-info-card" role="dialog"
                                         aria-label=move || t(locale.get(), "compute.environment_info")>
@@ -5193,8 +5199,24 @@ fn App() -> impl IntoView {
                                                 <div class="compute-context-detail">
                                                     <div class="compute-context-summary">{summary}</div>
                                                     <div class="compute-context-metrics">
-                                                        <span>{tf(locale.get(), "compute.runtime_count", &[("n", &runtime_count.to_string())])}</span>
-                                                        <span>{tf(locale.get(), "compute.run_count", &[("n", &run_count.to_string())])}</span>
+                                                        <span>{move || {
+                                                            let active_project_id = project_info.get().map(|project| project.id);
+                                                            let runtime_count = runtime_infos.get().into_iter()
+                                                                .filter(|runtime| {
+                                                                    runtime.key.context_id == runtime_count_context_id
+                                                                        && active_project_id.as_ref().is_none_or(|project_id| {
+                                                                            runtime.key.project_id == *project_id
+                                                                        })
+                                                                })
+                                                                .count();
+                                                            tf(locale.get(), "compute.runtime_count", &[("n", &runtime_count.to_string())])
+                                                        }}</span>
+                                                        <span>{move || {
+                                                            let run_count = run_records.get().into_iter()
+                                                                .filter(|run| run.context_id == run_count_context_id)
+                                                                .count();
+                                                            tf(locale.get(), "compute.run_count", &[("n", &run_count.to_string())])
+                                                        }}</span>
                                                     </div>
                                                     <div class="compute-context-actions">
                                                         <button type="button" on:click=move |_| {
