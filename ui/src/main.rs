@@ -27,9 +27,7 @@ use i18n::{
 use leptos::{ev, window_event_listener, *};
 use library::{refresh_library, LibraryScreen};
 use notebook::{collect_notebook_cells, NotebookCache, NotebookView};
-use overlays::{
-    AddHostOverlay, CapabilitiesOverlay, OnboardingOverlay, RuntimeInterpreterOverlay,
-};
+use overlays::{AddHostOverlay, CapabilitiesOverlay, OnboardingOverlay, RuntimeInterpreterOverlay};
 use pet::{PetDesktop, PetOverlay};
 use project_landing::{ProjectLanding, ProjectLandingState};
 use serde_wasm_bindgen::to_value;
