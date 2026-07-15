@@ -43,6 +43,7 @@ export function tauriMock(): void {
   const query = new URLSearchParams(window.location.search);
   const mockLongPages = Number(query.get("mockLongPages") ?? 0);
   const mockLongSession = query.get("mockLongSession") === "1" || mockLongPages > 0;
+  const mockResourceSession = query.get("mockResourceSession") === "1";
   const mockSessions = query.get("mockManySessions") === "1"
     ? Array.from({ length: 101 }, (_, index) => ({
         id: `session-${String(index + 1).padStart(3, "0")}`,
@@ -369,6 +370,30 @@ export function tauriMock(): void {
           case "load_demo":
             return demo;
           case "load_session":
+            if (mockResourceSession) {
+              return {
+                items: [{
+                  role: "assistant",
+                  text: "[Open bound report](D:/ZZM/03.%20figures/report.md')",
+                  tool_name: null,
+                  ok: null,
+                  resources: [{
+                    id: "resource-link-markdown",
+                    ordinal: 0,
+                    originalReference: "D:/ZZM/03.%20figures/report.md'",
+                    artifactId: "resource-artifact-markdown",
+                    artifactVersionId: "resource-version-markdown",
+                    displayName: "report.md",
+                    kind: "markdown",
+                    mimeType: "text/markdown",
+                    status: "ready",
+                    error: null,
+                  }],
+                }],
+                next_before_seq: null,
+                user_offset: 0,
+              };
+            }
             if (mockLongSession) {
               const before = arg("beforeSeq");
               ((window as any).__transcriptPageCalls ??= []).push(before ?? null);
@@ -939,6 +964,16 @@ export function tauriMock(): void {
               return { path: "artifact:art-markdown", mime: "text/markdown", text: "# Differential expression report\n\nRendered Markdown body.", base64: null };
             }
             return { path: `artifact:${arg("id")}`, mime: "text/csv", text: "a,b\n1,2", base64: null };
+          case "read_artifact_version":
+            if (arg("versionId") === "resource-version-markdown") {
+              return {
+                path: "artifact-version:resource-version-markdown",
+                mime: "text/markdown",
+                text: `# Bound report\n\n${Array.from({ length: 120 }, (_, index) => `Scrollable row ${index + 1}`).join("\n\n")}`,
+                base64: null,
+              };
+            }
+            throw new Error("Artifact version not found");
           case "missing_files": {
             const paths = Array.isArray(arg("paths")) ? arg("paths") : [];
             return paths.filter((p) => String(p).includes("/.pdf") || String(p).includes("\\.pdf"));

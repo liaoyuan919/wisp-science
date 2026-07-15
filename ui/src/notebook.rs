@@ -260,6 +260,7 @@ mod tests {
                 text: "```python\nprint(1)\n```\n```rust\nfn main() {}\n```\n```csv\na,b\n1,2\n```"
                     .into(),
                 model: None,
+                resources: Vec::new(),
             },
             ChatItem::Tool {
                 name: "python".into(),

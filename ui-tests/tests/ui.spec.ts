@@ -2264,6 +2264,34 @@ test("Markdown artifact modal opens its rendered preview in center", async ({ pa
   await expect(page.locator(".center-file-preview")).toContainText("Rendered Markdown body.");
 });
 
+test("bound Markdown resources use immutable versions and a scrollable center preview", async ({ page }) => {
+  await page.goto("/?mockResourceSession=1");
+  await page.getByRole("button", { name: "Search" }).click();
+  const search = commandPalette(page);
+  await search.fill("Enumerate");
+  await search.press("Enter");
+
+  await page.getByRole("link", { name: "Open bound report" }).click();
+  const tab = page.locator('.center-tab[data-center-path="artifact-version:resource-version-markdown"]');
+  await expect(tab).toContainText("report.md");
+  const preview = page.locator(".center-file-preview");
+  await expect(preview.locator("h1")).toHaveText("Bound report");
+  await expect(preview).toContainText("Scrollable row 120");
+  await expect.poll(() => preview.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }))).toMatchObject({ clientHeight: expect.any(Number), scrollHeight: expect.any(Number) });
+  const dimensions = await preview.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight);
+  await preview.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect.poll(() => preview.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await expect.poll(() => lastInvokeArgs(page, "read_artifact_version"))
+    .toMatchObject({ versionId: "resource-version-markdown" });
+});
+
 test("projects landing stays centered on wide windows", async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 900 });
   await page.goto("/");

@@ -13,6 +13,7 @@ mod project_transfer;
 mod projects;
 mod provenance;
 mod research;
+mod resources;
 mod runs;
 pub mod secrets;
 mod sessions;
@@ -45,6 +46,7 @@ const SESSION_REVIEWS_MIGRATION: &str = "0008_session_reviews";
 const SESSION_UI_EVENTS_MIGRATION: &str = "0009_session_ui_events";
 const PROJECT_SYNC_STATE_MIGRATION: &str = "0010_project_sync_state";
 const SESSION_HISTORY_INDEX_MIGRATION: &str = "0011_session_history_index";
+const MESSAGE_RESOURCE_LINKS_MIGRATION: &str = "0012_message_resource_links";
 
 #[derive(Clone)]
 pub struct Store {
@@ -173,6 +175,34 @@ impl Store {
             }
             Self::record_migration(pool, SESSION_HISTORY_INDEX_MIGRATION).await?;
         }
+        if !Self::migration_applied(pool, MESSAGE_RESOURCE_LINKS_MIGRATION).await? {
+            Self::apply_message_resource_links(pool).await?;
+            Self::record_migration(pool, MESSAGE_RESOURCE_LINKS_MIGRATION).await?;
+        }
+        Ok(())
+    }
+
+    async fn apply_message_resource_links(pool: &SqlitePool) -> Result<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS message_resource_links (\
+             id TEXT PRIMARY KEY, \
+             frame_id TEXT NOT NULL REFERENCES frames(id) ON DELETE CASCADE, \
+             message_seq INTEGER NOT NULL, ordinal INTEGER NOT NULL, \
+             original_reference TEXT NOT NULL, \
+             artifact_id TEXT REFERENCES artifacts(id) ON DELETE SET NULL, \
+             artifact_version_id TEXT REFERENCES artifact_versions(id) ON DELETE SET NULL, \
+             display_name TEXT NOT NULL, resource_kind TEXT NOT NULL, mime_type TEXT NOT NULL, \
+             status TEXT NOT NULL, error TEXT, created_at INTEGER NOT NULL, \
+             UNIQUE(frame_id,message_seq,ordinal))",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS ix_message_resource_links_message \
+             ON message_resource_links(frame_id,message_seq,ordinal)",
+        )
+        .execute(pool)
+        .await?;
         Ok(())
     }
 

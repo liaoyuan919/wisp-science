@@ -778,6 +778,25 @@ pub(crate) async fn run_acp_turn(
         .append_message(frame_id, next_seq, &persisted)
         .await
         .map_err(|error| error.to_string())?;
+    let resources = crate::resource_refs::bind_new_message_resources(
+        &state.store,
+        &project.root,
+        &project.id,
+        frame_id,
+        next_seq,
+        &persisted.content.as_text(),
+    )
+    .await;
+    if !resources.is_empty() {
+        let _ = app.emit(
+            "agent",
+            AgentEvent::Resources {
+                frame_id: frame_id.to_string(),
+                seq: next_seq,
+                resources: resources.iter().map(Into::into).collect(),
+            },
+        );
+    }
     cancel_pending_permissions(state, frame_id, &runtime).await;
     Ok(stop_reason(outcome.stop_reason).into())
 }
