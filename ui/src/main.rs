@@ -5424,17 +5424,19 @@ fn App() -> impl IntoView {
                                         <div class="model-menu">
                                             {move || {
                                                 let list = models.get();
-                                                let can_delete = list.len() > 1;
                                                 let acp_locked = active_acp_agent_id.get().is_some() && items.with(|rows| !rows.is_empty());
                                                 list.into_iter().map(|m| {
                                                     let pick_id = m.id.clone();
-                                                    let del_id = m.id.clone();
                                                     let is_active = m.active;
                                                     let show_sub = !m.model.is_empty() && m.model != m.label;
                                                     view! {
                                                         <div class="model-menu-row" class:active=is_active>
-                                                            <button type="button" class="model-menu-pick" disabled=acp_locked
-                                                                title=acp_locked.then_some("ACP Agent selection is locked after the first prompt") on:click=move |_| {
+                                                            <button type="button" class="model-menu-pick"
+                                                                on:click=move |_| {
+                                                                if acp_locked && !is_active {
+                                                                    show_warning_toast(&t(locale.get(), "models.locked_hint"));
+                                                                    return;
+                                                                }
                                                                 model_menu_open.set(false);
                                                                 provisional_acp_selection.set(None);
                                                                 active_acp_agent_id.set(None);
@@ -5459,18 +5461,6 @@ fn App() -> impl IntoView {
                                                                 </span>
                                                                 {is_active.then(|| view! { <span class="model-menu-check">"✓"</span> })}
                                                             </button>
-                                                            {(can_delete && !is_active).then(|| { let id = del_id.clone(); view! {
-                                                                <button type="button" class="model-menu-del"
-                                                                    title=move || t(locale.get(), "models.remove")
-                                                                    on:click=move |_| {
-                                                                        let id = id.clone();
-                                                                        spawn_local(async move {
-                                                                            let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
-                                                                            let v = invoke("remove_model", arg).await;
-                                                                            if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(v) { models.set(list); }
-                                                                        });
-                                                                    }>{compose_icon("close")}</button>
-                                                            }})}
                                                         </div>
                                                     }
                                                 }).collect_view()
@@ -5479,8 +5469,6 @@ fn App() -> impl IntoView {
                                                 <div class="compose-group-label">"ACP Agents"</div>
                                                 {acp_agents.get().into_iter().map(|agent| {
                                                     let id = agent.id.clone();
-                                                    let test_id = agent.id.clone();
-                                                    let delete_id = agent.id.clone();
                                                     let active = active_acp_agent_id.get().as_deref() == Some(agent.id.as_str());
                                                     let starts_new_session = items.with(|rows| !rows.is_empty()) && !active;
                                                     view! {
@@ -5525,27 +5513,6 @@ fn App() -> impl IntoView {
                                                                 </span>
                                                                 {active.then(|| view! { <span class="model-menu-check">"✓"</span> })}
                                                             </button>
-                                                            <button type="button" class="model-menu-del" title="Test ACP connection"
-                                                                on:click=move |_| {
-                                                                    let id = test_id.clone();
-                                                                    spawn_local(async move {
-                                                                        let args = to_value(&serde_json::json!({ "id": id })).unwrap();
-                                                                        status.set(match invoke_checked("test_acp_agent", args).await {
-                                                                            Ok(_) => "ACP connection succeeded".into(),
-                                                                            Err(error) => format!("ACP connection failed: {}", js_error_text(error)),
-                                                                        });
-                                                                    });
-                                                                }>{compose_icon("refresh")}</button>
-                                                            <button type="button" class="model-menu-del" title="Remove ACP Agent" disabled=active
-                                                                on:click=move |_| {
-                                                                    let id = delete_id.clone();
-                                                                    spawn_local(async move {
-                                                                        let args = to_value(&serde_json::json!({ "id": id })).unwrap();
-                                                                        if let Ok(value) = invoke_checked("remove_acp_agent", args).await {
-                                                                            if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<AcpAgentProfile>>(value) { acp_agents.set(list); }
-                                                                        }
-                                                                    });
-                                                                }>{compose_icon("close")}</button>
                                                         </div>
                                                     }
                                                 }).collect_view()}
@@ -5555,18 +5522,11 @@ fn App() -> impl IntoView {
                                                 open_settings_fn(Some("models".into()));
                                                 show_acp_agents.set(false);
                                                 acp_form.set(None);
-                                                model_form.set(Some(new_model_form()));
+                                                model_form.set(None);
                                                 model_form_key.set(String::new());
                                                 model_form_msg.set(None);
-                                            }>{move || t(locale.get(), "models.add")}</button>
-                                            <button type="button" class="model-menu-add" data-testid="add-acp-agent" on:click=move |_| {
-                                                model_menu_open.set(false);
-                                                open_settings_fn(Some("models".into()));
-                                                show_acp_agents.set(true);
-                                                model_form.set(None);
                                                 acp_form_msg.set(None);
-                                                acp_form.set(Some(new_acp_form()));
-                                            }>"Add ACP Agent"</button>
+                                            }>{move || t(locale.get(), "models.manage")}</button>
                                         </div>
                                     })}
                                 </div>

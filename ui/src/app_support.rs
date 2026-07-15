@@ -1267,6 +1267,14 @@ pub(super) fn show_copy_toast() {
 }
 
 pub(super) fn show_toast(message: &str) {
+    show_toast_with_class(message, "copy-toast");
+}
+
+pub(super) fn show_warning_toast(message: &str) {
+    show_toast_with_class(message, "copy-toast copy-toast-warning");
+}
+
+fn show_toast_with_class(message: &str, class_name: &str) {
     let Some(window) = web_sys::window() else {
         return;
     };
@@ -1280,7 +1288,7 @@ pub(super) fn show_toast(message: &str) {
         return;
     };
     toast.set_id("copy-toast");
-    toast.set_class_name("copy-toast");
+    toast.set_class_name(class_name);
     toast.set_text_content(Some(message));
     let Some(body) = document.body() else {
         return;
