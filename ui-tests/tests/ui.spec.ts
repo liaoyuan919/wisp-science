@@ -2285,6 +2285,19 @@ test("macOS uses the native title bar without the integrated header", async ({ b
   await expect.poll(async () => page.locator(".settings-page").evaluate((el) =>
     Math.round(el.getBoundingClientRect().top)
   )).toBe(0);
+  await page.getByRole("button", { name: "Back to app" }).click();
+
+  await page.locator(".proj-card-main").first().click();
+  await expect(newSessionButton(page)).toBeVisible();
+  await page.getByRole("button", { name: "Compute hosts", exact: true }).click();
+  await page.getByRole("menu", { name: "Compute hosts" })
+    .getByRole("button", { name: "gpu-server", exact: true }).click();
+  const card = page.getByRole("dialog", { name: "Environment info" });
+  await expect.poll(() => card.evaluate((element) => {
+    const toggle = document.querySelector('.topbar [title="Toggle panel"]');
+    if (!(toggle instanceof HTMLElement)) return null;
+    return Math.round(element.getBoundingClientRect().top - toggle.getBoundingClientRect().bottom);
+  })).toBe(18);
 
   await context.close();
 });
