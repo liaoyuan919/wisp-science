@@ -22,8 +22,10 @@ class KernelWorkerTests(unittest.TestCase):
                     "type": "execute",
                     "id": str(index),
                     "code": (
-                        "len([key for key in __import__('linecache').cache "
-                        "if str(key).startswith('<wisp-kernel:')])"
+                        "print(len([key for key in __import__('linecache').cache "
+                        "if str(key).startswith('<wisp-kernel:')]))"
+                        + "\n#"
+                        + ("x" * (256 * 1024))
                     ),
                 }
                 worker.stdin.write(json.dumps(request) + "\n")
@@ -33,7 +35,29 @@ class KernelWorkerTests(unittest.TestCase):
                     if response.get("type") == "result" and response.get("id") == str(index):
                         break
 
-            self.assertEqual(response["stdout"].strip(), "64")
+            self.assertLessEqual(int(response["stdout"].strip()), 32)
+
+            oversized = {
+                "type": "execute",
+                "id": "oversized",
+                "code": "x" * (1024 * 1024 + 1),
+            }
+            worker.stdin.write(json.dumps(oversized) + "\n")
+            worker.stdin.flush()
+            response = json.loads(worker.stdout.readline())
+            self.assertEqual(response["id"], "oversized")
+            self.assertIn("Code exceeds", response["error"])
+
+            too_many_lines = {
+                "type": "execute",
+                "id": "too-many-lines",
+                "code": "pass\r" * 20_001,
+            }
+            worker.stdin.write(json.dumps(too_many_lines) + "\n")
+            worker.stdin.flush()
+            response = json.loads(worker.stdout.readline())
+            self.assertEqual(response["id"], "too-many-lines")
+            self.assertIn("Code exceeds", response["error"])
             worker.stdin.close()
             self.assertEqual(worker.wait(timeout=5), 0)
         finally:

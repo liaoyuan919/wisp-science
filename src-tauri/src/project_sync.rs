@@ -10,7 +10,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -269,8 +269,16 @@ fn build_workspace_snapshot(
             manifest.skipped_paths.push(entry.archive_path);
             continue;
         }
-        let bytes = std::fs::read(&entry.source)
+        let mut bytes = Vec::with_capacity(entry.size as usize);
+        std::fs::File::open(&entry.source)
+            .and_then(|file| file.take(MAX_SYNC_FILE_BYTES + 1).read_to_end(&mut bytes))
             .map_err(|error| format!("Cannot read {}: {error}", entry.source.display()))?;
+        if bytes.len() as u64 > MAX_SYNC_FILE_BYTES {
+            return Err(format!(
+                "Workspace file grew beyond {MAX_SYNC_FILE_BYTES} bytes while sync was reading it: {}",
+                entry.archive_path
+            ));
+        }
         if bytes.len() as u64 != entry.size {
             return Err(format!(
                 "Workspace file changed while sync was reading it: {}",
@@ -285,7 +293,7 @@ fn build_workspace_snapshot(
         } else {
             changed_blob_bytes = reserve_changed_blob_bytes(
                 changed_blob_bytes,
-                entry.size,
+                bytes.len() as u64,
                 MAX_SYNC_CHANGED_BLOBS_BYTES,
             )?;
             let encrypted = encrypt_blob(key, &bytes).map_err(|error| error.to_string())?;

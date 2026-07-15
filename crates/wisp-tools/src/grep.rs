@@ -5,11 +5,13 @@ use crate::tool::{arg_str, arg_str_opt, Tool};
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::json;
+use std::io::Read;
 use wisp_llm::ToolSchema;
 
 const MAX_RESULTS: usize = 500;
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const TRUNCATED: &str = "... results truncated";
+const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 pub struct GrepTool;
 
@@ -62,11 +64,24 @@ impl Tool for GrepTool {
             }
             // ponytail: flat 10MB skip like code-search tools; no override knob
             // until someone actually greps huge files.
-            if entry.metadata().is_ok_and(|m| m.len() > 10 * 1024 * 1024) {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
                 continue;
             }
             let path = entry.path();
-            let Ok(text) = std::fs::read_to_string(path) else {
+            let mut bytes = Vec::with_capacity(metadata.len() as usize);
+            let Ok(_) = std::fs::File::open(path)
+                .and_then(|file| file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes))
+            else {
+                continue;
+            };
+            if bytes.len() as u64 > MAX_FILE_BYTES {
+                truncated = true;
+                break;
+            }
+            let Ok(text) = String::from_utf8(bytes) else {
                 continue;
             };
             for (i, line) in text.lines().enumerate() {

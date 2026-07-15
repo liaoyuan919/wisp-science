@@ -39,12 +39,26 @@ async fn read_stderr(reader: &mut Option<ChildStderr>, buf: &mut [u8]) -> std::i
     }
 }
 
-fn append_output(output: &mut Vec<u8>, chunk: &[u8]) -> (usize, bool) {
-    let take = chunk
-        .len()
-        .min(MAX_OUTPUT_BYTES.saturating_sub(output.len()));
+fn append_output(output: &mut Vec<u8>, chunk: &[u8], remaining: usize) -> (usize, bool) {
+    let take = chunk.len().min(remaining);
     output.extend_from_slice(&chunk[..take]);
     (take, take < chunk.len())
+}
+
+fn decode_stdout_chunk(carry: &mut Vec<u8>, chunk: &[u8], flush: bool) -> String {
+    carry.extend_from_slice(chunk);
+    let valid = match std::str::from_utf8(carry) {
+        Ok(_) => carry.len(),
+        Err(error) if error.error_len().is_none() => error.valid_up_to(),
+        Err(_) => carry.len(),
+    };
+    let mut text = String::from_utf8_lossy(&carry[..valid]).into_owned();
+    carry.drain(..valid);
+    if flush && !carry.is_empty() {
+        text.push_str(&String::from_utf8_lossy(carry));
+        carry.clear();
+    }
+    text
 }
 
 pub struct ShellTool;
@@ -55,7 +69,7 @@ fn shell_description() -> String {
     } else {
         "POSIX sh"
     };
-    format!("Execute a shell command via {shell} (60s timeout) and return stdout/stderr. Reach for this only when no dedicated tool fits. Write commands for this OS; avoid cross-shell one-liners and use Python or pixi for package-heavy scientific work.")
+    format!("Execute a shell command via {shell} (60s timeout, 1 MiB combined output limit) and return stdout/stderr. Reach for this only when no dedicated tool fits. Write commands for this OS; avoid cross-shell one-liners and use Python or pixi for package-heavy scientific work.")
 }
 
 async fn run_shell(args: &serde_json::Value, env: &dyn ToolEnv, timeout: Duration) -> ToolResult {
@@ -104,7 +118,9 @@ async fn run_shell(args: &serde_json::Value, env: &dyn ToolEnv, timeout: Duratio
     let mut stderr_done = stderr_reader.is_none();
     let mut stdout_buf = [0_u8; 8192];
     let mut stderr_buf = [0_u8; 8192];
-    let mut output = Vec::with_capacity(MAX_OUTPUT_BYTES);
+    let mut stdout_output = Vec::new();
+    let mut stderr_output = Vec::new();
+    let mut stdout_carry = Vec::with_capacity(4);
     let mut output_limited = false;
 
     // One deadline covers both output draining and the final child wait.
@@ -122,13 +138,27 @@ async fn run_shell(args: &serde_json::Value, env: &dyn ToolEnv, timeout: Duratio
                 return ToolResult::fail("interrupted by user");
             }
             res = read_stdout(&mut stdout_reader, &mut stdout_buf), if !stdout_done => match res {
-                Ok(0) => stdout_done = true,
+                Ok(0) => {
+                    stdout_done = true;
+                    let chunk = decode_stdout_chunk(&mut stdout_carry, &[], true);
+                    if !chunk.is_empty() {
+                        env.emit(ToolEvent::Stdout { chunk }).await;
+                    }
+                },
                 Ok(n) => {
-                    let (kept, limited) = append_output(&mut output, &stdout_buf[..n]);
+                    let remaining = MAX_OUTPUT_BYTES
+                        .saturating_sub(stdout_output.len() + stderr_output.len());
+                    let (kept, limited) =
+                        append_output(&mut stdout_output, &stdout_buf[..n], remaining);
                     if kept > 0 {
-                        env.emit(ToolEvent::Stdout {
-                            chunk: String::from_utf8_lossy(&stdout_buf[..kept]).into_owned(),
-                        }).await;
+                        let chunk = decode_stdout_chunk(
+                            &mut stdout_carry,
+                            &stdout_buf[..kept],
+                            false,
+                        );
+                        if !chunk.is_empty() {
+                            env.emit(ToolEvent::Stdout { chunk }).await;
+                        }
                     }
                     output_limited |= limited;
                 }
@@ -136,7 +166,12 @@ async fn run_shell(args: &serde_json::Value, env: &dyn ToolEnv, timeout: Duratio
             },
             res = read_stderr(&mut stderr_reader, &mut stderr_buf), if !stderr_done => match res {
                 Ok(0) => stderr_done = true,
-                Ok(n) => output_limited |= append_output(&mut output, &stderr_buf[..n]).1,
+                Ok(n) => {
+                    let remaining = MAX_OUTPUT_BYTES
+                        .saturating_sub(stdout_output.len() + stderr_output.len());
+                    output_limited |=
+                        append_output(&mut stderr_output, &stderr_buf[..n], remaining).1;
+                },
                 Err(_) => stderr_done = true,
             },
         }
@@ -144,6 +179,11 @@ async fn run_shell(args: &serde_json::Value, env: &dyn ToolEnv, timeout: Duratio
             let _ = child.kill().await;
             break;
         }
+    }
+
+    let chunk = decode_stdout_chunk(&mut stdout_carry, &[], true);
+    if !chunk.is_empty() {
+        env.emit(ToolEvent::Stdout { chunk }).await;
     }
 
     let status = tokio::select! {
@@ -164,7 +204,13 @@ async fn run_shell(args: &serde_json::Value, env: &dyn ToolEnv, timeout: Duratio
         }
     };
 
-    let decoded = String::from_utf8_lossy(&output);
+    let mut decoded = String::from_utf8_lossy(&stdout_output).into_owned();
+    if !stderr_output.is_empty() {
+        if !decoded.is_empty() && !decoded.ends_with('\n') {
+            decoded.push('\n');
+        }
+        decoded.push_str(&String::from_utf8_lossy(&stderr_output));
+    }
     let total_lines = decoded.lines().count();
     let mut out_lines: Vec<String> = decoded
         .lines()
@@ -315,5 +361,14 @@ mod tests {
         assert!(!result.success);
         assert!(result.content.contains("output exceeded"));
         assert!(result.content.len() <= MAX_OUTPUT_BYTES + 100);
+    }
+
+    #[test]
+    fn stdout_decoder_preserves_split_utf8() {
+        let bytes = "文".as_bytes();
+        let mut carry = Vec::new();
+        assert_eq!(decode_stdout_chunk(&mut carry, &bytes[..1], false), "");
+        assert_eq!(decode_stdout_chunk(&mut carry, &bytes[1..], false), "文");
+        assert!(carry.is_empty());
     }
 }

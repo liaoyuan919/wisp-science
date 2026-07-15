@@ -1,7 +1,7 @@
 use super::AppState;
 use crate::file_browser::mime_for_path;
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
+use std::io::{Read, Write};
 use tauri::{AppHandle, State};
 use wisp_llm::Message;
 use wisp_store::Store;
@@ -296,15 +296,32 @@ fn zip_file<W: Write + std::io::Seek>(
     zip: &mut zip::ZipWriter<W>,
     path: &str,
     source: &std::path::Path,
+    bytes: u64,
 ) -> Result<(), String> {
     let opts = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
+        .large_file(bytes > u32::MAX as u64)
         .unix_permissions(0o644);
     zip.start_file(path, opts).map_err(|e| format!("{e}"))?;
-    let mut file = std::fs::File::open(source).map_err(|e| format!("{e}"))?;
-    std::io::copy(&mut file, zip)
-        .map(|_| ())
-        .map_err(|e| format!("{e}"))
+    let file = std::fs::File::open(source).map_err(|e| format!("{e}"))?;
+    if !file.metadata().map_err(|e| format!("{e}"))?.is_file() {
+        return Err(format!(
+            "artifact is not a regular file: {}",
+            source.display()
+        ));
+    }
+    let copied = std::io::copy(&mut file.take(bytes), zip).map_err(|e| format!("{e}"))?;
+    if copied != bytes {
+        return Err(format!(
+            "artifact changed while exporting: {}",
+            source.display()
+        ));
+    }
+    Ok(())
+}
+
+fn same_existing_file(left: &std::path::Path, right: &std::path::Path) -> bool {
+    same_file::is_same_file(left, right).unwrap_or(false)
 }
 
 fn zip_json<W: Write + std::io::Seek, T: serde::Serialize>(
@@ -512,9 +529,16 @@ pub(super) async fn export_session(
         return Ok(None);
     };
     let dest_path = std::path::PathBuf::from(dest.to_string());
+    if files
+        .iter()
+        .any(|file| same_existing_file(&dest_path, &file.real_path))
+    {
+        return Err("Export destination cannot overwrite an exported artifact.".into());
+    }
     // Compression is CPU-bound and the archive can carry many MB of
     // artifacts — keep it off the async runtime.
     let out_path = dest_path.clone();
+    let export_root = ap.root.clone();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let out = std::fs::File::create(&out_path).map_err(|e| format!("{e}"))?;
         let mut zip = zip::ZipWriter::new(out);
@@ -528,7 +552,11 @@ pub(super) async fn export_session(
         zip_json(&mut zip, "messages.json", &messages)?;
         zip_json(&mut zip, "tool-calls.json", &tool_calls)?;
         for file in &files {
-            zip_file(&mut zip, &file.zip_path, &file.real_path)?;
+            let source = wisp_tools::safety::validate_file_path(
+                &export_root,
+                &file.real_path.to_string_lossy(),
+            )?;
+            zip_file(&mut zip, &file.zip_path, &source, file.bytes)?;
         }
         for (path, provenance) in &provenance_files {
             zip_json(&mut zip, path, provenance)?;
@@ -602,12 +630,29 @@ mod tests {
         assert_eq!(files[0].bytes, 9);
 
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        zip_file(&mut zip, &files[0].zip_path, &files[0].real_path).unwrap();
+        std::fs::write(root.join("results/data.txt"), b"stream me plus later bytes").unwrap();
+        zip_file(
+            &mut zip,
+            &files[0].zip_path,
+            &files[0].real_path,
+            files[0].bytes,
+        )
+        .unwrap();
         let cursor = zip.finish().unwrap();
         let mut archive = zip::ZipArchive::new(cursor).unwrap();
         let mut contents = String::new();
         std::io::Read::read_to_string(&mut archive.by_index(0).unwrap(), &mut contents).unwrap();
         assert_eq!(contents, "stream me");
+        assert!(same_existing_file(
+            &root.join("results/data.txt"),
+            &files[0].real_path
+        ));
+        #[cfg(unix)]
+        {
+            let alias = root.join("results/data-hardlink.txt");
+            std::fs::hard_link(&files[0].real_path, &alias).unwrap();
+            assert!(same_existing_file(&alias, &files[0].real_path));
+        }
 
         let _ = std::fs::remove_dir_all(root);
     }

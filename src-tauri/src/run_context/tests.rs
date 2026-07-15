@@ -33,6 +33,28 @@ async fn process_runner_keeps_only_bounded_output_tails() {
     assert!(output.stderr.ends_with("ERR_END"));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn process_runner_timeout_cleans_up_inherited_pipes() {
+    let command = RunCommand {
+        context_id: "local".into(),
+        program: "sh".into(),
+        args: vec!["-c".into(), "sleep 1 & wait".into()],
+        script: String::new(),
+        cwd: None,
+        stdin: None,
+    };
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        ProcessRunRunner.run(command, Duration::from_millis(20)),
+    )
+    .await
+    .expect("runner leaked a pipe reader after timeout")
+    .unwrap_err();
+    assert!(result.contains("timed out"));
+}
+
 #[tokio::test]
 async fn run_in_context_preview_keeps_long_commands_intact() {
     use wisp_tools::Tool;

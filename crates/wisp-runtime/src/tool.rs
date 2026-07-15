@@ -1,6 +1,8 @@
 //! Persistent `python` and `r` tools backed by `RuntimeManager`.
 
-use crate::{KernelResp, RuntimeEvent, RuntimeKey, RuntimeManager, LOCAL_CONTEXT_ID};
+use crate::{
+    KernelResp, RuntimeEvent, RuntimeKey, RuntimeManager, LOCAL_CONTEXT_ID, MAX_CODE_BYTES,
+};
 use async_trait::async_trait;
 use serde_json::json;
 use wisp_llm::ToolSchema;
@@ -46,6 +48,19 @@ fn context_id(args: &serde_json::Value) -> Result<&str, &'static str> {
             .filter(|value| !value.is_empty())
             .ok_or("argument 'context_id' must be a non-empty string"),
     }
+}
+
+fn code_arg(args: &serde_json::Value) -> Result<String, String> {
+    let code = args
+        .get("code")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "missing required argument 'code'".to_string())?;
+    if code.len() > MAX_CODE_BYTES {
+        return Err(format!(
+            "argument 'code' exceeds {MAX_CODE_BYTES} byte limit"
+        ));
+    }
+    Ok(code.to_string())
 }
 
 fn format_response(resp: &KernelResp) -> String {
@@ -150,9 +165,9 @@ impl Tool for ReplTool {
     }
 
     async fn run(&self, args: &serde_json::Value, env: &dyn ToolEnv) -> ToolResult {
-        let code = match args.get("code").and_then(|value| value.as_str()) {
-            Some(code) => code.to_string(),
-            None => return ToolResult::fail("missing required argument 'code'"),
+        let code = match code_arg(args) {
+            Ok(code) => code,
+            Err(error) => return ToolResult::fail(error),
         };
         let context_id = match context_id(args) {
             Ok(context_id) => context_id,
@@ -200,9 +215,9 @@ impl Tool for RTool {
     }
 
     async fn run(&self, args: &serde_json::Value, env: &dyn ToolEnv) -> ToolResult {
-        let code = match args.get("code").and_then(|value| value.as_str()) {
-            Some(code) => code.to_string(),
-            None => return ToolResult::fail("missing required argument 'code'"),
+        let code = match code_arg(args) {
+            Ok(code) => code,
+            Err(error) => return ToolResult::fail(error),
         };
         let context_id = match context_id(args) {
             Ok(context_id) => context_id,
@@ -221,7 +236,8 @@ impl Tool for RTool {
 
 #[cfg(test)]
 mod tests {
-    use super::{context_id, PYTHON_TOOL_DESCRIPTION, R_TOOL_DESCRIPTION};
+    use super::{code_arg, context_id, PYTHON_TOOL_DESCRIPTION, R_TOOL_DESCRIPTION};
+    use crate::MAX_CODE_BYTES;
 
     #[test]
     fn python_description_keeps_package_setup_out_of_the_repl() {
@@ -249,5 +265,11 @@ mod tests {
             context_id(&serde_json::json!({"context_id": " ssh:gpu "})).unwrap(),
             "ssh:gpu"
         );
+    }
+
+    #[test]
+    fn code_size_is_rejected_before_runtime_dispatch() {
+        let args = serde_json::json!({"code": "x".repeat(MAX_CODE_BYTES + 1)});
+        assert!(code_arg(&args).unwrap_err().contains("byte limit"));
     }
 }

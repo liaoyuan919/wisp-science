@@ -10,6 +10,21 @@ use wisp_llm::ToolSchema;
 
 const MAX_EDIT_BYTES: u64 = 10 * 1024 * 1024;
 
+fn replaced_len(text: &str, old: &str, new: &str, all: bool) -> Option<usize> {
+    let count = if all {
+        if old.is_empty() {
+            text.chars().count().checked_add(1)?
+        } else {
+            text.matches(old).count()
+        }
+    } else {
+        1
+    };
+    let removed = old.len().checked_mul(count)?;
+    let added = new.len().checked_mul(count)?;
+    text.len().checked_sub(removed)?.checked_add(added)
+}
+
 pub struct EditTool;
 
 #[async_trait]
@@ -20,7 +35,7 @@ impl Tool for EditTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema::new(
             "edit",
-            "Edit a file by replacing an exact string with a new string. The `old` string must be unique unless `all` is true.",
+            "Edit a text file up to 10 MiB by replacing an exact string. The result must remain within 10 MiB, and `old` must be unique unless `all` is true.",
             json!({
                 "type": "object",
                 "properties": {
@@ -64,6 +79,11 @@ impl Tool for EditTool {
             Ok(n) => n,
             Err(e) => return ToolResult::fail(e),
         };
+        if old.len() as u64 > MAX_EDIT_BYTES || new.len() as u64 > MAX_EDIT_BYTES {
+            return ToolResult::fail(format!(
+                "edit {path} error: replacement text exceeds {MAX_EDIT_BYTES} byte limit"
+            ));
+        }
         let all = arg_bool_opt(args, "all").unwrap_or(false);
 
         let real = match crate::safety::validate_file_path(env.project_root(), &path) {
@@ -100,6 +120,14 @@ impl Tool for EditTool {
         if !all && count > 1 {
             return ToolResult::fail(format!(
                 "edit error: old_string appears {count} times, must be unique (use all=true)"
+            ));
+        }
+        let Some(result_len) = replaced_len(&text, &old, &new, all) else {
+            return ToolResult::fail("edit error: replacement size overflow");
+        };
+        if result_len as u64 > MAX_EDIT_BYTES {
+            return ToolResult::fail(format!(
+                "edit {path} error: edited file would be {result_len} bytes (limit {MAX_EDIT_BYTES})"
             ));
         }
         let replaced = if all {
@@ -155,5 +183,16 @@ mod tests {
         assert!(!result.success);
         assert!(result.content.contains("limit"));
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn replacement_size_is_checked_before_allocating() {
+        assert_eq!(replaced_len("aaa", "a", "bb", true), Some(6));
+        assert_eq!(replaced_len("abc", "", "x", true), Some(7));
+        assert_eq!(replaced_len("aaa", "a", "bb", false), Some(4));
+        assert!(
+            replaced_len("aaa", "a", &"x".repeat(MAX_EDIT_BYTES as usize), true)
+                .is_some_and(|len| len as u64 > MAX_EDIT_BYTES)
+        );
     }
 }
