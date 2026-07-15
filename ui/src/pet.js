@@ -43,6 +43,8 @@ class PetRuntime {
 
   configure(config) {
     this.config = config;
+    this.desktop = !!config.desktop;
+    this.element.classList.toggle("is-desktop", this.desktop);
     this.element.classList.toggle("is-visible", !!config.visible && !!config.src);
     this.element.title = config.name || "Pet";
     if (this.src !== config.src) {
@@ -114,7 +116,7 @@ class PetRuntime {
 
   scheduleRoam() {
     clearTimeout(this.roamTimer);
-    if (this.reduceMotion || this.externalState !== "idle") return;
+    if (this.reduceMotion || this.externalState !== "idle" || this.config?.roam === false) return;
     this.roamTimer = setTimeout(() => this.roam(), 5000 + Math.random() * 6000);
   }
 

@@ -1,3 +1,4 @@
+use super::desktop_lifecycle::should_hide_workspace_on_close;
 use super::{
     branch_title, copy_dir_recursive, events_to_items, messages_to_items, parse_disabled_skills,
     parse_enabled_skill_names, parse_skill_tags, parse_ssh_artifact_uri,
@@ -677,4 +678,11 @@ fn macos_close_hides_only_main_window_when_not_quitting() {
     assert!(should_hide_app_on_macos_close("main", false));
     assert!(!should_hide_app_on_macos_close("proj-default", false));
     assert!(!should_hide_app_on_macos_close("main", true));
+}
+
+#[test]
+fn windows_close_to_tray_applies_only_to_the_main_window() {
+    assert!(should_hide_workspace_on_close("main"));
+    assert!(!should_hide_workspace_on_close("proj-default"));
+    assert!(!should_hide_workspace_on_close("pet"));
 }

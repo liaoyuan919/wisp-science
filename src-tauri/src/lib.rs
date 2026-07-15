@@ -22,6 +22,7 @@ mod approval_commands;
 mod artifact_commands;
 mod connector_commands;
 mod context_probe;
+mod desktop_lifecycle;
 mod file_browser;
 mod harvest;
 mod library_commands;
@@ -5467,14 +5468,29 @@ pub fn run() {
                 bootstrap,
                 reviewing: Arc::new(StdMutex::new(HashSet::new())),
             };
+            let pet_enabled = tauri::async_runtime::block_on(async {
+                state
+                    .store
+                    .get_setting("pet_enabled")
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|value| value == "true")
+            });
             app.manage(state);
             app.manage(terminal_sessions::TerminalManager::new());
             start_python_bootstrap(app.handle());
             set_dev_flag(app.handle());
             #[cfg(target_os = "windows")]
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_decorations(false);
-                let _ = window.set_shadow(true);
+            {
+                desktop_lifecycle::install_windows_shell(app)?;
+                if let Err(error) = desktop_lifecycle::sync_pet_window(app.handle(), pet_enabled) {
+                    tracing::warn!(target: "wisp", %error, "failed to initialize pet window");
+                }
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.set_decorations(false);
+                    let _ = window.set_shadow(true);
+                }
             }
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
@@ -5606,6 +5622,8 @@ pub fn run() {
             settings_commands::credential_status,
             settings_commands::set_credential,
             pet_commands::get_pet,
+            pet_commands::get_pet_runtime_status,
+            desktop_lifecycle::set_pet_window_visible,
             models::list_models,
             models::save_model,
             models::remove_model,

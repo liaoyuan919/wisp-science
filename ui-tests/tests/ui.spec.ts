@@ -1080,6 +1080,31 @@ test("right panel shows execution contexts and runs", async ({ page }) => {
   )).toBeGreaterThan(1);
 });
 
+test("contexts panel keeps its scroll position across background refreshes", async ({ page }) => {
+  await enterApp(page);
+  await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.getByRole("button", { name: "Add panel" }).click();
+  await page.getByRole("button", { name: "Contexts" }).click();
+
+  const panel = page.locator(".rp-contexts");
+  await expect(panel).toBeVisible();
+  const scrollTop = await panel.evaluate((element) => {
+    const target = Math.min(200, element.scrollHeight - element.clientHeight);
+    element.scrollTop = target;
+    return element.scrollTop;
+  });
+  expect(scrollTop).toBeGreaterThan(0);
+
+  const refreshCount = await page.evaluate(() =>
+    ((window as any).__skillInvokeLog ?? []).filter((call: any) => call.cmd === "list_runtimes").length,
+  );
+  await expect.poll(async () => page.evaluate(() =>
+    ((window as any).__skillInvokeLog ?? []).filter((call: any) => call.cmd === "list_runtimes").length,
+  )).toBeGreaterThan(refreshCount);
+
+  await expect.poll(() => panel.evaluate((element) => element.scrollTop)).toBe(scrollTop);
+});
+
 test("execution contexts remember Python and R interpreter paths", async ({ page }) => {
   await enterApp(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
@@ -2239,12 +2264,52 @@ test("pet stays off until the user explicitly configures its directory", async (
     },
   });
 
-  await page.locator(".proj-card-main").first().click();
+  await page.goto("/?pet=desktop&mockPet=1");
   const pet = page.getByTestId("wisp-pet");
   await expect(pet).toBeVisible();
   await expect.poll(() => pet.getAttribute("data-state")).toMatch(/^(idle|looking)$/);
   await pet.click();
   await expect(pet).toHaveAttribute("data-state", "waving");
+});
+
+test("desktop pet remains independent and reflects global agent state", async ({ page }) => {
+  await page.goto("/?pet=desktop&mockPet=1");
+
+  const pet = page.getByTestId("wisp-pet");
+  await expect(page.getByTestId("pet-window-root")).toBeVisible();
+  await expect(pet).toBeVisible();
+  await expect(pet).toHaveAttribute("data-tauri-drag-region", "deep");
+  await expect.poll(() => page.evaluate(() => (window as any).__petWindowVisible)).toBe(true);
+
+  await page.evaluate(() => {
+    (window as any).__tauriEmit("agent", { kind: "User", frame_id: "pet-frame", text: "run" });
+  });
+  await expect(pet).toHaveAttribute("data-state", "running");
+  await expect(pet.getByText("Working")).toBeVisible();
+
+  await page.evaluate(() => {
+    (window as any).__tauriEmit("confirm-request", { frame_id: "pet-frame", message: "Approve?" });
+  });
+  await expect(pet).toHaveAttribute("data-state", "waiting");
+  await expect(pet.getByText("Needs you")).toBeVisible();
+
+  await page.evaluate(() => {
+    (window as any).__tauriEmit("agent", { kind: "Text", frame_id: "pet-frame", delta: "continuing" });
+    (window as any).__tauriEmit("agent", { kind: "ReviewStarted", frame_id: "pet-frame" });
+  });
+  await expect(pet).toHaveAttribute("data-state", "review");
+  await expect(pet.getByText("Reviewing")).toBeVisible();
+
+  await page.evaluate(() => {
+    (window as any).__tauriEmit("agent", { kind: "Error", frame_id: "pet-frame", message: "failed" });
+  });
+  await expect(pet).toHaveAttribute("data-state", "failed");
+  await expect(pet.getByText("Failed")).toBeVisible();
+
+  await page.evaluate(() => {
+    (window as any).__tauriEmit("agent", { kind: "Done", frame_id: "pet-frame" });
+  });
+  await expect(pet).toHaveAttribute("data-state", "jumping");
 });
 
 test("a sync conflict requires an explicit authoritative device choice", async ({ page }) => {

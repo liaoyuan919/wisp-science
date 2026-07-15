@@ -1,6 +1,6 @@
 use super::{
-    build_provider_config, clear_idle_agents, effective_api_key, load_locale, load_settings,
-    models, normalized_provider, pet_commands::load_pet_asset, AppState, Settings,
+    build_provider_config, clear_idle_agents, desktop_lifecycle, effective_api_key, load_locale,
+    load_settings, models, normalized_provider, pet_commands::load_pet_asset, AppState, Settings,
 };
 use serde_json::json;
 use std::{
@@ -209,6 +209,7 @@ pub(super) async fn set_settings(
         .set_setting("pet_directory", pet_directory)
         .await
         .map_err(|e| e.to_string())?;
+    desktop_lifecycle::sync_pet_window(&app, settings.pet_enabled)?;
 
     // Workspace directory: persist an absolute, creatable path. Takes effect on
     // next launch (AppState.root is fixed at startup — restart, not hot-swap).
