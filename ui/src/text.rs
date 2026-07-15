@@ -132,6 +132,7 @@ pub(crate) fn md_to_html(src: &str) -> String {
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
     opts.insert(Options::ENABLE_FOOTNOTES);
+    opts.insert(Options::ENABLE_MATH);
     let parser = Parser::new_ext(src.as_ref(), opts);
     let mut out = String::new();
     html::push_html(&mut out, parser);
@@ -140,10 +141,124 @@ pub(crate) fn md_to_html(src: &str) -> String {
 
 fn preprocess_markdown(src: &str) -> std::borrow::Cow<'_, str> {
     let src = strip_yaml_front_matter(src);
-    match rewrite_image_tags(src.as_ref()) {
+    let src = match rewrite_image_tags(src.as_ref()) {
+        std::borrow::Cow::Borrowed(_) => src,
+        std::borrow::Cow::Owned(s) => std::borrow::Cow::Owned(s),
+    };
+    match normalize_math_delimiters(src.as_ref()) {
         std::borrow::Cow::Borrowed(_) => src,
         std::borrow::Cow::Owned(s) => std::borrow::Cow::Owned(s),
     }
+}
+
+/// GPT-family models emit LaTeX with `\(...\)` / `\[...\]` delimiters, but
+/// pulldown-cmark's math extension only knows `$...$` / `$$...$$`. Rewrite the
+/// former into the latter so both styles render (#249). Fenced code blocks and
+/// inline code spans are left untouched.
+fn normalize_math_delimiters(src: &str) -> std::borrow::Cow<'_, str> {
+    if !src.contains("\\(") && !src.contains("\\[") {
+        return std::borrow::Cow::Borrowed(src);
+    }
+    let mut out = String::with_capacity(src.len());
+    let mut seg = String::new();
+    let mut changed = false;
+    let mut fence: Option<(char, usize)> = None;
+    for chunk in src.split_inclusive('\n') {
+        let line = chunk.trim_end_matches(['\r', '\n']);
+        let stripped = line.trim_start();
+        let mark = stripped.chars().next().filter(|c| matches!(c, '`' | '~'));
+        let run = mark.map_or(0, |m| stripped.chars().take_while(|&c| c == m).count());
+        match fence {
+            Some((m, n)) => {
+                out.push_str(chunk);
+                if mark == Some(m) && run >= n && stripped[run..].trim().is_empty() {
+                    fence = None;
+                }
+            }
+            None if run >= 3 => {
+                convert_math_spans(&seg, &mut out, &mut changed);
+                seg.clear();
+                out.push_str(chunk);
+                fence = Some((mark.unwrap(), run));
+            }
+            None => seg.push_str(chunk),
+        }
+    }
+    convert_math_spans(&seg, &mut out, &mut changed);
+    if changed {
+        std::borrow::Cow::Owned(out)
+    } else {
+        std::borrow::Cow::Borrowed(src)
+    }
+}
+
+/// Rewrite `\(...\)` → `$...$` and `\[...\]` → `$$...$$` in one non-fenced
+/// segment, skipping inline code spans. Unpaired delimiters pass through.
+fn convert_math_spans(seg: &str, out: &mut String, changed: &mut bool) {
+    let mut rest = seg;
+    loop {
+        let bt = rest.find('`');
+        let par = rest.find("\\(");
+        let brk = rest.find("\\[");
+        let Some(pos) = [bt, par, brk].into_iter().flatten().min() else {
+            out.push_str(rest);
+            return;
+        };
+        out.push_str(&rest[..pos]);
+        rest = &rest[pos..];
+        if Some(pos) == bt {
+            // Inline code span: copy verbatim through the matching backtick
+            // run; an unmatched opener is literal text, keep scanning after it.
+            let n = rest.chars().take_while(|&c| c == '`').count();
+            out.push_str(&rest[..n]);
+            rest = &rest[n..];
+            if let Some(end) = find_backtick_run(rest, n) {
+                out.push_str(&rest[..end + n]);
+                rest = &rest[end + n..];
+            }
+            continue;
+        }
+        let (close, wrap) = if Some(pos) == par {
+            ("\\)", "$")
+        } else {
+            ("\\]", "$$")
+        };
+        let paired = rest[2..].find(close).filter(|&end| {
+            // A blank line between the delimiters means this is not real math.
+            let body = &rest[2..2 + end];
+            !body.contains("\n\n") && !body.contains("\n\r\n")
+        });
+        match paired {
+            Some(end) if !rest[2..2 + end].trim().is_empty() => {
+                *changed = true;
+                out.push_str(wrap);
+                out.push_str(rest[2..2 + end].trim());
+                out.push_str(wrap);
+                rest = &rest[2 + end + 2..];
+            }
+            Some(end) => {
+                out.push_str(&rest[..2 + end + 2]);
+                rest = &rest[2 + end + 2..];
+            }
+            None => {
+                out.push_str(&rest[..2]);
+                rest = &rest[2..];
+            }
+        }
+    }
+}
+
+fn find_backtick_run(s: &str, n: usize) -> Option<usize> {
+    let mut from = 0;
+    while let Some(p) = s[from..].find('`') {
+        let at = from + p;
+        let run = s[at..].chars().take_while(|&c| c == '`').count();
+        if run == n {
+            return Some(at);
+        }
+        from = at + run;
+    }
+    None
 }
 
 /// Treat leading YAML front matter like normal Markdown tooling does: metadata
@@ -667,6 +782,38 @@ mod md_catalog_tests {
             "{html}"
         );
         assert!(!html.contains("<image"), "{html}");
+    }
+
+    #[test]
+    fn renders_dollar_math_as_math_spans() {
+        let html = md_to_html("质能方程 $E = mc^2$ 成立。\n\n$$\\int_0^1 x^2 dx$$\n");
+        assert!(html.contains(r#"<span class="math math-inline">"#), "{html}");
+        assert!(html.contains(r#"<span class="math math-display">"#), "{html}");
+    }
+
+    #[test]
+    fn converts_gpt_style_math_delimiters() {
+        let html = md_to_html("Inline \\(a_i^2\\) and display:\n\n\\[\nE = mc^2\n\\]\n");
+        assert!(html.contains(r#"<span class="math math-inline">a_i^2</span>"#), "{html}");
+        assert!(html.contains(r#"<span class="math math-display">E = mc^2</span>"#), "{html}");
+    }
+
+    #[test]
+    fn leaves_math_delimiters_in_code_alone() {
+        let src = "Use `\\(x\\)` here.\n\n```tex\n\\[ y \\]\n```\n";
+        let html = md_to_html(src);
+        assert!(!html.contains("math-inline"), "{html}");
+        assert!(!html.contains("math-display"), "{html}");
+        assert!(html.contains("\\(x\\)"), "{html}");
+    }
+
+    #[test]
+    fn leaves_unpaired_math_delimiters_alone() {
+        let src = "A stray \\( paren and \\[ bracket.\n";
+        assert!(matches!(
+            super::normalize_math_delimiters(src),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]

@@ -334,6 +334,8 @@ details.rz .body { margin-top: 6px; }
 }
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
+/* KaTeX display math: block-level, scroll long equations instead of overflowing. */
+.md .math-display { display: block; overflow-x: auto; overflow-y: hidden; }
 .md p:empty { display: none; margin: 0; }
 .md p { margin: 0 0 0.55em; }
 .md p + ul,

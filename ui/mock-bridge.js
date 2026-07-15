@@ -113,7 +113,7 @@
               { role: "tool", text: "12 hits written to report.csv", tool_name: "python", ok: true },
               {
                 role: "assistant",
-                text: "## FX-cell literature\n\n| gene | score |\n| --- | --- |\n| FX-cell | 0.91 |\n\nSee `report.csv` or {{artifact:00000001}}.\n\n```python\nimport pandas as pd\ndf = pd.read_csv('report.csv')\nprint(df.head())\n```",
+                text: "## FX-cell literature\n\n| gene | score |\n| --- | --- |\n| FX-cell | 0.91 |\n\nThe score follows $s = \\frac{1}{1 + e^{-x}}$ and GPT-style \\(a_i^2 + b_i^2\\) too.\n\n$$\\int_0^1 x^2 \\, dx = \\frac{1}{3}$$\n\nSee `report.csv` or {{artifact:00000001}}.\n\n```python\nimport pandas as pd\ndf = pd.read_csv('report.csv')\nprint(df.head())\n```",
                 tool_name: null,
                 ok: null,
               },
