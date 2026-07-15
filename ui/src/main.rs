@@ -53,6 +53,8 @@ const NO_API_KEY_MARK: &str = "No API key set";
 const HOME_SEARCH_PROJECT_LIMIT: usize = 6;
 const HOME_SEARCH_ARTIFACT_LIMIT: usize = 8;
 const HOME_SEARCH_SESSION_LIMIT: usize = 6;
+const TRANSCRIPT_RENDER_TURNS: usize = 40;
+const TRANSCRIPT_WINDOW_STEP: usize = 20;
 const THEME_STORAGE_KEY: &str = "wisp-theme";
 /// Reserved `acp_config_menu_open` key for the session-mode dropdown, kept
 /// distinct from any agent-supplied config option id.
@@ -295,10 +297,7 @@ fn terminal_tab_id(session_id: &str) -> String {
 }
 
 #[component]
-fn TerminalHost(
-    session_id: String,
-    active_terminal_id: RwSignal<Option<String>>,
-) -> impl IntoView {
+fn TerminalHost(session_id: String, active_terminal_id: RwSignal<Option<String>>) -> impl IntoView {
     let element_id = terminal_element_id(&session_id);
     let labelled_by = terminal_tab_id(&session_id);
     let host_ref = create_node_ref::<html::Div>();
@@ -383,8 +382,7 @@ fn App() -> impl IntoView {
     let pet_activity = create_rw_signal((String::from("idle"), 0_u64));
     let pending_turns = create_rw_signal::<HashMap<String, usize>>(HashMap::new());
     let transcripts = create_rw_signal::<HashMap<String, Vec<ChatItem>>>(HashMap::new());
-    let transcript_pages =
-        create_rw_signal::<HashMap<String, TranscriptPageState>>(HashMap::new());
+    let transcript_pages = create_rw_signal::<HashMap<String, TranscriptPageState>>(HashMap::new());
     let busy = create_rw_signal(false);
     // Interrupting a running turn (especially a language runtime) is not instant, so
     // keep track of the session whose Stop click is waiting for the backend.
@@ -1673,6 +1671,9 @@ fn App() -> impl IntoView {
             if active_session.get_untracked().as_deref() != Some(id.as_str()) {
                 active_session.set(Some(id.clone()));
             }
+            transcript_pages.update(|pages| {
+                pages.entry(id.clone()).or_default().window_user_start = usize::MAX;
+            });
             route_items(active_session, items, transcripts, &id, |rows| {
                 if queued {
                     rows.push(ChatItem::QueuedUser(display_message.clone()));
@@ -1917,6 +1918,7 @@ fn App() -> impl IntoView {
                                 next_before_seq: page.next_before_seq,
                                 user_offset: page.user_offset,
                                 loading: false,
+                                window_user_start: usize::MAX,
                             }),
                         ),
                         Err(_) => (prefix_items, None),
@@ -2007,14 +2009,10 @@ fn App() -> impl IntoView {
                                 to_value(&serde_json::json!({ "id": id })).unwrap(),
                             )
                             .await;
-                            if let Ok(page) =
-                                serde_wasm_bindgen::from_value::<LoadedSessionPage>(v)
+                            if let Ok(page) = serde_wasm_bindgen::from_value::<LoadedSessionPage>(v)
                             {
-                                let chats: Vec<ChatItem> = page
-                                    .items
-                                    .into_iter()
-                                    .map(LoadedItem::into_chat)
-                                    .collect();
+                                let chats: Vec<ChatItem> =
+                                    page.items.into_iter().map(LoadedItem::into_chat).collect();
                                 transcript_pages.update(|pages| {
                                     pages.insert(
                                         id.clone(),
@@ -2022,6 +2020,7 @@ fn App() -> impl IntoView {
                                             next_before_seq: page.next_before_seq,
                                             user_offset: page.user_offset,
                                             loading: false,
+                                            window_user_start: usize::MAX,
                                         },
                                     );
                                 });
@@ -2704,6 +2703,9 @@ fn App() -> impl IntoView {
             // reconcile the separately persisted Plan claim/status. This keeps
             // session switching and restart semantics identical.
             items.set(transcripts.with(|m| m.get(&id).cloned().unwrap_or_default()));
+            transcript_pages.update(|pages| {
+                pages.entry(id.clone()).or_default().window_user_start = usize::MAX;
+            });
             force_chat_bottom();
             // Still retarget the backend's viewed-session marker so uploads
             // attach here (#194). Not `load_session`: that would overwrite the
@@ -2725,11 +2727,8 @@ fn App() -> impl IntoView {
             )
             .await;
             if let Ok(page) = serde_wasm_bindgen::from_value::<LoadedSessionPage>(v) {
-                let chats: Vec<ChatItem> = page
-                    .items
-                    .into_iter()
-                    .map(LoadedItem::into_chat)
-                    .collect();
+                let chats: Vec<ChatItem> =
+                    page.items.into_iter().map(LoadedItem::into_chat).collect();
                 transcript_pages.update(|pages| {
                     pages.insert(
                         id.clone(),
@@ -2737,6 +2736,7 @@ fn App() -> impl IntoView {
                             next_before_seq: page.next_before_seq,
                             user_offset: page.user_offset,
                             loading: false,
+                            window_user_start: usize::MAX,
                         },
                     );
                 });
@@ -2762,11 +2762,9 @@ fn App() -> impl IntoView {
             return;
         }
         let Some(cursor) = transcript_pages.with_untracked(|pages| {
-            pages.get(&id).and_then(|page| {
-                (!page.loading)
-                    .then_some(page.next_before_seq)
-                    .flatten()
-            })
+            pages
+                .get(&id)
+                .and_then(|page| (!page.loading).then_some(page.next_before_seq).flatten())
         }) else {
             return;
         };
@@ -2809,6 +2807,7 @@ fn App() -> impl IntoView {
                         next_before_seq: page.next_before_seq,
                         user_offset: page.user_offset,
                         loading: false,
+                        window_user_start: 0,
                     },
                 );
             });
@@ -2818,6 +2817,47 @@ fn App() -> impl IntoView {
                     current.splice(0..0, older);
                 });
             }
+        });
+    });
+
+    let show_earlier_loaded = Callback::new(move |_: ()| {
+        let Some(id) = active_session.get_untracked() else {
+            return;
+        };
+        let requested = transcript_pages.with_untracked(|pages| {
+            pages
+                .get(&id)
+                .map_or(usize::MAX, |page| page.window_user_start)
+        });
+        let (_, start, _) = items.with_untracked(|rows| {
+            transcript_render_window(rows, requested, TRANSCRIPT_RENDER_TURNS)
+        });
+        transcript_pages.update(|pages| {
+            pages.entry(id).or_default().window_user_start =
+                start.saturating_sub(TRANSCRIPT_WINDOW_STEP);
+        });
+    });
+
+    let show_newer_loaded = Callback::new(move |_: ()| {
+        let Some(id) = active_session.get_untracked() else {
+            return;
+        };
+        let requested = transcript_pages.with_untracked(|pages| {
+            pages
+                .get(&id)
+                .map_or(usize::MAX, |page| page.window_user_start)
+        });
+        let (_, start, total) = items.with_untracked(|rows| {
+            transcript_render_window(rows, requested, TRANSCRIPT_RENDER_TURNS)
+        });
+        let latest_start = total.saturating_sub(TRANSCRIPT_RENDER_TURNS);
+        let next = start.saturating_add(TRANSCRIPT_WINDOW_STEP);
+        transcript_pages.update(|pages| {
+            pages.entry(id).or_default().window_user_start = if next >= latest_start {
+                usize::MAX
+            } else {
+                next
+            };
         });
     });
 
@@ -4493,7 +4533,27 @@ fn App() -> impl IntoView {
                 <div class="thread" id=CHAT_THREAD_ID>
                     {move || active_session.get().and_then(|id| {
                         transcript_pages.get().get(&id).copied().and_then(|page| {
-                            page.next_before_seq.map(|_| {
+                            let (_, window_start, _) = items.with(|rows| {
+                                transcript_render_window(
+                                    rows,
+                                    page.window_user_start,
+                                    TRANSCRIPT_RENDER_TURNS,
+                                )
+                            });
+                            if window_start > 0 {
+                                Some(view! {
+                                    <div class="transcript-page-control">
+                                        <button
+                                            type="button"
+                                            class="transcript-load-older"
+                                            on:click=move |_| show_earlier_loaded.call(())
+                                        >
+                                            {t(locale.get(), "transcript.show_earlier")}
+                                        </button>
+                                    </div>
+                                })
+                            } else {
+                                page.next_before_seq.map(|_| {
                                 let loading = page.loading;
                                 view! {
                                     <div class="transcript-page-control">
@@ -4514,7 +4574,8 @@ fn App() -> impl IntoView {
                                         </button>
                                     </div>
                                 }
-                            })
+                                })
+                            }
                         })
                     })}
                     {move || items.with(|l| l.is_empty()).then(|| view! {
@@ -4532,6 +4593,16 @@ fn App() -> impl IntoView {
                             use std::hash::{Hash, Hasher};
                             let arts_fp = artifacts.with(|a| artifacts_fingerprint(a));
                             let busy_now = busy.get();
+                            let requested_start = if busy_now {
+                                usize::MAX
+                            } else {
+                                active_session.get().and_then(|id| {
+                                    transcript_pages
+                                        .get()
+                                        .get(&id)
+                                        .map(|page| page.window_user_start)
+                                }).unwrap_or(usize::MAX)
+                            };
                             // `with` avoids deep-cloning every message per flush;
                             // only rows being built clone their item below.
                             items.with(|list| {
@@ -4544,14 +4615,19 @@ fn App() -> impl IntoView {
                             // streaming placeholder, attempt_completion) are skipped
                             // so no `.thread` gap is left behind (#19).
                             let mut rows: Vec<(usize, u64, ThreadRow)> = Vec::new();
-                            let mut i = 0usize;
-                            while i < list.len() {
+                            let (window, _, _) = transcript_render_window(
+                                list,
+                                requested_start,
+                                TRANSCRIPT_RENDER_TURNS,
+                            );
+                            let mut i = window.start;
+                            while i < window.end {
                                 if renders_nothing(&list[i]) { i += 1; continue; }
                                 if is_process_item(&list[i]) {
                                     let start = i;
                                     let mut run: Vec<(usize, ChatItem)> = Vec::new();
                                     let mut j = i;
-                                    while j < list.len() {
+                                    while j < window.end {
                                         if renders_nothing(&list[j]) { j += 1; continue; }
                                         if is_process_item(&list[j]) { run.push((j, list[j].clone())); j += 1; }
                                         else { break; }
@@ -4624,6 +4700,28 @@ fn App() -> impl IntoView {
                             }
                         }
                     />
+                    {move || (!busy.get()).then(|| active_session.get()).flatten().and_then(|id| {
+                        transcript_pages.get().get(&id).copied().and_then(|page| {
+                            let (_, start, total) = items.with(|rows| {
+                                transcript_render_window(
+                                    rows,
+                                    page.window_user_start,
+                                    TRANSCRIPT_RENDER_TURNS,
+                                )
+                            });
+                            (start + TRANSCRIPT_RENDER_TURNS < total).then(|| view! {
+                                <div class="transcript-page-control">
+                                    <button
+                                        type="button"
+                                        class="transcript-load-older"
+                                        on:click=move |_| show_newer_loaded.call(())
+                                    >
+                                        {t(locale.get(), "transcript.show_newer")}
+                                    </button>
+                                </div>
+                            })
+                        })
+                    })}
                 </div>
             </div>
 
