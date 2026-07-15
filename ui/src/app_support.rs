@@ -9,9 +9,9 @@ use crate::bindings::{
 use crate::dto::*;
 use crate::i18n::{localize_backend, t, tf, use_locale, Locale};
 use crate::text::{
-    dom_value, event_target_value, extract_href_from_tag, fasta_seq_count, fenced_blocks,
-    file_kind, format_bytes, format_duration_ms, html_escape, is_external_href, is_separator,
-    is_table_row, md_inline_to_html, md_to_html, next_artifact_id, normalize_path,
+    decode_href, dom_value, event_target_value, extract_href_from_tag, fasta_seq_count,
+    fenced_blocks, file_kind, format_bytes, format_duration_ms, html_escape, is_external_href,
+    is_separator, is_table_row, md_inline_to_html, md_to_html, next_artifact_id, normalize_path,
     opens_in_system_browser, parent_path, parse_csv_line, pretty_json, provider_defaults,
     provider_value, split_row, tool_lang, unique_dom_id, user_message_presentation,
 };
@@ -2972,7 +2972,7 @@ pub(super) fn replace_file_links(html: String, arts: &[Artifact]) -> String {
         let inner = &after[..end];
         rest = &after[end + 4..];
 
-        if let Some(href) = extract_href_from_tag(tag) {
+        if let Some(href) = extract_href_from_tag(tag).map(|h| decode_href(&h)) {
             if !is_external_href(&href) {
                 if let Some(idx) = artifact_index_for_href(arts, &href) {
                     out.push_str(&art_chip(idx, &arts[idx]));
@@ -3261,7 +3261,7 @@ pub(super) fn handle_md_click(
                 if !is_external_href(&href) {
                     ev.prevent_default();
                     ev.stop_propagation();
-                    let path = normalize_path(&href);
+                    let path = normalize_path(&decode_href(&href));
                     if let Some(idx) = artifact_index_for_href(arts, &path) {
                         on_artifact.call(idx);
                     } else {
