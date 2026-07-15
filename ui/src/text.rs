@@ -514,6 +514,31 @@ pub(crate) fn normalize_path(path: &str) -> String {
     strip_image_pdf_shorthand(path).to_string()
 }
 
+/// Percent-decode an href read back from rendered HTML. pulldown-cmark
+/// percent-encodes link destinations (a Windows path `D:\a\b` becomes
+/// `D:%5Ca%5Cb`), so an href taken straight off the DOM never matches a real
+/// file path until it is decoded. Decodes byte-wise so multi-byte UTF-8
+/// filenames (e.g. Chinese) round-trip; a malformed `%` sequence is left as-is.
+pub(crate) fn decode_href(href: &str) -> String {
+    let bytes = href.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn strip_image_pdf_shorthand(path: &str) -> &str {
     const IMAGE_EXTS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "svg"];
     let lower = path.to_ascii_lowercase();
@@ -712,9 +737,30 @@ pub(crate) fn fasta_seq_count(text: &str) -> usize {
 #[cfg(test)]
 mod md_catalog_tests {
     use super::{
-        fence_identifier_line_runs, file_kind, format_bytes, md_to_html, parent_path, pretty_json,
-        user_message_presentation,
+        decode_href, fence_identifier_line_runs, file_kind, format_bytes, md_to_html, parent_path,
+        pretty_json, user_message_presentation,
     };
+
+    #[test]
+    fn decodes_percent_encoded_windows_href() {
+        // pulldown-cmark percent-encodes the backslashes of an absolute Windows
+        // path in the rendered <a href>; clicking it must round-trip back to the
+        // real path, not hit the filesystem as `D:%5C...` (#outside-project-root).
+        assert_eq!(
+            decode_href("D:%5CPHD_project%5CAI4drug%5CPeptide%5Cfig.png"),
+            "D:\\PHD_project\\AI4drug\\Peptide\\fig.png"
+        );
+    }
+
+    #[test]
+    fn decodes_multibyte_and_leaves_plain_and_malformed_untouched() {
+        // Chinese filename: pulldown-cmark encodes each UTF-8 byte.
+        assert_eq!(decode_href("out/%E5%9B%BE1.png"), "out/图1.png");
+        // No encoding: unchanged.
+        assert_eq!(decode_href("results/fig.png"), "results/fig.png");
+        // A lone/percent-with-non-hex stays literal.
+        assert_eq!(decode_href("100%done/%zz"), "100%done/%zz");
+    }
 
     #[test]
     fn formats_large_runtime_memory_in_gigabytes() {
