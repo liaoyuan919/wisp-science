@@ -29,6 +29,51 @@
 .wisp-pet[data-state="running"] .wisp-pet-status { background: var(--info); }
 .wisp-pet[data-state="review"] .wisp-pet-status { background: var(--clay); }
 .wisp-pet[data-state="waiting"] .wisp-pet-status { background: var(--warn); animation: pet-status-pulse 1.3s ease-in-out infinite; }
+.wisp-pet-state-label { display: none; }
+
+html.pet-window-shell,
+html.pet-window-shell body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent !important;
+}
+
+.pet-window-root { position: relative; width: 100%; height: 100%; background: transparent; }
+.pet-window-root .wisp-pet {
+  right: 16px;
+  bottom: 25px;
+  width: 96px;
+  height: 104px;
+  animation: none;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.pet-window-root .wisp-pet:active { cursor: grabbing; }
+.pet-window-root .wisp-pet-status { border-color: rgba(255, 255, 255, .9); }
+.pet-window-root .wisp-pet-state-label {
+  position: absolute;
+  left: 50%;
+  bottom: -19px;
+  display: none;
+  min-width: 52px;
+  padding: 2px 7px;
+  border: 1px solid rgba(25, 29, 34, .13);
+  border-radius: 999px;
+  background: rgba(252, 250, 246, .9);
+  box-shadow: 0 3px 10px rgba(20, 23, 28, .13);
+  color: #34383e;
+  font: 600 10px/1.35 "Segoe UI Variable", "Segoe UI", sans-serif;
+  text-align: center;
+  transform: translateX(-50%);
+  backdrop-filter: blur(8px);
+}
+.pet-window-root .wisp-pet[data-state="running"] .wisp-pet-state-label,
+.pet-window-root .wisp-pet[data-state="review"] .wisp-pet-state-label,
+.pet-window-root .wisp-pet[data-state="waiting"] .wisp-pet-state-label,
+.pet-window-root .wisp-pet[data-state="failed"] .wisp-pet-state-label { display: block; }
 
 @keyframes pet-arrive { from { opacity: 0; transform: translateX(var(--pet-x)) translateY(12px) scale(.92); } to { opacity: 1; transform: translateX(var(--pet-x)) translateY(0) scale(1); } }
 @keyframes pet-status-pulse { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--warn) 20%, transparent); } }

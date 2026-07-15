@@ -48,8 +48,9 @@ export function tauriMock(): void {
     release_url: "https://github.com/xuzhougeng/wisp-science/releases",
   };
   let mockUpdateCheckPending = false;
-  let mockPetEnabled = false;
-  let mockPetDirectory = "";
+  let mockPetEnabled = new URLSearchParams(window.location.search).get("mockPet") === "1";
+  let mockPetDirectory = mockPetEnabled ? "C:\\Users\\tester\\.codex\\pets\\wispy" : "";
+  (window as any).__petWindowVisible = false;
   let resolveMockUpdateCheck: (() => void) | null = null;
   const syncedProjects = new Set<string>();
   const nextProjectOpenDelayMs: Record<string, number> = {};
@@ -460,6 +461,11 @@ export function tauriMock(): void {
                 frameCounts: { idle: 7, "running-right": 8, "running-left": 8, waving: 4, jumping: 5, failed: 8, waiting: 6, running: 6, review: 6 },
               } : null,
             };
+          case "get_pet_runtime_status":
+            return { running: [], waiting: [], reviewing: [] };
+          case "set_pet_window_visible":
+            (window as any).__petWindowVisible = Boolean(arg("visible"));
+            return null;
           case "list_models":
             return mockModels;
           case "list_acp_agents":
@@ -1212,6 +1218,13 @@ export function tauriMock(): void {
           listeners[event] = undefined;
         };
       },
+    },
+    window: {
+      getCurrentWindow: () => ({
+        startDragging: async () => {
+          (window as any).__petDragStarted = true;
+        },
+      }),
     },
   };
 }

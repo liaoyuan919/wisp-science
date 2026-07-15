@@ -39,6 +39,14 @@ pub(super) struct PetStatus {
     error: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PetRuntimeStatus {
+    running: Vec<String>,
+    waiting: Vec<String>,
+    reviewing: Vec<String>,
+}
+
 #[derive(Deserialize)]
 struct ValidationReport {
     ok: bool,
@@ -263,6 +271,26 @@ pub(super) async fn get_pet(state: State<'_, AppState>) -> Result<PetStatus, Str
             error: Some(error),
         }),
     }
+}
+
+#[tauri::command]
+pub(super) async fn get_pet_runtime_status(
+    state: State<'_, AppState>,
+) -> Result<PetRuntimeStatus, String> {
+    let running = state.running_turns.lock().await.iter().cloned().collect();
+    let waiting = state
+        .awaiting_confirm
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect();
+    let reviewing = state.reviewing.lock().unwrap().iter().cloned().collect();
+    Ok(PetRuntimeStatus {
+        running,
+        waiting,
+        reviewing,
+    })
 }
 
 #[cfg(test)]

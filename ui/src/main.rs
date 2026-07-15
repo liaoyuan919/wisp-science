@@ -30,7 +30,7 @@ use notebook::{collect_notebook_cells, NotebookCache, NotebookView};
 use overlays::{
     AddHostOverlay, CapabilitiesOverlay, OnboardingOverlay, RuntimeInterpreterOverlay,
 };
-use pet::PetOverlay;
+use pet::{PetDesktop, PetOverlay};
 use project_landing::{ProjectLanding, ProjectLandingState};
 use serde_wasm_bindgen::to_value;
 use settings_view::{SettingsView, SettingsViewState};
@@ -5668,18 +5668,14 @@ fn App() -> impl IntoView {
                         }
                         RightTab::Hosts => {
                             let loc = locale.get();
-                            let contexts = execution_contexts.get();
-                            let runtime_rows = runtime_slots(
-                                runtime_infos.get(),
-                                &contexts,
-                                project_info.get(),
-                                &proj_list.get(),
-                            );
-                            let runs = run_records.get();
-                            let hs = ssh_hosts.get();
                             view! {
                                 <div class="rp-contexts">
-                                    <section class="control-section">
+                                    // Keep the scroll container outside these reactive children:
+                                    // runtime/run polling must update sections without replacing
+                                    // `.rp-contexts` and resetting its scrollTop.
+                                    {move || {
+                                        let contexts = execution_contexts.get();
+                                        view! { <section class="control-section">
                                         <div class="control-section-head">
                                             <span>{t(loc, "contexts.execution")}</span>
                                             <span class="control-count">{contexts.len().to_string()}</span>
@@ -5795,8 +5791,17 @@ fn App() -> impl IntoView {
                                                     }><span class="gi server"></span>{t(loc, "contexts.import_wsl")}</button>
                                             })}
                                         </div>
-                                    </section>
-                                    <section class="control-section runtime-section">
+                                    </section> }.into_view()
+                                    }}
+                                    {move || {
+                                        let contexts = execution_contexts.get();
+                                        let runtime_rows = runtime_slots(
+                                            runtime_infos.get(),
+                                            &contexts,
+                                            project_info.get(),
+                                            &proj_list.get(),
+                                        );
+                                        view! { <section class="control-section runtime-section">
                                         <div class="control-section-head">
                                             <span>{t(loc, "contexts.runtimes")}</span>
                                             <div class="control-head-actions">
@@ -5818,8 +5823,11 @@ fn App() -> impl IntoView {
                                                     object_states=runtime_object_states />
                                             }).collect_view()
                                         }}
-                                    </section>
-                                    <section class="control-section">
+                                    </section> }.into_view()
+                                    }}
+                                    {move || {
+                                        let runs = run_records.get();
+                                        view! { <section class="control-section">
                                         <div class="control-section-head">
                                             <span>{t(loc, "contexts.runs")}</span>
                                             <div class="control-head-actions">
@@ -5901,8 +5909,11 @@ fn App() -> impl IntoView {
                                                 }.into_view()
                                             }).collect_view()
                                         }}
-                                    </section>
-                                    {(!hs.is_empty()).then(|| view! {
+                                    </section> }.into_view()
+                                    }}
+                                    {move || {
+                                        let hs = ssh_hosts.get();
+                                        (!hs.is_empty()).then(|| view! {
                                         <section class="control-section">
                                             <div class="control-section-head">
                                                 <span>{t(loc, "hosts.title")}</span>
@@ -5940,7 +5951,8 @@ fn App() -> impl IntoView {
                                                 }
                                             }).collect_view()}
                                         </section>
-                                    })}
+                                        })
+                                    }}
                                 </div>
                             }.into_view()
                         }
@@ -6448,9 +6460,11 @@ fn App() -> impl IntoView {
             remove_specialist=Callback::new(remove_specialist_fn)
         />
 
-        <PetOverlay status=pet_status active_session=active_session running=running
-            approval_pending=approval_pending activity=pet_activity show_projects=show_projects
-            show_settings=show_settings center_file_open=center_file_open />
+        {(!is_windows()).then(|| view! {
+            <PetOverlay status=pet_status active_session=active_session running=running
+                approval_pending=approval_pending activity=pet_activity show_projects=show_projects
+                show_settings=show_settings center_file_open=center_file_open />
+        })}
 
 
 
@@ -7019,5 +7033,14 @@ fn render_item(
 
 pub fn main() {
     console_error_panic_hook::set_once();
-    mount_to_body(App);
+    let is_pet_window = window()
+        .location()
+        .search()
+        .ok()
+        .is_some_and(|query| query.split('&').any(|part| part == "?pet=desktop" || part == "pet=desktop"));
+    if is_pet_window {
+        mount_to_body(PetDesktop);
+    } else {
+        mount_to_body(App);
+    }
 }
