@@ -1797,6 +1797,7 @@ mod tauri_args_tests {
         let items = vec![ChatItem::Assistant {
             text: "`figures/panel_I_heatmap_4genes_median.png/.pdf`".into(),
             model: None,
+            resources: Vec::new(),
         }];
         let arts = collect_artifacts(&items, Locale::En, &mut ProtoCache::new());
         let a = arts
@@ -2078,6 +2079,7 @@ mod review_tests {
         let mut items = vec![ChatItem::Assistant {
             text: "answer".into(),
             model: None,
+            resources: Vec::new(),
         }];
         upsert_review(&mut items, report("r1", "first"));
         upsert_review(&mut items, report("r1", "verified"));
@@ -2112,6 +2114,7 @@ pub(super) fn ensure_streaming_assistant(items: &mut Vec<ChatItem>, model: Optio
             ChatItem::Assistant {
                 text: String::new(),
                 model,
+                resources: Vec::new(),
             },
         );
     }
@@ -2173,6 +2176,7 @@ mod acp_tool_insert_tests {
             ChatItem::Assistant {
                 text: String::new(),
                 model: None,
+                resources: Vec::new(),
             },
         ];
         assert_eq!(acp_tool_insert_index(&items), 1);
@@ -2193,6 +2197,7 @@ mod acp_tool_insert_tests {
             ChatItem::Assistant {
                 text: "done".into(),
                 model: Some("Codex".into()),
+                resources: Vec::new(),
             },
         ];
         assert_eq!(acp_tool_insert_index(&items), 2);
@@ -2224,6 +2229,7 @@ pub(super) fn start_user_turn(items: &mut Vec<ChatItem>, text: String, model: Op
                 ChatItem::Assistant {
                     text: String::new(),
                     model,
+                    resources: Vec::new(),
                 },
             ],
         );
@@ -2248,6 +2254,7 @@ pub(super) fn start_user_turn(items: &mut Vec<ChatItem>, text: String, model: Op
         items.push(ChatItem::Assistant {
             text: String::new(),
             model,
+            resources: Vec::new(),
         });
     }
 }
@@ -2303,6 +2310,7 @@ mod start_user_turn_tests {
             ChatItem::Assistant {
                 text: String::new(),
                 model: Some("gpt".into()),
+                resources: Vec::new(),
             },
         ];
         start_user_turn(&mut items, "图片里有啥文字?".into(), Some("gpt".into()));
@@ -2318,6 +2326,7 @@ mod start_user_turn_tests {
             ChatItem::Assistant {
                 text: String::new(),
                 model: None,
+                resources: Vec::new(),
             },
         ];
         start_user_turn(&mut items, display.clone(), None);
@@ -2337,6 +2346,7 @@ mod start_user_turn_tests {
             ChatItem::Assistant {
                 text: "我先查近年文献".into(),
                 model: Some("Codex".into()),
+                resources: Vec::new(),
             },
         ];
 
@@ -2371,6 +2381,7 @@ mod start_user_turn_tests {
             ChatItem::Assistant {
                 text: String::new(),
                 model: None,
+                resources: Vec::new(),
             },
         ];
 
@@ -2387,6 +2398,7 @@ mod start_user_turn_tests {
             ChatItem::Assistant {
                 text: "echo:alpha".into(),
                 model: None,
+                resources: Vec::new(),
             },
             ChatItem::QueuedUser("queued".into()),
         ];
@@ -2409,6 +2421,7 @@ mod start_user_turn_tests {
             ChatItem::Assistant {
                 text: "done".into(),
                 model: None,
+                resources: Vec::new(),
             },
             ChatItem::QueuedUser(display.clone()),
         ];
@@ -2430,6 +2443,7 @@ mod start_user_turn_tests {
             ChatItem::Assistant {
                 text: "done".into(),
                 model: None,
+                resources: Vec::new(),
             },
             ChatItem::QueuedUser("queued".into()),
             ChatItem::QueuedUser("later".into()),
@@ -2440,7 +2454,7 @@ mod start_user_turn_tests {
         assert!(matches!(&items[2], ChatItem::User(text) if text == "queued"));
         assert!(matches!(
             &items[3],
-            ChatItem::Assistant { text, model } if text.is_empty() && model.as_deref() == Some("model")
+            ChatItem::Assistant { text, model, .. } if text.is_empty() && model.as_deref() == Some("model")
         ));
         assert!(matches!(&items[4], ChatItem::QueuedUser(text) if text == "later"));
     }
@@ -2530,7 +2544,14 @@ pub(super) fn append_assistant_delta(
             return;
         }
     }
-    items.insert(queue_start, ChatItem::Assistant { text: delta, model });
+    items.insert(
+        queue_start,
+        ChatItem::Assistant {
+            text: delta,
+            model,
+            resources: Vec::new(),
+        },
+    );
 }
 
 pub(super) fn append_reasoning_delta(items: &mut Vec<ChatItem>, delta: String) {
@@ -3407,8 +3428,110 @@ fn strip_trailing_list_marker(before: &str) -> &str {
     }
 }
 
-/// Post-process rendered Markdown: artifact chips, code wrappers, filename links.
-pub(super) fn enrich_md_html(mut html: String, arts: &[Artifact], locale: Locale) -> String {
+fn html_attr(tag: &str, name: &str) -> Option<String> {
+    let needle = format!(r#"{name}=""#);
+    let start = tag.find(&needle)? + needle.len();
+    let end = tag[start..].find('"')? + start;
+    Some(tag[start..end].to_string())
+}
+
+fn resource_reference_matches(rendered: &str, original: &str) -> bool {
+    fn decode_html_attribute(value: &str) -> String {
+        value
+            .replace("&#x27;", "'")
+            .replace("&#39;", "'")
+            .replace("&quot;", "\"")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
+    }
+    normalize_path(&decode_href(&decode_html_attribute(rendered)))
+        == normalize_path(&decode_href(original))
+}
+
+/// Replace path-bearing Markdown tags with durable resource identities. Only
+/// bindings persisted with this exact message are considered; old unbound
+/// messages intentionally retain their original behavior.
+fn replace_bound_resource_tags(html: String, resources: &[MessageResource]) -> String {
+    if resources.is_empty() {
+        return html;
+    }
+    let mut out = String::with_capacity(html.len() + resources.len() * 48);
+    let mut rest = html.as_str();
+    let mut consumed = vec![false; resources.len()];
+    loop {
+        let next = [(rest.find("<a "), "href"), (rest.find("<img "), "src")]
+            .into_iter()
+            .filter_map(|(position, attribute)| position.map(|position| (position, attribute)))
+            .min_by_key(|(position, _)| *position);
+        let Some((position, attribute)) = next else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..position]);
+        rest = &rest[position..];
+        let Some(end) = rest.find('>') else {
+            out.push_str(rest);
+            break;
+        };
+        let tag = &rest[..=end];
+        rest = &rest[end + 1..];
+        let Some(reference) = html_attr(tag, attribute) else {
+            out.push_str(tag);
+            continue;
+        };
+        let Some(resource_index) = resources.iter().enumerate().position(|(index, resource)| {
+            !consumed[index] && resource_reference_matches(&reference, &resource.original_reference)
+        }) else {
+            out.push_str(tag);
+            continue;
+        };
+        consumed[resource_index] = true;
+        let resource = &resources[resource_index];
+        let old = format!(r#"{attribute}="{}""#, reference);
+        let title = html_escape(
+            resource
+                .error
+                .as_deref()
+                .unwrap_or(resource.display_name.as_str()),
+        );
+        if attribute == "src" && resource.status != "ready" {
+            out.push_str(&format!(
+                r#"<span class="resource-unresolved" data-resource-id="{}" data-resource-status="unresolved" title="{title}">{}</span>"#,
+                html_escape(&resource.id),
+                html_escape(&format!("{} — {title}", resource.display_name)),
+            ));
+            continue;
+        }
+        let replacement = if resource.status == "ready" && resource.artifact_version_id.is_some() {
+            let value = if attribute == "src" { "" } else { "#" };
+            format!(
+                r#"{attribute}="{value}" data-resource-id="{}" data-resource-kind="{}" data-resource-status="ready" title="{title}""#,
+                html_escape(&resource.id),
+                html_escape(&resource.kind),
+            )
+        } else {
+            let value = if attribute == "src" { "" } else { "#" };
+            format!(
+                r#"{attribute}="{value}" data-resource-id="{}" data-resource-kind="{}" data-resource-status="unresolved" title="{title}""#,
+                html_escape(&resource.id),
+                html_escape(&resource.kind),
+            )
+        };
+        out.push_str(&tag.replacen(&old, &replacement, 1));
+    }
+    out
+}
+
+/// Post-process rendered Markdown: durable resources, artifact chips, code
+/// wrappers, and filename links.
+pub(super) fn enrich_md_html(
+    mut html: String,
+    arts: &[Artifact],
+    resources: &[MessageResource],
+    locale: Locale,
+) -> String {
+    html = replace_bound_resource_tags(html, resources);
     html = replace_artifact_tokens(html, arts);
     html = replace_file_links(html, arts);
     for (i, a) in arts.iter().enumerate() {
@@ -3426,6 +3549,73 @@ pub(super) fn enrich_md_html(mut html: String, arts: &[Artifact], locale: Locale
 #[cfg(test)]
 mod art_ref_marker_tests {
     use super::*;
+
+    fn message_resource(reference: &str, kind: &str, ready: bool) -> MessageResource {
+        MessageResource {
+            id: "resource-link".into(),
+            ordinal: 0,
+            original_reference: reference.into(),
+            artifact_id: ready.then(|| "artifact-id".into()),
+            artifact_version_id: ready.then(|| "version-id".into()),
+            display_name: "plot.png".into(),
+            kind: kind.into(),
+            mime_type: "image/png".into(),
+            status: if ready { "ready" } else { "unresolved" }.into(),
+            error: (!ready).then(|| "not found".into()),
+        }
+    }
+
+    #[test]
+    fn replaces_bound_links_and_images_with_resource_identity() {
+        let html = r#"<p><a href="D:/work/report.md">report</a><img src="figures/plot.png" alt="plot" /></p>"#;
+        let resources = vec![
+            message_resource("D:/work/report.md", "markdown", true),
+            message_resource("figures/plot.png", "image", true),
+        ];
+        let out = replace_bound_resource_tags(html.into(), &resources);
+        assert_eq!(out.matches(r#"data-resource-status="ready""#).count(), 2);
+        assert!(out.contains(r##"href="#" data-resource-id="resource-link""##));
+        assert!(out.contains(r#"src="" data-resource-id="resource-link""#));
+        assert!(!out.contains("D:/work/report.md"));
+    }
+
+    #[test]
+    fn unresolved_binding_is_visible_and_never_keeps_the_raw_path() {
+        let html = r#"<p><a href="figures/missing.md">missing</a></p>"#;
+        let out = replace_bound_resource_tags(
+            html.into(),
+            &[message_resource("figures/missing.md", "markdown", false)],
+        );
+        assert!(out.contains(r#"data-resource-status="unresolved""#));
+        assert!(out.contains(r#"title="not found""#));
+        assert!(!out.contains("figures/missing.md"));
+    }
+
+    #[test]
+    fn unresolved_image_becomes_an_error_placeholder() {
+        let html = r#"<p><img src="figures/missing.png" alt="plot" /></p>"#;
+        let out = replace_bound_resource_tags(
+            html.into(),
+            &[message_resource("figures/missing.png", "image", false)],
+        );
+        assert!(out.contains(r#"class="resource-unresolved""#));
+        assert!(out.contains("plot.png — not found"));
+        assert!(!out.contains("<img"));
+        assert!(!out.contains("figures/missing.png"));
+    }
+
+    #[test]
+    fn matches_html_escaped_quotes_in_rendered_destinations() {
+        let markdown = "[report](D:/work/report.md')";
+        let out = enrich_md_html(
+            md_to_html(markdown),
+            &[],
+            &[message_resource("D:/work/report.md'", "markdown", true)],
+            Locale::En,
+        );
+        assert!(out.contains(r#"data-resource-status="ready""#));
+        assert!(!out.contains("D:/work/report.md"));
+    }
 
     #[test]
     fn strips_list_dashes_before_chips_in_table_cells() {
@@ -3513,8 +3703,9 @@ mod art_ref_marker_tests {
 pub(super) fn handle_md_click(
     ev: &web_sys::MouseEvent,
     arts: &[Artifact],
+    resources: &[MessageResource],
     on_artifact: &Callback<usize>,
-    on_file: &Callback<(String, String)>,
+    on_file: &Callback<ModalArtifact>,
 ) {
     use wasm_bindgen::JsCast;
     let mut el = ev
@@ -3546,6 +3737,25 @@ pub(super) fn handle_md_click(
             return;
         }
         if n.tag_name().eq_ignore_ascii_case("a") {
+            if let Some(resource_id) = n.get_attribute("data-resource-id") {
+                ev.prevent_default();
+                ev.stop_propagation();
+                if let Some(resource) = resources.iter().find(|resource| resource.id == resource_id)
+                {
+                    if let Some(version_id) = resource
+                        .artifact_version_id
+                        .as_ref()
+                        .filter(|_| resource.status == "ready")
+                    {
+                        on_file.call((
+                            format!("artifact-version:{version_id}"),
+                            resource.display_name.clone(),
+                            resource.kind.clone(),
+                        ));
+                    }
+                }
+                return;
+            }
             if let Some(href) = n.get_attribute("href") {
                 if opens_in_system_browser(&href) {
                     ev.prevent_default();
@@ -3561,7 +3771,8 @@ pub(super) fn handle_md_click(
                         on_artifact.call(idx);
                     } else {
                         let kind = file_kind(&path).unwrap_or("text").to_string();
-                        on_file.call((path, kind));
+                        let name = attachment_name(&path);
+                        on_file.call((path, name, kind));
                     }
                     return;
                 }
@@ -3966,6 +4177,7 @@ pub(super) fn promote_assistant_text(items: &mut Vec<ChatItem>, text: &str) {
     items.push(ChatItem::Assistant {
         text: text.to_string(),
         model: None,
+        resources: Vec::new(),
     });
 }
 
@@ -4106,6 +4318,7 @@ mod artifact_scan_tests {
             ChatItem::Assistant {
                 text: "| a | b |\n|---|---|\n| 1 | 2 |\n\n```csv\nx,y\n1,2\n```".into(),
                 model: None,
+                resources: Vec::new(),
             },
         ];
         let a1 = collect_artifacts(&items, Locale::En, &mut cache);
@@ -4136,10 +4349,12 @@ mod artifact_scan_tests {
             ChatItem::Assistant {
                 text: "Created `result.csv`".into(),
                 model: None,
+                resources: Vec::new(),
             },
             ChatItem::Assistant {
                 text: "Updated `result.csv`".into(),
                 model: None,
+                resources: Vec::new(),
             },
         ];
         let artifacts = fresh(&items, Locale::En);
@@ -4164,6 +4379,7 @@ mod artifact_scan_tests {
             ChatItem::Assistant {
                 text: "Done.".into(),
                 model: None,
+                resources: Vec::new(),
             },
         ];
         let artifacts = fresh(&items, Locale::En);
@@ -4185,6 +4401,7 @@ mod artifact_scan_tests {
             ChatItem::Assistant {
                 text: "Created `sample_statistics.png`".into(),
                 model: None,
+                resources: Vec::new(),
             },
             ChatItem::Tool {
                 name: "write".into(),
@@ -4197,16 +4414,13 @@ mod artifact_scan_tests {
             ChatItem::Assistant {
                 text: r"Updated `E:\cross-species-root\sample_statistics.png`".into(),
                 model: None,
+                resources: Vec::new(),
             },
         ];
         let all = fresh(&items, Locale::En);
         assert_eq!(all.len(), 4);
 
-        let current = current_artifacts(
-            &all,
-            r"E:\cross-species-root",
-            &HashSet::<String>::new(),
-        );
+        let current = current_artifacts(&all, r"E:\cross-species-root", &HashSet::<String>::new());
         assert_eq!(current.len(), 1);
         assert_eq!(current[0].name, "sample_statistics.png");
         assert!(matches!(
@@ -4341,6 +4555,11 @@ pub(super) fn artifact_id_path(path: &str) -> Option<&str> {
     path.strip_prefix("artifact:").filter(|id| !id.is_empty())
 }
 
+pub(super) fn artifact_version_id_path(path: &str) -> Option<&str> {
+    path.strip_prefix("artifact-version:")
+        .filter(|id| !id.is_empty())
+}
+
 #[component]
 pub(super) fn CsvFilePreview(path: String) -> impl IntoView {
     let locale = use_locale();
@@ -4352,21 +4571,30 @@ pub(super) fn CsvFilePreview(path: String) -> impl IntoView {
         spawn_local(async move {
             table.set(None);
             err.set(None);
-            let v = match artifact_id_path(&path) {
-                Some(id) => {
+            let v = match artifact_version_id_path(&path) {
+                Some(version_id) => {
                     invoke(
-                        "read_artifact",
-                        to_value(&serde_json::json!({ "id": id })).unwrap(),
+                        "read_artifact_version",
+                        to_value(&serde_json::json!({ "versionId": version_id })).unwrap(),
                     )
                     .await
                 }
-                None => {
-                    invoke(
-                        "read_file",
-                        to_value(&serde_json::json!({ "path": path })).unwrap(),
-                    )
-                    .await
-                }
+                None => match artifact_id_path(&path) {
+                    Some(id) => {
+                        invoke(
+                            "read_artifact",
+                            to_value(&serde_json::json!({ "id": id })).unwrap(),
+                        )
+                        .await
+                    }
+                    None => {
+                        invoke(
+                            "read_file",
+                            to_value(&serde_json::json!({ "path": path })).unwrap(),
+                        )
+                        .await
+                    }
+                },
             };
             let Ok(fc) = serde_wasm_bindgen::from_value::<FileContent>(v) else {
                 err.set(Some(tf(loc, "err.file_not_found", &[("path", &path)])));
@@ -4396,21 +4624,31 @@ pub(super) fn JsonFilePreview(path: String) -> impl IntoView {
         spawn_local(async move {
             body.set(None);
             err.set(None);
-            let result = match artifact_id_path(&path) {
-                Some(id) => {
+            let result = match artifact_version_id_path(&path) {
+                Some(version_id) => {
                     invoke_checked(
-                        "read_artifact",
-                        to_value(&serde_json::json!({ "id": id })).unwrap(),
+                        "read_artifact_version",
+                        to_value(&serde_json::json!({ "versionId": version_id })).unwrap(),
                     )
                     .await
                 }
-                None => {
-                    invoke_checked(
-                        "read_file",
-                        to_value(&tauri_args::read_file(&path, Some(32 * 1024 * 1024))).unwrap(),
-                    )
-                    .await
-                }
+                None => match artifact_id_path(&path) {
+                    Some(id) => {
+                        invoke_checked(
+                            "read_artifact",
+                            to_value(&serde_json::json!({ "id": id })).unwrap(),
+                        )
+                        .await
+                    }
+                    None => {
+                        invoke_checked(
+                            "read_file",
+                            to_value(&tauri_args::read_file(&path, Some(32 * 1024 * 1024)))
+                                .unwrap(),
+                        )
+                        .await
+                    }
+                },
             };
             let fc = match result {
                 Ok(v) => match serde_wasm_bindgen::from_value::<FileContent>(v) {
@@ -4569,21 +4807,31 @@ pub(super) fn FilePreview(dom_id: String, path: String, kind: String) -> impl In
             // PDF still renders (the default 8 MB cap silently rejected them, #35).
             // On failure, surface the real backend error (size limit / outside project
             // root / …) instead of a blanket "file not found".
-            let result = match artifact_id_path(&path) {
-                Some(id) => {
+            let result = match artifact_version_id_path(&path) {
+                Some(version_id) => {
                     invoke_checked(
-                        "read_artifact",
-                        to_value(&serde_json::json!({ "id": id })).unwrap(),
+                        "read_artifact_version",
+                        to_value(&serde_json::json!({ "versionId": version_id })).unwrap(),
                     )
                     .await
                 }
-                None => {
-                    invoke_checked(
-                        "read_file",
-                        to_value(&tauri_args::read_file(&path, Some(32 * 1024 * 1024))).unwrap(),
-                    )
-                    .await
-                }
+                None => match artifact_id_path(&path) {
+                    Some(id) => {
+                        invoke_checked(
+                            "read_artifact",
+                            to_value(&serde_json::json!({ "id": id })).unwrap(),
+                        )
+                        .await
+                    }
+                    None => {
+                        invoke_checked(
+                            "read_file",
+                            to_value(&tauri_args::read_file(&path, Some(32 * 1024 * 1024)))
+                                .unwrap(),
+                        )
+                        .await
+                    }
+                },
             };
             let fc = match result {
                 Ok(v) => match serde_wasm_bindgen::from_value::<FileContent>(v) {
@@ -5032,6 +5280,7 @@ mod transcript_render_window_tests {
                     ChatItem::Assistant {
                         text: format!("answer {turn}"),
                         model: None,
+                        resources: Vec::new(),
                     },
                 ]
             })
@@ -5204,7 +5453,7 @@ pub(super) fn UserMessage(
     on_copy: Callback<String>,
     on_edit: Callback<usize>,
     on_branch: Callback<usize>,
-    on_file: Callback<(String, String)>,
+    on_file: Callback<ModalArtifact>,
 ) -> impl IntoView {
     let locale = use_locale();
     let presentation = user_message_presentation(&text);
@@ -5223,12 +5472,13 @@ pub(super) fn UserMessage(
         .into_iter()
         .map(|path| {
             let name = attachment_name(&path);
+            let name_for_click = name.clone();
             let path_for_click = path.clone();
             let on_file = on_file.clone();
             view! {
                 <button type="button" class="user-attachment-image"
                     title=name.clone()
-                    on:click=move |_| on_file.call((path_for_click.clone(), "image".into()))>
+                    on:click=move |_| on_file.call((path_for_click.clone(), name_for_click.clone(), "image".into()))>
                     <AttachmentThumbnail path=path alt=name.clone() />
                     <span class="user-attachment-image-name">{name}</span>
                 </button>
@@ -5239,6 +5489,7 @@ pub(super) fn UserMessage(
         .into_iter()
         .map(|path| {
             let name = attachment_name(&path);
+            let name_for_click = name.clone();
             let kind = file_kind(&path).unwrap_or("text").to_string();
             let path_for_click = path.clone();
             let kind_for_click = kind.clone();
@@ -5246,7 +5497,7 @@ pub(super) fn UserMessage(
             view! {
                 <button type="button" class="user-attachment-file"
                     title=path.clone()
-                    on:click=move |_| on_file.call((path_for_click.clone(), kind_for_click.clone()))>
+                    on:click=move |_| on_file.call((path_for_click.clone(), name_for_click.clone(), kind_for_click.clone()))>
                     <span class="user-attachment-file-icon">{compose_icon("doc")}</span>
                     <span class="user-attachment-file-copy">
                         <span class="user-attachment-file-name">{name}</span>
@@ -5315,17 +5566,24 @@ pub(super) fn UserMessage(
 pub(super) fn AssistantMessage(
     text: String,
     model: Option<String>,
+    resources: Vec<MessageResource>,
     artifacts: Vec<Artifact>,
     source_item: usize,
     on_artifact: Callback<usize>,
-    on_file: Callback<(String, String)>,
+    on_file: Callback<ModalArtifact>,
     on_copy: Callback<String>,
 ) -> impl IntoView {
     let locale = use_locale();
     let arts_for_html = artifacts.clone();
+    let resources_for_html = resources.clone();
     let text_for_html = text.clone();
     let html = create_memo(move |_| {
-        enrich_md_html(md_to_html(&text_for_html), &arts_for_html, locale.get())
+        enrich_md_html(
+            md_to_html(&text_for_html),
+            &arts_for_html,
+            &resources_for_html,
+            locale.get(),
+        )
     });
     let hid = unique_dom_id("md");
     let hid_for_effect = hid.clone();
@@ -5333,9 +5591,50 @@ pub(super) fn AssistantMessage(
         let _ = html.get();
         schedule_highlight(hid_for_effect.clone());
     });
+    let hid_for_resources = hid.clone();
+    let resources_for_effect = resources.clone();
+    create_effect(move |_| {
+        let _ = html.get();
+        let dom_id = hid_for_resources.clone();
+        let resources = resources_for_effect.clone();
+        spawn_local(async move {
+            for resource in resources
+                .into_iter()
+                .filter(|resource| resource.status == "ready" && resource.kind == "image")
+            {
+                let Some(version_id) = resource.artifact_version_id else {
+                    continue;
+                };
+                let Ok(value) = invoke_checked(
+                    "read_artifact_version",
+                    to_value(&serde_json::json!({ "versionId": version_id })).unwrap(),
+                )
+                .await
+                else {
+                    continue;
+                };
+                let Ok(file) = serde_wasm_bindgen::from_value::<FileContent>(value) else {
+                    continue;
+                };
+                let Some(base64) = file.base64 else {
+                    continue;
+                };
+                let selector = format!(r#"#{dom_id} [data-resource-id="{}"]"#, resource.id);
+                if let Some(element) = web_sys::window()
+                    .and_then(|window| window.document())
+                    .and_then(|document| document.query_selector(&selector).ok().flatten())
+                {
+                    let _ = element
+                        .set_attribute("src", &format!("data:{};base64,{base64}", file.mime));
+                    let _ = element.set_attribute("class", "resource-inline-image");
+                }
+            }
+        });
+    });
     let on_artifact = on_artifact.clone();
     let on_file = on_file.clone();
     let arts_for_click = artifacts.clone();
+    let resources_for_click = resources.clone();
     let generated = artifacts
         .iter()
         .enumerate()
@@ -5376,7 +5675,13 @@ pub(super) fn AssistantMessage(
             <div class="body md" id=hid.clone()
                 inner_html=move || html.get()
                 on:click=move |ev: web_sys::MouseEvent| {
-                    handle_md_click(&ev, &arts_for_click, &on_artifact, &on_file)
+                    handle_md_click(
+                        &ev,
+                        &arts_for_click,
+                        &resources_for_click,
+                        &on_artifact,
+                        &on_file,
+                    )
                 }></div>
             {(generated_count > 0).then(|| view! {
                 <div class="message-artifacts">

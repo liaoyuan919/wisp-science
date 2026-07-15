@@ -35,6 +35,23 @@ pub struct ArtifactVersion {
     pub created_at: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageResourceLink {
+    pub id: String,
+    pub frame_id: String,
+    pub message_seq: i64,
+    pub ordinal: i64,
+    pub original_reference: String,
+    pub artifact_id: Option<String>,
+    pub artifact_version_id: Option<String>,
+    pub display_name: String,
+    pub resource_kind: String,
+    pub mime_type: String,
+    pub status: String,
+    pub error: Option<String>,
+    pub created_at: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct RecentSessionDetail {
     pub id: String,

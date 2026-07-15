@@ -268,6 +268,7 @@ fn mark_optimistic_send_failed(rows: &mut Vec<ChatItem>, display_message: &str, 
             ChatItem::Assistant {
                 text: format!("Error: {error}"),
                 model: None,
+                resources: Vec::new(),
             },
         );
         return;
@@ -805,15 +806,26 @@ fn App() -> impl IntoView {
         refresh_file_search(file_query, file_search_hits);
     });
 
+    let open_resource = Callback::new(move |(path, name, kind): ModalArtifact| {
+        if opens_in_modal(&kind) {
+            modal_artifact.set(Some((path, name, kind)));
+            return;
+        }
+        let tab = CenterFileTab::new(path.clone(), name, kind);
+        center_files.update(|files| {
+            if !files.iter().any(|file| file.path == path) {
+                files.push(tab.clone());
+            }
+        });
+        center_file.set(Some(path));
+        show_projects.set(false);
+    });
+
     let on_artifact_select = Callback::new(move |idx: usize| {
         let arts = artifacts.get();
         if let Some(a) = arts.get(idx) {
             if let PreviewData::File { path, kind } = &a.data {
-                if opens_in_modal(kind) {
-                    modal_artifact.set(Some((path.clone(), a.name.clone(), kind.clone())));
-                    return;
-                }
-                open_workspace_file(path.clone(), modal_artifact);
+                open_resource.call((path.clone(), a.name.clone(), kind.clone()));
             } else {
                 ensure_right_tab(RightTab::Artifacts, show_right, open_right_tabs, right_tab);
                 sel_artifact.set(idx);
@@ -822,8 +834,8 @@ fn App() -> impl IntoView {
         }
     });
 
-    let on_file_link = Callback::new(move |(path, _kind): (String, String)| {
-        open_workspace_file(path, modal_artifact);
+    let on_file_link = Callback::new(move |resource: ModalArtifact| {
+        open_resource.call(resource);
     });
 
     // Inline @ artifact, # session, and / skill pickers all share one cursor
@@ -1085,6 +1097,24 @@ fn App() -> impl IntoView {
                 })
             }
             AgentEvent::MessageBoundary { .. } => {}
+            AgentEvent::Resources {
+                frame_id,
+                resources,
+                ..
+            } => {
+                flush_now();
+                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |items| {
+                    if let Some(ChatItem::Assistant {
+                        resources: current, ..
+                    }) = items
+                        .iter_mut()
+                        .rev()
+                        .find(|item| matches!(item, ChatItem::Assistant { .. }))
+                    {
+                        *current = resources;
+                    }
+                });
+            }
             AgentEvent::Text { frame_id, delta } => {
                 set_pet_activity(&frame_id, "running");
                 queue(frame_id, PendingDelta::Text(delta));
@@ -1235,6 +1265,7 @@ fn App() -> impl IntoView {
                     v.push(ChatItem::Assistant {
                         text: format!("Error: {message}"),
                         model,
+                        resources: Vec::new(),
                     });
                 });
                 approval_cb.update(|s| {
@@ -1280,6 +1311,7 @@ fn App() -> impl IntoView {
                         ChatItem::Assistant {
                             text: String::new(),
                             model: (!model.is_empty()).then_some(model),
+                            resources: Vec::new(),
                         },
                     );
                 });
@@ -1679,6 +1711,7 @@ fn App() -> impl IntoView {
                     rows.push(ChatItem::Assistant {
                         text: String::new(),
                         model: turn_model.clone(),
+                        resources: Vec::new(),
                     });
                 }
             });
@@ -1771,6 +1804,7 @@ fn App() -> impl IntoView {
                         items.push(ChatItem::Assistant {
                             text,
                             model: model.clone(),
+                            resources: Vec::new(),
                         });
                     });
                 }
@@ -1782,6 +1816,7 @@ fn App() -> impl IntoView {
                                 localize_backend(locale.get(), &js_error_text(err))
                             ),
                             model: model.clone(),
+                            resources: Vec::new(),
                         });
                     });
                 }
@@ -2627,6 +2662,7 @@ fn App() -> impl IntoView {
                 ChatItem::Assistant {
                     text: String::new(),
                     model: turn_model,
+                    resources: Vec::new(),
                 },
             ]);
             force_chat_bottom();
@@ -2890,6 +2926,7 @@ fn App() -> impl IntoView {
                 view.push(ChatItem::Assistant {
                     text: demo.response.clone(),
                     model: None,
+                    resources: Vec::new(),
                 });
                 items.set(view);
                 force_chat_bottom();
@@ -3172,8 +3209,7 @@ fn App() -> impl IntoView {
     let ssh_hosts = create_rw_signal::<Vec<SshHost>>(vec![]);
     let execution_contexts = create_rw_signal::<Vec<ExecutionContext>>(vec![]);
     let selected_context_id = create_rw_signal::<Option<String>>(None);
-    let context_details_modal =
-        create_rw_signal::<Option<(String, ContextModalKind)>>(None);
+    let context_details_modal = create_rw_signal::<Option<(String, ContextModalKind)>>(None);
     let runtime_interpreter_form = create_rw_signal(None::<RuntimeInterpreterForm>);
     let runtime_infos = create_rw_signal::<Vec<RuntimeInfo>>(vec![]);
     let runtime_object_states =
@@ -6555,7 +6591,7 @@ fn App() -> impl IntoView {
                                                     ChatItem::User(text) => view! {
                                                         <div class="sidechat-row user"><div class="sidechat-bubble">{text}</div></div>
                                                     }.into_view(),
-                                                    ChatItem::Assistant { text, model } => {
+                                                    ChatItem::Assistant { text, model, .. } => {
                                                         let error = text.starts_with("Error: ");
                                                         view! {
                                                             <div class="sidechat-row assistant">
@@ -7450,7 +7486,7 @@ fn render_item(
     item: &ChatItem,
     artifacts: &[Artifact],
     on_artifact: Callback<usize>,
-    on_file: Callback<(String, String)>,
+    on_file: Callback<ModalArtifact>,
     busy: ReadSignal<bool>,
     is_last: bool,
     can_modify: bool,
@@ -7505,10 +7541,11 @@ fn render_item(
                 </div>
             }.into_view()
         }
-        ChatItem::Assistant { text, model } => view! {
+        ChatItem::Assistant { text, model, resources } => view! {
             <AssistantMessage
                 text=text.clone()
                 model=model.clone()
+                resources=resources.clone()
                 artifacts=artifacts.to_vec()
                 source_item=ui_index
                 on_artifact=on_artifact

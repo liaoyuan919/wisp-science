@@ -1,9 +1,10 @@
 use super::desktop_lifecycle::should_hide_workspace_on_close;
 use super::{
-    branch_title, copy_dir_recursive, events_to_items, merge_pending_ui_event, messages_to_items,
-    parse_disabled_skills, parse_enabled_skill_names, parse_skill_tags, parse_ssh_artifact_uri,
-    persist_ui_events, resolve_acp_artifact_references, resolve_composer_references,
-    resolve_workspace, session_runtime_status, should_hide_app_on_macos_close, side_chat_prompt,
+    branch_title, copy_dir_recursive, events_to_items, merge_pending_ui_event,
+    message_uses_resource_bindings, messages_to_items, parse_disabled_skills,
+    parse_enabled_skill_names, parse_skill_tags, parse_ssh_artifact_uri, persist_ui_events,
+    resolve_acp_artifact_references, resolve_composer_references, resolve_workspace,
+    session_runtime_status, should_hide_app_on_macos_close, side_chat_prompt,
     transcript_page_items, update_check_from_release, user_message_start, AgentEvent,
     ComposerReferenceArg, GithubRelease, McpConnection, McpTransport, MAX_PENDING_UI_EVENT_BYTES,
 };
@@ -441,6 +442,7 @@ fn transcript_page_reconstructs_legacy_prefix_before_persisted_events() {
             (2, wisp_llm::Message::assistant("fallback answer")),
         ],
         reviews: vec![],
+        resources: vec![],
         ui_events: events
             .iter()
             .map(|event| serde_json::to_string(event).unwrap())
@@ -456,6 +458,17 @@ fn transcript_page_reconstructs_legacy_prefix_before_persisted_events() {
     assert_eq!(items[0].text, "legacy question");
     assert_eq!(items[1].role, "assistant");
     assert_eq!(items[1].text, "new answer");
+}
+
+#[test]
+fn resource_bindings_cover_messages_rendered_as_assistant_output() {
+    assert!(message_uses_resource_bindings(
+        &wisp_llm::Message::assistant("answer")
+    ));
+    let completion = wisp_llm::Message::tool("call-1", "attempt_completion", "result");
+    assert!(message_uses_resource_bindings(&completion));
+    let ordinary_tool = wisp_llm::Message::tool("call-2", "read_file", "result");
+    assert!(!message_uses_resource_bindings(&ordinary_tool));
 }
 
 #[test]

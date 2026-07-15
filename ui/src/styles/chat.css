@@ -322,6 +322,18 @@ details.rz[open] > summary::before { content: "\25BE  "; }
 details.rz .body { margin-top: 6px; }
 
 /* ---------- Rendered Markdown (assistant messages) ---------- */
+.md .resource-inline-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 12px 0;
+  border-radius: var(--radius-sm);
+}
+.md [data-resource-status="unresolved"] {
+  color: var(--err);
+  text-decoration-style: dotted;
+  cursor: help;
+}
 .md {
   font-family: var(--font-response);
   font-size: 15px;

@@ -10,6 +10,21 @@
 use crate::i18n::Locale;
 use serde::{Deserialize, Serialize};
 
+#[derive(Deserialize, Clone, Debug, Hash, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MessageResource {
+    pub(crate) id: String,
+    pub(crate) ordinal: i64,
+    pub(crate) original_reference: String,
+    pub(crate) artifact_id: Option<String>,
+    pub(crate) artifact_version_id: Option<String>,
+    pub(crate) display_name: String,
+    pub(crate) kind: String,
+    pub(crate) mime_type: String,
+    pub(crate) status: String,
+    pub(crate) error: Option<String>,
+}
+
 #[derive(Deserialize, Clone)]
 #[allow(dead_code)]
 #[serde(tag = "kind")]
@@ -21,6 +36,11 @@ pub(crate) enum AgentEvent {
     MessageBoundary {
         frame_id: String,
         seq: i64,
+    },
+    Resources {
+        frame_id: String,
+        seq: i64,
+        resources: Vec<MessageResource>,
     },
     Text {
         frame_id: String,
@@ -128,6 +148,7 @@ pub(crate) enum ChatItem {
     Assistant {
         text: String,
         model: Option<String>,
+        resources: Vec<MessageResource>,
     },
     Reasoning(String),
     Tool {
@@ -185,7 +206,11 @@ impl ChatItem {
         match self {
             Self::User(s) => (0u8, s).hash(&mut h),
             Self::QueuedUser(s) => (1u8, s).hash(&mut h),
-            Self::Assistant { text, model } => (2u8, text, model).hash(&mut h),
+            Self::Assistant {
+                text,
+                model,
+                resources,
+            } => (2u8, text, model, resources).hash(&mut h),
             Self::Reasoning(s) => (3u8, s).hash(&mut h),
             Self::Tool {
                 name,
@@ -613,6 +638,8 @@ pub(crate) struct LoadedItem {
     pub(crate) status: Option<String>,
     #[serde(default)]
     pub(crate) locations: Option<String>,
+    #[serde(default)]
+    pub(crate) resources: Vec<MessageResource>,
 }
 
 #[derive(Deserialize)]
@@ -640,6 +667,7 @@ impl LoadedItem {
                 .unwrap_or_else(|_| ChatItem::Assistant {
                     text: self.text,
                     model: None,
+                    resources: self.resources,
                 }),
             "acp_tool" => ChatItem::AcpTool {
                 call_id: self.call_id.unwrap_or_default(),
@@ -660,6 +688,7 @@ impl LoadedItem {
             _ => ChatItem::Assistant {
                 text: self.text,
                 model: self.model_name,
+                resources: self.resources,
             },
         }
     }

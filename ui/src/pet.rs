@@ -83,7 +83,8 @@ impl DesktopPetActivity {
             AgentEvent::MessageBoundary { .. }
             | AgentEvent::Usage { .. }
             | AgentEvent::Compaction { .. }
-            | AgentEvent::Diff { .. } => {}
+            | AgentEvent::Diff { .. }
+            | AgentEvent::Resources { .. } => {}
         }
     }
 

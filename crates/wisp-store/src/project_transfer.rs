@@ -61,6 +61,9 @@ async fn copy_project_children(tx: &mut Transaction<'_, Sqlite>, project_id: &st
         "INSERT INTO artifact_versions(id,artifact_id,version_number,content_type,storage_path,size_bytes,checksum,parent_version_id,producing_run_id,env_snapshot_hash,created_at) \
          SELECT av.id,av.artifact_id,av.version_number,av.content_type,av.storage_path,av.size_bytes,av.checksum,av.parent_version_id,av.producing_run_id,av.env_snapshot_hash,av.created_at \
          FROM transfer.artifact_versions av JOIN transfer.artifacts a ON a.id=av.artifact_id WHERE a.project_id=?",
+        "INSERT INTO message_resource_links(id,frame_id,message_seq,ordinal,original_reference,artifact_id,artifact_version_id,display_name,resource_kind,mime_type,status,error,created_at) \
+         SELECT id,frame_id,message_seq,ordinal,original_reference,artifact_id,artifact_version_id,display_name,resource_kind,mime_type,status,error,created_at \
+         FROM transfer.message_resource_links WHERE frame_id IN (SELECT id FROM transfer.frames WHERE project_id=?)",
         "INSERT INTO artifact_dependencies(id,artifact_version_id,depends_on_version_id,reference_name,created_at) \
          SELECT d.id,d.artifact_version_id,d.depends_on_version_id,d.reference_name,d.created_at FROM transfer.artifact_dependencies d \
          WHERE d.artifact_version_id IN (SELECT av.id FROM transfer.artifact_versions av JOIN transfer.artifacts a ON a.id=av.artifact_id WHERE a.project_id=?)",
@@ -91,6 +94,7 @@ pub(crate) async fn delete_project_children(
 ) -> Result<()> {
     const QUERIES: &[&str] = &[
         "DELETE FROM artifact_dependencies WHERE artifact_version_id IN (SELECT av.id FROM artifact_versions av JOIN artifacts a ON a.id=av.artifact_id WHERE a.project_id=?)",
+        "DELETE FROM message_resource_links WHERE frame_id IN (SELECT id FROM frames WHERE project_id=?)",
         "DELETE FROM artifact_versions WHERE artifact_id IN (SELECT id FROM artifacts WHERE project_id=?)",
         "DELETE FROM run_artifacts WHERE run_id IN (SELECT id FROM runs WHERE project_id=?)",
         "DELETE FROM session_reviews WHERE frame_id IN (SELECT id FROM frames WHERE project_id=?)",
@@ -453,6 +457,7 @@ impl Store {
             ("runs", "*", "id"),
             ("artifacts", "*", "id"),
             ("artifact_versions", "*", "id"),
+            ("message_resource_links", "*", "id"),
             ("artifact_dependencies", "*", "id"),
             ("run_artifacts", "*", "id"),
             ("research_nodes", "*", "id"),
@@ -801,14 +806,36 @@ mod tests {
             .append_message("frame-1", 1, &Message::user("hello"))
             .await
             .unwrap();
-        source
+        let artifact_version_id = source
             .save_artifact(
                 "artifact-1",
                 "project-1",
                 "frame-1",
                 "plot.png",
                 "image/png",
-                r"C:\Users\Alice\Study\figures\plot.png",
+                r"C:\Users\Alice\Study\.wisp\artifacts\sha256\ab\abcdef.png",
+            )
+            .await
+            .unwrap();
+        source
+            .replace_message_resource_links(
+                "frame-1",
+                1,
+                &[crate::MessageResourceLink {
+                    id: "resource-link-1".into(),
+                    frame_id: "frame-1".into(),
+                    message_seq: 1,
+                    ordinal: 0,
+                    original_reference: r"D:/original/location/plot.png".into(),
+                    artifact_id: Some("artifact-1".into()),
+                    artifact_version_id: Some(artifact_version_id.clone()),
+                    display_name: "plot.png".into(),
+                    resource_kind: "image".into(),
+                    mime_type: "image/png".into(),
+                    status: "ready".into(),
+                    error: None,
+                    created_at: 1,
+                }],
             )
             .await
             .unwrap();
@@ -849,9 +876,31 @@ mod tests {
             "/Users/alice/Study"
         );
         assert_eq!(target.load_messages("frame-1").await.unwrap().len(), 1);
+        let imported_resources = target
+            .list_message_resource_links("frame-1", 1, None)
+            .await
+            .unwrap();
+        assert_eq!(imported_resources.len(), 1);
+        assert_eq!(
+            imported_resources[0].artifact_version_id.as_deref(),
+            Some(artifact_version_id.as_str())
+        );
+        assert_eq!(
+            imported_resources[0].original_reference,
+            "D:/original/location/plot.png"
+        );
         assert_eq!(
             target.get_artifact("artifact-1").await.unwrap().unwrap().2,
-            "/Users/alice/Study/figures/plot.png"
+            "/Users/alice/Study/.wisp/artifacts/sha256/ab/abcdef.png"
+        );
+        assert_eq!(
+            target
+                .get_artifact_version(&artifact_version_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .storage_path,
+            "/Users/alice/Study/.wisp/artifacts/sha256/ab/abcdef.png"
         );
         let imported_run = target.get_run("run-1").await.unwrap().unwrap();
         assert_eq!(imported_run.status, RunStatus::Lost);

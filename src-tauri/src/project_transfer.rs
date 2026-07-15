@@ -721,6 +721,9 @@ mod tests {
         let archive = base.join("project.zip");
         std::fs::create_dir_all(workspace.join("figures")).unwrap();
         std::fs::write(workspace.join("figures/plot.txt"), b"plot").unwrap();
+        let snapshot = workspace.join(".wisp/artifacts/sha256/ab/abcdef.png");
+        std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+        std::fs::write(&snapshot, b"snapshot").unwrap();
         std::fs::write(&database, b"sqlite-placeholder").unwrap();
         let stats = wisp_store::ProjectTransferStats::default();
         write_project_archive(
@@ -733,13 +736,17 @@ mod tests {
         .unwrap();
         let manifest = read_manifest(&archive).unwrap();
         assert_eq!(manifest.source_os, std::env::consts::OS);
-        assert_eq!(manifest.contents.workspace_files, 1);
-        assert_eq!(manifest.contents.workspace_bytes, 4);
+        assert_eq!(manifest.contents.workspace_files, 2);
+        assert_eq!(manifest.contents.workspace_bytes, 12);
         std::fs::create_dir_all(&extracted).unwrap();
         extract_project_archive(&archive, &extracted, &extracted_database, &manifest).unwrap();
         assert_eq!(
             std::fs::read(extracted.join("figures/plot.txt")).unwrap(),
             b"plot"
+        );
+        assert_eq!(
+            std::fs::read(extracted.join(".wisp/artifacts/sha256/ab/abcdef.png")).unwrap(),
+            b"snapshot"
         );
         assert_eq!(
             std::fs::read(extracted_database).unwrap(),

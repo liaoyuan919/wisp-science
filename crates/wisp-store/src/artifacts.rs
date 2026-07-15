@@ -88,6 +88,18 @@ impl Store {
         rows.into_iter().map(artifact_version_from_row).collect()
     }
 
+    pub async fn get_artifact_version(&self, version_id: &str) -> Result<Option<ArtifactVersion>> {
+        let row = sqlx::query(
+            "SELECT id,artifact_id,version_number,content_type,storage_path,size_bytes,checksum,\
+                    parent_version_id,producing_run_id,env_snapshot_hash,created_at \
+             FROM artifact_versions WHERE id=?",
+        )
+        .bind(version_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(artifact_version_from_row).transpose()
+    }
+
     pub async fn set_artifact_version_provenance(
         &self,
         version_id: &str,

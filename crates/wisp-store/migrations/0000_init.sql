@@ -84,6 +84,29 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 CREATE INDEX IF NOT EXISTS ix_artifacts_project ON artifacts(project_id);
 
+-- Structured resource references discovered when a new assistant message is
+-- persisted. The transcript keeps the agent's original Markdown; rendering
+-- uses these bindings and the immutable artifact version instead of guessing a
+-- filesystem path from an href at click time.
+CREATE TABLE IF NOT EXISTS message_resource_links (
+    id                  TEXT PRIMARY KEY,
+    frame_id            TEXT NOT NULL REFERENCES frames(id) ON DELETE CASCADE,
+    message_seq         INTEGER NOT NULL,
+    ordinal             INTEGER NOT NULL,
+    original_reference  TEXT NOT NULL,
+    artifact_id         TEXT REFERENCES artifacts(id) ON DELETE SET NULL,
+    artifact_version_id TEXT REFERENCES artifact_versions(id) ON DELETE SET NULL,
+    display_name        TEXT NOT NULL,
+    resource_kind       TEXT NOT NULL,
+    mime_type           TEXT NOT NULL,
+    status              TEXT NOT NULL,
+    error               TEXT,
+    created_at          INTEGER NOT NULL,
+    UNIQUE(frame_id, message_seq, ordinal)
+);
+CREATE INDEX IF NOT EXISTS ix_message_resource_links_message
+    ON message_resource_links(frame_id, message_seq, ordinal);
+
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL

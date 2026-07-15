@@ -33,6 +33,7 @@ mod pet_commands;
 mod project_sync;
 mod project_transfer;
 mod research_graph;
+mod resource_refs;
 mod review;
 mod run_context;
 mod runtime_config_tool;
@@ -65,6 +66,11 @@ enum AgentEvent {
     MessageBoundary {
         frame_id: String,
         seq: i64,
+    },
+    Resources {
+        frame_id: String,
+        seq: i64,
+        resources: Vec<resource_refs::UiMessageResource>,
     },
     Text {
         frame_id: String,
@@ -750,6 +756,8 @@ struct UiItem {
     status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     locations: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    resources: Vec<resource_refs::UiMessageResource>,
 }
 
 /// Index in `msgs` where the `user_index`‑th user turn starts (0-based user count).
@@ -800,6 +808,7 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
                         kind: None,
                         status: None,
                         locations: None,
+                        resources: Vec::new(),
                     });
                 }
             }
@@ -818,6 +827,7 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
                             kind: None,
                             status: None,
                             locations: None,
+                            resources: Vec::new(),
                         });
                     }
                 }
@@ -835,6 +845,7 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
                         kind: None,
                         status: None,
                         locations: None,
+                        resources: Vec::new(),
                     });
                 }
             }
@@ -854,6 +865,7 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
                             kind: None,
                             status: None,
                             locations: None,
+                            resources: Vec::new(),
                         });
                     }
                 } else if let Some(envelope) =
@@ -871,6 +883,7 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
                         kind: (!envelope.kind.is_empty()).then_some(envelope.kind),
                         status: Some(envelope.status),
                         locations: (!envelope.locations.is_empty()).then_some(envelope.locations),
+                        resources: Vec::new(),
                     });
                 } else {
                     out.push(UiItem {
@@ -889,6 +902,7 @@ fn messages_to_items(msgs: &[wisp_llm::Message]) -> Vec<UiItem> {
                         kind: None,
                         status: None,
                         locations: None,
+                        resources: Vec::new(),
                     });
                 }
             }
@@ -915,6 +929,7 @@ fn events_to_items(events: &[AgentEvent]) -> (Vec<UiItem>, HashMap<i64, usize>) 
                 kind: None,
                 status: None,
                 locations: None,
+                resources: Vec::new(),
             }),
             AgentEvent::Text { delta, .. } | AgentEvent::Reasoning { delta, .. } => {
                 let role = if matches!(event, AgentEvent::Text { .. }) {
@@ -937,6 +952,7 @@ fn events_to_items(events: &[AgentEvent]) -> (Vec<UiItem>, HashMap<i64, usize>) 
                         kind: None,
                         status: None,
                         locations: None,
+                        resources: Vec::new(),
                     });
                 }
             }
@@ -952,6 +968,7 @@ fn events_to_items(events: &[AgentEvent]) -> (Vec<UiItem>, HashMap<i64, usize>) 
                 kind: None,
                 status: None,
                 locations: None,
+                resources: Vec::new(),
             }),
             AgentEvent::ToolResult {
                 name,
@@ -989,12 +1006,18 @@ fn events_to_items(events: &[AgentEvent]) -> (Vec<UiItem>, HashMap<i64, usize>) 
                             kind: None,
                             status: None,
                             locations: None,
+                            resources: Vec::new(),
                         });
                     }
                 }
             }
             AgentEvent::MessageBoundary { seq, .. } => {
                 boundaries.insert(*seq, items.len());
+            }
+            AgentEvent::Resources { resources, .. } => {
+                if let Some(item) = items.iter_mut().rev().find(|item| item.role == "assistant") {
+                    item.resources = resources.clone();
+                }
             }
             AgentEvent::Stdout { chunk, .. } => {
                 if let Some(item) = items.iter_mut().rev().find(|item| item.role == "tool") {
@@ -1012,6 +1035,7 @@ fn events_to_items(events: &[AgentEvent]) -> (Vec<UiItem>, HashMap<i64, usize>) 
                         kind: None,
                         status: None,
                         locations: None,
+                        resources: Vec::new(),
                     });
                 }
             }
@@ -3184,6 +3208,9 @@ async fn send_message(
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
         let store = state.store.clone();
         let fid = frame_id.clone();
+        let resource_root = ap.root.clone();
+        let resource_project_id = ap.id.clone();
+        let resource_app = app.clone();
         let stamp = model_label.clone();
         let mut seq = start_seq;
         let handle = tokio::spawn(async move {
@@ -3194,6 +3221,28 @@ async fn send_message(
                 seq += 1;
                 if let Err(e) = store.append_message(&fid, seq, &msg).await {
                     tracing::warn!("incremental persist seq {seq} failed: {e}");
+                    continue;
+                }
+                if message_uses_resource_bindings(&msg) {
+                    let resources = resource_refs::bind_new_message_resources(
+                        &store,
+                        &resource_root,
+                        &resource_project_id,
+                        &fid,
+                        seq,
+                        &msg.content.as_text(),
+                    )
+                    .await;
+                    if !resources.is_empty() {
+                        let _ = resource_app.emit(
+                            "agent",
+                            AgentEvent::Resources {
+                                frame_id: fid.clone(),
+                                seq,
+                                resources: resources.iter().map(Into::into).collect(),
+                            },
+                        );
+                    }
                 }
             }
             seq
@@ -3348,6 +3397,12 @@ async fn send_message(
             Err(format!("{e}"))
         }
     }
+}
+
+fn message_uses_resource_bindings(message: &Message) -> bool {
+    message.role == wisp_llm::Role::Assistant
+        || (message.role == wisp_llm::Role::Tool
+            && message.tool_name.as_deref() == Some("attempt_completion"))
 }
 
 #[tauri::command]
@@ -4800,6 +4855,31 @@ fn transcript_page_items(page: &wisp_store::SessionTranscriptPage) -> Result<Vec
                 .collect(),
         )
     };
+    let mut resources_by_seq = HashMap::<i64, Vec<resource_refs::UiMessageResource>>::new();
+    for resource in &page.resources {
+        resources_by_seq
+            .entry(resource.message_seq)
+            .or_default()
+            .push(resource.into());
+    }
+    for (message_seq, resources) in resources_by_seq {
+        let end = boundaries.get(&message_seq).copied().unwrap_or_else(|| {
+            let message_count = page
+                .messages
+                .iter()
+                .take_while(|(seq, _)| *seq <= message_seq)
+                .count();
+            messages_to_items(&msgs[..message_count]).len()
+        });
+        let end = end.min(items.len());
+        if let Some(item) = items[..end]
+            .iter_mut()
+            .rev()
+            .find(|item| item.role == "assistant")
+        {
+            item.resources = resources;
+        }
+    }
     let mut inserted = 0usize;
     for (message_seq, report_json) in &page.reviews {
         let report: review::ReviewReport = serde_json::from_str(&report_json)
@@ -4826,6 +4906,7 @@ fn transcript_page_items(page: &wisp_store::SessionTranscriptPage) -> Result<Vec
                 kind: None,
                 status: None,
                 locations: None,
+                resources: Vec::new(),
             },
         );
         inserted += 1;
@@ -5013,6 +5094,31 @@ async fn read_artifact(state: State<'_, AppState>, id: String) -> Result<FileCon
         .ok_or_else(|| format!("artifact '{id}' not found"))?;
     let root = PathBuf::from(row.project_root);
     tokio::task::spawn_blocking(move || read_file_at(&root, row.path, None))
+        .await
+        .map_err(|e| format!("{e}"))?
+}
+
+/// Read the immutable artifact version captured by a message resource binding.
+/// Resource previews must never follow the artifact's mutable latest-version pointer.
+#[tauri::command]
+async fn read_artifact_version(
+    state: State<'_, AppState>,
+    version_id: String,
+) -> Result<FileContent, String> {
+    let version = state
+        .store
+        .get_artifact_version(&version_id)
+        .await
+        .map_err(|e| format!("{e}"))?
+        .ok_or_else(|| format!("artifact version '{version_id}' not found"))?;
+    let artifact = state
+        .store
+        .get_artifact_detail(&version.artifact_id)
+        .await
+        .map_err(|e| format!("{e}"))?
+        .ok_or_else(|| format!("artifact '{}' not found", version.artifact_id))?;
+    let root = PathBuf::from(artifact.project_root);
+    tokio::task::spawn_blocking(move || read_file_at(&root, version.storage_path, None))
         .await
         .map_err(|e| format!("{e}"))?
 }
@@ -5795,6 +5901,7 @@ pub fn run() {
             search_artifacts,
             search_sessions,
             read_artifact,
+            read_artifact_version,
             missing_files,
             set_viewed_session,
             upload_file,

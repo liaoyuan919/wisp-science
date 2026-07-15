@@ -1,4 +1,7 @@
-use super::{parse_role, session_display_title, RecentSessionDetail, SessionSearchResult, Store};
+use super::{
+    parse_role, session_display_title, MessageResourceLink, RecentSessionDetail,
+    SessionSearchResult, Store,
+};
 use anyhow::Result;
 use sqlx::{Row, Sqlite, Transaction};
 use wisp_llm::Message;
@@ -8,6 +11,7 @@ pub struct SessionTranscriptPage {
     pub messages: Vec<(i64, Message)>,
     pub reviews: Vec<(i64, String)>,
     pub ui_events: Vec<String>,
+    pub resources: Vec<MessageResourceLink>,
     pub next_before_seq: Option<i64>,
     pub user_offset: usize,
     pub latest_seq: i64,
@@ -20,6 +24,14 @@ pub struct SessionTranscriptPage {
 async fn delete_session_rows(tx: &mut Transaction<'_, Sqlite>, frame_id: &str) -> Result<()> {
     sqlx::query(
         "UPDATE runs SET frame_id=NULL \
+         WHERE frame_id IN (SELECT id FROM frames WHERE root_frame_id=?)",
+    )
+    .bind(frame_id)
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "DELETE FROM message_resource_links \
          WHERE frame_id IN (SELECT id FROM frames WHERE root_frame_id=?)",
     )
     .bind(frame_id)
@@ -244,6 +256,11 @@ impl Store {
 
     /// Drop persisted turns after `keep` (seq is 1-based; keep=3 retains seq 1..=3).
     pub async fn truncate_messages(&self, frame_id: &str, keep: i64) -> Result<()> {
+        sqlx::query("DELETE FROM message_resource_links WHERE frame_id=? AND message_seq>?")
+            .bind(frame_id)
+            .bind(keep)
+            .execute(&self.pool)
+            .await?;
         sqlx::query(
             "DELETE FROM session_ui_events WHERE frame_id=? AND seq > COALESCE((\
              SELECT MAX(seq) FROM session_ui_events WHERE frame_id=? \
@@ -446,11 +463,15 @@ impl Store {
             .into_iter()
             .map(|row| Ok((row.try_get("message_seq")?, row.try_get("report_json")?)))
             .collect::<Result<Vec<_>>>()?;
+        let resources = self
+            .list_message_resource_links(frame_id, start_seq, before_seq)
+            .await?;
 
         Ok(SessionTranscriptPage {
             messages,
             reviews,
             ui_events,
+            resources,
             next_before_seq,
             user_offset: user_offset as usize,
             latest_seq,
