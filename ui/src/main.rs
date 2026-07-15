@@ -625,7 +625,10 @@ fn App() -> impl IntoView {
     let composer_dragging = create_rw_signal(false);
     let composer_drag_start_y = create_rw_signal(0.0_f64);
     let composer_drag_start_h = create_rw_signal(0.0_f64);
-    let terminal_session = create_rw_signal(None::<TerminalSessionSummary>);
+    let terminal_sessions = create_rw_signal::<Vec<TerminalSessionSummary>>(vec![]);
+    let active_terminal_id = create_rw_signal(None::<String>);
+    let terminal_panel_open = create_rw_signal(false);
+    let terminal_add_menu_open = create_rw_signal(false);
     let terminal_h = create_rw_signal(320.0_f64);
     let terminal_dragging = create_rw_signal(false);
     let terminal_drag_start_y = create_rw_signal(0.0_f64);
@@ -2933,6 +2936,38 @@ fn App() -> impl IntoView {
     let host_port = create_rw_signal(String::new());
     let host_identity = create_rw_signal(String::new());
     let host_notes = create_rw_signal(String::new());
+
+    let open_terminal_for_context = Callback::new(move |context_id: String| {
+        spawn_local(async move {
+            let arg = to_value(&serde_json::json!({ "contextId": context_id })).unwrap();
+            match invoke_checked("open_terminal", arg).await {
+                Ok(value) => {
+                    match serde_wasm_bindgen::from_value::<TerminalSessionSummary>(value) {
+                        Ok(session) => {
+                            let session_id = session.id.clone();
+                            terminal_sessions.update(|sessions| {
+                                if let Some(existing) =
+                                    sessions.iter_mut().find(|item| item.id == session_id)
+                                {
+                                    *existing = session;
+                                } else {
+                                    sessions.push(session);
+                                }
+                            });
+                            active_terminal_id.set(Some(session_id));
+                            terminal_panel_open.set(true);
+                            terminal_add_menu_open.set(false);
+                        }
+                        Err(error) => show_toast(&error.to_string()),
+                    }
+                }
+                Err(error) => {
+                    let message = localize_backend(locale.get_untracked(), &js_error_text(error));
+                    show_toast(&message);
+                }
+            }
+        });
+    });
 
     // Load persisted hosts once at startup.
     {
@@ -5727,20 +5762,7 @@ fn App() -> impl IntoView {
                                                                     title=t(loc, "contexts.open_terminal")
                                                                     aria-label=t(loc, "contexts.open_terminal")
                                                                     on:click=move |_| {
-                                                                        let context_id = terminal_context_id.clone();
-                                                                        spawn_local(async move {
-                                                                            let arg = to_value(&serde_json::json!({ "contextId": context_id })).unwrap();
-                                                                            match invoke_checked("open_terminal", arg).await {
-                                                                                Ok(value) => match serde_wasm_bindgen::from_value::<TerminalSessionSummary>(value) {
-                                                                                    Ok(session) => terminal_session.set(Some(session)),
-                                                                                    Err(error) => show_toast(&error.to_string()),
-                                                                                },
-                                                                                Err(error) => {
-                                                                                    let message = localize_backend(locale.get_untracked(), &js_error_text(error));
-                                                                                    show_toast(&message);
-                                                                                }
-                                                                            }
-                                                                        });
+                                                                        open_terminal_for_context.call(terminal_context_id.clone());
                                                                     }>{compose_icon("terminal")}</button>
                                                                 <span class=status_class>{status}</span>
                                                             </div>
@@ -6056,44 +6078,118 @@ fn App() -> impl IntoView {
         }.into_view())}
         </div>
 
-        {move || terminal_session.get().map(|session| {
-            let session_id = session.id.clone();
-            let frame_src = format!("/terminal.html?session={}&embedded=1", session.id);
-            view! {
-                <section class="terminal-dock" data-testid="terminal-dock"
-                    style=move || format!("height:{}px", terminal_h.get())>
-                    <div class="terminal-dock-resize" aria-hidden="true"
-                        on:mousedown=on_terminal_resize_start></div>
-                    <header class="terminal-dock-head">
-                        <div class="terminal-dock-tab">
-                            {compose_icon("terminal")}
-                            <span class="terminal-dock-title">{session.title}</span>
+        <Show when=move || terminal_panel_open.get() && !terminal_sessions.get().is_empty()>
+            <section class="terminal-dock" data-testid="terminal-dock"
+                style=move || format!("height:{}px", terminal_h.get())>
+                <div class="terminal-dock-resize" aria-hidden="true"
+                    on:mousedown=on_terminal_resize_start></div>
+                <header class="terminal-dock-head">
+                    <div class="terminal-dock-tabs" role="tablist">
+                        <For
+                            each=move || terminal_sessions.get()
+                            key=|session| session.id.clone()
+                            let:session
+                        >
+                            {
+                                let tab_session_id = session.id.clone();
+                                let tab_active_id = session.id.clone();
+                                view! {
+                                    <button type="button" role="tab" class="terminal-dock-tab"
+                                        class:active=move || active_terminal_id.get().as_deref() == Some(tab_active_id.as_str())
+                                        aria-selected=move || active_terminal_id.get().as_deref() == Some(session.id.as_str())
+                                        title=session.title.clone()
+                                        on:click=move |_| {
+                                            active_terminal_id.set(Some(tab_session_id.clone()));
+                                            terminal_add_menu_open.set(false);
+                                        }>
+                                        {compose_icon("terminal")}
+                                        <span class="terminal-dock-title">{session.title}</span>
+                                    </button>
+                                }
+                            }
+                        </For>
+                        <div class="terminal-dock-add-wrap">
+                            <button type="button" class="terminal-dock-action icon terminal-dock-add"
+                                class:active=move || terminal_add_menu_open.get()
+                                title=move || t(locale.get(), "terminal.new")
+                                aria-label=move || t(locale.get(), "terminal.new")
+                                on:click=move |_| terminal_add_menu_open.update(|open| *open = !*open)>
+                                {compose_icon("plus")}
+                            </button>
+                            {move || terminal_add_menu_open.get().then(|| view! {
+                                <div class="terminal-dock-add-menu">
+                                    <div class="terminal-dock-add-label">{move || t(locale.get(), "terminal.choose_context")}</div>
+                                    {move || execution_contexts.get().into_iter().map(|context| {
+                                        let context_id = context.id.clone();
+                                        let label = if context.label.trim().is_empty() {
+                                            context.id.clone()
+                                        } else {
+                                            context.label.clone()
+                                        };
+                                        view! {
+                                            <button type="button" class="terminal-dock-add-item"
+                                                on:click=move |_| open_terminal_for_context.call(context_id.clone())>
+                                                {compose_icon("terminal")}
+                                                <span>{label}</span>
+                                                <small>{context.id}</small>
+                                            </button>
+                                        }
+                                    }).collect_view()}
+                                </div>
+                            })}
                         </div>
-                        <span class="terminal-dock-meta">{session.context_id}{" · "}{session.display_cwd}</span>
-                        <span class="terminal-dock-spacer"></span>
-                        <button type="button" class="terminal-dock-action danger"
-                            disabled=!session.running
-                            on:click=move |_| {
-                                let session_id = session_id.clone();
-                                spawn_local(async move {
-                                    let arg = to_value(&serde_json::json!({ "sessionId": session_id })).unwrap();
-                                    if invoke_checked("terminate_terminal", arg).await.is_ok() {
-                                        terminal_session.update(|current| {
-                                            if let Some(current) = current.as_mut() { current.running = false; }
-                                        });
-                                    }
-                                });
-                            }>{move || t(locale.get(), "terminal.terminate")}</button>
-                        <button type="button" class="terminal-dock-action icon"
-                            title=move || t(locale.get(), "terminal.close")
-                            aria-label=move || t(locale.get(), "terminal.close")
-                            on:click=move |_| terminal_session.set(None)>{compose_icon("close")}</button>
-                    </header>
-                    <iframe class="terminal-dock-frame" src=frame_src
-                        title=move || t(locale.get(), "terminal.frame_title")></iframe>
-                </section>
-            }
-        })}
+                    </div>
+                    {move || terminal_sessions.get().into_iter()
+                        .find(|session| Some(&session.id) == active_terminal_id.get().as_ref())
+                        .map(|session| view! {
+                            <span class="terminal-dock-meta">{session.context_id}{" · "}{session.display_cwd}</span>
+                        })}
+                    <span class="terminal-dock-spacer"></span>
+                    <button type="button" class="terminal-dock-action danger"
+                        disabled=move || terminal_sessions.get().into_iter()
+                            .find(|session| Some(&session.id) == active_terminal_id.get().as_ref())
+                            .is_none_or(|session| !session.running)
+                        on:click=move |_| {
+                            let Some(session_id) = active_terminal_id.get_untracked() else { return; };
+                            spawn_local(async move {
+                                let arg = to_value(&serde_json::json!({ "sessionId": session_id })).unwrap();
+                                if invoke_checked("terminate_terminal", arg).await.is_ok() {
+                                    terminal_sessions.update(|sessions| {
+                                        if let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) {
+                                            session.running = false;
+                                        }
+                                    });
+                                }
+                            });
+                        }>{move || t(locale.get(), "terminal.terminate")}</button>
+                    <button type="button" class="terminal-dock-action icon"
+                        title=move || t(locale.get(), "terminal.close")
+                        aria-label=move || t(locale.get(), "terminal.close")
+                        on:click=move |_| {
+                            terminal_add_menu_open.set(false);
+                            terminal_panel_open.set(false);
+                        }>{compose_icon("close")}</button>
+                </header>
+                <div class="terminal-dock-frames">
+                    <For
+                        each=move || terminal_sessions.get()
+                        key=|session| session.id.clone()
+                        let:session
+                    >
+                        {
+                            let frame_session_id = session.id.clone();
+                            let frame_src = format!("/terminal.html?session={}&embedded=1", session.id);
+                            view! {
+                                <iframe class="terminal-dock-frame"
+                                    class:active=move || active_terminal_id.get().as_deref() == Some(frame_session_id.as_str())
+                                    src=frame_src
+                                    title=move || t(locale.get(), "terminal.frame_title")></iframe>
+                            }
+                        }
+                    </For>
+                </div>
+            </section>
+        </Show>
         </div>
 
         {move || dragging.get().then(|| view! {
