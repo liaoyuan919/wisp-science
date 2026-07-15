@@ -833,15 +833,27 @@ mod md_catalog_tests {
     #[test]
     fn renders_dollar_math_as_math_spans() {
         let html = md_to_html("质能方程 $E = mc^2$ 成立。\n\n$$\\int_0^1 x^2 dx$$\n");
-        assert!(html.contains(r#"<span class="math math-inline">"#), "{html}");
-        assert!(html.contains(r#"<span class="math math-display">"#), "{html}");
+        assert!(
+            html.contains(r#"<span class="math math-inline">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="math math-display">"#),
+            "{html}"
+        );
     }
 
     #[test]
     fn converts_gpt_style_math_delimiters() {
         let html = md_to_html("Inline \\(a_i^2\\) and display:\n\n\\[\nE = mc^2\n\\]\n");
-        assert!(html.contains(r#"<span class="math math-inline">a_i^2</span>"#), "{html}");
-        assert!(html.contains(r#"<span class="math math-display">E = mc^2</span>"#), "{html}");
+        assert!(
+            html.contains(r#"<span class="math math-inline">a_i^2</span>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="math math-display">E = mc^2</span>"#),
+            "{html}"
+        );
     }
 
     #[test]

@@ -297,10 +297,7 @@ fn terminal_tab_id(session_id: &str) -> String {
 }
 
 #[component]
-fn TerminalHost(
-    session_id: String,
-    active_terminal_id: RwSignal<Option<String>>,
-) -> impl IntoView {
+fn TerminalHost(session_id: String, active_terminal_id: RwSignal<Option<String>>) -> impl IntoView {
     let element_id = terminal_element_id(&session_id);
     let labelled_by = terminal_tab_id(&session_id);
     let host_ref = create_node_ref::<html::Div>();
@@ -385,8 +382,7 @@ fn App() -> impl IntoView {
     let pet_activity = create_rw_signal((String::from("idle"), 0_u64));
     let pending_turns = create_rw_signal::<HashMap<String, usize>>(HashMap::new());
     let transcripts = create_rw_signal::<HashMap<String, Vec<ChatItem>>>(HashMap::new());
-    let transcript_pages =
-        create_rw_signal::<HashMap<String, TranscriptPageState>>(HashMap::new());
+    let transcript_pages = create_rw_signal::<HashMap<String, TranscriptPageState>>(HashMap::new());
     let busy = create_rw_signal(false);
     // Interrupting a running turn (especially a language runtime) is not instant, so
     // keep track of the session whose Stop click is waiting for the backend.
@@ -2013,14 +2009,10 @@ fn App() -> impl IntoView {
                                 to_value(&serde_json::json!({ "id": id })).unwrap(),
                             )
                             .await;
-                            if let Ok(page) =
-                                serde_wasm_bindgen::from_value::<LoadedSessionPage>(v)
+                            if let Ok(page) = serde_wasm_bindgen::from_value::<LoadedSessionPage>(v)
                             {
-                                let chats: Vec<ChatItem> = page
-                                    .items
-                                    .into_iter()
-                                    .map(LoadedItem::into_chat)
-                                    .collect();
+                                let chats: Vec<ChatItem> =
+                                    page.items.into_iter().map(LoadedItem::into_chat).collect();
                                 transcript_pages.update(|pages| {
                                     pages.insert(
                                         id.clone(),
@@ -2735,11 +2727,8 @@ fn App() -> impl IntoView {
             )
             .await;
             if let Ok(page) = serde_wasm_bindgen::from_value::<LoadedSessionPage>(v) {
-                let chats: Vec<ChatItem> = page
-                    .items
-                    .into_iter()
-                    .map(LoadedItem::into_chat)
-                    .collect();
+                let chats: Vec<ChatItem> =
+                    page.items.into_iter().map(LoadedItem::into_chat).collect();
                 transcript_pages.update(|pages| {
                     pages.insert(
                         id.clone(),
@@ -2773,11 +2762,9 @@ fn App() -> impl IntoView {
             return;
         }
         let Some(cursor) = transcript_pages.with_untracked(|pages| {
-            pages.get(&id).and_then(|page| {
-                (!page.loading)
-                    .then_some(page.next_before_seq)
-                    .flatten()
-            })
+            pages
+                .get(&id)
+                .and_then(|page| (!page.loading).then_some(page.next_before_seq).flatten())
         }) else {
             return;
         };
@@ -2837,8 +2824,11 @@ fn App() -> impl IntoView {
         let Some(id) = active_session.get_untracked() else {
             return;
         };
-        let requested = transcript_pages
-            .with_untracked(|pages| pages.get(&id).map_or(usize::MAX, |page| page.window_user_start));
+        let requested = transcript_pages.with_untracked(|pages| {
+            pages
+                .get(&id)
+                .map_or(usize::MAX, |page| page.window_user_start)
+        });
         let (_, start, _) = items.with_untracked(|rows| {
             transcript_render_window(rows, requested, TRANSCRIPT_RENDER_TURNS)
         });
@@ -2852,16 +2842,22 @@ fn App() -> impl IntoView {
         let Some(id) = active_session.get_untracked() else {
             return;
         };
-        let requested = transcript_pages
-            .with_untracked(|pages| pages.get(&id).map_or(usize::MAX, |page| page.window_user_start));
+        let requested = transcript_pages.with_untracked(|pages| {
+            pages
+                .get(&id)
+                .map_or(usize::MAX, |page| page.window_user_start)
+        });
         let (_, start, total) = items.with_untracked(|rows| {
             transcript_render_window(rows, requested, TRANSCRIPT_RENDER_TURNS)
         });
         let latest_start = total.saturating_sub(TRANSCRIPT_RENDER_TURNS);
         let next = start.saturating_add(TRANSCRIPT_WINDOW_STEP);
         transcript_pages.update(|pages| {
-            pages.entry(id).or_default().window_user_start =
-                if next >= latest_start { usize::MAX } else { next };
+            pages.entry(id).or_default().window_user_start = if next >= latest_start {
+                usize::MAX
+            } else {
+                next
+            };
         });
     });
 

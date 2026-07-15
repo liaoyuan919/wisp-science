@@ -186,7 +186,10 @@ async fn test_full_lifecycle() -> Result<(), String> {
         .await
         .err()
         .ok_or("unknown mode unexpectedly accepted")?;
-    check(bad_mode.to_string().contains("unknown mode"), "set mode rejects unknown id")?;
+    check(
+        bad_mode.to_string().contains("unknown mode"),
+        "set mode rejects unknown id",
+    )?;
     handle
         .resume_session(
             session_id.clone(),
@@ -541,9 +544,7 @@ async fn serve_fake(scenario: &str) -> acp::Result<()> {
                 // Reject unknown ids so the client-side round-trip actually
                 // asserts the selected mode reached the agent intact.
                 match request.mode_id.to_string().as_str() {
-                    "agent" | "full-access" => {
-                        responder.respond(SetSessionModeResponse::new())
-                    }
+                    "agent" | "full-access" => responder.respond(SetSessionModeResponse::new()),
                     other => responder.respond_with_error(acp::util::internal_error(format!(
                         "unknown mode {other}"
                     ))),

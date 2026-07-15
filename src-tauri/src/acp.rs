@@ -271,7 +271,9 @@ async fn acp_side_chat_turn(
         .new_session(cwd, vec![])
         .await
         .map_err(|error| error.to_string())?;
-    let content = vec![ContentBlock::Text(TextContent::new(prompt_text.to_string()))];
+    let content = vec![ContentBlock::Text(TextContent::new(
+        prompt_text.to_string(),
+    ))];
     let prompt = handle.prompt(start.session_id, content);
     tokio::pin!(prompt);
     let mut answer = String::new();
