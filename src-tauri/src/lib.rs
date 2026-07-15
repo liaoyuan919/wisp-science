@@ -3589,6 +3589,7 @@ async fn side_chat(
     window: tauri::WebviewWindow,
     session_id: Option<String>,
     question: String,
+    acp_agent_id: Option<String>,
 ) -> Result<String, String> {
     let question = question.trim();
     if question.is_empty() {
@@ -3618,6 +3619,13 @@ async fn side_chat(
         None => Vec::new(),
     };
     let transcript = review::serialize_transcript(&msgs);
+    let prompt = side_chat_prompt(&transcript, question);
+    // ACP side chat: one-shot, read-only answer from the selected ACP Agent,
+    // running in the active project root. Never touches the main thread.
+    if let Some(agent_id) = acp_agent_id.as_deref().filter(|id| !id.is_empty()) {
+        let cwd = state.active(window.label()).root;
+        return acp::acp_side_chat_once(&state, &cwd, agent_id, &prompt).await;
+    }
     let (provider, api_url, model, api_key) = load_settings(&state.store).await;
     let (max_tokens, reasoning_effort) = models::active_llm_advanced(&state.store).await;
     let cfg = build_provider_config(
@@ -3629,7 +3637,6 @@ async fn side_chat(
         &reasoning_effort,
     )?;
     let llm = wisp_llm::build(cfg);
-    let prompt = side_chat_prompt(&transcript, question);
     let completion = llm
         .complete(
             &[
@@ -5663,6 +5670,7 @@ pub fn run() {
             acp::authenticate_acp_agent,
             acp::respond_acp_permission,
             acp::set_acp_session_config,
+            acp::set_acp_session_mode,
             review_session,
             side_chat,
             context_probe::probe_execution_context,

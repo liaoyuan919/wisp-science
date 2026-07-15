@@ -1660,6 +1660,48 @@ pub(super) fn acp_agent_selection_after_fetch(
     }
 }
 
+/// Fold a `CurrentModeUpdate` payload into the stored SessionModeState.
+///
+/// The update only carries `currentModeId`, so when we already hold the initial
+/// `SessionModeState` we keep its `availableModes` (which the mode picker needs)
+/// and only swap the current id. With no prior object, the payload stands alone.
+pub(super) fn merge_current_mode(
+    existing: Option<&serde_json::Value>,
+    payload: serde_json::Value,
+) -> serde_json::Value {
+    if let (Some(serde_json::Value::Object(existing)), Some(id)) =
+        (existing, payload.get("currentModeId"))
+    {
+        let mut merged = existing.clone();
+        merged.insert("currentModeId".into(), id.clone());
+        return serde_json::Value::Object(merged);
+    }
+    payload
+}
+
+#[cfg(test)]
+mod merge_current_mode_tests {
+    use super::merge_current_mode;
+    use serde_json::json;
+
+    #[test]
+    fn preserves_available_modes_on_update() {
+        let existing = json!({
+            "currentModeId": "full-access",
+            "availableModes": [{"id": "agent", "name": "Agent"}, {"id": "full-access", "name": "Full Access"}],
+        });
+        let merged = merge_current_mode(Some(&existing), json!({ "currentModeId": "agent" }));
+        assert_eq!(merged["currentModeId"], json!("agent"));
+        assert_eq!(merged["availableModes"], existing["availableModes"]);
+    }
+
+    #[test]
+    fn falls_back_to_payload_without_prior_state() {
+        let merged = merge_current_mode(None, json!({ "currentModeId": "agent" }));
+        assert_eq!(merged, json!({ "currentModeId": "agent" }));
+    }
+}
+
 #[cfg(test)]
 mod acp_agent_selection_tests {
     use super::acp_agent_selection_after_fetch;

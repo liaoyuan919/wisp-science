@@ -13,8 +13,8 @@ use wisp_acp::{
     acp::schema::v1::{
         ContentBlock, McpServer, McpServerStdio, ResourceLink, SessionId, TextContent,
     },
-    AcpAgentProfile as LaunchProfile, AcpPermissionRequest, AcpSessionEvent, AcpSessionHandle,
-    AcpStopReason, AcpUpdateKind,
+    AcpAgentProfile as LaunchProfile, AcpPermissionKind, AcpPermissionRequest, AcpSessionEvent,
+    AcpSessionHandle, AcpStopReason, AcpUpdateKind,
 };
 use wisp_llm::Message;
 
@@ -237,6 +237,86 @@ pub(crate) async fn authenticate_acp_agent(
         .map_err(|error| error.to_string());
     handle.shutdown(Duration::from_secs(2)).await;
     result
+}
+
+/// One-shot, read-only ACP answer for the side chat: launch a throwaway
+/// session, prompt once with the transcript+question, collect the reply, and
+/// shut the agent down. Tool-use requests are auto-rejected so the side chat
+/// never mutates the workspace or blocks waiting on approval.
+pub(crate) async fn acp_side_chat_once(
+    state: &AppState,
+    cwd: &Path,
+    profile_id: &str,
+    prompt_text: &str,
+) -> Result<String, String> {
+    let profile = profiles(&state.store)
+        .await
+        .into_iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| "Unknown ACP Agent.".to_string())?;
+    let handle = AcpSessionHandle::launch(launch_profile(&profile))
+        .await
+        .map_err(|error| error.to_string())?;
+    let result = acp_side_chat_turn(&handle, cwd, prompt_text).await;
+    handle.shutdown(Duration::from_secs(2)).await;
+    result
+}
+
+async fn acp_side_chat_turn(
+    handle: &AcpSessionHandle,
+    cwd: &Path,
+    prompt_text: &str,
+) -> Result<String, String> {
+    let start = handle
+        .new_session(cwd, vec![])
+        .await
+        .map_err(|error| error.to_string())?;
+    let content = vec![ContentBlock::Text(TextContent::new(prompt_text.to_string()))];
+    let prompt = handle.prompt(start.session_id, content);
+    tokio::pin!(prompt);
+    let mut answer = String::new();
+    loop {
+        tokio::select! {
+            result = &mut prompt => {
+                result.map_err(|error| error.to_string())?;
+                break;
+            }
+            event = handle.next_event() => match event {
+                Some(AcpSessionEvent::Update { kind, payload, .. }) => {
+                    if kind == AcpUpdateKind::AgentMessage {
+                        if let Some(text) = text_from_payload(&payload) {
+                            answer.push_str(text);
+                        }
+                    }
+                }
+                Some(AcpSessionEvent::Permission(request)) => {
+                    // Read-only side chat: reject the tool without cancelling the
+                    // turn when the agent offers a reject option; else cancel.
+                    let reject = request
+                        .options
+                        .iter()
+                        .find(|option| {
+                            matches!(
+                                option.kind,
+                                AcpPermissionKind::RejectOnce | AcpPermissionKind::RejectAlways
+                            )
+                        })
+                        .map(|option| option.id.clone());
+                    let _ = handle.respond_permission(request.request_id, reject);
+                }
+                Some(AcpSessionEvent::Exited { error }) => {
+                    return Err(error.unwrap_or_else(|| "ACP Agent exited.".into()));
+                }
+                None => return Err("ACP Agent event stream closed.".into()),
+            }
+        }
+    }
+    let answer = answer.trim();
+    if answer.is_empty() {
+        Err("The ACP Agent returned no answer.".into())
+    } else {
+        Ok(answer.to_string())
+    }
 }
 
 fn mcp_server(
@@ -827,6 +907,43 @@ pub(crate) async fn set_acp_session_config(
         }),
     );
     Ok(value)
+}
+
+/// Set the ACP session mode (e.g. Codex approval mode: read-only / agent /
+/// full-access). `session/set_mode` returns no state, so the caller applies the
+/// selected `mode_id` optimistically; the agent will confirm with a
+/// `CurrentModeUpdate` notification during the next turn if it disagrees.
+#[tauri::command]
+pub(crate) async fn set_acp_session_mode(
+    state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
+    frame_id: String,
+    mode_id: String,
+) -> Result<String, String> {
+    let project = state.active(window.label());
+    if state
+        .store
+        .frame_project_id(&frame_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .as_deref()
+        != Some(project.id.as_str())
+    {
+        return Err("Session does not belong to the active project.".into());
+    }
+    let runtime = state
+        .acp_sessions
+        .lock()
+        .await
+        .get(&frame_id)
+        .cloned()
+        .ok_or_else(|| "ACP session is not active.".to_string())?;
+    runtime
+        .handle
+        .set_mode(runtime.session_id.clone(), mode_id.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(mode_id)
 }
 
 pub(crate) async fn cancel_frame(state: &AppState, frame_id: &str) {

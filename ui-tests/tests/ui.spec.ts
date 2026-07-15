@@ -188,13 +188,20 @@ test("ACP turn maps config, overlapping tools, plan, usage, and exact permission
   await expect(page.getByTestId("acp-tool")).toHaveCount(2);
   await expect(page.getByText("Inspect")).toBeVisible();
   const config = page.getByTestId("acp-session-config");
-  await expect(config).toContainText("code");
+  await expect(config).toContainText("Agent");
   await expect(config).toContainText("Smart");
   await config.getByRole("button", { name: "Model" }).click();
   await page.getByRole("option", { name: "Fast" }).click();
   await expect.poll(() => lastInvokeArgs(page, "set_acp_session_config")).toMatchObject({
     configId: "model", value: { value: "fast" },
   });
+  // Session mode is now a selector (#247): switching invokes set_acp_session_mode.
+  await config.getByRole("button", { name: "Session mode" }).click();
+  await page.getByRole("option", { name: "Full Access" }).click();
+  await expect.poll(() => lastInvokeArgs(page, "set_acp_session_mode")).toMatchObject({
+    modeId: "full-access",
+  });
+  await expect(config).toContainText("Full Access");
 
   const permission = page.getByTestId("acp-permission-card");
   await expect(permission).toBeVisible();
@@ -726,6 +733,16 @@ test("side chat answers in a temporary side panel and can switch model", async (
   await panel.getByRole("button", { name: /deepseek-v4-pro/ }).click();
   await panel.getByRole("button", { name: "opus-4.8" }).click();
   await expect(panel.getByRole("button", { name: /opus-4.8/ })).toBeVisible();
+
+  // Side chat can route through an ACP Agent (#250).
+  await panel.getByRole("button", { name: /opus-4.8/ }).click();
+  await panel.getByRole("button", { name: "Test ACP Agent" }).click();
+  await expect(panel.getByRole("button", { name: /Test ACP Agent/ })).toBeVisible();
+  await panel.getByPlaceholder("Follow up…").fill("acp side question");
+  await panel.getByRole("button", { name: "Send" }).click();
+  await expect.poll(() => lastInvokeArgs(page, "side_chat")).toMatchObject({
+    question: "acp side question", acpAgentId: "acp-test",
+  });
 });
 
 test("branch in new session starts a new frame from the current session", async ({ page }) => {

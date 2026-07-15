@@ -19,8 +19,8 @@ use agent_client_protocol::{
             PermissionOptionId, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
             RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome,
             SessionConfigOption, SessionConfigOptionValue, SessionId, SessionModeState,
-            SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, StopReason,
-            TextContent,
+            SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+            SetSessionModeRequest, StopReason, TextContent,
         },
         ProtocolVersion,
     },
@@ -205,6 +205,7 @@ enum Command {
         SessionConfigOptionValue,
         Reply<Vec<SessionConfigOption>>,
     ),
+    SetMode(SessionId, String, Reply<()>),
     Close(SessionId, Reply<()>),
     Shutdown,
 }
@@ -345,6 +346,15 @@ impl AcpSessionHandle {
         value: SessionConfigOptionValue,
     ) -> Result<Vec<SessionConfigOption>, AcpError> {
         self.request(|reply| Command::SetConfig(session_id, config_id.into(), value, reply))
+            .await
+    }
+
+    pub async fn set_mode(
+        &self,
+        session_id: SessionId,
+        mode_id: impl Into<String>,
+    ) -> Result<(), AcpError> {
+        self.request(|reply| Command::SetMode(session_id, mode_id.into(), reply))
             .await
     }
 
@@ -650,6 +660,17 @@ async fn run_actor(
                                 .block_task()
                                 .await
                                 .map(|response| response.config_options),
+                        );
+                    }
+                    Command::SetMode(session_id, mode_id, reply) => {
+                        let request = SetSessionModeRequest::new(session_id, mode_id);
+                        answer(
+                            reply,
+                            connection
+                                .send_request(request)
+                                .block_task()
+                                .await
+                                .map(|_| ()),
                         );
                     }
                     Command::Close(session_id, reply) => {
