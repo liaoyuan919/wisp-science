@@ -116,6 +116,9 @@ the previous files when it did not.
   larger than 64 MiB remain local and are reported after sync. Large scientific
   datasets should be represented as remote references/checksummed assets rather
   than copied through progress sync.
+- A workspace scan accepts at most 100,000 entries, and one push accepts at most
+  128 MiB of changed workspace blobs. The filtered SQLite metadata snapshot is
+  limited to 192 MiB. Split or reference larger datasets instead of syncing them.
 - Empty directories are not materialized unless a synchronized file needs them.
 - Both devices should run the same Wisp version for protocol v1 snapshots.
 - Protocol v1 does not garbage-collect old remote revisions or blobs. Deleting

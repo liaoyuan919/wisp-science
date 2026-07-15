@@ -174,53 +174,41 @@ fn same_path(left: &Path, right: &Path) -> bool {
     }
 }
 
+const MAX_WORKSPACE_ENTRIES: usize = 100_000;
+
 pub(super) fn collect_workspace(
     root: &Path,
     excluded: &Path,
 ) -> Result<CollectedWorkspace, String> {
-    fn visit(
-        root: &Path,
+    collect_workspace_capped(root, excluded, MAX_WORKSPACE_ENTRIES)
+}
+
+fn collect_workspace_capped(
+    root: &Path,
+    excluded: &Path,
+    max_entries: usize,
+) -> Result<CollectedWorkspace, String> {
+    fn children(
         directory: &Path,
-        excluded: &Path,
-        collected: &mut CollectedWorkspace,
-    ) -> Result<(), String> {
-        let mut children = std::fs::read_dir(directory)
+        visited: &mut usize,
+        max_entries: usize,
+    ) -> Result<Vec<std::fs::DirEntry>, String> {
+        let mut children = Vec::new();
+        for child in std::fs::read_dir(directory)
             .map_err(|error| format!("cannot read {}: {error}", directory.display()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("cannot read {}: {error}", directory.display()))?;
-        children.sort_by_key(|entry| entry.file_name());
-        for child in children {
-            let path = child.path();
-            if same_path(&path, excluded) {
-                continue;
+        {
+            if *visited >= max_entries {
+                return Err(format!(
+                    "workspace contains more than {max_entries} entries"
+                ));
             }
-            let metadata = std::fs::symlink_metadata(&path)
-                .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
-            let relative = portable_relative(root, &path)?;
-            if metadata.file_type().is_symlink() || (!metadata.is_file() && !metadata.is_dir()) {
-                collected.skipped_paths.push(relative);
-                continue;
-            }
-            if metadata.is_dir() {
-                collected.entries.push(WorkspaceEntry {
-                    source: path.clone(),
-                    archive_path: relative,
-                    kind: WorkspaceEntryKind::Directory,
-                    size: 0,
-                    mode: file_mode(&metadata),
-                });
-                visit(root, &path, excluded, collected)?;
-            } else {
-                collected.entries.push(WorkspaceEntry {
-                    source: path,
-                    archive_path: relative,
-                    kind: WorkspaceEntryKind::File,
-                    size: metadata.len(),
-                    mode: file_mode(&metadata),
-                });
-            }
+            *visited += 1;
+            children.push(
+                child.map_err(|error| format!("cannot read {}: {error}", directory.display()))?,
+            );
         }
-        Ok(())
+        children.sort_by_key(|entry| entry.file_name());
+        Ok(children)
     }
 
     if !root.is_dir() {
@@ -230,7 +218,42 @@ pub(super) fn collect_workspace(
         ));
     }
     let mut collected = CollectedWorkspace::default();
-    visit(root, root, excluded, &mut collected)?;
+    let mut visited = 0usize;
+    let mut pending = children(root, &mut visited, max_entries)?;
+    pending.reverse();
+    while let Some(child) = pending.pop() {
+        let path = child.path();
+        if same_path(&path, excluded) {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+        let relative = portable_relative(root, &path)?;
+        if metadata.file_type().is_symlink() || (!metadata.is_file() && !metadata.is_dir()) {
+            collected.skipped_paths.push(relative);
+            continue;
+        }
+        if metadata.is_dir() {
+            collected.entries.push(WorkspaceEntry {
+                source: path.clone(),
+                archive_path: relative,
+                kind: WorkspaceEntryKind::Directory,
+                size: 0,
+                mode: file_mode(&metadata),
+            });
+            let mut nested = children(&path, &mut visited, max_entries)?;
+            nested.reverse();
+            pending.extend(nested);
+        } else {
+            collected.entries.push(WorkspaceEntry {
+                source: path,
+                archive_path: relative,
+                kind: WorkspaceEntryKind::File,
+                size: metadata.len(),
+                mode: file_mode(&metadata),
+            });
+        }
+    }
     Ok(collected)
 }
 
@@ -722,6 +745,23 @@ mod tests {
             std::fs::read(extracted_database).unwrap(),
             b"sqlite-placeholder"
         );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn workspace_collection_stops_at_the_entry_limit() {
+        let base =
+            std::env::temp_dir().join(format!("wisp_project_entry_limit_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        for name in ["a", "b", "c"] {
+            std::fs::write(base.join(name), b"x").unwrap();
+        }
+
+        let error = match collect_workspace_capped(&base, &base.join("excluded"), 2) {
+            Ok(_) => panic!("workspace entry limit was not enforced"),
+            Err(error) => error,
+        };
+        assert!(error.contains("more than 2 entries"));
         let _ = std::fs::remove_dir_all(base);
     }
 

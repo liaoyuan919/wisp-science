@@ -5,7 +5,13 @@ use crate::tool::{arg_str, arg_str_opt, Tool};
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::json;
+use std::io::Read;
 use wisp_llm::ToolSchema;
+
+const MAX_RESULTS: usize = 500;
+const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+const TRUNCATED: &str = "... results truncated";
+const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 pub struct GrepTool;
 
@@ -43,7 +49,9 @@ impl Tool for GrepTool {
         let base = arg_str_opt(args, "path")
             .unwrap_or_else(|| env.project_root().to_string_lossy().to_string());
         let mut hits: Vec<String> = vec![];
-        for entry in walkdir::WalkDir::new(&base)
+        let mut hit_bytes = 0;
+        let mut truncated = false;
+        'walk: for entry in walkdir::WalkDir::new(&base)
             .into_iter()
             .filter_entry(|e| {
                 let name = e.file_name().to_string_lossy();
@@ -56,30 +64,90 @@ impl Tool for GrepTool {
             }
             // ponytail: flat 10MB skip like code-search tools; no override knob
             // until someone actually greps huge files.
-            if entry.metadata().is_ok_and(|m| m.len() > 10 * 1024 * 1024) {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
                 continue;
             }
             let path = entry.path();
-            let Ok(text) = std::fs::read_to_string(path) else {
+            let mut bytes = Vec::with_capacity(metadata.len() as usize);
+            let Ok(_) = std::fs::File::open(path)
+                .and_then(|file| file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes))
+            else {
+                continue;
+            };
+            if bytes.len() as u64 > MAX_FILE_BYTES {
+                truncated = true;
+                break;
+            }
+            let Ok(text) = String::from_utf8(bytes) else {
                 continue;
             };
             for (i, line) in text.lines().enumerate() {
                 if re.is_match(line) {
-                    hits.push(format!("{}:{}:{}", path.display(), i + 1, line));
-                    if hits.len() >= 500 {
-                        break;
+                    let prefix = format!("{}:{}:", path.display(), i + 1);
+                    if hits.len() >= MAX_RESULTS
+                        || hit_bytes + prefix.len() + line.len() + 1
+                            > MAX_OUTPUT_BYTES - TRUNCATED.len() - 1
+                    {
+                        truncated = true;
+                        break 'walk;
                     }
+                    hit_bytes += prefix.len() + line.len() + 1;
+                    hits.push(format!("{prefix}{line}"));
                 }
             }
-            if hits.len() >= 500 {
-                break;
-            }
         }
-        let out = if hits.is_empty() {
+        let mut out = if hits.is_empty() {
             "none".to_string()
         } else {
             hits.join("\n")
         };
+        if truncated {
+            if out != "none" {
+                out.push('\n');
+            } else {
+                out.clear();
+            }
+            out.push_str(TRUNCATED);
+        }
         ToolResult::ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::env::ToolEvent;
+    use std::path::{Path, PathBuf};
+
+    struct TestEnv(PathBuf);
+
+    #[async_trait::async_trait]
+    impl ToolEnv for TestEnv {
+        fn project_root(&self) -> &Path {
+            &self.0
+        }
+        async fn confirm(&self, _message: &str) -> bool {
+            true
+        }
+        async fn emit(&self, _event: ToolEvent) {}
+    }
+
+    #[tokio::test]
+    async fn caps_a_matching_line_by_total_output_bytes() {
+        let tmp = std::env::temp_dir().join(format!("wisp_grep_cap_{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("long.txt"), "x".repeat(MAX_OUTPUT_BYTES * 2)).unwrap();
+
+        let result = GrepTool
+            .run(&json!({ "pat": "x" }), &TestEnv(tmp.clone()))
+            .await;
+        assert!(result.success);
+        assert!(result.content.contains(TRUNCATED));
+        assert!(result.content.len() <= MAX_OUTPUT_BYTES);
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

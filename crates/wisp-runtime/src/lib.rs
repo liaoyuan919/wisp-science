@@ -9,7 +9,7 @@ pub use env::{
     bundled_mock_mcp_path, bundled_r_worker_path, bundled_worker_path, find_rscript,
     resolve_bundled_script, PythonEnv,
 };
-pub use kernel::{KernelClient, KernelReady, KernelResp, PROTOCOL_VERSION};
+pub use kernel::{KernelClient, KernelReady, KernelResp, MAX_CODE_BYTES, PROTOCOL_VERSION};
 pub use manager::{
     LaunchedRuntime, RuntimeEvent, RuntimeExecution, RuntimeInfo, RuntimeKernel, RuntimeKey,
     RuntimeLanguage, RuntimeLauncher, RuntimeManager, RuntimeMetadata, RuntimeObject,

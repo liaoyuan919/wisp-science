@@ -31,17 +31,19 @@ pub fn encrypt_blob(key: &[u8; PROJECT_KEY_BYTES], plaintext: &[u8]) -> Result<V
     SystemRandom::new()
         .fill(&mut nonce_bytes)
         .map_err(|_| anyhow::anyhow!("could not generate an encryption nonce"))?;
-    let mut sealed = plaintext.to_vec();
-    key.seal_in_place_append_tag(
-        Nonce::assume_unique_for_key(nonce_bytes),
-        Aad::empty(),
-        &mut sealed,
-    )
-    .map_err(|_| anyhow::anyhow!("could not encrypt sync data"))?;
-    let mut output = Vec::with_capacity(ENCRYPTED_MAGIC.len() + NONCE_BYTES + sealed.len());
+    let header = ENCRYPTED_MAGIC.len() + NONCE_BYTES;
+    let mut output = Vec::with_capacity(header + plaintext.len() + CHACHA20_POLY1305.tag_len());
     output.extend_from_slice(ENCRYPTED_MAGIC);
     output.extend_from_slice(&nonce_bytes);
-    output.extend_from_slice(&sealed);
+    output.extend_from_slice(plaintext);
+    let tag = key
+        .seal_in_place_separate_tag(
+            Nonce::assume_unique_for_key(nonce_bytes),
+            Aad::empty(),
+            &mut output[header..],
+        )
+        .map_err(|_| anyhow::anyhow!("could not encrypt sync data"))?;
+    output.extend_from_slice(tag.as_ref());
     Ok(output)
 }
 
@@ -59,14 +61,16 @@ pub fn decrypt_blob(key: &[u8; PROJECT_KEY_BYTES], encrypted: &[u8]) -> Result<V
         .map_err(|_| anyhow::anyhow!("invalid project sync key"))?;
     let key = LessSafeKey::new(unbound);
     let mut plaintext = encrypted[header..].to_vec();
-    let opened = key
+    let opened_len = key
         .open_in_place(
             Nonce::assume_unique_for_key(nonce),
             Aad::empty(),
             &mut plaintext,
         )
-        .map_err(|_| anyhow::anyhow!("sync blob authentication failed"))?;
-    Ok(opened.to_vec())
+        .map_err(|_| anyhow::anyhow!("sync blob authentication failed"))?
+        .len();
+    plaintext.truncate(opened_len);
+    Ok(plaintext)
 }
 
 fn revision_auth_bytes(revision: &SyncRevision) -> Result<Vec<u8>> {

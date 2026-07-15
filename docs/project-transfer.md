@@ -37,7 +37,8 @@ Imported jobs that were still recorded as active are marked `lost` and are not
 resumed on the destination computer. A project keeps its stable project ID, so
 importing the same archive twice on one device is rejected rather than merging
 histories. Symbolic links and special filesystem entries are listed in the
-archive manifest and are not followed.
+archive manifest and are not followed. Export rejects workspaces with more than
+100,000 filesystem entries rather than collecting an unbounded archive manifest.
 
 For repeated device switching, use [Manual project sync](project-sync.md). It
 uses the same portable project snapshot rules while transferring only changed

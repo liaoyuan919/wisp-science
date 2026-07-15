@@ -11,6 +11,7 @@ use tokio::{
 };
 
 pub const PROTOCOL_VERSION: u32 = 1;
+pub const MAX_CODE_BYTES: usize = 1024 * 1024;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Default)]
@@ -172,6 +173,9 @@ impl KernelClient {
         code: &str,
         output: &RuntimeOutput,
     ) -> Result<KernelResp> {
+        if code.len() > MAX_CODE_BYTES {
+            bail!("runtime code exceeds {MAX_CODE_BYTES} byte limit");
+        }
         if let Some(status) = self.child.try_wait()? {
             bail!("kernel worker exited before execution ({status})");
         }

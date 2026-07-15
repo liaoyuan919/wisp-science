@@ -5,8 +5,25 @@ use crate::env::{ToolEnv, ToolEvent, ToolResult};
 use crate::tool::{arg_bool_opt, arg_str, Tool};
 use async_trait::async_trait;
 use serde_json::json;
-use similar::TextDiff;
+use std::io::Read;
 use wisp_llm::ToolSchema;
+
+const MAX_EDIT_BYTES: u64 = 10 * 1024 * 1024;
+
+fn replaced_len(text: &str, old: &str, new: &str, all: bool) -> Option<usize> {
+    let count = if all {
+        if old.is_empty() {
+            text.chars().count().checked_add(1)?
+        } else {
+            text.matches(old).count()
+        }
+    } else {
+        1
+    };
+    let removed = old.len().checked_mul(count)?;
+    let added = new.len().checked_mul(count)?;
+    text.len().checked_sub(removed)?.checked_add(added)
+}
 
 pub struct EditTool;
 
@@ -18,7 +35,7 @@ impl Tool for EditTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema::new(
             "edit",
-            "Edit a file by replacing an exact string with a new string. The `old` string must be unique unless `all` is true.",
+            "Edit a text file up to 10 MiB by replacing an exact string. The result must remain within 10 MiB, and `old` must be unique unless `all` is true.",
             json!({
                 "type": "object",
                 "properties": {
@@ -43,16 +60,9 @@ impl Tool for EditTool {
         ) else {
             return;
         };
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        if std::fs::metadata(&path).is_ok_and(|m| !m.is_file() || m.len() > MAX_EDIT_BYTES) {
             return;
-        };
-        let preview_new = text.replacen(&old, &new, 1);
-        let diff = TextDiff::from_lines(&text, &preview_new)
-            .unified_diff()
-            .context_radius(3)
-            .header(&format!("a/{path}"), &format!("b/{path}"))
-            .to_string();
-        let _ = diff.lines().take(200).count(); // cap preview cost
+        }
         env.emit(ToolEvent::Diff { path, old, new }).await;
     }
 
@@ -69,16 +79,40 @@ impl Tool for EditTool {
             Ok(n) => n,
             Err(e) => return ToolResult::fail(e),
         };
+        if old.len() as u64 > MAX_EDIT_BYTES || new.len() as u64 > MAX_EDIT_BYTES {
+            return ToolResult::fail(format!(
+                "edit {path} error: replacement text exceeds {MAX_EDIT_BYTES} byte limit"
+            ));
+        }
         let all = arg_bool_opt(args, "all").unwrap_or(false);
 
         let real = match crate::safety::validate_file_path(env.project_root(), &path) {
             Ok(p) => p,
             Err(e) => return ToolResult::fail(format!("edit {path} error: {e}")),
         };
-        let text = match std::fs::read_to_string(&real) {
-            Ok(t) => t,
+        let metadata = match std::fs::metadata(&real) {
+            Ok(m) if m.is_file() => m,
+            Ok(_) => return ToolResult::fail(format!("edit {path} error: not a regular file")),
             Err(e) => return ToolResult::fail(format!("edit {path} error: {e}")),
         };
+        if metadata.len() > MAX_EDIT_BYTES {
+            return ToolResult::fail(format!(
+                "edit {path} error: file is {} bytes (limit {MAX_EDIT_BYTES})",
+                metadata.len()
+            ));
+        }
+        let mut text = String::with_capacity(metadata.len() as usize);
+        let read = std::fs::File::open(&real)
+            .and_then(|file| file.take(MAX_EDIT_BYTES + 1).read_to_string(&mut text));
+        match read {
+            Ok(n) if n as u64 <= MAX_EDIT_BYTES => {}
+            Ok(_) => {
+                return ToolResult::fail(format!(
+                    "edit {path} error: file grew beyond {MAX_EDIT_BYTES} bytes while reading"
+                ));
+            }
+            Err(e) => return ToolResult::fail(format!("edit {path} error: {e}")),
+        }
         if !text.contains(&old) {
             return ToolResult::fail("edit error: old_string not found");
         }
@@ -86,6 +120,14 @@ impl Tool for EditTool {
         if !all && count > 1 {
             return ToolResult::fail(format!(
                 "edit error: old_string appears {count} times, must be unique (use all=true)"
+            ));
+        }
+        let Some(result_len) = replaced_len(&text, &old, &new, all) else {
+            return ToolResult::fail("edit error: replacement size overflow");
+        };
+        if result_len as u64 > MAX_EDIT_BYTES {
+            return ToolResult::fail(format!(
+                "edit {path} error: edited file would be {result_len} bytes (limit {MAX_EDIT_BYTES})"
             ));
         }
         let replaced = if all {
@@ -100,5 +142,57 @@ impl Tool for EditTool {
             "edit {path} ok ({count} replacement{})",
             if count == 1 { "" } else { "s" }
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    struct TestEnv(PathBuf);
+
+    #[async_trait::async_trait]
+    impl ToolEnv for TestEnv {
+        fn project_root(&self) -> &Path {
+            &self.0
+        }
+        async fn confirm(&self, _message: &str) -> bool {
+            true
+        }
+        async fn emit(&self, _event: ToolEvent) {}
+    }
+
+    #[tokio::test]
+    async fn rejects_large_files_before_reading_them() {
+        let tmp = std::env::temp_dir().join(format!("wisp_edit_cap_{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("large.txt");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_EDIT_BYTES + 1)
+            .unwrap();
+
+        let result = EditTool
+            .run(
+                &json!({ "path": "large.txt", "old": "a", "new": "b" }),
+                &TestEnv(tmp.clone()),
+            )
+            .await;
+        assert!(!result.success);
+        assert!(result.content.contains("limit"));
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn replacement_size_is_checked_before_allocating() {
+        assert_eq!(replaced_len("aaa", "a", "bb", true), Some(6));
+        assert_eq!(replaced_len("abc", "", "x", true), Some(7));
+        assert_eq!(replaced_len("aaa", "a", "bb", false), Some(4));
+        assert!(
+            replaced_len("aaa", "a", &"x".repeat(MAX_EDIT_BYTES as usize), true)
+                .is_some_and(|len| len as u64 > MAX_EDIT_BYTES)
+        );
     }
 }

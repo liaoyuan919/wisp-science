@@ -5,7 +5,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
@@ -70,6 +70,29 @@ pub trait RunCommandRunner: Send + Sync {
 #[derive(Clone)]
 pub(crate) struct ProcessRunRunner;
 
+const MAX_RUN_OUTPUT_BYTES: usize = 64 * 1024;
+
+async fn read_tail<R: AsyncRead + Unpin>(mut reader: R) -> std::io::Result<Vec<u8>> {
+    let mut tail = Vec::with_capacity(MAX_RUN_OUTPUT_BYTES);
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            return Ok(tail);
+        }
+        if read >= MAX_RUN_OUTPUT_BYTES {
+            tail.clear();
+            tail.extend_from_slice(&chunk[read - MAX_RUN_OUTPUT_BYTES..read]);
+            continue;
+        }
+        let overflow = (tail.len() + read).saturating_sub(MAX_RUN_OUTPUT_BYTES);
+        if overflow > 0 {
+            tail.drain(..overflow);
+        }
+        tail.extend_from_slice(&chunk[..read]);
+    }
+}
+
 #[async_trait::async_trait]
 impl RunCommandRunner for ProcessRunRunner {
     async fn run(
@@ -93,8 +116,19 @@ impl RunCommandRunner for ProcessRunRunner {
             .spawn()
             .map_err(|e| format!("failed to spawn {}: {e}", command.program))?;
         let program = command.program.clone();
-        let operation = async move {
-            if let Some(input) = command.stdin {
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| format!("failed to open {program} stdout"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| format!("failed to open {program} stderr"))?;
+        let mut stdout_task = tokio::spawn(read_tail(stdout));
+        let mut stderr_task = tokio::spawn(read_tail(stderr));
+        let input = command.stdin;
+        let operation = async {
+            if let Some(input) = input {
                 let mut stdin = child
                     .stdin
                     .take()
@@ -108,18 +142,48 @@ impl RunCommandRunner for ProcessRunRunner {
                     .await
                     .map_err(|e| format!("failed to close {program} stdin: {e}"))?;
             }
-            child
-                .wait_with_output()
+            let status = child
+                .wait()
                 .await
-                .map_err(|e| format!("run_in_context wait failed: {e}"))
+                .map_err(|e| format!("run_in_context wait failed: {e}"))?;
+            let stdout = (&mut stdout_task)
+                .await
+                .map_err(|e| format!("run_in_context stdout task failed: {e}"))?
+                .map_err(|e| format!("run_in_context stdout read failed: {e}"))?;
+            let stderr = (&mut stderr_task)
+                .await
+                .map_err(|e| format!("run_in_context stderr task failed: {e}"))?
+                .map_err(|e| format!("run_in_context stderr read failed: {e}"))?;
+            Ok::<_, String>((status, stdout, stderr))
         };
-        let output = tokio::time::timeout(timeout, operation)
-            .await
-            .map_err(|_| format!("run_in_context timed out after {}s", timeout.as_secs()))??;
+        let (status, stdout, stderr) = match tokio::time::timeout(timeout, operation).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => {
+                stdout_task.abort();
+                stderr_task.abort();
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                let _ = stdout_task.await;
+                let _ = stderr_task.await;
+                return Err(error);
+            }
+            Err(_) => {
+                stdout_task.abort();
+                stderr_task.abort();
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                let _ = stdout_task.await;
+                let _ = stderr_task.await;
+                return Err(format!(
+                    "run_in_context timed out after {}s",
+                    timeout.as_secs()
+                ));
+            }
+        };
         Ok(RunCommandOutput {
-            exit_code: output.status.code().unwrap_or(-1) as i64,
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            exit_code: status.code().unwrap_or(-1) as i64,
+            stdout: String::from_utf8_lossy(&stdout).to_string(),
+            stderr: String::from_utf8_lossy(&stderr).to_string(),
         })
     }
 }

@@ -27,7 +27,7 @@ const SKIP_DIRS: &[&str] = &[
 ];
 // ponytail: recursive mtime scan, capped + heavy dirs skipped. Swap for an fs-notify
 // watcher only if this shows up in a profile.
-const MAX_FILES: usize = 20_000;
+const MAX_ENTRIES: usize = 20_000;
 
 pub fn is_producing(tool: &str) -> bool {
     matches!(tool, "python" | "r" | "shell")
@@ -57,16 +57,22 @@ pub fn source_of(tool: &str, args: &serde_json::Value) -> String {
 
 /// Recursive path→mtime map of the workspace, skipping heavy dirs, capped.
 pub fn snapshot(root: &Path) -> BTreeMap<PathBuf, SystemTime> {
+    snapshot_capped(root, MAX_ENTRIES)
+}
+
+fn snapshot_capped(root: &Path, max_entries: usize) -> BTreeMap<PathBuf, SystemTime> {
     let mut out = BTreeMap::new();
     let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if out.len() >= MAX_FILES {
-            break;
-        }
+    let mut visited = 0;
+    'walk: while let Some(dir) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&dir) else {
             continue;
         };
         for entry in rd.flatten() {
+            if visited >= max_entries {
+                break 'walk;
+            }
+            visited += 1;
             let Ok(ft) = entry.file_type() else { continue };
             let p = entry.path();
             if ft.is_dir() {
@@ -159,5 +165,18 @@ mod tests {
             source_of("r", &serde_json::json!({"code": "png('plot.png')"})),
             "png('plot.png')"
         );
+    }
+
+    #[test]
+    fn snapshot_caps_entries_inside_a_wide_directory() {
+        let tmp = std::env::temp_dir().join("wisp_prov_wide_test");
+        std::fs::remove_dir_all(&tmp).ok();
+        std::fs::create_dir_all(&tmp).unwrap();
+        for name in ["a", "b", "c"] {
+            std::fs::write(tmp.join(name), b"x").unwrap();
+        }
+
+        assert_eq!(snapshot_capped(&tmp, 2).len(), 2);
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

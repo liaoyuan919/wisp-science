@@ -19,6 +19,7 @@ long-running cells block until they return.
 """
 
 import builtins
+from collections import deque
 import io
 import json
 import os
@@ -31,6 +32,11 @@ MAX_OUTPUT_SIZE = 1024 * 1024  # 1 MB head cap on stdout/stderr
 MAX_OBJECTS = 200
 MAX_NAME_SIZE = 256
 MAX_META_SIZE = 160
+MAX_LINECACHE_CELLS = 64
+MAX_LINECACHE_BYTES = 8 * 1024 * 1024
+MAX_CODE_SIZE = 1024 * 1024
+MAX_CODE_LINES = 20_000
+MAX_REQUEST_SIZE = 8 * 1024 * 1024
 
 # Force a non-interactive matplotlib backend before matplotlib is ever imported.
 # Without this, generated plotting code (plt.show(), scanpy sc.pl.*) selects the
@@ -311,9 +317,18 @@ def main():
     }) + "\n")
     protocol_out.flush()
 
+    linecache_cells = deque()
+    linecache_bytes = 0
     while True:
-        line = protocol_in.readline()
+        line = protocol_in.readline(MAX_REQUEST_SIZE + 1)
         if not line:
+            break
+        if len(line) > MAX_REQUEST_SIZE:
+            protocol_out.write(json.dumps({
+                "type": "result", "id": "unknown", "stdout": "", "stderr": "",
+                "error": f"Request exceeds {MAX_REQUEST_SIZE} character limit",
+            }) + "\n")
+            protocol_out.flush()
             break
         line = line.strip()
         if not line:
@@ -342,11 +357,33 @@ def main():
             continue
 
         code = req.get("code", "")
+        if not isinstance(code, str):
+            code = ""
+        code_size = len(code.encode("utf-8"))
+        code_lines = code.count("\n") + code.count("\r") - code.count("\r\n") + 1
+        if code_size > MAX_CODE_SIZE or code_lines > MAX_CODE_LINES:
+            protocol_out.write(json.dumps({
+                "type": "result", "id": rid, "stdout": "", "stderr": "",
+                "error": (
+                    f"Code exceeds {MAX_CODE_SIZE} byte or {MAX_CODE_LINES} line limit"
+                ),
+            }) + "\n")
+            protocol_out.flush()
+            continue
         cell_counter += 1
         cell_tag = f"<wisp-kernel:{cell_counter}>"
 
         import linecache as _lc
+        while linecache_cells and (
+            len(linecache_cells) >= MAX_LINECACHE_CELLS
+            or linecache_bytes + code_size > MAX_LINECACHE_BYTES
+        ):
+            old_tag, old_size = linecache_cells.popleft()
+            _lc.cache.pop(old_tag, None)
+            linecache_bytes -= old_size
         _lc.cache[cell_tag] = (len(code), None, code.splitlines(True), cell_tag)
+        linecache_cells.append((cell_tag, code_size))
+        linecache_bytes += code_size
 
         stdout_cap = _StreamingStdout(protocol_out, protocol_lock, rid)
         stderr_cap = _CappedStream()
