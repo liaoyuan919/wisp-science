@@ -9,12 +9,13 @@ use async_trait::async_trait;
 use serde_json::json;
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::AsyncReadExt;
 use tokio::process::{ChildStderr, ChildStdout, Command};
 use wisp_llm::ToolSchema;
 
 const TIMEOUT_SECS: u64 = 60;
 const MAX_LINES: usize = 1000;
+const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Resolves once the env's cancel flag is set. Polls at 100ms — cheap, and
 /// bounds Stop-button latency to ~100ms while a command is mid-run.
@@ -24,24 +25,26 @@ async fn cancel_watch(env: &dyn ToolEnv) {
     }
 }
 
-/// Read one line from an optional stdout stream.
-async fn next_stdout_line(
-    reader: &mut Option<tokio::io::Lines<BufReader<ChildStdout>>>,
-) -> std::io::Result<Option<String>> {
+async fn read_stdout(reader: &mut Option<ChildStdout>, buf: &mut [u8]) -> std::io::Result<usize> {
     match reader {
-        Some(r) => r.next_line().await,
+        Some(r) => r.read(buf).await,
         None => std::future::pending().await,
     }
 }
 
-/// Read one line from an optional stderr stream.
-async fn next_stderr_line(
-    reader: &mut Option<tokio::io::Lines<BufReader<ChildStderr>>>,
-) -> std::io::Result<Option<String>> {
+async fn read_stderr(reader: &mut Option<ChildStderr>, buf: &mut [u8]) -> std::io::Result<usize> {
     match reader {
-        Some(r) => r.next_line().await,
+        Some(r) => r.read(buf).await,
         None => std::future::pending().await,
     }
+}
+
+fn append_output(output: &mut Vec<u8>, chunk: &[u8]) -> (usize, bool) {
+    let take = chunk
+        .len()
+        .min(MAX_OUTPUT_BYTES.saturating_sub(output.len()));
+    output.extend_from_slice(&chunk[..take]);
+    (take, take < chunk.len())
 }
 
 pub struct ShellTool;
@@ -95,13 +98,14 @@ async fn run_shell(args: &serde_json::Value, env: &dyn ToolEnv, timeout: Duratio
     let cancelled = cancel_watch(env);
     tokio::pin!(deadline, cancelled);
 
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let mut stdout_reader = stdout.map(|s| BufReader::new(s).lines());
-    let mut stderr_reader = stderr.map(|s| BufReader::new(s).lines());
+    let mut stdout_reader = child.stdout.take();
+    let mut stderr_reader = child.stderr.take();
     let mut stdout_done = stdout_reader.is_none();
     let mut stderr_done = stderr_reader.is_none();
-    let mut out_lines: Vec<String> = vec![];
+    let mut stdout_buf = [0_u8; 8192];
+    let mut stderr_buf = [0_u8; 8192];
+    let mut output = Vec::with_capacity(MAX_OUTPUT_BYTES);
+    let mut output_limited = false;
 
     // One deadline covers both output draining and the final child wait.
     while !(stdout_done && stderr_done) {
@@ -117,24 +121,26 @@ async fn run_shell(args: &serde_json::Value, env: &dyn ToolEnv, timeout: Duratio
                 let _ = child.kill().await;
                 return ToolResult::fail("interrupted by user");
             }
-            res = next_stdout_line(&mut stdout_reader), if !stdout_done => match res {
-                Ok(Some(line)) => {
-                    env.emit(ToolEvent::Stdout {
-                        chunk: format!("{line}\n"),
-                    })
-                    .await;
-                    out_lines.push(line);
+            res = read_stdout(&mut stdout_reader, &mut stdout_buf), if !stdout_done => match res {
+                Ok(0) => stdout_done = true,
+                Ok(n) => {
+                    let (kept, limited) = append_output(&mut output, &stdout_buf[..n]);
+                    if kept > 0 {
+                        env.emit(ToolEvent::Stdout {
+                            chunk: String::from_utf8_lossy(&stdout_buf[..kept]).into_owned(),
+                        }).await;
+                    }
+                    output_limited |= limited;
                 }
-                Ok(None) => stdout_done = true,
                 Err(_) => stdout_done = true,
             },
-            res = next_stderr_line(&mut stderr_reader), if !stderr_done => match res {
-                Ok(Some(line)) => out_lines.push(line),
-                Ok(None) => stderr_done = true,
+            res = read_stderr(&mut stderr_reader, &mut stderr_buf), if !stderr_done => match res {
+                Ok(0) => stderr_done = true,
+                Ok(n) => output_limited |= append_output(&mut output, &stderr_buf[..n]).1,
                 Err(_) => stderr_done = true,
             },
         }
-        if out_lines.len() > MAX_LINES + 50 {
+        if output_limited {
             let _ = child.kill().await;
             break;
         }
@@ -158,10 +164,17 @@ async fn run_shell(args: &serde_json::Value, env: &dyn ToolEnv, timeout: Duratio
         }
     };
 
-    let out_lines = if crate::safety::is_directory_heavy(&cmd) {
+    let decoded = String::from_utf8_lossy(&output);
+    let total_lines = decoded.lines().count();
+    let mut out_lines: Vec<String> = decoded
+        .lines()
+        .take(MAX_LINES + 50)
+        .map(str::to_owned)
+        .collect();
+    out_lines = if crate::safety::is_directory_heavy(&cmd) {
         crate::safety::filter_directory_output(&out_lines, MAX_LINES)
-    } else if out_lines.len() > MAX_LINES {
-        let n = out_lines.len() - MAX_LINES;
+    } else if total_lines > MAX_LINES {
+        let n = total_lines - MAX_LINES;
         out_lines.truncate(MAX_LINES);
         out_lines.push(String::new());
         out_lines.push(format!("... and {n} more lines"));
@@ -170,7 +183,13 @@ async fn run_shell(args: &serde_json::Value, env: &dyn ToolEnv, timeout: Duratio
         out_lines
     };
 
-    let body = out_lines.join("\n");
+    let mut body = out_lines.join("\n");
+    if output_limited {
+        body.push_str(&format!(
+            "\n... output exceeded {MAX_OUTPUT_BYTES} bytes; process terminated"
+        ));
+        return ToolResult::fail(body);
+    }
     if !status.success() {
         return ToolResult::fail(format!("exit {}: {body}", status.code().unwrap_or(-1)));
     }
@@ -280,5 +299,21 @@ mod tests {
 
         assert!(!result.success);
         assert!(result.content.contains("timed out"), "{}", result.content);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn kills_a_single_line_at_the_byte_limit() {
+        let env = TestEnv(std::env::current_dir().unwrap());
+        let result = run_shell(
+            &json!({ "cmd": "head -c 1052672 /dev/zero" }),
+            &env,
+            Duration::from_secs(2),
+        )
+        .await;
+
+        assert!(!result.success);
+        assert!(result.content.contains("output exceeded"));
+        assert!(result.content.len() <= MAX_OUTPUT_BYTES + 100);
     }
 }

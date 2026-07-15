@@ -15,7 +15,6 @@ tracing = { workspace = true }
 regex = { workspace = true }
 glob = { workspace = true }
 walkdir = { workspace = true }
-similar = { workspace = true }
 dunce = { workspace = true }
 base64 = "0.22"
 wisp-llm = { workspace = true }
