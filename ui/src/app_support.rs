@@ -4205,6 +4205,7 @@ pub(super) fn FilePreview(dom_id: String, path: String, kind: String) -> impl In
                 if let Some(el) = el {
                     el.set_class_name("rp-heavy md");
                     el.set_inner_html(&md_to_html(fc.text.as_deref().unwrap_or("")));
+                    schedule_highlight(dom_id.clone());
                 }
                 return;
             }
@@ -4252,7 +4253,9 @@ pub(super) fn artifact_preview(a: &Artifact, dom_id: String, locale: Locale) -> 
         PreviewData::Table(t) => table_view(t, locale).into_view(),
         PreviewData::Text(s) => view! { <pre class="rp-pre">{s.clone()}</pre> }.into_view(),
         PreviewData::Markdown(s) => {
-            view! { <div class="md rp-md" inner_html=md_to_html(s)></div> }.into_view()
+            let hid_for_effect = dom_id.clone();
+            create_effect(move |_| schedule_highlight(hid_for_effect.clone()));
+            view! { <div class="md rp-md" id=dom_id inner_html=md_to_html(s)></div> }.into_view()
         }
         PreviewData::Latex { tex, display } => {
             let payload = serde_json::json!({ "tex": tex, "display": display }).to_string();
