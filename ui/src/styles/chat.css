@@ -863,6 +863,7 @@ button.stop:disabled { opacity: .6; cursor: default; }
 .sidechat-model-menu { position: absolute; z-index: 82; left: 0; bottom: calc(100% + 8px); min-width: 220px; max-height: 260px; overflow-y: auto; padding: 6px; background: var(--bg-elev); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: var(--shadow); transform-origin: bottom left; animation: motion-surface-in-soft var(--motion-duration-fast) var(--motion-ease-decelerate) both; }
 .sidechat-model-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 8px 9px; border: none; border-radius: 7px; background: transparent; color: var(--text); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer; }
 .sidechat-model-row:hover, .sidechat-model-row.active { background: var(--bg-sunken); }
+.sidechat-model-group { padding: 8px 9px 4px; font-size: 10.5px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--text-muted); }
 .sidechat-send { height: 30px; padding: 0 13px; border: none; border-radius: 999px; background: var(--clay); color: var(--on-clay); font: inherit; font-size: 12.5px; font-weight: 650; cursor: pointer; }
 .sidechat-send:disabled { opacity: .45; cursor: default; }
 .sidechat-send:hover:not(:disabled) { background: var(--clay-strong); }

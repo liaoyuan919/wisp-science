@@ -549,6 +549,8 @@ export function tauriMock(): void {
             return null;
           case "set_acp_session_config":
             return [{ id: "model", name: "Model", type: "select", currentValue: arg("value")?.value ?? "fast", options: [{ value: "fast", name: "Fast" }, { value: "smart", name: "Smart" }] }];
+          case "set_acp_session_mode":
+            return String(arg("modeId") ?? "");
           case "respond_acp_permission":
             setTimeout(() => {
               const requestId = String(arg("requestId"));
@@ -1015,7 +1017,7 @@ export function tauriMock(): void {
                 emit("agent", { kind: "User", frame_id: fid, text: msg });
                 emit("acp-session-state", {
                   frameId: fid,
-                  modes: { currentModeId: "code", availableModes: [{ id: "code", name: "Code" }] },
+                  modes: { currentModeId: "agent", availableModes: [{ id: "read-only", name: "Read Only" }, { id: "agent", name: "Agent" }, { id: "full-access", name: "Full Access" }] },
                   configOptions: [{ id: "model", name: "Model", type: "select", currentValue: "fast", options: [{ value: "fast", name: "Fast" }, { value: "smart", name: "Smart" }] }],
                 });
                 emit("acp-session-update", { frameId: fid, kind: "ToolCall", payload: { toolCallId: "tool-a", title: "Read files", kind: "read", status: "in_progress" } });

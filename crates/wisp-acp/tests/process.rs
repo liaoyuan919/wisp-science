@@ -21,9 +21,10 @@ use wisp_acp::{
                 PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
                 ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
                 SessionCloseCapabilities, SessionConfigOption, SessionConfigOptionValue,
-                SessionNotification, SessionResumeCapabilities, SessionUpdate,
-                SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
-                TextContent, ToolCallUpdate, ToolCallUpdateFields,
+                SessionMode, SessionModeState, SessionNotification, SessionResumeCapabilities,
+                SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+                SetSessionModeRequest, SetSessionModeResponse, StopReason, TextContent,
+                ToolCallUpdate, ToolCallUpdateFields,
             },
             ProtocolVersion,
         },
@@ -112,6 +113,16 @@ async fn test_full_lifecycle() -> Result<(), String> {
             .is_some_and(|options| options.len() == 1),
         "initial session config options",
     )?;
+    check(
+        start
+            .state
+            .modes
+            .as_ref()
+            .and_then(|modes| modes.get("availableModes"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|modes| modes.len() == 2),
+        "initial session modes",
+    )?;
     let session_id = start.session_id;
 
     let prompt = handle.prompt_text(session_id.clone(), "permissions");
@@ -166,6 +177,16 @@ async fn test_full_lifecycle() -> Result<(), String> {
         .await
         .map_err(stringify)?;
     check(changed.len() == 1, "set config response")?;
+    handle
+        .set_mode(session_id.clone(), "full-access")
+        .await
+        .map_err(stringify)?;
+    let bad_mode = handle
+        .set_mode(session_id.clone(), "nonexistent")
+        .await
+        .err()
+        .ok_or("unknown mode unexpectedly accepted")?;
+    check(bad_mode.to_string().contains("unknown mode"), "set mode rejects unknown id")?;
     handle
         .resume_session(
             session_id.clone(),
@@ -421,9 +442,19 @@ async fn serve_fake(scenario: &str) -> acp::Result<()> {
                         return responder
                             .respond_with_error(acp::util::internal_error("auth required"));
                     }
-                    responder.respond(NewSessionResponse::new("fake-session").config_options(vec![
-                        SessionConfigOption::boolean("thinking", "Thinking", false),
-                    ]))
+                    responder.respond(
+                        NewSessionResponse::new("fake-session")
+                            .config_options(vec![SessionConfigOption::boolean(
+                                "thinking", "Thinking", false,
+                            )])
+                            .modes(SessionModeState::new(
+                                "agent",
+                                vec![
+                                    SessionMode::new("agent", "Agent"),
+                                    SessionMode::new("full-access", "Full Access"),
+                                ],
+                            )),
+                    )
                 }
             },
             acp::on_receive_request!(),
@@ -502,6 +533,21 @@ async fn serve_fake(scenario: &str) -> acp::Result<()> {
                 responder.respond(SetSessionConfigOptionResponse::new(vec![
                     SessionConfigOption::boolean("thinking", "Thinking", true),
                 ]))
+            },
+            acp::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: SetSessionModeRequest, responder, _cx| {
+                // Reject unknown ids so the client-side round-trip actually
+                // asserts the selected mode reached the agent intact.
+                match request.mode_id.to_string().as_str() {
+                    "agent" | "full-access" => {
+                        responder.respond(SetSessionModeResponse::new())
+                    }
+                    other => responder.respond_with_error(acp::util::internal_error(format!(
+                        "unknown mode {other}"
+                    ))),
+                }
             },
             acp::on_receive_request!(),
         )

@@ -54,6 +54,9 @@ const HOME_SEARCH_PROJECT_LIMIT: usize = 6;
 const HOME_SEARCH_ARTIFACT_LIMIT: usize = 8;
 const HOME_SEARCH_SESSION_LIMIT: usize = 6;
 const THEME_STORAGE_KEY: &str = "wisp-theme";
+/// Reserved `acp_config_menu_open` key for the session-mode dropdown, kept
+/// distinct from any agent-supplied config option id.
+const ACP_MODE_MENU: &str = "__acp_session_mode";
 
 #[derive(Default)]
 struct ProjectOpenGate {
@@ -415,6 +418,8 @@ fn App() -> impl IntoView {
     let side_chat_items = create_rw_signal::<Vec<ChatItem>>(vec![]);
     let side_chat_busy = create_rw_signal(false);
     let side_chat_model_menu_open = create_rw_signal(false);
+    // Side chat routes through this ACP Agent when set; None = the active model.
+    let side_chat_acp_agent = create_rw_signal::<Option<String>>(None);
     let settings_busy = create_rw_signal(false);
     let settings_message = create_rw_signal::<Option<(bool, String)>>(None);
     let update_check_busy = create_rw_signal(false);
@@ -1431,8 +1436,12 @@ fn App() -> impl IntoView {
                 }
             }
             "CurrentMode" => {
+                // A CurrentModeUpdate only carries `currentModeId`; merge it into
+                // the existing state so the `availableModes` captured from the
+                // initial SessionModeState (and needed by the mode picker) survive.
                 acp_session_modes.update(|all| {
-                    all.insert(update.frame_id, update.payload);
+                    let merged = merge_current_mode(all.get(&update.frame_id), update.payload);
+                    all.insert(update.frame_id, merged);
                 });
             }
             "Usage" => {
@@ -1692,11 +1701,21 @@ fn App() -> impl IntoView {
         side_chat_items.update(|v| v.push(ChatItem::User(question.clone())));
         side_chat_busy.set(true);
         let sid = active_session.get();
-        let model = active_model_label(&models.get());
+        let acp_agent = side_chat_acp_agent.get();
+        let model = match acp_agent.as_ref() {
+            Some(id) => acp_agents
+                .get()
+                .into_iter()
+                .find(|agent| &agent.id == id)
+                .map(|agent| agent.label)
+                .or_else(|| Some("ACP Agent".into())),
+            None => active_model_label(&models.get()),
+        };
         spawn_local(async move {
             let arg = to_value(&serde_json::json!({
                 "sessionId": sid,
                 "question": question,
+                "acpAgentId": acp_agent,
             }))
             .unwrap();
             match invoke_checked("side_chat", arg).await {
@@ -4710,9 +4729,21 @@ fn App() -> impl IntoView {
                     {move || active_session.get().and_then(|session_id| {
                         active_acp_agent_id.get()?;
                         let options = acp_session_configs.get().get(&session_id).cloned().unwrap_or_default();
-                        let mode = acp_session_modes.get().get(&session_id)
+                        let modes_state = acp_session_modes.get().get(&session_id).cloned();
+                        let mode = modes_state.as_ref()
                             .and_then(|state| state.get("currentModeId"))
                             .and_then(serde_json::Value::as_str).map(str::to_string);
+                        // `availableModes` from the initial SessionModeState drives the
+                        // picker; a single-mode agent stays a read-only chip.
+                        let available_modes: Vec<(String, String)> = modes_state.as_ref()
+                            .and_then(|state| state.get("availableModes"))
+                            .and_then(serde_json::Value::as_array)
+                            .map(|arr| arr.iter().filter_map(|m| {
+                                let id = m.get("id").and_then(serde_json::Value::as_str)?.to_string();
+                                let name = m.get("name").and_then(serde_json::Value::as_str).unwrap_or(&id).to_string();
+                                Some((id, name))
+                            }).collect())
+                            .unwrap_or_default();
                         (!options.is_empty() || mode.is_some()).then(|| view! {
                             <div class="acp-composer-config" data-testid="acp-session-config">
                                 {(!options.iter().any(|option| {
@@ -4724,12 +4755,76 @@ fn App() -> impl IntoView {
                                 }))
                                     .then(|| {
                                         mode.map(|mode| {
-                                            view! {
-                                                <span class="acp-config-chip acp-mode" title="Session mode">
-                                                    <span class="acp-config-key">"mode"</span>
-                                                    <span class="acp-config-val">{mode}</span>
-                                                </span>
+                                            let current_label = available_modes.iter()
+                                                .find(|(id, _)| id == &mode)
+                                                .map(|(_, name)| name.clone())
+                                                .unwrap_or_else(|| mode.clone());
+                                            if available_modes.len() < 2 {
+                                                return view! {
+                                                    <span class="acp-config-chip acp-mode" title="Session mode">
+                                                        <span class="acp-config-key">"mode"</span>
+                                                        <span class="acp-config-val">{current_label}</span>
+                                                    </span>
+                                                }.into_view();
                                             }
+                                            let session_id = session_id.clone();
+                                            view! {
+                                                <div class="acp-config-chip acp-config-select acp-mode-select" title="Session mode"
+                                                    class:open=move || acp_config_menu_open.get().as_deref() == Some(ACP_MODE_MENU)>
+                                                    <button type="button" class="acp-config-trigger" aria-label="Session mode"
+                                                        on:click=move |_| {
+                                                            acp_config_menu_open.update(|open| {
+                                                                *open = if open.as_deref() == Some(ACP_MODE_MENU) { None } else { Some(ACP_MODE_MENU.into()) };
+                                                            });
+                                                        }>
+                                                        <span class="acp-config-key">"mode"</span>
+                                                        <span class="acp-config-val">{current_label}</span>
+                                                    </button>
+                                                    {move || (acp_config_menu_open.get().as_deref() == Some(ACP_MODE_MENU)).then(|| {
+                                                        let session_id = session_id.clone();
+                                                        let current_mode = mode.clone();
+                                                        view! {
+                                                            <div class="acp-config-backdrop" on:click=move |_| acp_config_menu_open.set(None)></div>
+                                                            <div class="acp-config-menu" role="listbox">
+                                                                {available_modes.clone().into_iter().map(|(mode_id, label)| {
+                                                                    let selected = mode_id == current_mode;
+                                                                    let session_id = session_id.clone();
+                                                                    view! {
+                                                                        <button type="button" class="acp-config-option" class:active=selected
+                                                                            role="option" aria-selected=selected
+                                                                            on:click=move |_| {
+                                                                                acp_config_menu_open.set(None);
+                                                                                let frame_id = session_id.clone();
+                                                                                let mode_id = mode_id.clone();
+                                                                                let args = to_value(&serde_json::json!({
+                                                                                    "frameId": frame_id,
+                                                                                    "modeId": mode_id,
+                                                                                })).unwrap();
+                                                                                spawn_local(async move {
+                                                                                    if let Ok(value) = invoke_checked("set_acp_session_mode", args).await {
+                                                                                        if let Some(applied) = value.as_string() {
+                                                                                            // `session/set_mode` returns no state, so apply the
+                                                                                            // selected id locally, preserving availableModes.
+                                                                                            acp_session_modes.update(|all| {
+                                                                                                let entry = all.entry(frame_id).or_insert_with(|| serde_json::json!({}));
+                                                                                                if let serde_json::Value::Object(map) = entry {
+                                                                                                    map.insert("currentModeId".into(), serde_json::Value::String(applied));
+                                                                                                }
+                                                                                            });
+                                                                                        }
+                                                                                    }
+                                                                                });
+                                                                            }>
+                                                                            <span class="acp-config-option-label">{label}</span>
+                                                                            {selected.then(|| view! { <span class="acp-config-option-check">"✓"</span> })}
+                                                                        </button>
+                                                                    }
+                                                                }).collect_view()}
+                                                            </div>
+                                                        }
+                                                    })}
+                                                </div>
+                                            }.into_view()
                                         })
                                     })}
                                 {options.into_iter().map(|option| {
@@ -6186,14 +6281,18 @@ fn App() -> impl IntoView {
                                             }
                                         ></textarea>
                                         <div class="sidechat-actions">
-                                            {move || (!models.get().is_empty()).then(|| view! {
+                                            {move || (!models.get().is_empty() || !acp_agents.get().is_empty()).then(|| view! {
                                                 <div class="sidechat-model">
                                                     <button type="button" class="sidechat-model-btn"
                                                         class:active=move || side_chat_model_menu_open.get()
                                                         on:click=move |_| side_chat_model_menu_open.update(|o| *o = !*o)>
                                                         {move || {
-                                                            let l = models.get();
-                                                            l.iter().find(|m| m.active).or_else(|| l.first()).map(|m| m.label.clone()).unwrap_or_default()
+                                                            if let Some(id) = side_chat_acp_agent.get() {
+                                                                acp_agents.get().into_iter().find(|agent| agent.id == id).map(|agent| agent.label).unwrap_or_else(|| "ACP Agent".into())
+                                                            } else {
+                                                                let l = models.get();
+                                                                l.iter().find(|m| m.active).or_else(|| l.first()).map(|m| m.label.clone()).unwrap_or_default()
+                                                            }
                                                         }}
                                                         <span>"▾"</span>
                                                     </button>
@@ -6202,11 +6301,12 @@ fn App() -> impl IntoView {
                                                         <div class="sidechat-model-menu">
                                                             {move || models.get().into_iter().map(|m| {
                                                                 let pick_id = m.id.clone();
-                                                                let is_active = m.active;
+                                                                let is_active = m.active && side_chat_acp_agent.get().is_none();
                                                                 view! {
                                                                     <button type="button" class="sidechat-model-row" class:active=is_active
                                                                         on:click=move |_| {
                                                                             side_chat_model_menu_open.set(false);
+                                                                            side_chat_acp_agent.set(None);
                                                                             let id = pick_id.clone();
                                                                             spawn_local(async move {
                                                                                 let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
@@ -6222,6 +6322,23 @@ fn App() -> impl IntoView {
                                                                     </button>
                                                                 }
                                                             }).collect_view()}
+                                                            {move || (!acp_agents.get().is_empty()).then(|| view! {
+                                                                <div class="sidechat-model-group">"ACP Agents"</div>
+                                                                {acp_agents.get().into_iter().map(|agent| {
+                                                                    let id = agent.id.clone();
+                                                                    let selected = side_chat_acp_agent.get().as_deref() == Some(agent.id.as_str());
+                                                                    view! {
+                                                                        <button type="button" class="sidechat-model-row" class:active=selected
+                                                                            on:click=move |_| {
+                                                                                side_chat_model_menu_open.set(false);
+                                                                                side_chat_acp_agent.set(Some(id.clone()));
+                                                                            }>
+                                                                            <span>{agent.label.clone()}</span>
+                                                                            {selected.then(|| view! { <span>"✓"</span> })}
+                                                                        </button>
+                                                                    }
+                                                                }).collect_view()}
+                                                            })}
                                                         </div>
                                                     })}
                                                 </div>
