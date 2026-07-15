@@ -196,8 +196,22 @@
 }
 
 .terminal-dock-frame.active { display: block; }
-.terminal-dock-frame .xterm { height: 100%; }
-.terminal-dock-frame .xterm-viewport { scrollbar-width: thin; }
+.terminal-dock-frame .xterm {
+  height: 100%;
+  background: var(--bg-app);
+}
+.terminal-dock-frame .xterm-viewport {
+  scrollbar-width: thin;
+  background: var(--bg-app);
+}
+.terminal-dock-frame .xterm-screen,
+.terminal-dock-frame .xterm-scroll-area {
+  background: var(--bg-app);
+}
+.terminal-dock-frame .composition-view {
+  background: var(--bg-app);
+  color: var(--text);
+}
 
 .terminal-dock-frame[data-terminal-error]::after {
   content: attr(data-terminal-error);
