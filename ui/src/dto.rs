@@ -935,6 +935,15 @@ impl ReviewBackendConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReviewerBackendTestResult {
+    pub(crate) backend: String,
+    pub(crate) model: String,
+    pub(crate) status: String,
+    pub(crate) summary: String,
+}
+
 #[derive(Clone, Deserialize)]
 pub(crate) struct RecentSession {
     pub(crate) id: String,

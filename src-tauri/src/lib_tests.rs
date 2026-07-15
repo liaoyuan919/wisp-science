@@ -3,13 +3,51 @@ use super::{
     branch_title, copy_dir_recursive, events_to_items, merge_pending_ui_event,
     message_uses_resource_bindings, messages_to_items, parse_disabled_skills,
     parse_enabled_skill_names, parse_skill_tags, parse_ssh_artifact_uri, persist_ui_events,
-    resolve_acp_artifact_references, resolve_composer_references, resolve_workspace,
-    session_runtime_status, should_hide_app_on_macos_close, side_chat_prompt,
+    resolve_acp_artifact_references, resolve_composer_references, resolve_review_backend,
+    resolve_workspace, session_runtime_status, should_hide_app_on_macos_close, side_chat_prompt,
     transcript_page_items, update_check_from_release, user_message_start, AgentEvent,
     ComposerReferenceArg, GithubRelease, McpConnection, McpTransport, MAX_PENDING_UI_EVENT_BYTES,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
+
+fn reviewer_with_backend(
+    backend: Option<crate::review::ReviewBackendConfig>,
+) -> crate::specialists::Specialist {
+    let mut reviewer = crate::specialists::builtin_reviewer();
+    reviewer.review_backend = backend;
+    reviewer
+}
+
+#[test]
+fn reviewer_follow_session_resolves_acp_or_default_http() {
+    let reviewer = reviewer_with_backend(Some(crate::review::ReviewBackendConfig::FollowSession));
+    assert_eq!(
+        resolve_review_backend(&reviewer, Some("acp-codex")),
+        Some(crate::review::ReviewBackendConfig::AcpAgent {
+            profile_id: "acp-codex".into(),
+        })
+    );
+    assert_eq!(
+        resolve_review_backend(&reviewer, None),
+        Some(crate::review::ReviewBackendConfig::HttpModel {
+            profile_id: String::new(),
+        })
+    );
+}
+
+#[test]
+fn reviewer_explicit_backend_does_not_follow_session() {
+    let reviewer = reviewer_with_backend(Some(crate::review::ReviewBackendConfig::HttpModel {
+        profile_id: "http-reviewer".into(),
+    }));
+    assert_eq!(
+        resolve_review_backend(&reviewer, Some("acp-codex")),
+        Some(crate::review::ReviewBackendConfig::HttpModel {
+            profile_id: "http-reviewer".into(),
+        })
+    );
+}
 
 #[tokio::test]
 async fn auto_review_is_on_by_default_and_persists_changes() {

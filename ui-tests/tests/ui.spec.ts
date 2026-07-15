@@ -3029,6 +3029,44 @@ test("specialists page lists builtin reviewer without a delete affordance and sa
   await expect(page.getByText("Paper hunter")).toBeVisible();
 });
 
+test("Reviewer settings select, test, and persist an ACP backend", async ({ page }) => {
+  await enterApp(page);
+  await openSettingsSection(page, "Specialists");
+  await page.getByText("Reviewer").click();
+
+  const backend = page.getByTestId("reviewer-backend-select");
+  await expect(backend.locator('option[value="acp:acp-test"]')).toHaveCount(1);
+  await backend.selectOption("acp:acp-test");
+  await expect(page.getByTestId("reviewer-selected-backend")).toContainText("Test ACP Agent");
+  await expect(backend).toHaveValue("acp:acp-test");
+  await expect(page.getByTestId("reviewer-selected-backend")).toContainText("ACP");
+
+  await page.getByTestId("test-reviewer-backend").click();
+  await expect.poll(() => lastInvokeArgs(page, "test_reviewer_backend")).toMatchObject({
+    reviewer: {
+      id: "reviewer",
+      review_backend: { kind: "acp_agent", profile_id: "acp-test" },
+    },
+  });
+  await expect(page.locator(".settings-status")).toContainText(
+    "valid review JSON via ACP / Test ACP Agent",
+  );
+
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect.poll(() => lastInvokeArgs(page, "save_specialist_cmd")).toMatchObject({
+    spec: {
+      id: "reviewer",
+      review_backend: { kind: "acp_agent", profile_id: "acp-test" },
+    },
+  });
+  await expect(page.locator(".settings-status")).toContainText("Specialist saved");
+  await expect(backend).toHaveValue("acp:acp-test");
+
+  await page.locator(".settings-head-back").click();
+  await page.getByText("Reviewer").click();
+  await expect(page.getByTestId("reviewer-backend-select")).toHaveValue("acp:acp-test");
+});
+
 test("new session can pick a specialist and it locks after the first message", async ({ page }) => {
   await enterApp(page);
   // Create the custom specialist through the settings flow, as above.

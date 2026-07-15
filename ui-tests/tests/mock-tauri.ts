@@ -1368,6 +1368,29 @@ export function tauriMock(): void {
               : [...mockSpecialists, spec];
             return mockSpecialists;
           }
+          case "test_reviewer_backend": {
+            const reviewer = plain(arg("reviewer") ?? {});
+            const config = reviewer.review_backend ?? { kind: "http_model", profile_id: reviewer.model_id ?? "" };
+            if (config.kind === "acp_agent") {
+              const profile = mockAcpAgents.find((agent) => agent.id === config.profile_id);
+              if (!profile) throw new Error("The Reviewer ACP Agent profile no longer exists.");
+              return {
+                backend: "acp_agent",
+                model: profile.label,
+                status: "passed",
+                summary: "The reported sample count matches the tool output.",
+              };
+            }
+            const profile = mockModels.find((model) => model.id === config.profile_id)
+              ?? mockModels.find((model) => model.active)
+              ?? mockModels[0];
+            return {
+              backend: "http_model",
+              model: profile?.model ?? profile?.label ?? "default",
+              status: "passed",
+              summary: "The reported sample count matches the tool output.",
+            };
+          }
           case "remove_specialist": {
             const id = arg("id");
             if (mockSpecialists.find((s) => s.id === id)?.builtin) throw new Error("Built-in specialists cannot be removed.");

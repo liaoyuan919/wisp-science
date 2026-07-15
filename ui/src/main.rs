@@ -1307,6 +1307,7 @@ fn App() -> impl IntoView {
                     v.push(ChatItem::Assistant {
                         text: text.clone(),
                         model: None,
+                        resources: Vec::new(),
                     });
                 });
                 if active_cb.get().as_deref() == Some(&frame_id) {
@@ -2591,27 +2592,108 @@ fn App() -> impl IntoView {
         });
     };
 
+    let test_reviewer_form = move |_| {
+        let Some(spec) = specialist_form.get() else {
+            return;
+        };
+        if spec.id != "reviewer" || settings_busy.get() {
+            return;
+        }
+        let loc = locale.get();
+        settings_busy.set(true);
+        model_form_msg.set(Some((
+            true,
+            t(loc, "specialists.reviewer.testing").into(),
+        )));
+        spawn_local(async move {
+            let result = invoke_timeout(
+                "test_reviewer_backend",
+                to_value(&serde_json::json!({ "reviewer": spec })).unwrap(),
+                120_000,
+            )
+            .await;
+            match result {
+                Ok(value) => match serde_wasm_bindgen::from_value::<ReviewerBackendTestResult>(value)
+                {
+                    Ok(result) => {
+                        let backend = match result.backend.as_str() {
+                            "acp_agent" => "ACP",
+                            "http_model" => "HTTP",
+                            other => other,
+                        };
+                        let headline = tf(
+                            loc,
+                            "specialists.reviewer.test_ok",
+                            &[
+                                ("backend", backend),
+                                ("model", &result.model),
+                                ("status", &result.status),
+                            ],
+                        );
+                        model_form_msg.set(Some((
+                            true,
+                            if result.summary.trim().is_empty() {
+                                headline
+                            } else {
+                                format!("{headline} {}", result.summary.trim())
+                            },
+                        )));
+                    }
+                    Err(error) => model_form_msg.set(Some((false, error.to_string()))),
+                },
+                Err(error) => model_form_msg.set(Some((
+                    false,
+                    tf(
+                        loc,
+                        "specialists.reviewer.test_failed",
+                        &[("msg", &localize_backend(loc, &js_error_text(error)))],
+                    ),
+                ))),
+            }
+            settings_busy.set(false);
+        });
+    };
+
     let save_specialist_form = move |_| {
         let Some(spec) = specialist_form.get() else {
             return;
         };
+        let loc = locale.get();
         if spec.name.trim().is_empty() {
-            settings_message.set(Some((false, "Specialist name is required.".into())));
+            model_form_msg.set(Some((
+                false,
+                t(loc, "specialists.name_required").into(),
+            )));
             return;
         }
+        let saved_id = spec.id.clone();
+        let keep_open = saved_id == "reviewer";
         settings_busy.set(true);
+        model_form_msg.set(Some((true, t(loc, "status.saving_settings").into())));
         spawn_local(async move {
             let args = to_value(&serde_json::json!({ "spec": spec })).unwrap();
             match invoke_checked("save_specialist_cmd", args).await {
                 Ok(value) => match serde_wasm_bindgen::from_value::<Vec<Specialist>>(value) {
                     Ok(value) => {
+                        let saved = value.iter().find(|item| item.id == saved_id).cloned();
                         specialists.set(value);
-                        specialist_form.set(None);
-                        settings_message.set(Some((true, "Specialist saved.".into())));
+                        if keep_open {
+                            specialist_form.set(saved);
+                            model_form_msg.set(Some((
+                                true,
+                                t(loc, "specialists.saved").into(),
+                            )));
+                        } else {
+                            specialist_form.set(None);
+                            settings_message.set(Some((
+                                true,
+                                t(loc, "specialists.saved").into(),
+                            )));
+                        }
                     }
-                    Err(error) => settings_message.set(Some((false, error.to_string()))),
+                    Err(error) => model_form_msg.set(Some((false, error.to_string()))),
                 },
-                Err(error) => settings_message.set(Some((false, js_error_text(error)))),
+                Err(error) => model_form_msg.set(Some((false, js_error_text(error)))),
             }
             settings_busy.set(false);
         });
@@ -7192,6 +7274,7 @@ fn App() -> impl IntoView {
             save_settings=Callback::new(save_settings)
             save_model_form=Callback::new(save_model_form)
             save_specialist_form=Callback::new(save_specialist_form)
+            test_reviewer_form=Callback::new(test_reviewer_form)
             validate_model_form=Callback::new(validate_model_form)
             start_specialist_chat=start_specialist_chat
             refresh_conns=Callback::new(move |_: ()| refresh_conns())
