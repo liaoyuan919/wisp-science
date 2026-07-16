@@ -6032,6 +6032,11 @@ pub fn run() {
     let macos_exit_for_setup = Arc::clone(&macos_exit_in_progress);
 
     tauri::Builder::default()
+        // Keep this first so a repeated launch is intercepted before other plugins
+        // and application state are initialized in a second process.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            desktop_lifecycle::activate_workspace(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(move |app| {

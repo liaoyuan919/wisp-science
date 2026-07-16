@@ -1,4 +1,4 @@
-use super::desktop_lifecycle::should_hide_workspace_on_close;
+use super::desktop_lifecycle::{should_activate_workspace_window, should_hide_workspace_on_close};
 use super::{
     branch_title, copy_dir_recursive, events_to_items, merge_pending_ui_event,
     message_uses_resource_bindings, messages_to_items, parse_disabled_skills,
@@ -870,4 +870,11 @@ fn windows_close_to_tray_applies_only_to_the_main_window() {
     assert!(should_hide_workspace_on_close("main"));
     assert!(!should_hide_workspace_on_close("proj-default"));
     assert!(!should_hide_workspace_on_close("pet"));
+}
+
+#[test]
+fn app_activation_restores_workspace_windows_but_not_the_pet() {
+    assert!(should_activate_workspace_window("main"));
+    assert!(should_activate_workspace_window("proj-default"));
+    assert!(!should_activate_workspace_window("pet"));
 }
