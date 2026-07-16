@@ -641,15 +641,31 @@ details.tool:not([open]) > summary.head .run-dot { animation: tool-pulse 1.1s ea
 .composer-attachment.uploading { color: var(--text-muted); }
 .composer-attachment.error { color: var(--err); }
 .composer-attachment-remove {
-  position: absolute; top: 5px; right: 5px; display: inline-flex; align-items: center; justify-content: center;
-  width: 24px; height: 24px; padding: 0; border: none; border-radius: 7px; background: transparent;
-  color: var(--text-faint); cursor: pointer; opacity: .7;
+  position: absolute; top: -7px; right: -7px; display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0; border: 1px solid var(--border-strong); border-radius: 999px;
+  background: var(--bg-elev); color: var(--text-muted); cursor: pointer; box-shadow: var(--shadow-sm);
 }
-.composer-attachment-remove svg { width: 14px; height: 14px; }
-.composer-attachment-remove:hover { color: var(--text); background: var(--bg-sunken); opacity: 1; }
+.composer-attachment-remove svg { width: 12px; height: 12px; }
+.composer-attachment-remove:hover { color: var(--err); border-color: color-mix(in srgb, var(--err) 40%, var(--border-strong)); background: var(--bg-sunken); }
 .composer-reference-chips { margin-top: -2px; }
 .composer-reference-card.skill .composer-attachment-icon { color: #7655c7; background: color-mix(in srgb, #7655c7 12%, transparent); }
 .composer-reference-card.session .composer-attachment-icon { color: var(--info); background: var(--info-soft); }
+.composer-reference-card.quote .composer-attachment-icon { color: var(--clay-strong); background: var(--clay-soft); }
+
+/* Floating actions over a chat text selection */
+.selection-popup {
+  position: fixed; z-index: 80; display: flex; align-items: center; gap: 2px; padding: 3px;
+  background: var(--bg-elev); border: 1px solid var(--border-strong); border-radius: 10px;
+  box-shadow: var(--shadow); transform: translate(-50%, calc(-100% - 10px));
+  animation: motion-surface-in-soft var(--motion-duration-fast) var(--motion-ease-decelerate) both;
+}
+.selection-popup-btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border: none; border-radius: 7px;
+  background: transparent; color: var(--text); font: inherit; font-size: 12.5px; font-weight: 500;
+  cursor: pointer; white-space: nowrap;
+}
+.selection-popup-btn:hover { background: var(--bg-sunken); }
+.selection-popup-btn svg { width: 14px; height: 14px; color: var(--text-muted); }
 .composer textarea {
   display: block; width: 100%; box-sizing: border-box;
   resize: none; min-height: 26px; overflow-x: hidden; overflow-y: auto;

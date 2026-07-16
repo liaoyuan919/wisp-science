@@ -865,6 +865,11 @@ fn App() -> impl IntoView {
     // model and one chip list. Uploads remain separate because they have async
     // progress/error state; selected catalog items are already durable records.
     let composer_references = create_rw_signal::<Vec<ComposerReferenceChip>>(vec![]);
+    // Quoted chat selections waiting in the composer; folded into the message
+    // body as blockquotes on send (no backend-side reference type needed).
+    let composer_quotes = create_rw_signal::<Vec<String>>(vec![]);
+    // Floating action popup over a chat text selection: (text, viewport x, y).
+    let selection_popup = create_rw_signal::<Option<(String, i32, i32)>>(None);
     let picker_mode = create_rw_signal(None::<ComposerPickerMode>);
     let picker_query = create_rw_signal(String::new());
     let picker_index = create_rw_signal(0usize);
@@ -1676,13 +1681,18 @@ fn App() -> impl IntoView {
         let message = input.get();
         let saved_attachments = attachments.get();
         let refs = composer_references.get();
+        let quotes = composer_quotes.get();
         let paths = attachment_paths(&saved_attachments);
-        let display_message = message_with_composer_context(&message, &paths, &refs);
+        let display_message = message_with_composer_context(&message, &paths, &refs, &quotes);
         let reference_args = refs
             .iter()
             .map(ComposerReferenceChip::arg)
             .collect::<Vec<_>>();
-        if message.trim().is_empty() && paths.is_empty() && reference_args.is_empty() {
+        if message.trim().is_empty()
+            && paths.is_empty()
+            && reference_args.is_empty()
+            && quotes.is_empty()
+        {
             return;
         }
         if active_acp_agent_id.get().is_some() && action == ComposerSendAction::BranchNew {
@@ -1706,6 +1716,7 @@ fn App() -> impl IntoView {
         input.set(String::new());
         attachments.set(vec![]);
         composer_references.set(vec![]);
+        composer_quotes.set(vec![]);
         picker_mode.set(None);
         spawn_local(async move {
             let id = if branch {
@@ -1721,6 +1732,7 @@ fn App() -> impl IntoView {
                         input.set(message);
                         attachments.set(saved_attachments);
                         composer_references.set(refs);
+                        composer_quotes.set(quotes);
                         status.set(t(locale.get(), "status.send_failed").into());
                         return;
                     }
@@ -1734,6 +1746,7 @@ fn App() -> impl IntoView {
                         input.set(message);
                         attachments.set(saved_attachments);
                         composer_references.set(refs);
+                        composer_quotes.set(quotes);
                         status.set(t(locale.get(), "status.send_failed").into());
                         return;
                     }
@@ -1801,6 +1814,9 @@ fn App() -> impl IntoView {
                         }
                         if composer_references.get_untracked().is_empty() {
                             composer_references.set(refs);
+                        }
+                        if composer_quotes.get_untracked().is_empty() {
+                            composer_quotes.set(quotes);
                         }
                     }
                     if raw.contains(NO_API_KEY_MARK) {
@@ -1968,6 +1984,7 @@ fn App() -> impl IntoView {
             let draft = composer_text_from_user_message(text);
             attachments.set(vec![]);
             composer_references.set(vec![]);
+            composer_quotes.set(vec![]);
             spawn_local(async move {
                 let arg = to_value(&tauri_args::branch_session(
                     &sid,
@@ -3855,6 +3872,23 @@ fn App() -> impl IntoView {
         }
     });
 
+    // Dismiss the selection popup on any press outside it: starting a new
+    // selection, clicking the composer, or clicking elsewhere in the app.
+    window_event_listener(ev::mousedown, move |ev| {
+        use wasm_bindgen::JsCast;
+        if selection_popup.get_untracked().is_none() {
+            return;
+        }
+        let inside = ev
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+            .and_then(|el| el.closest(".selection-popup").ok().flatten())
+            .is_some();
+        if !inside {
+            selection_popup.set(None);
+        }
+    });
+
     // --- Top-nav project switcher + Project Settings ---
     // Every project-open entry point shares one epoch/target guard and one
     // serialized gate. A rapid A -> B switch can therefore never let A's late
@@ -4167,6 +4201,7 @@ fn App() -> impl IntoView {
         }
         attachments.set(vec![]);
         composer_references.set(vec![]);
+        composer_quotes.set(vec![]);
         sel_artifact.set(0);
         right_tab.set(RightTab::Artifacts);
         spawn_local(async move {
@@ -4698,7 +4733,46 @@ fn App() -> impl IntoView {
                     </div>
                 }
             })}
-            <div class="chat" id=CHAT_SCROLLER_ID class:center-hidden=move || center_file.get().is_some()>
+            {move || selection_popup.get().map(|(text, x, y)| {
+                let quote = text.clone();
+                let explain = text;
+                view! {
+                    <div class="selection-popup" style=format!("left:{x}px;top:{y}px")>
+                        <button type="button" class="selection-popup-btn"
+                            on:click=move |_| {
+                                composer_quotes.update(|items| items.push(quote.clone()));
+                                selection_popup.set(None);
+                                focus_composer();
+                            }>
+                            {compose_icon("plus")}
+                            <span>{t(locale.get(), "selection.add_to_chat")}</span>
+                        </button>
+                        <button type="button" class="selection-popup-btn"
+                            on:click=move |_| {
+                                let question = message_with_quotes(
+                                    &t(locale.get(), "selection.explain_prompt"),
+                                    &[explain.clone()],
+                                );
+                                selection_popup.set(None);
+                                send_side_chat(question);
+                            }>
+                            {compose_icon("chat")}
+                            <span>{t(locale.get(), "selection.explain")}</span>
+                        </button>
+                    </div>
+                }
+            })}
+            <div class="chat" id=CHAT_SCROLLER_ID class:center-hidden=move || center_file.get().is_some()
+                on:mouseup=move |ev| {
+                    let popup = context_menu::selection_text()
+                        .map(|text| (text, ev.client_x(), ev.client_y()));
+                    selection_popup.set(popup);
+                }
+                on:scroll=move |_| {
+                    if selection_popup.get_untracked().is_some() {
+                        selection_popup.set(None);
+                    }
+                }>
                 <div class="thread" id=CHAT_THREAD_ID>
                     {move || active_session.get().and_then(|id| {
                         transcript_pages.get().get(&id).copied().and_then(|page| {
@@ -4999,6 +5073,30 @@ fn App() -> impl IntoView {
                                             title=move || t(locale.get(), "composer.remove_attachment")
                                             aria-label=move || t(locale.get(), "composer.remove_attachment")
                                             on:click=move |_| composer_references.update(|items| items.retain(|item| item.key() != key))>{compose_icon("close")}</button>
+                                    </div>
+                                }
+                            }).collect_view()}
+                        </div>
+                    })}
+                    {move || (!composer_quotes.get().is_empty()).then(|| view! {
+                        <div class="composer-attachments composer-reference-chips">
+                            {composer_quotes.get().into_iter().enumerate().map(|(idx, text)| {
+                                let label = quote_label(&text);
+                                view! {
+                                    <div class="composer-attachment-row composer-reference-card quote" title=text>
+                                        <span class="composer-attachment-icon">{compose_icon("chat")}</span>
+                                        <span class="composer-attachment-copy">
+                                            <span class="composer-attachment ready">{label}</span>
+                                            <span class="composer-attachment-meta">{move || t(locale.get(), "attachment.quote")}</span>
+                                        </span>
+                                        <button type="button" class="composer-attachment-remove"
+                                            title=move || t(locale.get(), "composer.remove_attachment")
+                                            aria-label=move || t(locale.get(), "composer.remove_attachment")
+                                            on:click=move |_| composer_quotes.update(|items| {
+                                                if idx < items.len() {
+                                                    items.remove(idx);
+                                                }
+                                            })>{compose_icon("close")}</button>
                                     </div>
                                 }
                             }).collect_view()}
