@@ -3360,7 +3360,9 @@ pub(super) fn build_conn_json(f: &ConnForm, assign_id: bool) -> serde_json::Valu
             "test".into()
         }
     });
-    let transport = if f.kind == "http" {
+    let transport = if f.kind == "notion" {
+        serde_json::json!({ "kind": "notion" })
+    } else if f.kind == "http" {
         let headers: Vec<(String, String)> = f
             .headers
             .lines()

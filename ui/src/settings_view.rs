@@ -213,6 +213,7 @@ pub(super) fn SettingsView(
     let join_code = create_rw_signal(String::new());
     let join_busy = create_rw_signal(false);
     let join_error = create_rw_signal(None::<String>);
+    let notion_authorizing = create_rw_signal(false);
     create_effect(move |_| {
         if joining.get() {
             focus_element_soon("sync-device-code");
@@ -1962,12 +1963,23 @@ pub(super) fn SettingsView(
                                 <div class="conn-form">
                                     <label>{move || t(locale.get(),"conn.name")}
                                         <input prop:value=move || conn_form.get().map(|f| f.name.clone()).unwrap_or_default()
+                                            disabled=move || notion_authorizing.get()
                                             on:input=move |ev| conn_form.update(|o| if let Some(o)=o { o.name = event_target_input(&ev).value(); }) /></label>
                                     <label>{move || t(locale.get(),"conn.kind")}
                                         <select prop:value=move || conn_form.get().map(|f| f.kind.clone()).unwrap_or_else(|| "stdio".into())
-                                            on:change=move |ev| { let k = dom_value(&ev); conn_form.update(|o| if let Some(o)=o { o.kind = k; }); }>
+                                            disabled=move || notion_authorizing.get()
+                                            on:change=move |ev| {
+                                                let kind = dom_value(&ev);
+                                                conn_form.update(|form| if let Some(form) = form {
+                                                    form.kind = kind.clone();
+                                                    if kind == "notion" && form.name.trim().is_empty() {
+                                                        form.name = "Notion".into();
+                                                    }
+                                                });
+                                            }>
                                             <option value="stdio">{move || t(locale.get(),"conn.kind.stdio")}</option>
                                             <option value="http">{move || t(locale.get(),"conn.kind.http")}</option>
+                                            <option value="notion">{move || t(locale.get(),"conn.kind.notion")}</option>
                                         </select></label>
                                     {move || (conn_form_kind.get() == "stdio").then(|| view!{
                                         <label>{move || t(locale.get(),"conn.command")}
@@ -1985,31 +1997,54 @@ pub(super) fn SettingsView(
                                             <input placeholder="Authorization: Bearer xxx" prop:value=move || conn_form.get().map(|f| f.headers.clone()).unwrap_or_default()
                                                 on:input=move |ev| conn_form.update(|o| if let Some(o)=o { o.headers = event_target_input(&ev).value(); }) /></label>
                                     })}
+                                    {move || (conn_form_kind.get() == "notion").then(|| view!{
+                                        <p class="settings-note">{move || t(locale.get(), "conn.notion.desc")}</p>
+                                    })}
                                     {move || conn_test_msg.get().map(|(ok,msg)| view!{
                                         <div class="settings-status" class:ok=ok class:fail=move||!ok>{msg}</div>
                                     })}
                                     <div class="row settings-footer">
-                                        <button type="button" on:click=move |_| { let f = conn_form.get().unwrap_or_default();
-                                            spawn_local(async move {
-                                                let conn = build_conn_json(&f, false);
-                                                match invoke_checked("test_mcp_connection", to_value(&serde_json::json!({"conn": conn})).unwrap()).await {
-                                                    Ok(v) => match serde_wasm_bindgen::from_value::<Vec<ConnectorTool>>(v) {
-                                                        Ok(tools) => {
-                                                            let n = tools.len();
-                                                            if let Some(id) = f.id.clone() {
-                                                                custom_conn_tools.update(|m| { m.insert(id, tools); });
+                                        {move || (conn_form_kind.get() != "notion").then(|| view! {
+                                            <button type="button" on:click=move |_| { let f = conn_form.get().unwrap_or_default();
+                                                spawn_local(async move {
+                                                    let conn = build_conn_json(&f, false);
+                                                    match invoke_checked("test_mcp_connection", to_value(&serde_json::json!({"conn": conn})).unwrap()).await {
+                                                        Ok(v) => match serde_wasm_bindgen::from_value::<Vec<ConnectorTool>>(v) {
+                                                            Ok(tools) => {
+                                                                let n = tools.len();
+                                                                if let Some(id) = f.id.clone() {
+                                                                    custom_conn_tools.update(|m| { m.insert(id, tools); });
+                                                                }
+                                                                conn_test_msg.set(Some((true, format!("OK — {n} tools"))));
                                                             }
-                                                            conn_test_msg.set(Some((true, format!("OK — {n} tools"))));
-                                                        }
-                                                        Err(e) => conn_test_msg.set(Some((false, e.to_string()))),
-                                                    },
-                                                    Err(e) => conn_test_msg.set(Some((false, js_error_text(e)))),
-                                                }
-                                            });
-                                        }>{move || t(locale.get(),"conn.test")}</button>
-                                        <button type="button" on:click=move |_| close_settings_subpage.call(())>{move || t(locale.get(),"settings.cancel")}</button>
+                                                            Err(e) => conn_test_msg.set(Some((false, e.to_string()))),
+                                                        },
+                                                        Err(e) => conn_test_msg.set(Some((false, js_error_text(e)))),
+                                                    }
+                                                });
+                                            }>{move || t(locale.get(),"conn.test")}</button>
+                                        })}
+                                        <button type="button" disabled=move || notion_authorizing.get()
+                                            on:click=move |_| close_settings_subpage.call(())>{move || t(locale.get(),"settings.cancel")}</button>
                                         <button type="button" class="primary" on:click=move |_| { let f = conn_form.get().unwrap_or_default();
                                             spawn_local(async move {
+                                                if f.kind == "notion" {
+                                                    notion_authorizing.set(true);
+                                                    conn_test_msg.set(Some((true, t(locale.get(), "conn.notion.waiting").into())));
+                                                    let args = to_value(&serde_json::json!({ "name": f.name })).unwrap();
+                                                    match invoke_checked("add_notion_connection", args).await {
+                                                        Ok(_) => {
+                                                            conn_form.set(None);
+                                                            conn_test_msg.set(None);
+                                                            refresh_conns.call(());
+                                                        }
+                                                        Err(error) => {
+                                                            conn_test_msg.set(Some((false, js_error_text(error))));
+                                                        }
+                                                    }
+                                                    notion_authorizing.set(false);
+                                                    return;
+                                                }
                                                 let editing = f.id.is_some();
                                                 let conn = build_conn_json(&f, true);
                                                 let cmd = if editing { "update_mcp_connection" } else { "add_mcp_connection" };
@@ -2017,7 +2052,15 @@ pub(super) fn SettingsView(
                                                     conn_form.set(None); conn_test_msg.set(None); refresh_conns.call(());
                                                 }
                                             });
-                                        }>{move || t(locale.get(),"settings.save")}</button>
+                                        } disabled=move || notion_authorizing.get()>
+                                            {move || if notion_authorizing.get() {
+                                                t(locale.get(), "conn.notion.waiting")
+                                            } else if conn_form_kind.get() == "notion" {
+                                                t(locale.get(), "conn.notion.authorize")
+                                            } else {
+                                                t(locale.get(), "settings.save")
+                                            }}
+                                        </button>
                                     </div>
                                 </div>
                             </div>

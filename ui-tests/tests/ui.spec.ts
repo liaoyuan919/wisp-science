@@ -2208,6 +2208,24 @@ test("custom MCP row opens tools while edit uses a dedicated button", async ({ p
   await expect(page.getByPlaceholder("https://host/mcp")).toHaveValue("https://api.wolai.com/v1/mcp/");
 });
 
+test("Notion is authorized only when selected from Add connection", async ({ page }) => {
+  await enterApp(page);
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Connections" }).click();
+
+  await expect.poll(() => lastInvokeArgs(page, "add_notion_connection")).toBeNull();
+  await page.getByRole("button", { name: "Add connection" }).click();
+  await page.getByLabel("Type").selectOption("notion");
+
+  await expect(page.getByLabel("Name")).toHaveValue("Notion");
+  await expect(page.getByText("Authorization starts only after you choose Authorize and add.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Test" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Authorize and add" }).click();
+  await expect.poll(() => lastInvokeArgs(page, "add_notion_connection")).toEqual({ name: "Notion" });
+  await expect(page.locator(".settings-list-row", { hasText: "Notion" })).toBeVisible();
+});
+
 test("settings validation rejects blank required fields", async ({ page }) => {
   await enterApp(page);
   await openModelsSettings(page);

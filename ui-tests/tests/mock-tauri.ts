@@ -914,6 +914,17 @@ export function tauriMock(): void {
           case "set_approval_scope":
           case "set_connector_skip_approvals":
             return null;
+          case "add_notion_connection":
+            mockMcpConnections = [
+              ...mockMcpConnections.filter((connection) => connection.transport?.kind !== "notion"),
+              {
+                id: "notion",
+                name: String(arg("name") ?? "").trim() || "Notion",
+                enabled: true,
+                transport: { kind: "notion" },
+              },
+            ];
+            return null;
           case "set_credential": {
             const id = String(arg("id") ?? "");
             mockCredentials[id] = String(arg("value") ?? "").trim().length > 0;

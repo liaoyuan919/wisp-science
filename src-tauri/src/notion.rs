@@ -410,7 +410,7 @@ pub async fn connect(connection_id: &str) -> Result<wisp_mcp::McpClient> {
     .await
 }
 
-pub fn is_authorized(connection_id: &str) -> bool {
+pub fn has_credential(connection_id: &str) -> bool {
     wisp_store::secrets::Secret::get(&secret_name(connection_id)).is_ok()
 }
 

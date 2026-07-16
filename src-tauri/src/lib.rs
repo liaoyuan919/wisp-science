@@ -6353,6 +6353,7 @@ pub fn run() {
             open_external_url,
             connector_commands::list_mcp_connections,
             connector_commands::add_mcp_connection,
+            connector_commands::add_notion_connection,
             connector_commands::update_mcp_connection,
             connector_commands::delete_mcp_connection,
             connector_commands::set_mcp_connection_enabled,
