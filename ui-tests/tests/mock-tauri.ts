@@ -92,7 +92,7 @@ export function tauriMock(): void {
     { name: "paper-narrative", description: "Shape a paper story", tags: [], enabled: true, builtin: false, dir: "/home/me/.wisp/skills/paper-narrative" },
   ];
   let memoryEnabled = true;
-  let autoReviewEnabled = true;
+  let autoReviewEnabled = false;
   let memoryFiles = [{ name: "2026-07-01.md", preview: "User prefers DeepSeek.", bytes: 128 }];
   let mockSpecialists: any[] = [
     { id: "reviewer", name: "Reviewer", icon: "review", color: "clay", description: "", instructions: "rubric", model_id: "", skills: [], connectors: [], builtin: true },

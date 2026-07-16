@@ -11,6 +11,12 @@ use super::{
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+#[test]
+fn llm_dispatch_debug_detects_cached_model_mismatch() {
+    assert!(!super::llm_model_mismatch("glm-5.2", "GLM-5.2"));
+    assert!(super::llm_model_mismatch("gpt-5.6-luna", "glm-5.2"));
+}
+
 fn reviewer_with_backend(
     backend: Option<crate::review::ReviewBackendConfig>,
 ) -> crate::specialists::Specialist {
@@ -50,17 +56,15 @@ fn reviewer_explicit_backend_does_not_follow_session() {
 }
 
 #[tokio::test]
-async fn auto_review_is_on_by_default_and_persists_changes() {
+async fn auto_review_is_off_by_default_and_persists_changes() {
     let dir = std::env::temp_dir().join(format!("wisp_auto_review_{}", uuid::Uuid::new_v4()));
     let store = wisp_store::Store::open(&dir.join("wisp.sqlite"))
         .await
         .unwrap();
 
-    assert!(super::load_auto_review_enabled(&store).await);
-    super::save_auto_review_enabled(&store, false)
-        .await
-        .unwrap();
     assert!(!super::load_auto_review_enabled(&store).await);
+    super::save_auto_review_enabled(&store, true).await.unwrap();
+    assert!(super::load_auto_review_enabled(&store).await);
     drop(store);
     let _ = std::fs::remove_dir_all(dir);
 }
