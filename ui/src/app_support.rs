@@ -38,9 +38,9 @@ pub(super) fn model_switch_warning_disabled() -> bool {
 }
 
 pub(super) fn disable_model_switch_warning() {
-    if let Some(storage) = web_sys::window().and_then(|window| {
-        window.local_storage().ok().flatten()
-    }) {
+    if let Some(storage) =
+        web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+    {
         let _ = storage.set_item(MODEL_SWITCH_WARNING_DISABLED_KEY, "1");
     }
 }
@@ -897,7 +897,8 @@ fn RuntimeEnvironmentPanel(
     states: RwSignal<HashMap<String, RuntimeObjectState>>,
     runtimes: RwSignal<Vec<RuntimeInfo>>,
 ) -> impl IntoView {
-    move || selected.get().map(|mut slot| {
+    move || {
+        selected.get().map(|mut slot| {
         slot.info = runtimes.get().into_iter().find(|runtime| {
             runtime.key.project_id == slot.project_id
                 && runtime.key.context_id == slot.context_id
@@ -1011,6 +1012,7 @@ fn RuntimeEnvironmentPanel(
             </section>
         }
     })
+    }
 }
 
 #[component]

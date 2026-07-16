@@ -476,9 +476,7 @@ fn App() -> impl IntoView {
                     }
                 }
                 Err(err) => {
-                    web_sys::console::warn_1(
-                        &format!("set_active_model failed: {:?}", err).into(),
-                    );
+                    web_sys::console::warn_1(&format!("set_active_model failed: {:?}", err).into());
                 }
             }
         });
@@ -2641,10 +2639,7 @@ fn App() -> impl IntoView {
         }
         let loc = locale.get();
         settings_busy.set(true);
-        model_form_msg.set(Some((
-            true,
-            t(loc, "specialists.reviewer.testing").into(),
-        )));
+        model_form_msg.set(Some((true, t(loc, "specialists.reviewer.testing").into())));
         spawn_local(async move {
             let result = invoke_timeout(
                 "test_reviewer_backend",
@@ -2653,34 +2648,35 @@ fn App() -> impl IntoView {
             )
             .await;
             match result {
-                Ok(value) => match serde_wasm_bindgen::from_value::<ReviewerBackendTestResult>(value)
-                {
-                    Ok(result) => {
-                        let backend = match result.backend.as_str() {
-                            "acp_agent" => "ACP",
-                            "http_model" => "HTTP",
-                            other => other,
-                        };
-                        let headline = tf(
-                            loc,
-                            "specialists.reviewer.test_ok",
-                            &[
-                                ("backend", backend),
-                                ("model", &result.model),
-                                ("status", &result.status),
-                            ],
-                        );
-                        model_form_msg.set(Some((
-                            true,
-                            if result.summary.trim().is_empty() {
-                                headline
-                            } else {
-                                format!("{headline} {}", result.summary.trim())
-                            },
-                        )));
+                Ok(value) => {
+                    match serde_wasm_bindgen::from_value::<ReviewerBackendTestResult>(value) {
+                        Ok(result) => {
+                            let backend = match result.backend.as_str() {
+                                "acp_agent" => "ACP",
+                                "http_model" => "HTTP",
+                                other => other,
+                            };
+                            let headline = tf(
+                                loc,
+                                "specialists.reviewer.test_ok",
+                                &[
+                                    ("backend", backend),
+                                    ("model", &result.model),
+                                    ("status", &result.status),
+                                ],
+                            );
+                            model_form_msg.set(Some((
+                                true,
+                                if result.summary.trim().is_empty() {
+                                    headline
+                                } else {
+                                    format!("{headline} {}", result.summary.trim())
+                                },
+                            )));
+                        }
+                        Err(error) => model_form_msg.set(Some((false, error.to_string()))),
                     }
-                    Err(error) => model_form_msg.set(Some((false, error.to_string()))),
-                },
+                }
                 Err(error) => model_form_msg.set(Some((
                     false,
                     tf(
@@ -2700,10 +2696,7 @@ fn App() -> impl IntoView {
         };
         let loc = locale.get();
         if spec.name.trim().is_empty() {
-            model_form_msg.set(Some((
-                false,
-                t(loc, "specialists.name_required").into(),
-            )));
+            model_form_msg.set(Some((false, t(loc, "specialists.name_required").into())));
             return;
         }
         let saved_id = spec.id.clone();
@@ -2719,16 +2712,10 @@ fn App() -> impl IntoView {
                         specialists.set(value);
                         if keep_open {
                             specialist_form.set(saved);
-                            model_form_msg.set(Some((
-                                true,
-                                t(loc, "specialists.saved").into(),
-                            )));
+                            model_form_msg.set(Some((true, t(loc, "specialists.saved").into())));
                         } else {
                             specialist_form.set(None);
-                            settings_message.set(Some((
-                                true,
-                                t(loc, "specialists.saved").into(),
-                            )));
+                            settings_message.set(Some((true, t(loc, "specialists.saved").into())));
                         }
                     }
                     Err(error) => model_form_msg.set(Some((false, error.to_string()))),
