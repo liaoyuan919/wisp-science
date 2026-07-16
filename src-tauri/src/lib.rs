@@ -6183,6 +6183,7 @@ pub fn run() {
             context_probe::probe_execution_context,
             runtime_launcher::update_execution_context_interpreters,
             ssh_hosts::list_ssh_hosts,
+            ssh_hosts::set_execution_context_resource_enabled,
             ssh_hosts::add_ssh_host,
             ssh_hosts::remove_ssh_host,
             ssh_hosts::list_ssh_config_aliases,

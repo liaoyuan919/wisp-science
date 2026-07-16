@@ -298,10 +298,13 @@ async fn ssh_run_detaches_persists_handle_and_finishes_from_poller() {
         .create_project("p", "proj", &tmp.to_string_lossy())
         .await
         .unwrap();
-    store
-        .upsert_execution_context(&wisp_store::ExecutionContext::new("ssh:gpu", "GPU").unwrap())
-        .await
-        .unwrap();
+    let mut context = wisp_store::ExecutionContext::new("ssh:gpu", "GPU").unwrap();
+    context.config_json = serde_json::json!({
+        "alias": "gpu",
+        "resource_enabled": true
+    })
+    .to_string();
+    store.upsert_execution_context(&context).await.unwrap();
     let runner = Arc::new(ScriptedRunRunner::new(vec![
         ok_output("__WISP_PREPARED__\n"),
         ok_output("__WISP_HANDLE__:token-will-be-replaced"),

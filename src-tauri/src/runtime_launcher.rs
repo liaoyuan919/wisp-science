@@ -19,11 +19,12 @@ use wisp_runtime::{
 };
 
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(30);
-const INTERPRETER_CONFIG_KEYS: [&str; 4] = [
+const PRESERVED_CONFIG_KEYS: [&str; 5] = [
     "python_executable",
     "python_path",
     "rscript_executable",
     "rscript_path",
+    "resource_enabled",
 ];
 
 pub(crate) fn preserve_interpreter_config(existing: &str, replacement: &str) -> Result<String> {
@@ -32,7 +33,7 @@ pub(crate) fn preserve_interpreter_config(existing: &str, replacement: &str) -> 
     let target = replacement
         .as_object_mut()
         .expect("json_object always returns an object");
-    for key in INTERPRETER_CONFIG_KEYS {
+    for key in PRESERVED_CONFIG_KEYS {
         if let Some(value) = existing.get(key) {
             target.insert(key.into(), value.clone());
         }

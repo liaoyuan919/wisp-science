@@ -2,9 +2,10 @@ use crate::app_support::{
     build_conn_json, close_details_ancestor, compose_icon, conn_form_from_row, focus_element_soon,
     join_tags, js_error_text, new_acp_form, new_model_form, profile_to_form, reviewer_backend_key,
     reviewer_backend_label, reviewer_missing_acp_profile_id, set_reviewer_backend,
-    settings_section_label, settings_subpage_label, skill_matches_filter, CRED_GROUPS,
+    context_capability_summary, context_resource_enabled, settings_section_label,
+    settings_subpage_label, skill_matches_filter, CRED_GROUPS,
 };
-use crate::bindings::{invoke, invoke_checked};
+use crate::bindings::{invoke, invoke_checked, is_windows};
 use crate::dto::*;
 use crate::i18n::{localize_backend, set_document_lang, t, tf, Locale};
 use crate::text::{
@@ -120,6 +121,8 @@ pub(super) struct SettingsViewState {
     pub(super) custom_conn_tools_loading: RwSignal<HashSet<String>>,
     pub(super) custom_conn_tool_errors: RwSignal<HashMap<String, String>>,
     pub(super) pet_status: RwSignal<PetStatus>,
+    pub(super) ssh_hosts: RwSignal<Vec<SshHost>>,
+    pub(super) execution_contexts: RwSignal<Vec<ExecutionContext>>,
 }
 
 #[component]
@@ -144,6 +147,12 @@ pub(super) fn SettingsView(
     set_visible_skills_enabled: Callback<bool>,
     install_skill_from: Callback<String>,
     remove_specialist: Callback<String>,
+    open_add_host: Callback<()>,
+    import_ssh_hosts: Callback<()>,
+    import_wsl_contexts: Callback<()>,
+    remove_ssh_host: Callback<String>,
+    toggle_compute_resource: Callback<(String, bool)>,
+    probe_compute_resource: Callback<String>,
 ) -> impl IntoView {
     let SettingsViewState {
         locale,
@@ -195,6 +204,8 @@ pub(super) fn SettingsView(
         custom_conn_tools_loading,
         custom_conn_tool_errors,
         pet_status,
+        ssh_hosts,
+        execution_contexts,
     } = state;
     let acp_form_open = create_memo(move |_| acp_form.get().is_some());
     let joining = create_rw_signal(false);
@@ -288,6 +299,9 @@ pub(super) fn SettingsView(
                     <button class:active=move || settings_section.get()=="permissions"
                         on:click=move |_| go_settings_section.call("permissions".into())>
                         {move || t(locale.get(), "settings.nav.permissions")}</button>
+                    <button class:active=move || settings_section.get()=="environments"
+                        on:click=move |_| go_settings_section.call("environments".into())>
+                        {move || t(locale.get(), "settings.nav.environments")}</button>
                 </div>
                 <div class="settings-nav-group">
                     <span class="settings-nav-label">{move || t(locale.get(), "settings.nav.capabilities")}</span>
@@ -459,6 +473,84 @@ pub(super) fn SettingsView(
                                 <button type="button" disabled=move || settings_busy.get() on:click=move |ev| check_updates.call(ev)>{move || t(locale.get(), "settings.check_updates")}</button>
                             <button type="button" disabled=move || settings_busy.get() on:click=move |_| show_settings.set(false)>{move || t(locale.get(), "settings.cancel")}</button>
                                 <button type="button" class="primary" disabled=move || settings_busy.get() on:click=move |ev| save_settings.call(ev)>{move || t(locale.get(), "settings.save")}</button>
+                        </div>
+                    </div>
+                }.into_view())}
+                {move || (settings_section.get() == "environments").then(|| view! {
+                    <div class="settings-pane settings-pane-list environment-settings-pane">
+                        <p class="settings-note">{move || t(locale.get(), "environments.hint")}</p>
+                        <div class="settings-toolbar environment-settings-actions">
+                            <button type="button" class="primary" on:click=move |_| open_add_host.call(())>
+                                {compose_icon("plus")}
+                                <span>{move || t(locale.get(), "hosts.add")}</span>
+                            </button>
+                            <span></span>
+                            <button type="button" on:click=move |_| import_ssh_hosts.call(())>
+                                {move || t(locale.get(), "hosts.import")}
+                            </button>
+                            {is_windows().then(|| view! {
+                                <button type="button" on:click=move |_| import_wsl_contexts.call(())>
+                                    {move || t(locale.get(), "contexts.import_wsl")}
+                                </button>
+                            })}
+                        </div>
+                        <div class="settings-list environment-settings-list">
+                            {move || {
+                                let contexts = execution_contexts.get();
+                                let hosts = ssh_hosts.get();
+                                if hosts.is_empty() {
+                                    return view! { <div class="settings-list-empty">{t(locale.get(), "hosts.empty")}</div> }.into_view();
+                                }
+                                hosts.into_iter().map(|host| {
+                                    let context_id = format!("ssh:{}", host.alias);
+                                    let enabled = contexts.iter()
+                                        .find(|context| context.id == context_id)
+                                        .is_some_and(context_resource_enabled);
+                                    let capability_summary = contexts.iter()
+                                        .find(|context| context.id == context_id)
+                                        .map(|context| format!(" · {}", context_capability_summary(context)));
+                                    let toggle_id = context_id.clone();
+                                    let probe_id = context_id.clone();
+                                    let remove_alias = host.alias.clone();
+                                    let connection = match (&host.user, host.port) {
+                                        (Some(user), Some(port)) => format!("{user}@{}:{port}", host.alias),
+                                        (Some(user), None) => format!("{user}@{}", host.alias),
+                                        (None, Some(port)) => format!("{}:{port}", host.alias),
+                                        (None, None) => host.alias.clone(),
+                                    };
+                                    view! {
+                                        <div class="settings-list-row environment-settings-row" data-context-id=context_id>
+                                            <span class="environment-server-icon" class:enabled=enabled>
+                                                {compose_icon("server")}
+                                            </span>
+                                            <div class="settings-list-main">
+                                                <span class="settings-list-title">{host.alias.clone()}</span>
+                                                <span class="settings-list-sub">
+                                                    {connection}
+                                                    {capability_summary}
+                                                </span>
+                                            </div>
+                                            <div class="settings-list-actions">
+                                                <button type="button" class="environment-probe"
+                                                    on:click=move |_| probe_compute_resource.call(probe_id.clone())>
+                                                    {t(locale.get(), "contexts.probe")}
+                                                </button>
+                                                <button type="button" class="environment-resource-toggle" class:enabled=enabled
+                                                    aria-pressed=enabled.to_string()
+                                                    on:click=move |_| toggle_compute_resource.call((toggle_id.clone(), !enabled))>
+                                                    {if enabled { t(locale.get(), "environments.enabled") } else { t(locale.get(), "environments.disabled") }}
+                                                </button>
+                                                <button type="button" class="settings-list-remove"
+                                                    title=move || t(locale.get(), "environments.remove")
+                                                    aria-label=move || t(locale.get(), "environments.remove")
+                                                    on:click=move |_| remove_ssh_host.call(remove_alias.clone())>
+                                                    {compose_icon("close")}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    }.into_view()
+                                }).collect_view()
+                            }}
                         </div>
                     </div>
                 }.into_view())}
