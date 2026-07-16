@@ -2,6 +2,12 @@
 target = "index.html"
 dist = "dist"
 
+# Multiple `trunk serve` instances (dev preview on dist-dev, Playwright on
+# dist-test) share this directory; without these ignores each instance's
+# output re-triggers the other's watcher in an endless rebuild/reload loop.
+[watch]
+ignore = ["dist", "dist-dev", "dist-test"]
+
 [serve]
 port = 1421
 addresses = ["127.0.0.1"]

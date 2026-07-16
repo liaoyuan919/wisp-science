@@ -3312,6 +3312,7 @@ pub(super) fn settings_subpage_label(
     memory_selected: Option<&str>,
     specialist_form: Option<&Specialist>,
     acp_form: Option<&AcpAgentProfile>,
+    channels_open: Option<&str>,
 ) -> Option<String> {
     match section {
         "models" => acp_form
@@ -3348,6 +3349,11 @@ pub(super) fn settings_subpage_label(
             })
             .or_else(|| open_conn.map(|s| s.to_string())),
         "memory" => memory_selected.map(|s| s.to_string()),
+        "channels" => channels_open.map(|key| match key {
+            "feishu" => t(loc, "channels.feishu.title").into(),
+            "weixin" => t(loc, "channels.weixin.title").into(),
+            other => other.to_string(),
+        }),
         _ => None,
     }
 }
