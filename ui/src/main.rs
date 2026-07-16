@@ -3303,7 +3303,7 @@ fn App() -> impl IntoView {
     let compute_menu_open = create_rw_signal(false);
     let compute_info_context_id = create_rw_signal::<Option<String>>(None);
     let specialist_menu_open = create_rw_signal(false);
-    let auto_review_enabled = create_rw_signal(true);
+    let auto_review_enabled = create_rw_signal(false);
     spawn_local(async move {
         let value = invoke("get_auto_review_enabled", JsValue::UNDEFINED).await;
         if let Some(enabled) = value.as_bool() {

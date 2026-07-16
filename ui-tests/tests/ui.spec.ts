@@ -1140,7 +1140,7 @@ test("agent menu updates review, reviewer model, and memory preferences", async 
   let menu = await openAgentMenu(page);
 
   await menu.locator("label.agent-menu-row", { hasText: "Auto-review" }).click();
-  await expect.poll(() => lastInvokeArgs(page, "set_auto_review_enabled")).toMatchObject({ enabled: false });
+  await expect.poll(() => lastInvokeArgs(page, "set_auto_review_enabled")).toMatchObject({ enabled: true });
 
   await menu.getByRole("button", { name: /^Reviewer model/ }).click();
   await page.getByRole("menu", { name: "Reviewer model" })
@@ -1182,7 +1182,7 @@ test("agent menu updates review, reviewer model, and memory preferences", async 
   await expect.poll(() => lastInvokeArgs(page, "set_memory_enabled")).toMatchObject({ enabled: false });
 
   await menu.locator("label.agent-menu-row", { hasText: "Auto-review" }).click();
-  await expect.poll(() => lastInvokeArgs(page, "set_auto_review_enabled")).toMatchObject({ enabled: true });
+  await expect.poll(() => lastInvokeArgs(page, "set_auto_review_enabled")).toMatchObject({ enabled: false });
   await menu.getByRole("button", { name: /^Reviewer model/ }).click();
   await page.getByRole("menu", { name: "Reviewer model" })
     .getByRole("button", { name: "Default" }).click();
