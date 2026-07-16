@@ -528,6 +528,7 @@ export function tauriMock(): void {
               model: "deepseek-v4-pro",
               has_api_key: true,
               locale: "en",
+              max_iter: 100,
               max_tokens: 4096,
               reasoning_effort: "",
               supports_vision: true,

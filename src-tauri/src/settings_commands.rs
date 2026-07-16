@@ -24,6 +24,15 @@ pub(super) async fn get_settings(state: State<'_, AppState>) -> Result<Settings,
         .ok()
         .flatten()
         .unwrap_or_default();
+    let max_iter = state
+        .store
+        .get_setting("max_iter")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value >= 0)
+        .unwrap_or_else(super::default_max_iter_setting);
     let (max_tokens, reasoning_effort) = models::active_llm_advanced(&state.store).await;
     let has_api_key = models::active_has_key(&state.store).await;
     let supports_vision = models::active_supports_vision(&state.store).await;
@@ -76,6 +85,7 @@ pub(super) async fn get_settings(state: State<'_, AppState>) -> Result<Settings,
         has_api_key,
         locale,
         workspace_dir,
+        max_iter,
         max_tokens,
         reasoning_effort,
         supports_vision,
@@ -104,6 +114,7 @@ pub(super) async fn set_settings(
     if model.is_empty() {
         return Err("Model is required.".into());
     }
+    validate_max_iter(settings.max_iter)?;
     if !matches!(settings.sync_backend.as_str(), "relay" | "folder") {
         return Err("Sync backend must be relay or shared folder.".into());
     }
@@ -209,6 +220,11 @@ pub(super) async fn set_settings(
         .set_setting("pet_directory", pet_directory)
         .await
         .map_err(|e| e.to_string())?;
+    state
+        .store
+        .set_setting("max_iter", &settings.max_iter.to_string())
+        .await
+        .map_err(|e| e.to_string())?;
     desktop_lifecycle::sync_pet_window(&app, settings.pet_enabled)?;
 
     // Workspace directory: persist an absolute, creatable path. Takes effect on
@@ -235,6 +251,13 @@ pub(super) async fn set_settings(
 
     // Reset cached agents so the next turn picks up the new provider.
     clear_idle_agents(&state).await;
+    Ok(())
+}
+
+fn validate_max_iter(max_iter: i64) -> Result<(), String> {
+    if max_iter < 0 {
+        return Err("Maximum agent iterations cannot be negative.".into());
+    }
     Ok(())
 }
 
@@ -488,7 +511,7 @@ pub(super) async fn validate_settings(
 
 #[cfg(test)]
 mod tests {
-    use super::{merged_scimaster_config, sync_scimaster_config_at};
+    use super::{merged_scimaster_config, sync_scimaster_config_at, validate_max_iter};
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},
@@ -503,6 +526,16 @@ mod tests {
         assert_eq!(v["apiBaseUrl"], "https://scimaster.bohrium.com");
         assert_eq!(v["defaults"]["limit"], 10);
         assert_eq!(v["defaults"]["mode"], "low");
+    }
+
+    #[test]
+    fn max_iter_cannot_be_negative() {
+        assert!(validate_max_iter(0).is_ok());
+        assert!(validate_max_iter(1).is_ok());
+        assert_eq!(
+            validate_max_iter(-1).unwrap_err(),
+            "Maximum agent iterations cannot be negative."
+        );
     }
 
     #[test]

@@ -1137,6 +1137,9 @@ struct Settings {
     /// (Documents/wisp-science). Applied on next launch (#6, #13).
     #[serde(default)]
     workspace_dir: String,
+    /// Maximum LLM/tool iterations in one agent turn.
+    #[serde(default = "default_max_iter_setting")]
+    max_iter: i64,
     /// Max output tokens per LLM turn. 0 = provider default.
     #[serde(default)]
     max_tokens: u64,
@@ -1161,6 +1164,12 @@ struct Settings {
     pet_enabled: bool,
     #[serde(default)]
     pet_directory: String,
+}
+
+const DEFAULT_MAX_ITER: usize = 100;
+
+const fn default_max_iter_setting() -> i64 {
+    DEFAULT_MAX_ITER as i64
 }
 
 /// Drop cached per-session agents so the next turn picks up new model settings.
@@ -3085,7 +3094,7 @@ async fn send_message(
         .ok()
         .flatten()
         .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(100);
+        .unwrap_or(DEFAULT_MAX_ITER);
 
     // Resolve the target session frame: an explicit id wins, else lazily create
     // one (mirrors the legacy first-send behavior). The frame id is what every
