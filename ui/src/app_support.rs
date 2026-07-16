@@ -5004,6 +5004,13 @@ pub(super) fn FilePreview(dom_id: String, path: String, kind: String) -> impl In
                     return;
                 }
             };
+            if !matches!(kind.as_str(), "image" | "pdf") && fc.text.is_none() {
+                if let Some(el) = el {
+                    el.set_class_name("rp-heavy rp-error");
+                    el.set_text_content(Some(&t(loc, "preview.unsupported_file")));
+                }
+                return;
+            }
             if kind == "markdown" {
                 if let Some(el) = el {
                     el.set_class_name("rp-heavy md");

@@ -191,6 +191,7 @@ conversation history.
 | ACP reviewer fails to start | Test that ACP profile under Settings first and complete the adapter's authentication flow |
 | Reviewer backend shows Missing ACP Agent | The saved reviewer profile was removed. Select and save another ACP Agent or an HTTP reviewer backend |
 | ACP reviewer times out | The one-shot reviewer exceeded 90 seconds. Retry it or choose a faster reviewer backend; the primary answer remains available |
+| A local script says Preview is not supported | In-app source preview currently supports `.R`, `.py`, and `.sh`; open or download other file types with an external application |
 
 ## Current limits
 
