@@ -1449,6 +1449,7 @@ struct TauriOutput {
 
 impl TauriOutput {
     fn emit(&self, event: AgentEvent) {
+        channels::publish_agent_event(&event);
         if matches!(
             event,
             AgentEvent::User { .. }
@@ -3002,6 +3003,7 @@ async fn send_message(
     references: Option<Vec<ComposerReferenceArg>>,
     resume: Option<bool>,
     acp_agent_id: Option<String>,
+    progress_observer_id: Option<u64>,
 ) -> Result<String, String> {
     let resume = resume.unwrap_or(false);
     if !resume && message.trim().is_empty() {
@@ -3062,6 +3064,12 @@ async fn send_message(
             injected_context.push(compute);
         }
         let artifact_references = resolve_acp_artifact_references(&state.store, refs).await?;
+        // Record the destination before waiting for a busy session. A user can
+        // therefore send a queued desktop follow-up and immediately continue
+        // that same conversation from Feishu or WeChat.
+        channels::record_last_message_session(&state.store, &frame_id)
+            .await
+            .map_err(|error| format!("Failed to update the shared last-message route: {error}"))?;
         let runtime = {
             let mut sessions = state.sessions.lock().await;
             sessions
@@ -3070,6 +3078,8 @@ async fn send_message(
                 .clone()
         };
         let _workflow = runtime.workflow.lock().await;
+        let _progress_subscription =
+            progress_observer_id.and_then(|id| channels::activate_progress_observer(id, &frame_id));
         runtime.cancel.store(false, Ordering::SeqCst);
         let turn_start = state
             .store
@@ -3180,6 +3190,12 @@ async fn send_message(
         &reasoning_effort,
     )?;
 
+    // Route on accepted send, not on eventual execution. In particular, a
+    // follow-up queued behind a long turn must become the target immediately.
+    channels::record_last_message_session(&state.store, &frame_id)
+        .await
+        .map_err(|error| format!("Failed to update the shared last-message route: {error}"))?;
+
     // Get or create this session's runtime. The map mutex is dropped here —
     // the per-session `agent` mutex (not this map) is what the turn holds,
     // so a turn in session A never blocks a turn in session B.
@@ -3192,6 +3208,8 @@ async fn send_message(
     };
     rt.cancel.store(false, Ordering::SeqCst);
     let mut guard = rt.agent.lock().await;
+    let _progress_subscription =
+        progress_observer_id.and_then(|id| channels::activate_progress_observer(id, &frame_id));
     if rt.deleted.load(Ordering::SeqCst) {
         return Err("This session was deleted while the turn was queued.".into());
     }
@@ -6236,6 +6254,10 @@ pub fn run() {
             stop_agent,
             channels::channels_status,
             channels::set_feishu_channel,
+            channels::feishu_bind_start,
+            channels::feishu_bind_poll,
+            channels::feishu_bind_cancel,
+            channels::feishu_unbind,
             channels::set_weixin_channel,
             channels::weixin_bind_start,
             channels::weixin_bind_poll,

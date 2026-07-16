@@ -135,6 +135,22 @@ impl Store {
         Ok(row.map(|value| value.0))
     }
 
+    /// The root conversation that most recently accepted a user message,
+    /// across every project. Assistant/tool messages do not move this pointer:
+    /// callers use it as a deterministic cold-start fallback for cross-surface
+    /// conversation routing.
+    pub async fn last_user_message_session(&self) -> Result<Option<(String, String)>> {
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT m.frame_id, f.project_id \
+             FROM messages m JOIN frames f ON f.id=m.frame_id \
+             WHERE m.role='user' AND f.parent_frame_id=f.id \
+             ORDER BY m.ts DESC, m.rowid DESC LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
     /// Newest sessions across ALL projects, for the landing "Recent sessions" list.
     pub async fn list_recent_sessions(
         &self,

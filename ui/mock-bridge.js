@@ -55,6 +55,8 @@
   };
   const mockChannels = {
     feishu_enabled: false,
+    feishu_bound: false,
+    feishu_international: false,
     feishu_app_id: "",
     feishu_has_secret: false,
     feishu_state: "stopped",
@@ -150,9 +152,31 @@
             return { ...mockChannels };
           case "set_feishu_channel":
             mockChannels.feishu_enabled = !!args?.enabled;
+            mockChannels.feishu_international = !!args?.international;
             mockChannels.feishu_app_id = args?.appId ?? "";
             if (args?.appSecret) mockChannels.feishu_has_secret = true;
+            mockChannels.feishu_bound = !!(mockChannels.feishu_app_id && mockChannels.feishu_has_secret);
             mockChannels.feishu_state = mockChannels.feishu_enabled ? "running" : "stopped";
+            return null;
+          case "feishu_bind_start":
+            return {
+              flow_id: "mock-feishu-flow",
+              qr_image: "data:image/svg+xml;base64," + btoa('<svg xmlns="http://www.w3.org/2000/svg" width="220" height="220"><rect width="220" height="220" fill="#3370ff"/></svg>'),
+              expires_in_seconds: 600,
+            };
+          case "feishu_bind_poll":
+            mockChannels.feishu_bound = true;
+            mockChannels.feishu_has_secret = true;
+            mockChannels.feishu_app_id = "cli_scan_created";
+            return { state: "confirmed", retry_after_ms: 0, app_id: mockChannels.feishu_app_id };
+          case "feishu_bind_cancel":
+            return null;
+          case "feishu_unbind":
+            mockChannels.feishu_bound = false;
+            mockChannels.feishu_enabled = false;
+            mockChannels.feishu_has_secret = false;
+            mockChannels.feishu_app_id = "";
+            mockChannels.feishu_state = "stopped";
             return null;
           case "set_weixin_channel":
             mockChannels.weixin_enabled = !!args?.enabled;

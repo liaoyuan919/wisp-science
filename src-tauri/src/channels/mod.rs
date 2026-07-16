@@ -6,20 +6,22 @@
 //! visible in the desktop app. The final assistant message is sent back to
 //! the IM chat when the turn completes.
 //!
-//! Each IM chat has a durable project/session binding (JSON map in the
-//! `channel_sessions` setting). The first ordinary message snapshots the
-//! desktop's active project and creates a session there; `/project` and
-//! `/session` make that routing explicit and switchable. Non-secret config
-//! lives in SQLite settings; the Feishu app secret and WeChat bot token live
-//! in the keyring.
+//! Desktop, Feishu, and WeChat share one durable last-message route. An ordinary
+//! IM message always continues the session that most recently accepted a user
+//! message on any of those surfaces; `/project`, `/session`, and `/new` can
+//! explicitly move that shared target. Non-secret config lives in SQLite
+//! settings; the Feishu app secret and WeChat bot token live in the keyring.
 
 pub mod feishu;
+pub mod feishu_card;
+pub mod feishu_registration;
 pub mod pbbp2;
 pub mod weixin;
 
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::watch;
@@ -57,6 +59,8 @@ pub struct ChannelManager {
     weixin: StdMutex<Option<watch::Sender<bool>>>,
     feishu_status: Arc<StdMutex<ChannelStatus>>,
     weixin_status: Arc<StdMutex<ChannelStatus>>,
+    feishu_registrations:
+        tokio::sync::Mutex<HashMap<String, feishu_registration::RegistrationFlow>>,
 }
 
 impl ChannelManager {
@@ -86,6 +90,7 @@ impl ChannelManager {
         let state = app.state::<AppState>();
         let app_id = get_setting(&state.store, "feishu_app_id").await;
         let secret = load_secret(FEISHU_SECRET).await;
+        let international = get_setting(&state.store, "feishu_international").await == "true";
         if app_id.is_empty() || secret.is_empty() {
             set_status(
                 &self.feishu_status,
@@ -99,7 +104,7 @@ impl ChannelManager {
         let status = self.feishu_status.clone();
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            feishu::run(app, app_id, secret, status, rx).await;
+            feishu::run(app, app_id, secret, international, status, rx).await;
         });
     }
 
@@ -159,6 +164,150 @@ async fn load_weixin_binding(store: &Store) -> Option<weixin::Binding> {
     serde_json::from_str(&get_setting(store, "weixin_binding").await).ok()
 }
 
+// --------------------------------------------- live agent progress observers
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProgressEvent {
+    AssistantDelta(String),
+    Activity,
+    ToolStarted(String),
+    ToolFinished {
+        name: String,
+        ok: bool,
+        duration_ms: u64,
+    },
+}
+
+type ProgressSubscribers =
+    HashMap<String, Vec<(u64, tokio::sync::mpsc::UnboundedSender<ProgressEvent>)>>;
+
+static PROGRESS_SUBSCRIBERS: OnceLock<StdMutex<ProgressSubscribers>> = OnceLock::new();
+static PENDING_PROGRESS: OnceLock<
+    StdMutex<HashMap<u64, tokio::sync::mpsc::UnboundedSender<ProgressEvent>>>,
+> = OnceLock::new();
+static NEXT_PROGRESS_SUBSCRIBER: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) struct ProgressSubscription {
+    frame_id: String,
+    id: u64,
+}
+
+struct PendingProgress {
+    id: u64,
+}
+
+impl PendingProgress {
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+impl Drop for PendingProgress {
+    fn drop(&mut self) {
+        if let Some(pending) = PENDING_PROGRESS.get() {
+            pending.lock().unwrap().remove(&self.id);
+        }
+    }
+}
+
+fn prepare_progress_observer(
+    sender: tokio::sync::mpsc::UnboundedSender<ProgressEvent>,
+) -> PendingProgress {
+    let id = NEXT_PROGRESS_SUBSCRIBER.fetch_add(1, Ordering::Relaxed);
+    PENDING_PROGRESS
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .insert(id, sender);
+    PendingProgress { id }
+}
+
+/// Activate an observer only after `send_message` owns the target session's
+/// runtime lock. This prevents a queued IM turn from receiving progress events
+/// produced by an earlier desktop or IM turn on the same session.
+pub(crate) fn activate_progress_observer(id: u64, frame_id: &str) -> Option<ProgressSubscription> {
+    let sender = PENDING_PROGRESS
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .remove(&id)?;
+    Some(subscribe_agent_events(frame_id, sender))
+}
+
+impl Drop for ProgressSubscription {
+    fn drop(&mut self) {
+        let Some(registry) = PROGRESS_SUBSCRIBERS.get() else {
+            return;
+        };
+        let mut registry = registry.lock().unwrap();
+        if let Some(entries) = registry.get_mut(&self.frame_id) {
+            entries.retain(|(id, _)| *id != self.id);
+            if entries.is_empty() {
+                registry.remove(&self.frame_id);
+            }
+        }
+    }
+}
+
+fn subscribe_agent_events(
+    frame_id: &str,
+    sender: tokio::sync::mpsc::UnboundedSender<ProgressEvent>,
+) -> ProgressSubscription {
+    let id = NEXT_PROGRESS_SUBSCRIBER.fetch_add(1, Ordering::Relaxed);
+    PROGRESS_SUBSCRIBERS
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .entry(frame_id.to_string())
+        .or_default()
+        .push((id, sender));
+    ProgressSubscription {
+        frame_id: frame_id.to_string(),
+        id,
+    }
+}
+
+/// Forward only safe-to-project progress events. The Feishu renderer never
+/// receives raw reasoning text or tool output; it maps these events to coarse
+/// activity labels in `feishu_card`.
+pub(crate) fn publish_agent_event(event: &crate::AgentEvent) {
+    let (frame_id, progress) = match event {
+        crate::AgentEvent::Text { frame_id, delta } => {
+            (frame_id, ProgressEvent::AssistantDelta(delta.clone()))
+        }
+        crate::AgentEvent::Reasoning { frame_id, .. }
+        | crate::AgentEvent::Stdout { frame_id, .. } => (frame_id, ProgressEvent::Activity),
+        crate::AgentEvent::ToolCall { frame_id, name, .. } => {
+            (frame_id, ProgressEvent::ToolStarted(name.clone()))
+        }
+        crate::AgentEvent::ToolResult {
+            frame_id,
+            name,
+            ok,
+            duration_ms,
+            ..
+        } => (
+            frame_id,
+            ProgressEvent::ToolFinished {
+                name: name.clone(),
+                ok: *ok,
+                duration_ms: *duration_ms,
+            },
+        ),
+        _ => return,
+    };
+    let Some(registry) = PROGRESS_SUBSCRIBERS.get() else {
+        return;
+    };
+    let mut registry = registry.lock().unwrap();
+    if let Some(entries) = registry.get_mut(frame_id) {
+        entries.retain(|(_, sender)| sender.send(progress.clone()).is_ok());
+        if entries.is_empty() {
+            registry.remove(frame_id);
+        }
+    }
+}
+
 /// Char-boundary-safe cap so an oversized agent answer cannot blow up the
 /// IM send API.
 fn truncate_reply(text: &str, max_chars: usize) -> String {
@@ -169,16 +318,17 @@ fn truncate_reply(text: &str, max_chars: usize) -> String {
     format!("{cut}\n……(内容过长已截断,完整内容请在桌面端查看)")
 }
 
-// ----------------------------------------------- chat ↔ project/session map
+// ------------------------------------------------ shared last-message route
 
-const SESSION_MAP_KEY: &str = "channel_sessions";
-/// Serializes read-modify-write on the session map across channel workers.
-static MAP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+const LAST_MESSAGE_ROUTE_KEY: &str = "channel_last_message_route";
+/// Serializes route validation, explicit switches, first-session creation, and
+/// accepted-send updates across the desktop, Feishu, and WeChat.
+static ROUTE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// One IM conversation's routing target. `session_id=None` means that the next
-/// ordinary message should create a fresh session inside `project_id`.
+/// The shared routing target. `session_id=None` is an explicit `/project` or
+/// `/new` selection: the next ordinary message creates a session there.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
-struct ChatBinding {
+struct SharedRoute {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     project_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -197,74 +347,126 @@ struct SessionChoice {
     title: String,
 }
 
-async fn session_map(store: &Store) -> serde_json::Map<String, serde_json::Value> {
-    serde_json::from_str(&get_setting(store, SESSION_MAP_KEY).await).unwrap_or_default()
+async fn route_get_unlocked(store: &Store) -> SharedRoute {
+    serde_json::from_str(&get_setting(store, LAST_MESSAGE_ROUTE_KEY).await).unwrap_or_default()
 }
 
-/// v1 stored each map value as a bare session-id string. Accept it forever and
-/// upgrade it to the structured binding on the next write.
-fn binding_from_value(value: &serde_json::Value) -> Option<ChatBinding> {
-    if let Some(session_id) = value.as_str() {
-        return (!session_id.is_empty()).then(|| ChatBinding {
-            project_id: None,
-            session_id: Some(session_id.to_string()),
-        });
-    }
-    serde_json::from_value(value.clone()).ok()
-}
-
-async fn binding_get(store: &Store, key: &str) -> ChatBinding {
-    session_map(store)
+async fn route_set_unlocked(store: &Store, route: &SharedRoute) -> Result<(), String> {
+    let json = serde_json::to_string(route).map_err(|error| error.to_string())?;
+    store
+        .set_setting(LAST_MESSAGE_ROUTE_KEY, &json)
         .await
-        .get(key)
-        .and_then(binding_from_value)
-        .unwrap_or_default()
+        .map_err(|error| error.to_string())
 }
 
-async fn binding_set(store: &Store, key: &str, binding: &ChatBinding) {
-    let _guard = MAP_LOCK.lock().await;
-    let mut map = session_map(store).await;
-    if binding.project_id.is_none() && binding.session_id.is_none() {
-        map.remove(key);
-    } else if let Ok(value) = serde_json::to_value(binding) {
-        map.insert(key.to_string(), value);
-    }
-    if let Ok(json) = serde_json::to_string(&map) {
-        let _ = store.set_setting(SESSION_MAP_KEY, &json).await;
-    }
-}
-
-/// Drop deleted targets and make the session owner authoritative. This also
-/// upgrades legacy string-only bindings without needing a schema migration.
-async fn validated_binding(store: &Store, key: &str) -> Result<ChatBinding, String> {
-    let original = binding_get(store, key).await;
-    let mut binding = original.clone();
-    if let Some(session_id) = binding.session_id.as_deref() {
+/// Validate the persisted target. On first run after upgrading, recover the
+/// most recently inserted user message from the transcript store. This is only
+/// a cold-start fallback; every subsequent accepted send writes the exact route.
+async fn validated_route_unlocked(store: &Store) -> Result<SharedRoute, String> {
+    let original = route_get_unlocked(store).await;
+    let mut route = original.clone();
+    if let Some(session_id) = route.session_id.as_deref() {
         match store
             .frame_project_id(session_id)
             .await
             .map_err(|error| error.to_string())?
         {
-            Some(owner) => binding.project_id = Some(owner),
-            None => binding.session_id = None,
+            Some(owner) => route.project_id = Some(owner),
+            None => {
+                route.project_id = None;
+                route.session_id = None;
+            }
         }
     }
-    if binding.session_id.is_none() {
-        if let Some(project_id) = binding.project_id.as_deref() {
+    if route.session_id.is_none() {
+        if let Some(project_id) = route.project_id.as_deref() {
             if store
                 .get_project(project_id)
                 .await
                 .map_err(|error| error.to_string())?
                 .is_none()
             {
-                binding.project_id = None;
+                route.project_id = None;
             }
         }
     }
-    if binding != original {
-        binding_set(store, key, &binding).await;
+    if route.project_id.is_none() && route.session_id.is_none() {
+        if let Some((session_id, project_id)) = store
+            .last_user_message_session()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            route = SharedRoute {
+                project_id: Some(project_id),
+                session_id: Some(session_id),
+            };
+        }
     }
-    Ok(binding)
+    if route != original {
+        route_set_unlocked(store, &route).await?;
+    }
+    Ok(route)
+}
+
+async fn validated_route(store: &Store) -> Result<SharedRoute, String> {
+    let _guard = ROUTE_LOCK.lock().await;
+    validated_route_unlocked(store).await
+}
+
+async fn set_route(store: &Store, route: &SharedRoute) -> Result<(), String> {
+    let _guard = ROUTE_LOCK.lock().await;
+    route_set_unlocked(store, route).await
+}
+
+/// Called by the shared desktop/channel `send_message` path after validation,
+/// but before waiting for the destination session's turn lock. A queued user
+/// message therefore changes the route immediately, matching send order rather
+/// than eventual execution order.
+pub(crate) async fn record_last_message_session(
+    store: &Store,
+    frame_id: &str,
+) -> Result<(), String> {
+    let _guard = ROUTE_LOCK.lock().await;
+    let project_id = store
+        .frame_project_id(frame_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("Session '{frame_id}' no longer exists."))?;
+    route_set_unlocked(
+        store,
+        &SharedRoute {
+            project_id: Some(project_id),
+            session_id: Some(frame_id.to_string()),
+        },
+    )
+    .await
+}
+
+/// Resolve an ordinary IM message to the shared target. Holding `ROUTE_LOCK`
+/// across validation and creation makes the no-history case linearizable: a
+/// Feishu message and a WeChat message arriving together reuse one new frame.
+async fn resolve_message_session(
+    store: &Store,
+    default_project_id: &str,
+) -> Result<String, String> {
+    let _route_guard = ROUTE_LOCK.lock().await;
+    let mut route = validated_route_unlocked(store).await?;
+    if route.project_id.is_none() {
+        route.project_id = Some(default_project_id.to_string());
+    }
+    if route.session_id.is_none() {
+        let project_id = route.project_id.as_deref().unwrap_or_default();
+        let frame_id = crate::create_session_frame(store, project_id)
+            .await
+            .map_err(|error| format!("创建会话失败: {error}"))?;
+        route.session_id = Some(frame_id);
+        // Persist before running the turn so a provider error does not make a
+        // retry fan out into another empty session.
+        route_set_unlocked(store, &route)
+            .await
+            .map_err(|error| format!("保存共享路由失败: {error}"))?;
+    }
+    Ok(route.session_id.unwrap_or_default())
 }
 
 /// Serialize turns per IM conversation so two near-simultaneous first messages
@@ -425,12 +627,12 @@ async fn project_name(store: &Store, project_id: &str) -> String {
         .unwrap_or_else(|| short_id(project_id))
 }
 
-async fn binding_status_text(store: &Store, binding: &ChatBinding) -> String {
-    let Some(project_id) = binding.project_id.as_deref() else {
-        return "当前对话尚未绑定项目。首条普通消息会使用桌面端当前项目，也可以先发送 /project 选择。".into();
+async fn route_status_text(store: &Store, route: &SharedRoute) -> String {
+    let Some(project_id) = route.project_id.as_deref() else {
+        return "还没有最近发言会话。下一条普通消息会使用桌面端当前项目，也可以先发送 /project 选择。".into();
     };
     let project = project_name(store, project_id).await;
-    let session = match binding.session_id.as_deref() {
+    let session = match route.session_id.as_deref() {
         Some(session_id) => {
             let title = store
                 .get_session_reference(session_id)
@@ -443,7 +645,7 @@ async fn binding_status_text(store: &Store, binding: &ChatBinding) -> String {
         }
         None => "新会话（下一条普通消息创建）".into(),
     };
-    format!("当前项目: {project}\n当前会话: {session}")
+    format!("共享目标项目: {project}\n最近发言会话: {session}")
 }
 
 async fn last_assistant_text(store: &Store, frame_id: &str) -> Option<String> {
@@ -455,7 +657,7 @@ async fn last_assistant_text(store: &Store, frame_id: &str) -> Option<String> {
         .filter(|t| !t.trim().is_empty())
 }
 
-const HELP_TEXT: &str = "可用命令:\n/status — 查看当前项目和会话\n/project — 列出项目\n/project <序号|名称|ID> — 切换项目\n/session — 列出当前项目的最近会话\n/session <序号|标题|ID> — 切换会话\n/new — 在当前项目开启新会话\n/stop — 停止当前任务\n/help — 显示本帮助\n\n首次发送普通消息时，会在桌面端当前项目创建会话；此后该 IM 对话会固定连接到它，直到使用上述命令切换。";
+const HELP_TEXT: &str = "可用命令:\n/status — 查看共享的最近发言会话\n/project — 列出项目\n/project <序号|名称|ID> — 切换项目\n/session — 列出当前项目的最近会话\n/session <序号|标题|ID> — 切换会话\n/new — 在当前项目开启新会话\n/stop — 停止当前任务\n/help — 显示本帮助\n\n桌面端、微信和飞书共用同一个路由目标：普通消息始终继续最近一次实际发送过用户消息的 session。/project、/session 和 /new 会显式切换这个共享目标。";
 
 /// Route one inbound IM text: chat commands are handled locally, everything
 /// else drives an agent turn. Returns the reply to send back (may be empty).
@@ -465,13 +667,26 @@ pub(crate) async fn handle_inbound(
     chat_key: &str,
     text: &str,
 ) -> String {
+    handle_inbound_observed(app, channel, chat_key, text, None).await
+}
+
+/// Feishu uses the optional observer to project the same live events shown in
+/// the desktop transcript into a rate-limited CardKit progress card. WeChat
+/// continues to call the simpler wrapper above.
+pub(crate) async fn handle_inbound_observed(
+    app: &AppHandle,
+    channel: &str,
+    chat_key: &str,
+    text: &str,
+    progress: Option<tokio::sync::mpsc::UnboundedSender<ProgressEvent>>,
+) -> String {
     let text = text.trim();
     if text.is_empty() {
         return String::new();
     }
     let state = app.state::<AppState>();
-    let map_key = format!("{channel}:{chat_key}");
-    let turn_lock = chat_turn_lock(&map_key);
+    let chat_lock_key = format!("{channel}:{chat_key}");
+    let turn_lock = chat_turn_lock(&chat_lock_key);
     let _turn_guard = turn_lock.lock().await;
     let mut parts = text.splitn(2, char::is_whitespace);
     let command = parts.next().unwrap_or_default().to_ascii_lowercase();
@@ -479,22 +694,22 @@ pub(crate) async fn handle_inbound(
     match command.as_str() {
         "/help" => return HELP_TEXT.to_string(),
         "/status" => {
-            return match validated_binding(&state.store, &map_key).await {
-                Ok(binding) => binding_status_text(&state.store, &binding).await,
-                Err(error) => format!("读取当前绑定失败: {error}"),
+            return match validated_route(&state.store).await {
+                Ok(route) => route_status_text(&state.store, &route).await,
+                Err(error) => format!("读取共享路由失败: {error}"),
             };
         }
         "/project" | "/projects" => {
-            let mut binding = match validated_binding(&state.store, &map_key).await {
-                Ok(binding) => binding,
-                Err(error) => return format!("读取当前绑定失败: {error}"),
+            let mut route = match validated_route(&state.store).await {
+                Ok(route) => route,
+                Err(error) => return format!("读取共享路由失败: {error}"),
             };
             let choices = match project_choices(&state.store).await {
                 Ok(choices) => choices,
                 Err(error) => return format!("读取项目失败: {error}"),
             };
             if argument.is_empty() {
-                return format_project_list(&choices, binding.project_id.as_deref());
+                return format_project_list(&choices, route.project_id.as_deref());
             }
             let selected = match select_choice(
                 &choices,
@@ -506,34 +721,39 @@ pub(crate) async fn handle_inbound(
                 Ok(selected) => selected,
                 Err(error) => return error,
             };
-            binding.project_id = Some(selected.id.clone());
-            binding.session_id = None;
-            binding_set(&state.store, &map_key, &binding).await;
+            route.project_id = Some(selected.id.clone());
+            route.session_id = None;
+            if let Err(error) = set_route(&state.store, &route).await {
+                return format!("切换共享路由失败: {error}");
+            }
             return format!(
-                "已切换到项目“{}”。下一条普通消息会在这里创建新会话；也可发送 /session 选择已有会话。",
+                "共享目标已切换到项目“{}”。下一条微信或飞书普通消息会在这里创建新会话；也可发送 /session 选择已有会话。",
                 selected.name
             );
         }
         "/session" | "/sessions" => {
-            let mut binding = match validated_binding(&state.store, &map_key).await {
-                Ok(binding) => binding,
-                Err(error) => return format!("读取当前绑定失败: {error}"),
+            let mut route = match validated_route(&state.store).await {
+                Ok(route) => route,
+                Err(error) => return format!("读取共享路由失败: {error}"),
             };
-            if binding.project_id.is_none() {
-                binding.project_id = Some(state.active("main").id);
-                binding_set(&state.store, &map_key, &binding).await;
+            if route.project_id.is_none() {
+                route.project_id = Some(state.active("main").id);
             }
             if argument.eq_ignore_ascii_case("new") {
-                binding.session_id = None;
+                route.session_id = None;
                 let project = project_name(
                     &state.store,
-                    binding.project_id.as_deref().unwrap_or_default(),
+                    route.project_id.as_deref().unwrap_or_default(),
                 )
                 .await;
-                binding_set(&state.store, &map_key, &binding).await;
-                return format!("已准备在项目“{project}”中开启新会话。请发送下一条普通消息。");
+                if let Err(error) = set_route(&state.store, &route).await {
+                    return format!("切换共享路由失败: {error}");
+                }
+                return format!(
+                    "已准备在项目“{project}”中开启共享的新会话。请从微信或飞书发送下一条普通消息。"
+                );
             }
-            let project_id = binding.project_id.as_deref().unwrap_or_default();
+            let project_id = route.project_id.as_deref().unwrap_or_default();
             let choices = match session_choices(&state.store, project_id).await {
                 Ok(choices) => choices,
                 Err(error) => return format!("读取会话失败: {error}"),
@@ -542,7 +762,7 @@ pub(crate) async fn handle_inbound(
                 let project = project_name(&state.store, project_id).await;
                 return format!(
                     "项目: {project}\n{}",
-                    format_session_list(&choices, binding.session_id.as_deref())
+                    format_session_list(&choices, route.session_id.as_deref())
                 );
             }
             let selected = match select_choice(
@@ -555,38 +775,44 @@ pub(crate) async fn handle_inbound(
                 Ok(selected) => selected,
                 Err(error) => return error,
             };
-            binding.session_id = Some(selected.id.clone());
-            binding_set(&state.store, &map_key, &binding).await;
+            route.session_id = Some(selected.id.clone());
+            if let Err(error) = set_route(&state.store, &route).await {
+                return format!("切换共享路由失败: {error}");
+            }
             return format!(
-                "已切换到会话“{}” · {}。后续消息会继续这个会话。",
+                "共享目标已切换到会话“{}” · {}。后续微信和飞书消息都会继续这个会话。",
                 selected.title,
                 short_id(&selected.id)
             );
         }
         "/new" => {
-            let mut binding = match validated_binding(&state.store, &map_key).await {
-                Ok(binding) => binding,
-                Err(error) => return format!("读取当前绑定失败: {error}"),
+            let mut route = match validated_route(&state.store).await {
+                Ok(route) => route,
+                Err(error) => return format!("读取共享路由失败: {error}"),
             };
-            if binding.project_id.is_none() {
-                binding.project_id = Some(state.active("main").id);
+            if route.project_id.is_none() {
+                route.project_id = Some(state.active("main").id);
             }
-            binding.session_id = None;
+            route.session_id = None;
             let project = project_name(
                 &state.store,
-                binding.project_id.as_deref().unwrap_or_default(),
+                route.project_id.as_deref().unwrap_or_default(),
             )
             .await;
-            binding_set(&state.store, &map_key, &binding).await;
-            return format!("已准备在项目“{project}”中开启新会话。请发送下一条普通消息。");
+            if let Err(error) = set_route(&state.store, &route).await {
+                return format!("切换共享路由失败: {error}");
+            }
+            return format!(
+                "已准备在项目“{project}”中开启共享的新会话。请从微信或飞书发送下一条普通消息。"
+            );
         }
         "/stop" => {
-            let binding = match validated_binding(&state.store, &map_key).await {
-                Ok(binding) => binding,
-                Err(error) => return format!("读取当前绑定失败: {error}"),
+            let route = match validated_route(&state.store).await {
+                Ok(route) => route,
+                Err(error) => return format!("读取共享路由失败: {error}"),
             };
-            let Some(frame_id) = binding.session_id else {
-                return "当前没有关联的会话。".to_string();
+            let Some(frame_id) = route.session_id else {
+                return "当前没有最近发言会话。".to_string();
             };
             return match crate::stop_agent(app.state(), Some(frame_id)).await {
                 Ok(()) => "已请求停止当前任务。".to_string(),
@@ -603,30 +829,15 @@ pub(crate) async fn handle_inbound(
     let Some(window) = app.get_webview_window("main") else {
         return "桌面端主窗口不可用,无法处理消息。".to_string();
     };
-    // The first ordinary message snapshots the desktop's active project. From
-    // that point onward the binding is independent of desktop navigation.
-    let mut binding = match validated_binding(&state.store, &map_key).await {
-        Ok(binding) => binding,
-        Err(error) => return format!("读取当前绑定失败: {error}"),
+    // Resolve and, when needed, create the shared target atomically.
+    let session_id = match resolve_message_session(&state.store, &state.active("main").id).await {
+        Ok(session_id) => session_id,
+        Err(error) => return format!("路由消息失败: {error}"),
     };
-    if binding.project_id.is_none() {
-        binding.project_id = Some(state.active("main").id);
-    }
-    if binding.session_id.is_none() {
-        let project_id = binding.project_id.as_deref().unwrap_or_default();
-        let frame_id = match crate::create_session_frame(&state.store, project_id).await {
-            Ok(frame_id) => frame_id,
-            Err(error) => return format!("创建会话失败: {error}"),
-        };
-        binding.session_id = Some(frame_id);
-        // Persist before running the turn so a provider error does not make a
-        // retry fan out into another empty session.
-        binding_set(&state.store, &map_key, &binding).await;
-    }
-    let session_id = binding.session_id.clone().unwrap_or_default();
+    let progress = progress.map(prepare_progress_observer);
     // The routing decision is now durable. Release the short critical section
-    // before the long agent turn so a later `/stop` can interrupt it; a second
-    // ordinary message will reuse this session and serialize on its runtime.
+    // before the long agent turn so a later `/stop` can interrupt it. The
+    // destination runtime serializes subsequent turns in this same session.
     drop(_turn_guard);
     let result = crate::send_message(
         app.state(),
@@ -638,6 +849,7 @@ pub(crate) async fn handle_inbound(
         None,
         None,
         None,
+        progress.as_ref().map(PendingProgress::id),
     )
     .await;
     match result {
@@ -656,6 +868,8 @@ pub(crate) async fn handle_inbound(
 #[derive(Serialize)]
 pub struct ChannelsStatus {
     pub feishu_enabled: bool,
+    pub feishu_bound: bool,
+    pub feishu_international: bool,
     pub feishu_app_id: String,
     pub feishu_has_secret: bool,
     pub feishu_state: String,
@@ -673,10 +887,14 @@ pub(crate) async fn channels_status(
 ) -> Result<ChannelsStatus, String> {
     let feishu = status_snapshot(&mgr.feishu_status);
     let weixin = status_snapshot(&mgr.weixin_status);
+    let feishu_app_id = get_setting(&state.store, "feishu_app_id").await;
+    let feishu_has_secret = !load_secret(FEISHU_SECRET).await.is_empty();
     Ok(ChannelsStatus {
         feishu_enabled: get_setting(&state.store, "feishu_enabled").await == "true",
-        feishu_app_id: get_setting(&state.store, "feishu_app_id").await,
-        feishu_has_secret: !load_secret(FEISHU_SECRET).await.is_empty(),
+        feishu_bound: !feishu_app_id.is_empty() && feishu_has_secret,
+        feishu_international: get_setting(&state.store, "feishu_international").await == "true",
+        feishu_app_id,
+        feishu_has_secret,
         feishu_state: feishu.state,
         feishu_detail: feishu.detail,
         weixin_enabled: get_setting(&state.store, "weixin_enabled").await == "true",
@@ -692,6 +910,7 @@ pub(crate) async fn set_feishu_channel(
     mgr: State<'_, ChannelManager>,
     app: AppHandle,
     enabled: bool,
+    international: bool,
     app_id: String,
     app_secret: String,
 ) -> Result<(), String> {
@@ -699,6 +918,14 @@ pub(crate) async fn set_feishu_channel(
     state
         .store
         .set_setting("feishu_app_id", &app_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    state
+        .store
+        .set_setting(
+            "feishu_international",
+            if international { "true" } else { "false" },
+        )
         .await
         .map_err(|e| e.to_string())?;
     let secret_input = app_secret.trim().to_string();
@@ -722,6 +949,146 @@ pub(crate) async fn set_feishu_channel(
     } else {
         mgr.stop_feishu();
     }
+    Ok(())
+}
+
+#[derive(Serialize)]
+pub struct FeishuBindStart {
+    /// Opaque backend flow id. Device codes never cross into the webview.
+    pub flow_id: String,
+    /// data: URL of the registration verification QR image.
+    pub qr_image: String,
+    pub expires_in_seconds: u64,
+}
+
+#[derive(Serialize)]
+pub struct FeishuBindPoll {
+    /// "pending" | "confirmed" | "denied" | "expired"
+    pub state: String,
+    pub retry_after_ms: u64,
+    pub app_id: String,
+}
+
+#[tauri::command]
+pub(crate) async fn feishu_bind_start(
+    mgr: State<'_, ChannelManager>,
+    international: bool,
+) -> Result<FeishuBindStart, String> {
+    let started = feishu_registration::RegistrationFlow::begin(international)
+        .await
+        .map_err(|error| format!("{error:#}"))?;
+    let flow_id = uuid::Uuid::new_v4().to_string();
+    let qr_image = qr_svg_data_url(&started.verification_uri)?;
+    let mut flows = mgr.feishu_registrations.lock().await;
+    flows.retain(|_, flow| !flow.expired());
+    flows.insert(flow_id.clone(), started.flow);
+    Ok(FeishuBindStart {
+        flow_id,
+        qr_image,
+        expires_in_seconds: started.expires_in_seconds,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn feishu_bind_poll(
+    state: State<'_, AppState>,
+    mgr: State<'_, ChannelManager>,
+    app: AppHandle,
+    flow_id: String,
+) -> Result<FeishuBindPoll, String> {
+    let result = {
+        let mut flows = mgr.feishu_registrations.lock().await;
+        let flow = flows
+            .get_mut(&flow_id)
+            .ok_or_else(|| "飞书扫码流程不存在或已结束,请重新扫码。".to_string())?;
+        let result = flow.poll().await.map_err(|error| format!("{error:#}"))?;
+        if !matches!(
+            &result,
+            feishu_registration::RegistrationPoll::Pending { .. }
+        ) {
+            flows.remove(&flow_id);
+        }
+        result
+    };
+
+    match result {
+        feishu_registration::RegistrationPoll::Pending { retry_after } => Ok(FeishuBindPoll {
+            state: "pending".into(),
+            retry_after_ms: retry_after.as_millis().min(u64::MAX as u128) as u64,
+            app_id: String::new(),
+        }),
+        feishu_registration::RegistrationPoll::Denied => Ok(FeishuBindPoll {
+            state: "denied".into(),
+            retry_after_ms: 0,
+            app_id: String::new(),
+        }),
+        feishu_registration::RegistrationPoll::Expired => Ok(FeishuBindPoll {
+            state: "expired".into(),
+            retry_after_ms: 0,
+            app_id: String::new(),
+        }),
+        feishu_registration::RegistrationPoll::Success {
+            app_id,
+            app_secret,
+            international,
+        } => {
+            let stored_secret = app_secret;
+            tokio::task::spawn_blocking(move || Secret::set(FEISHU_SECRET, &stored_secret))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+            state
+                .store
+                .set_setting("feishu_app_id", &app_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            state
+                .store
+                .set_setting(
+                    "feishu_international",
+                    if international { "true" } else { "false" },
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            if get_setting(&state.store, "feishu_enabled").await == "true" {
+                mgr.start_feishu(&app).await;
+            }
+            Ok(FeishuBindPoll {
+                state: "confirmed".into(),
+                retry_after_ms: 0,
+                app_id,
+            })
+        }
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn feishu_bind_cancel(
+    mgr: State<'_, ChannelManager>,
+    flow_id: String,
+) -> Result<(), String> {
+    mgr.feishu_registrations.lock().await.remove(&flow_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn feishu_unbind(
+    state: State<'_, AppState>,
+    mgr: State<'_, ChannelManager>,
+) -> Result<(), String> {
+    mgr.stop_feishu();
+    mgr.feishu_registrations.lock().await.clear();
+    let _ = tokio::task::spawn_blocking(|| Secret::delete(FEISHU_SECRET)).await;
+    state
+        .store
+        .set_setting("feishu_app_id", "")
+        .await
+        .map_err(|e| e.to_string())?;
+    state
+        .store
+        .set_setting("feishu_enabled", "false")
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -756,7 +1123,7 @@ pub struct WeixinBindStart {
     pub qr_image: String,
 }
 
-fn qr_svg_data_url(content: &str) -> Result<String, String> {
+pub(crate) fn qr_svg_data_url(content: &str) -> Result<String, String> {
     use base64::Engine;
     let code = qrcode::QrCode::new(content.as_bytes()).map_err(|e| e.to_string())?;
     let svg = code
@@ -864,25 +1231,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_session_value_becomes_structured_binding() {
-        let binding = binding_from_value(&serde_json::json!("session-1")).unwrap();
-        assert_eq!(
-            binding,
-            ChatBinding {
-                project_id: None,
-                session_id: Some("session-1".into()),
-            }
-        );
-        assert_eq!(
-            binding_from_value(&serde_json::json!({
-                "project_id": "project-1",
-                "session_id": "session-2"
-            })),
-            Some(ChatBinding {
-                project_id: Some("project-1".into()),
-                session_id: Some("session-2".into()),
-            })
-        );
+    fn shared_route_serializes_project_and_session() {
+        let route = SharedRoute {
+            project_id: Some("project-1".into()),
+            session_id: Some("session-1".into()),
+        };
+        let json = serde_json::to_string(&route).unwrap();
+        assert_eq!(serde_json::from_str::<SharedRoute>(&json).unwrap(), route);
     }
 
     #[test]
@@ -919,6 +1274,7 @@ mod tests {
         assert!(HELP_TEXT.contains("/status"));
         assert!(HELP_TEXT.contains("/project"));
         assert!(HELP_TEXT.contains("/session"));
+        assert!(HELP_TEXT.contains("微信和飞书共用同一个路由目标"));
         let projects = vec![ProjectChoice {
             id: "project-123456".into(),
             name: "Alpha".into(),
@@ -932,9 +1288,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validates_and_upgrades_legacy_binding_owner() {
+    async fn shared_route_follows_the_last_sent_session_and_recovers_after_delete() {
         let path = std::env::temp_dir().join(format!(
-            "wisp_channels_binding_{}.sqlite",
+            "wisp_channels_last_route_{}.sqlite",
             uuid::Uuid::new_v4()
         ));
         let store = Store::open(&path).await.unwrap();
@@ -947,25 +1303,99 @@ mod tests {
             .await
             .unwrap();
         store
-            .set_setting(SESSION_MAP_KEY, r#"{"feishu:chat-1":"session-1"}"#)
+            .create_frame("session-2", "project-1", "OPERON", "wisp")
+            .await
+            .unwrap();
+        store
+            .append_message("session-1", 1, &wisp_llm::Message::user("first"))
+            .await
+            .unwrap();
+        store
+            .append_message("session-2", 1, &wisp_llm::Message::user("second"))
             .await
             .unwrap();
 
-        let binding = validated_binding(&store, "feishu:chat-1").await.unwrap();
-        assert_eq!(binding.project_id.as_deref(), Some("project-1"));
-        assert_eq!(binding.session_id.as_deref(), Some("session-1"));
-        let persisted: serde_json::Value =
-            serde_json::from_str(&store.get_setting(SESSION_MAP_KEY).await.unwrap().unwrap())
-                .unwrap();
-        assert_eq!(persisted["feishu:chat-1"]["project_id"], "project-1");
+        // Cold-start migration discovers the latest actual user message.
+        let route = validated_route(&store).await.unwrap();
+        assert_eq!(route.session_id.as_deref(), Some("session-2"));
+
+        // The same writer is called by desktop, Feishu, and WeChat turn starts;
+        // there is intentionally no channel/chat key in the persisted value.
+        record_last_message_session(&store, "session-1")
+            .await
+            .unwrap();
+        let route = validated_route(&store).await.unwrap();
+        assert_eq!(route.project_id.as_deref(), Some("project-1"));
+        assert_eq!(route.session_id.as_deref(), Some("session-1"));
 
         store
             .delete_session("session-1", "project-1")
             .await
             .unwrap();
-        let binding = validated_binding(&store, "feishu:chat-1").await.unwrap();
-        assert_eq!(binding.project_id.as_deref(), Some("project-1"));
-        assert_eq!(binding.session_id, None);
+        let route = validated_route(&store).await.unwrap();
+        assert_eq!(route.session_id.as_deref(), Some("session-2"));
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn explicit_new_route_is_not_replaced_by_transcript_fallback() {
+        let path = std::env::temp_dir().join(format!(
+            "wisp_channels_pending_route_{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Store::open(&path).await.unwrap();
+        store
+            .create_project("project-1", "Alpha", "/workspace/alpha")
+            .await
+            .unwrap();
+        store
+            .create_frame("old-session", "project-1", "OPERON", "wisp")
+            .await
+            .unwrap();
+        store
+            .append_message("old-session", 1, &wisp_llm::Message::user("old"))
+            .await
+            .unwrap();
+        set_route(
+            &store,
+            &SharedRoute {
+                project_id: Some("project-1".into()),
+                session_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let route = validated_route(&store).await.unwrap();
+        assert_eq!(route.project_id.as_deref(), Some("project-1"));
+        assert_eq!(route.session_id, None);
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn simultaneous_feishu_and_wechat_first_messages_share_one_session() {
+        let path = std::env::temp_dir().join(format!(
+            "wisp_channels_concurrent_first_{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Store::open(&path).await.unwrap();
+        store
+            .create_project("project-1", "Alpha", "/workspace/alpha")
+            .await
+            .unwrap();
+
+        let (feishu, wechat) = tokio::join!(
+            resolve_message_session(&store, "project-1"),
+            resolve_message_session(&store, "project-1")
+        );
+        let feishu = feishu.unwrap();
+        let wechat = wechat.unwrap();
+        assert_eq!(feishu, wechat);
+        assert_eq!(store.list_root_frames("project-1").await.unwrap().len(), 1);
+        drop(store);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -976,6 +1406,51 @@ mod tests {
         assert!(cut.starts_with(&"好".repeat(10)));
         assert!(cut.contains("已截断"));
         assert!(cut.chars().count() < 8100);
+    }
+
+    #[test]
+    fn progress_observer_redacts_reasoning_and_tool_output() {
+        let frame_id = format!("progress-{}", uuid::Uuid::new_v4());
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let pending = prepare_progress_observer(sender);
+
+        publish_agent_event(&crate::AgentEvent::Text {
+            frame_id: frame_id.clone(),
+            delta: "earlier queued turn".into(),
+        });
+        assert!(receiver.try_recv().is_err());
+
+        let subscription = activate_progress_observer(pending.id(), &frame_id).unwrap();
+
+        publish_agent_event(&crate::AgentEvent::Reasoning {
+            frame_id: frame_id.clone(),
+            delta: "private chain of thought".into(),
+        });
+        assert_eq!(receiver.try_recv(), Ok(ProgressEvent::Activity));
+
+        publish_agent_event(&crate::AgentEvent::ToolResult {
+            frame_id: frame_id.clone(),
+            name: "shell".into(),
+            ok: true,
+            content: "SECRET=do-not-forward".into(),
+            duration_ms: 42,
+        });
+        assert_eq!(
+            receiver.try_recv(),
+            Ok(ProgressEvent::ToolFinished {
+                name: "shell".into(),
+                ok: true,
+                duration_ms: 42,
+            })
+        );
+
+        drop(subscription);
+        drop(pending);
+        publish_agent_event(&crate::AgentEvent::Text {
+            frame_id,
+            delta: "ignored".into(),
+        });
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]

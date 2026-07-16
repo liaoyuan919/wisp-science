@@ -7,12 +7,13 @@
 //! Protocol facts follow phantty's tested implementation and the official Go
 //! SDK (`larksuite/oapi-sdk-go`); payloads are plaintext JSON.
 
-use super::{pbbp2, set_status, ChannelStatus};
+use super::{feishu_card, pbbp2, set_status, ChannelStatus};
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
@@ -20,9 +21,17 @@ use tauri::AppHandle;
 use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-const BASE: &str = "https://open.feishu.cn";
-/// ponytail: Feishu-CN only; Lark International needs larksuite.com domains.
+const FEISHU_BASE: &str = "https://open.feishu.cn";
+const LARK_BASE: &str = "https://open.larksuite.com";
 const DEDUPE_WINDOW: usize = 128;
+
+fn api_base(international: bool) -> &'static str {
+    if international {
+        LARK_BASE
+    } else {
+        FEISHU_BASE
+    }
+}
 
 // ---------------------------------------------------------------- REST client
 
@@ -30,6 +39,7 @@ pub struct FeishuRest {
     http: reqwest::Client,
     app_id: String,
     app_secret: String,
+    base: &'static str,
     token: tokio::sync::Mutex<Option<(String, Instant)>>,
 }
 
@@ -46,7 +56,7 @@ struct TokenResp {
 }
 
 impl FeishuRest {
-    pub fn new(app_id: &str, app_secret: &str) -> Result<Self> {
+    pub fn new(app_id: &str, app_secret: &str, international: bool) -> Result<Self> {
         Ok(Self {
             http: reqwest::Client::builder()
                 .user_agent("wisp-science")
@@ -54,6 +64,7 @@ impl FeishuRest {
                 .build()?,
             app_id: app_id.to_string(),
             app_secret: app_secret.to_string(),
+            base: api_base(international),
             token: tokio::sync::Mutex::new(None),
         })
     }
@@ -70,7 +81,8 @@ impl FeishuRest {
         let resp: TokenResp = self
             .http
             .post(format!(
-                "{BASE}/open-apis/auth/v3/tenant_access_token/internal"
+                "{}/open-apis/auth/v3/tenant_access_token/internal",
+                self.base
             ))
             .json(&json!({"app_id": self.app_id, "app_secret": self.app_secret}))
             .send()
@@ -98,7 +110,8 @@ impl FeishuRest {
         let resp: serde_json::Value = self
             .http
             .post(format!(
-                "{BASE}/open-apis/im/v1/messages?receive_id_type=chat_id"
+                "{}/open-apis/im/v1/messages?receive_id_type=chat_id",
+                self.base
             ))
             .bearer_auth(token)
             .json(&json!({
@@ -120,12 +133,113 @@ impl FeishuRest {
         Ok(())
     }
 
+    pub async fn create_streaming_card(&self, initial_markdown: &str) -> Result<String> {
+        let token = self.tenant_token().await?;
+        let card = feishu_card::build_streaming_card(initial_markdown);
+        let resp = checked_json(
+            self.http
+                .post(format!("{}/open-apis/cardkit/v1/cards", self.base))
+                .bearer_auth(token)
+                .json(&json!({ "type": "card_json", "data": card }))
+                .send()
+                .await?,
+            "create streaming card",
+        )
+        .await?;
+        resp.get("data")
+            .and_then(|data| data.get("card_id"))
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("create streaming card response missing data.card_id"))
+    }
+
+    pub async fn send_card(&self, chat_id: &str, card_id: &str) -> Result<()> {
+        let token = self.tenant_token().await?;
+        let content = serde_json::to_string(&json!({
+            "type": "card",
+            "data": { "card_id": card_id },
+        }))?;
+        let resp = checked_json(
+            self.http
+                .post(format!(
+                    "{}/open-apis/im/v1/messages?receive_id_type=chat_id",
+                    self.base
+                ))
+                .bearer_auth(token)
+                .json(&json!({
+                    "receive_id": chat_id,
+                    "msg_type": "interactive",
+                    "content": content,
+                }))
+                .send()
+                .await?,
+            "send streaming card",
+        )
+        .await?;
+        if resp
+            .get("data")
+            .and_then(|data| data.get("message_id"))
+            .and_then(|value| value.as_str())
+            .is_none()
+        {
+            bail!("send streaming card response missing data.message_id");
+        }
+        Ok(())
+    }
+
+    pub async fn stream_card_content(
+        &self,
+        card_id: &str,
+        content: &str,
+        sequence: i64,
+    ) -> Result<()> {
+        let token = self.tenant_token().await?;
+        checked_json(
+            self.http
+                .put(format!(
+                    "{}/open-apis/cardkit/v1/cards/{}/elements/{}/content",
+                    self.base,
+                    card_id,
+                    feishu_card::PROGRESS_ELEMENT_ID
+                ))
+                .bearer_auth(token)
+                .json(&json!({ "content": content, "sequence": sequence }))
+                .send()
+                .await?,
+            "update streaming card",
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn close_streaming_card(&self, card_id: &str, sequence: i64) -> Result<()> {
+        let token = self.tenant_token().await?;
+        checked_json(
+            self.http
+                .patch(format!(
+                    "{}/open-apis/cardkit/v1/cards/{card_id}/settings",
+                    self.base
+                ))
+                .bearer_auth(token)
+                .json(&json!({
+                    "settings": "{\"config\":{\"streaming_mode\":false}}",
+                    "sequence": sequence,
+                }))
+                .send()
+                .await?,
+            "close streaming card",
+        )
+        .await?;
+        Ok(())
+    }
+
     /// The bot's own open_id, needed to detect "@ me" in group chats.
     pub async fn bot_open_id(&self) -> Result<String> {
         let token = self.tenant_token().await?;
         let resp: serde_json::Value = self
             .http
-            .get(format!("{BASE}/open-apis/bot/v3/info"))
+            .get(format!("{}/open-apis/bot/v3/info", self.base))
             .bearer_auth(token)
             .send()
             .await?
@@ -139,6 +253,25 @@ impl FeishuRest {
     }
 }
 
+async fn checked_json(response: reqwest::Response, operation: &str) -> Result<serde_json::Value> {
+    let status = response.status();
+    let value: serde_json::Value = response
+        .json()
+        .await
+        .with_context(|| format!("{operation}: invalid JSON response (HTTP {status})"))?;
+    let code = value
+        .get("code")
+        .and_then(|code| code.as_i64())
+        .unwrap_or(-1);
+    if !status.is_success() || code != 0 {
+        bail!(
+            "{operation} failed: HTTP {status}, code={code} {}",
+            value.get("msg").and_then(|msg| msg.as_str()).unwrap_or("")
+        );
+    }
+    Ok(value)
+}
+
 // ------------------------------------------------------- endpoint discovery
 
 struct Endpoint {
@@ -149,12 +282,13 @@ struct Endpoint {
 
 async fn discover_endpoint(
     http: &reqwest::Client,
+    base: &str,
     app_id: &str,
     app_secret: &str,
 ) -> Result<Endpoint> {
     // Key casing matters: lowercase keys get a 514 AuthFailed.
     let resp: serde_json::Value = http
-        .post(format!("{BASE}/callback/ws/endpoint"))
+        .post(format!("{base}/callback/ws/endpoint"))
         .json(&json!({"AppID": app_id, "AppSecret": app_secret}))
         .send()
         .await
@@ -284,10 +418,11 @@ pub async fn run(
     app: AppHandle,
     app_id: String,
     app_secret: String,
+    international: bool,
     status: Arc<StdMutex<ChannelStatus>>,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let rest = match FeishuRest::new(&app_id, &app_secret) {
+    let rest = match FeishuRest::new(&app_id, &app_secret, international) {
         Ok(rest) => Arc::new(rest),
         Err(e) => {
             set_status(&status, "error", &format!("HTTP 客户端初始化失败:{e}"));
@@ -329,7 +464,7 @@ async fn connect_once(
         .bot_open_id()
         .await
         .context("获取机器人信息失败(请检查凭证与「获取机器人信息」权限)")?;
-    let ep = discover_endpoint(&rest.http, app_id, app_secret).await?;
+    let ep = discover_endpoint(&rest.http, rest.base, app_id, app_secret).await?;
     let service_id = query_param(&ep.url, "service_id").unwrap_or_default();
 
     let (ws, _) = tokio_tungstenite::connect_async(&ep.url)
@@ -345,12 +480,39 @@ async fn connect_once(
         let rest = rest.clone();
         tokio::spawn(async move {
             while let Some(msg) = event_rx.recv().await {
-                let reply = match &msg.text {
-                    Some(text) if !text.is_empty() => {
-                        super::handle_inbound(&app, "feishu", &msg.chat_id, text).await
+                let Some(text) = msg.text.as_deref().filter(|text| !text.is_empty()) else {
+                    if let Err(e) = rest
+                        .send_text(&msg.chat_id, "暂不支持该消息类型,请发送文本消息。")
+                        .await
+                    {
+                        tracing::warn!(target: "wisp", channel = "feishu", error = %e, "send unsupported-message reply failed");
                     }
-                    _ => "暂不支持该消息类型,请发送文本消息。".to_string(),
+                    continue;
                 };
+
+                // Slash commands are immediate control-plane replies. Ordinary
+                // agent turns get one CardKit card that evolves from progress
+                // to the final answer, matching the desktop information flow.
+                if !text.trim_start().starts_with('/') {
+                    let initial = feishu_card::ProgressState::default().render();
+                    match rest.create_streaming_card(&initial).await {
+                        Ok(card_id) => match rest.send_card(&msg.chat_id, &card_id).await {
+                            Ok(()) => {
+                                run_streamed_turn(&app, rest.clone(), &msg.chat_id, text, card_id)
+                                    .await;
+                                continue;
+                            }
+                            Err(error) => {
+                                tracing::warn!(target: "wisp", channel = "feishu", %error, "send progress card failed; falling back to text");
+                            }
+                        },
+                        Err(error) => {
+                            tracing::warn!(target: "wisp", channel = "feishu", %error, "create progress card failed; falling back to text");
+                        }
+                    }
+                }
+
+                let reply = super::handle_inbound(&app, "feishu", &msg.chat_id, text).await;
                 if reply.is_empty() {
                     continue;
                 }
@@ -409,6 +571,102 @@ async fn connect_once(
     drop(event_tx);
     worker.abort();
     result
+}
+
+async fn run_streamed_turn(
+    app: &AppHandle,
+    rest: Arc<FeishuRest>,
+    chat_id: &str,
+    text: &str,
+    card_id: String,
+) {
+    let sequence = Arc::new(AtomicI64::new(1));
+    let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let progress_worker = tokio::spawn(stream_progress_events(
+        rest.clone(),
+        card_id.clone(),
+        sequence.clone(),
+        progress_rx,
+    ));
+
+    let reply =
+        super::handle_inbound_observed(app, "feishu", chat_id, text, Some(progress_tx)).await;
+    // The observer is removed when handle_inbound_observed returns, closing
+    // the receiver after every queued delta has been consumed.
+    let _ = progress_worker.await;
+
+    let final_text = if reply.trim().is_empty() {
+        "(本轮完成,但没有文本回复)"
+    } else {
+        reply.trim()
+    };
+    let update = rest
+        .stream_card_content(
+            &card_id,
+            final_text,
+            sequence.fetch_add(1, Ordering::SeqCst),
+        )
+        .await;
+    if let Err(error) = update {
+        tracing::warn!(target: "wisp", channel = "feishu", %error, "final progress-card update failed; sending text fallback");
+        let _ = rest.send_text(chat_id, final_text).await;
+    }
+    if let Err(error) = rest
+        .close_streaming_card(&card_id, sequence.fetch_add(1, Ordering::SeqCst))
+        .await
+    {
+        tracing::warn!(target: "wisp", channel = "feishu", %error, "close progress card failed");
+    }
+}
+
+async fn stream_progress_events(
+    rest: Arc<FeishuRest>,
+    card_id: String,
+    sequence: Arc<AtomicI64>,
+    mut events: tokio::sync::mpsc::UnboundedReceiver<super::ProgressEvent>,
+) {
+    let mut state = feishu_card::ProgressState::default();
+    let mut dirty = false;
+    let mut ticker = tokio::time::interval(Duration::from_millis(900));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticker.tick().await; // consume the immediate first tick
+
+    loop {
+        tokio::select! {
+            event = events.recv() => {
+                let Some(event) = event else {
+                    if dirty {
+                        let _ = rest.stream_card_content(
+                            &card_id,
+                            &state.render(),
+                            sequence.fetch_add(1, Ordering::SeqCst),
+                        ).await;
+                    }
+                    break;
+                };
+                match event {
+                    super::ProgressEvent::AssistantDelta(delta) => state.assistant_delta(&delta),
+                    super::ProgressEvent::Activity => state.reasoning_activity(),
+                    super::ProgressEvent::ToolStarted(name) => state.tool_started(&name),
+                    super::ProgressEvent::ToolFinished { name, ok, duration_ms } => {
+                        state.tool_finished(&name, ok, duration_ms);
+                    }
+                }
+                dirty = true;
+            }
+            _ = ticker.tick(), if dirty => {
+                let rendered = state.render();
+                if let Err(error) = rest.stream_card_content(
+                    &card_id,
+                    &rendered,
+                    sequence.fetch_add(1, Ordering::SeqCst),
+                ).await {
+                    tracing::warn!(target: "wisp", channel = "feishu", %error, "progress-card update failed");
+                }
+                dirty = false;
+            }
+        }
+    }
 }
 
 /// Fixed-size recent-event-id window for at-least-once delivery dedupe.
