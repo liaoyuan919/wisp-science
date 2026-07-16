@@ -2,8 +2,9 @@
 use tauri::{
     menu::{Menu, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    App, AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
+    App, Emitter, WebviewUrl, WebviewWindowBuilder,
 };
+use tauri::{AppHandle, Manager};
 
 #[cfg(target_os = "windows")]
 pub(crate) const PET_WINDOW_LABEL: &str = "pet";
@@ -13,10 +14,16 @@ pub(crate) fn should_hide_workspace_on_close(window_label: &str) -> bool {
     window_label == "main"
 }
 
-#[cfg(target_os = "windows")]
-fn show_workspace_windows(app: &AppHandle) {
+pub(crate) fn should_activate_workspace_window(window_label: &str) -> bool {
+    window_label != "pet"
+}
+
+pub(crate) fn activate_workspace(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.show();
+
     for (label, window) in app.webview_windows() {
-        if label != PET_WINDOW_LABEL {
+        if should_activate_workspace_window(&label) {
             let _ = window.show();
             let _ = window.unminimize();
         }
@@ -121,7 +128,7 @@ pub(crate) fn install_windows_shell(app: &mut App) -> tauri::Result<()> {
         .tooltip("Wisp Science")
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
-            "tray-show" => show_workspace_windows(app),
+            "tray-show" => activate_workspace(app),
             "tray-quit" => app.exit(0),
             _ => {}
         })
@@ -137,7 +144,7 @@ pub(crate) fn install_windows_shell(app: &mut App) -> tauri::Result<()> {
                     ..
                 }
             ) {
-                show_workspace_windows(tray.app_handle());
+                activate_workspace(tray.app_handle());
             }
         });
     if let Some(icon) = app.default_window_icon() {
