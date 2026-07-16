@@ -1032,6 +1032,8 @@ pub(crate) enum ConnTransport {
         #[serde(default)]
         headers: Vec<(String, String)>,
     },
+    /// OAuth-backed hosted Notion MCP. Credentials never cross the UI bridge.
+    Notion,
 }
 #[derive(Clone, serde::Deserialize)]
 pub(crate) struct ConnView {

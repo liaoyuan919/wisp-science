@@ -3403,6 +3403,16 @@ pub(super) fn conn_form_from_row(row: &ConnRow) -> ConnForm {
                 .join("\n"),
             enabled: row.enabled,
         },
+        ConnTransport::Notion => ConnForm {
+            id: Some(row.id.clone()),
+            name: row.name.clone(),
+            kind: "notion".into(),
+            command: String::new(),
+            args: String::new(),
+            url: String::new(),
+            headers: String::new(),
+            enabled: row.enabled,
+        },
     }
 }
 

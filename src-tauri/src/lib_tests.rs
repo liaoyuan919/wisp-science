@@ -758,7 +758,13 @@ fn mcp_connection_serde_roundtrip() {
             headers: vec![("Authorization".into(), "Bearer t".into())],
         },
     };
-    for c in [stdio, http] {
+    let notion = McpConnection {
+        id: "notion".into(),
+        name: "Notion".into(),
+        enabled: true,
+        transport: McpTransport::Notion,
+    };
+    for c in [stdio, http, notion] {
         let json = serde_json::to_string(&c).unwrap();
         let back: McpConnection = serde_json::from_str(&json).unwrap();
         assert_eq!(serde_json::to_string(&back).unwrap(), json);
@@ -775,6 +781,14 @@ fn mcp_connection_serde_roundtrip() {
     })
     .unwrap();
     assert_eq!(j["transport"]["kind"], "http");
+    let notion_json = serde_json::to_value(&McpConnection {
+        id: "notion".into(),
+        name: "Notion".into(),
+        enabled: true,
+        transport: McpTransport::Notion,
+    })
+    .unwrap();
+    assert_eq!(notion_json["transport"]["kind"], "notion");
 }
 
 #[test]

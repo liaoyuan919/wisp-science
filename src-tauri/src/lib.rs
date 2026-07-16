@@ -30,6 +30,7 @@ mod library_commands;
 mod mcp_bridge;
 pub use mcp_bridge::run_mcp_bridge_cli;
 mod models;
+mod notion;
 mod pet_commands;
 mod project_sync;
 mod project_transfer;
@@ -406,6 +407,9 @@ enum McpTransport {
         #[serde(default)]
         headers: Vec<(String, String)>,
     },
+    /// Notion's hosted MCP service. OAuth credentials live in the OS keyring,
+    /// never in the connection setting or SQLite.
+    Notion,
 }
 
 /// A user-configured MCP server connection.
@@ -2445,6 +2449,7 @@ async fn connect_mcp(conn: &McpConnection) -> anyhow::Result<wisp_mcp::McpClient
         McpTransport::Http { url, headers } => {
             wisp_mcp::McpClient::connect_http(url, headers).await
         }
+        McpTransport::Notion => notion::connect(&conn.id).await,
     }
 }
 
@@ -6352,6 +6357,7 @@ pub fn run() {
             connector_commands::delete_mcp_connection,
             connector_commands::set_mcp_connection_enabled,
             connector_commands::test_mcp_connection,
+            connector_commands::connect_notion,
             connector_commands::list_connectors,
             connector_commands::set_connector_enabled,
             connector_commands::set_tool_approval,

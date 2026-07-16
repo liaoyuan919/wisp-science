@@ -5,7 +5,7 @@ use super::{
     Scope,
 };
 use serde::Serialize;
-use tauri::State;
+use tauri::{Emitter, Manager, State};
 
 #[derive(Serialize, Clone)]
 pub(super) struct McpConnectionsView {
@@ -54,8 +54,14 @@ pub(super) async fn delete_mcp_connection(
     id: String,
 ) -> Result<(), String> {
     let mut conns = load_mcp_connections(&state.store).await;
+    let removed_notion = conns.iter().any(|connection| {
+        connection.id == id && matches!(&connection.transport, McpTransport::Notion)
+    });
     conns.retain(|c| c.id != id);
     save_mcp_connections(&state.store, &conns).await?;
+    if removed_notion {
+        crate::notion::forget(&id);
+    }
     clear_idle_agents(&state).await;
     Ok(())
 }
@@ -146,6 +152,7 @@ pub(super) async fn list_connectors(state: State<'_, AppState>) -> Result<Connec
         let (transport, subtitle) = match &c.transport {
             McpTransport::Stdio { command, .. } => ("stdio", command.clone()),
             McpTransport::Http { url, .. } => ("http", url.clone()),
+            McpTransport::Notion => ("notion", crate::notion::MCP_URL.into()),
         };
         connectors.push(ConnectorInfo {
             key: c.id,
@@ -247,4 +254,55 @@ pub(super) async fn test_mcp_connection(
     let client = connect_mcp(&conn).await.map_err(|e| format!("{e}"))?;
     let tools = client.tools_list().await.map_err(|e| format!("{e}"))?;
     Ok(tools)
+}
+
+/// Start Notion's OAuth authorization-code flow. The loopback listener is
+/// bound before the authorization URL is opened so the callback is safe on
+/// Windows, macOS, and Linux without a cloud redirect service.
+#[tauri::command]
+pub(super) async fn connect_notion(app: tauri::AppHandle) -> Result<(), String> {
+    let (listener, pending) = crate::notion::begin_authorization()
+        .await
+        .map_err(|error| error.to_string())?;
+    let authorization_url = pending.authorization_url().to_string();
+    {
+        use tauri_plugin_opener::OpenerExt;
+        app.opener()
+            .open_url(&authorization_url, None::<&str>)
+            .map_err(|error| format!("open Notion authorization page: {error}"))?;
+    }
+    let app_after_callback = app.clone();
+    tokio::spawn(async move {
+        let result = crate::notion::finish_authorization(listener, pending, "notion").await;
+        let payload = match result {
+            Ok(()) => {
+                let state = app_after_callback.state::<AppState>();
+                let mut connections = load_mcp_connections(&state.store).await;
+                let connection = McpConnection {
+                    id: "notion".into(),
+                    name: "Notion".into(),
+                    enabled: true,
+                    transport: McpTransport::Notion,
+                };
+                if let Some(slot) = connections
+                    .iter_mut()
+                    .find(|connection| connection.id == "notion")
+                {
+                    *slot = connection;
+                } else {
+                    connections.push(connection);
+                }
+                match save_mcp_connections(&state.store, &connections).await {
+                    Ok(()) => {
+                        clear_idle_agents(&state).await;
+                        serde_json::json!({ "ok": true, "message": "Notion connected." })
+                    }
+                    Err(error) => serde_json::json!({ "ok": false, "message": error }),
+                }
+            }
+            Err(error) => serde_json::json!({ "ok": false, "message": error.to_string() }),
+        };
+        let _ = app_after_callback.emit("notion-auth-result", payload);
+    });
+    Ok(())
 }

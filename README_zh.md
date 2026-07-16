@@ -53,6 +53,23 @@ wisp-science/
 
 ## 前置要求
 
+### 可复现的 Linux 环境（Pixi）
+
+此 fork 包含一个 [Pixi](https://pixi.sh/) 工作区，用于 Linux 桌面开发环境。它会
+锁定 Rust、WASM target、Trunk、Tauri CLI、Node.js、uv，以及桌面应用所需的
+GTK/WebKit 构建依赖。
+
+```bash
+pixi install
+pixi run fmt
+pixi run test
+pixi run mcp-smoke
+pixi run ui-test
+```
+
+使用 `pixi run cargo tauri dev` 启动桌面应用。当前 Pixi 工作区的目标平台为
+`linux-64`；在 Windows 或 macOS 上构建时，仍请遵循下方的系统专属前置要求。
+
 - **Rust**（stable，1.88+）及 `wasm32-unknown-unknown`：
   `rustup target add wasm32-unknown-unknown`
 - **uv**（Python 环境管理器）：<https://docs.astral.sh/uv/>
@@ -214,6 +231,16 @@ uv pip install mcp requests
 ```
 
 之后 Agent 即可直接调用该服务的工具，例如 PubMed 搜索。
+
+### Notion MCP
+
+在桌面应用中打开 **设置 → 连接 → 连接 Notion**。Wisp 会在浏览器中打开
+Notion 授权页；你批准工作区后，应用会自动加入其托管 MCP 服务。连接使用官方
+`https://mcp.notion.com/mcp` 端点；OAuth 访问令牌和刷新令牌保存在系统密钥环中，
+不会写入项目数据库。删除 Notion 连接时也会清除对应凭据。
+
+该连接会用于之后新建的 Agent 会话。Agent 可访问的内容由 Notion 工作区权限决定，
+请在批准写入操作前仔细确认。
 
 ### 内置演示
 

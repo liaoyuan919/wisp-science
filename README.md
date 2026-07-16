@@ -55,6 +55,24 @@ wisp-science/
 
 ## Prerequisites
 
+### Reproducible Linux environment (Pixi)
+
+This fork includes a [Pixi](https://pixi.sh/) workspace for the Linux desktop
+development environment. It pins Rust, the WASM target, Trunk, the Tauri CLI,
+Node.js, uv, and the GTK/WebKit build dependencies used by the desktop app.
+
+```bash
+pixi install
+pixi run fmt
+pixi run test
+pixi run mcp-smoke
+pixi run ui-test
+```
+
+`pixi run cargo tauri dev` starts the desktop app. The Pixi workspace currently
+targets `linux-64`; retain the platform-specific prerequisites below when
+building on Windows or macOS.
+
 - **Rust** (stable, 1.88+) with `wasm32-unknown-unknown`:
   `rustup target add wasm32-unknown-unknown`
 - **uv** (Python environment manager): <https://docs.astral.sh/uv/>
@@ -251,6 +269,19 @@ uv pip install mcp requests
 ```
 
 Then the agent can call that server's tools (e.g. PubMed search) directly.
+
+### Notion MCP
+
+In the desktop app, open **Settings → Connections → Connect Notion**. Wisp
+opens Notion's authorization page in your browser and adds the hosted MCP
+server after you approve a workspace. The connection uses the official
+`https://mcp.notion.com/mcp` endpoint; OAuth access and refresh tokens are kept
+in the OS keyring rather than the project database. Disconnecting the Notion
+connection removes its saved credential.
+
+The connection applies to newly created agent sessions. Notion controls the
+workspace permissions exposed to the agent, so review write actions before
+approving them.
 
 ### Bundled demos
 
