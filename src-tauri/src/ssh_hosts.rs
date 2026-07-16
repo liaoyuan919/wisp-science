@@ -220,6 +220,7 @@ pub fn parse_ssh_config_aliases(config: &str) -> Vec<String> {
     out
 }
 
+#[cfg(test)]
 pub fn render_hosts_section(hosts: &[SshHost]) -> Option<String> {
     if hosts.is_empty() {
         return None;
@@ -259,7 +260,7 @@ pub fn render_contexts_section(contexts: &[wisp_store::ExecutionContext]) -> Opt
             matches!(
                 c.kind,
                 wisp_store::ExecutionContextKind::Ssh | wisp_store::ExecutionContextKind::Wsl
-            )
+            ) && context_resource_enabled(c)
         })
         .collect();
     if contexts.is_empty() {
@@ -267,7 +268,8 @@ pub fn render_contexts_section(contexts: &[wisp_store::ExecutionContext]) -> Opt
     }
     let mut s = String::from(
         "## Compute contexts\n\n\
-The user has these execution contexts available. Use the shell tool only for \
+The user explicitly enabled these execution contexts. Prefer them over local \
+compute when they fit the task. Use the shell tool only for \
 quick, read-only probes. Submit real work and all long-running commands with \
 `run_in_context` using the context id. Do not use shell `sleep`, `ssh ... ps`, \
 `nohup`, background `&`, or polling loops to monitor work. After submission, \
@@ -318,9 +320,31 @@ Python or R executable.\n\n",
         if let Some(summary) = capability_summary(&ctx.capabilities_json) {
             s.push_str(&format!(" — capabilities: {summary}"));
         }
+        let capabilities: serde_json::Value =
+            serde_json::from_str(&ctx.capabilities_json).unwrap_or_default();
+        if capabilities
+            .get("gpu_summary")
+            .is_none_or(serde_json::Value::is_null)
+        {
+            s.push_str(" — GPU: none; do not plan GPU/CUDA work");
+        }
+        if capabilities
+            .get("privilege")
+            .and_then(|value| value.as_str())
+            == Some("unprivileged")
+        {
+            s.push_str(" — privilege: unprivileged; do not use sudo or system package managers");
+        }
         s.push('\n');
     }
     Some(s)
+}
+
+pub(crate) fn context_resource_enabled(context: &wisp_store::ExecutionContext) -> bool {
+    serde_json::from_str::<serde_json::Value>(&context.config_json)
+        .ok()
+        .and_then(|config| config.get("resource_enabled")?.as_bool())
+        .unwrap_or(false)
 }
 
 fn capability_summary(capabilities_json: &str) -> Option<String> {
@@ -479,10 +503,10 @@ pub async fn stored_compute_section(store: &wisp_store::Store) -> Option<String>
         }
     }
     match store.list_execution_contexts().await {
-        Ok(contexts) => render_contexts_section(&contexts).or_else(|| render_hosts_section(&hosts)),
+        Ok(contexts) => render_contexts_section(&contexts),
         Err(e) => {
             tracing::warn!("load execution contexts failed: {e}");
-            render_hosts_section(&hosts)
+            None
         }
     }
 }
@@ -490,6 +514,37 @@ pub async fn stored_compute_section(store: &wisp_store::Store) -> Option<String>
 #[tauri::command]
 pub async fn list_ssh_hosts(state: State<'_, crate::AppState>) -> Result<Vec<SshHost>, String> {
     Ok(load(&state.store).await)
+}
+
+#[tauri::command]
+pub async fn set_execution_context_resource_enabled(
+    state: State<'_, crate::AppState>,
+    context_id: String,
+    enabled: bool,
+) -> Result<wisp_store::ExecutionContext, String> {
+    let mut context = state
+        .store
+        .get_execution_context(&context_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("Execution context not found: {context_id}"))?;
+    if context.kind == wisp_store::ExecutionContextKind::Local {
+        return Err("Local compute is always available".into());
+    }
+    let mut config = serde_json::from_str::<serde_json::Value>(&context.config_json)
+        .map_err(|error| error.to_string())?;
+    let object = config
+        .as_object_mut()
+        .ok_or_else(|| "Execution context config must be a JSON object".to_string())?;
+    object.insert("resource_enabled".into(), enabled.into());
+    context.config_json = config.to_string();
+    context.updated_at = chrono::Utc::now().timestamp();
+    state
+        .store
+        .upsert_execution_context(&context)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(context)
 }
 
 #[tauri::command]
@@ -760,7 +815,8 @@ Host -unsafe bad/name !negated
             "alias": "gpu-box",
             "user": "alice",
             "port": 2222,
-            "notes": "slurm; sbatch"
+            "notes": "slurm; sbatch",
+            "resource_enabled": true
         })
         .to_string();
 
@@ -786,6 +842,29 @@ Host -unsafe bad/name !negated
             "remote path warning missing:\n{s}"
         );
         assert!(s.contains("slurm; sbatch"), "notes missing:\n{s}");
+    }
+
+    #[test]
+    fn render_contexts_excludes_resources_that_are_not_enabled() {
+        let disabled = wisp_store::ExecutionContext::new("ssh:off", "off").unwrap();
+        let mut enabled = wisp_store::ExecutionContext::new("ssh:on", "on").unwrap();
+        enabled.config_json = serde_json::json!({
+            "alias": "on",
+            "resource_enabled": true
+        })
+        .to_string();
+        enabled.capabilities_json = serde_json::json!({
+            "probe_skill": "probe-compute-environment",
+            "gpu_summary": null,
+            "privilege": "unprivileged"
+        })
+        .to_string();
+
+        let rendered = render_contexts_section(&[disabled, enabled]).unwrap();
+        assert!(rendered.contains("ssh:on"));
+        assert!(!rendered.contains("ssh:off"));
+        assert!(rendered.contains("GPU: none; do not plan GPU/CUDA work"));
+        assert!(rendered.contains("do not use sudo or system package managers"));
     }
 
     #[test]
@@ -891,7 +970,11 @@ Host -unsafe bad/name !negated
     fn render_contexts_lists_wsl_contexts_with_path_warning() {
         let mut ctx =
             wisp_store::ExecutionContext::new("wsl:Ubuntu-22.04", "Ubuntu-22.04").unwrap();
-        ctx.config_json = serde_json::json!({"distro": "Ubuntu-22.04"}).to_string();
+        ctx.config_json = serde_json::json!({
+            "distro": "Ubuntu-22.04",
+            "resource_enabled": true
+        })
+        .to_string();
 
         let s = render_contexts_section(&[ctx]).unwrap();
         assert!(s.contains("wsl:Ubuntu-22.04"), "context id missing:\n{s}");
@@ -908,7 +991,11 @@ Host -unsafe bad/name !negated
     #[test]
     fn render_contexts_summarizes_capabilities() {
         let mut ctx = wisp_store::ExecutionContext::new("ssh:gpu-box", "gpu-box").unwrap();
-        ctx.config_json = serde_json::json!({"alias": "gpu-box"}).to_string();
+        ctx.config_json = serde_json::json!({
+            "alias": "gpu-box",
+            "resource_enabled": true
+        })
+        .to_string();
         ctx.capabilities_json = serde_json::json!({
             "os": "Linux",
             "arch": "x86_64",

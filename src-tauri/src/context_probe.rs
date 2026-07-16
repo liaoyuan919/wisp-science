@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
+const PROBE_SKILL_NAME: &str = "probe-compute-environment";
+const PROBE_SKILL: &str = include_str!("../../skills/probe-compute-environment/SKILL.md");
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeResult {
+    pub probe_skill: String,
     pub os: Option<String>,
     pub arch: Option<String>,
     pub hostname: Option<String>,
@@ -21,6 +25,7 @@ pub struct ProbeResult {
     pub modulecmd: Option<String>,
     pub home: Option<String>,
     pub pwd: Option<String>,
+    pub privilege: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,8 +274,18 @@ pub fn probe_context_with_runner(
         runner,
         platform_script(ctx, "pwd", "(Get-Location).Path"),
     );
+    let privilege = run_optional(
+        ctx,
+        runner,
+        platform_script(
+            ctx,
+            "if [ \"$(id -u)\" = 0 ]; then printf root; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then printf sudo; else printf unprivileged; fi",
+            "if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { 'root' } else { 'unprivileged' }",
+        ),
+    );
 
     Ok(ProbeResult {
+        probe_skill: PROBE_SKILL_NAME.into(),
         os: Some(os),
         arch: Some(arch),
         hostname: Some(hostname),
@@ -288,6 +303,7 @@ pub fn probe_context_with_runner(
         modulecmd,
         home,
         pwd,
+        privilege,
     })
 }
 
@@ -431,6 +447,12 @@ pub async fn probe_execution_context(
     state: State<'_, crate::AppState>,
     context_id: String,
 ) -> Result<wisp_store::ExecutionContext, String> {
+    debug_assert!(PROBE_SKILL.contains("name: probe-compute-environment"));
+    tracing::info!(
+        skill = PROBE_SKILL_NAME,
+        context_id,
+        "probing execution context"
+    );
     let mut runner = ProcessProbeRunner;
     probe_and_store_with_runner(&state.store, &context_id, &mut runner).await
 }
@@ -537,6 +559,10 @@ mod tests {
             ("command -v modulecmd", "/usr/bin/modulecmd"),
             ("printf '%s' \"$HOME\"", "/home/alice"),
             ("pwd", "/scratch/proj"),
+            (
+                "if [ \"$(id -u)\" = 0 ]; then printf root; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then printf sudo; else printf unprivileged; fi",
+                "unprivileged",
+            ),
         ]);
 
         let probe = probe_context_with_runner(&ctx, &mut runner).unwrap();
@@ -569,6 +595,8 @@ mod tests {
         assert_eq!(probe.modulecmd.as_deref(), Some("/usr/bin/modulecmd"));
         assert_eq!(probe.home.as_deref(), Some("/home/alice"));
         assert_eq!(probe.pwd.as_deref(), Some("/scratch/proj"));
+        assert_eq!(probe.privilege.as_deref(), Some("unprivileged"));
+        assert_eq!(probe.probe_skill, "probe-compute-environment");
     }
 
     #[test]

@@ -180,7 +180,7 @@ export function tauriMock(): void {
       id: "ssh:gpu-server",
       kind: "ssh",
       label: "gpu-server",
-      config_json: "{}",
+      config_json: "{\"alias\":\"gpu-server\",\"resource_enabled\":true}",
       capabilities_json: "{\"gpu_summary\":\"NVIDIA A100\",\"scheduler\":\"slurm\",\"python_executable\":\"/opt/python/bin/python\",\"rscript_executable\":\"/opt/R/bin/Rscript\",\"r_jsonlite\":true}",
       last_probe_at: 1783482300,
       last_probe_status: "ok",
@@ -610,6 +610,16 @@ export function tauriMock(): void {
             }];
           case "list_execution_contexts":
             return executionContexts;
+          case "set_execution_context_resource_enabled": {
+            const context = executionContexts.find((item) =>
+              item.id === String(arg("contextId") ?? arg("context_id"))
+            );
+            if (!context || context.kind === "local") throw new Error("Execution context not found");
+            const config = JSON.parse(context.config_json || "{}");
+            config.resource_enabled = Boolean(arg("enabled"));
+            context.config_json = JSON.stringify(config);
+            return context;
+          }
           case "probe_execution_context":
             return executionContexts.find((context) =>
               context.id === String(arg("contextId") ?? arg("context_id"))

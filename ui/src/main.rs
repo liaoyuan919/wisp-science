@@ -3341,6 +3341,7 @@ fn App() -> impl IntoView {
     let agent_menu_open = create_rw_signal(false);
     let reviewer_model_menu_open = create_rw_signal(false);
     let compute_menu_open = create_rw_signal(false);
+    let compute_search = create_rw_signal(String::new());
     let compute_info_context_id = create_rw_signal::<Option<String>>(None);
     let specialist_menu_open = create_rw_signal(false);
     let auto_review_enabled = create_rw_signal(false);
@@ -3366,6 +3367,23 @@ fn App() -> impl IntoView {
     let host_port = create_rw_signal(String::new());
     let host_identity = create_rw_signal(String::new());
     let host_notes = create_rw_signal(String::new());
+
+    let toggle_compute_resource = Callback::new(move |(context_id, enabled): (String, bool)| {
+        spawn_local(async move {
+            let args = to_value(&serde_json::json!({
+                "contextId": context_id,
+                "enabled": enabled,
+            }))
+            .unwrap();
+            match invoke_checked("set_execution_context_resource_enabled", args).await {
+                Ok(_) => refresh_execution_contexts(execution_contexts),
+                Err(error) => {
+                    let message = localize_backend(locale.get_untracked(), &js_error_text(error));
+                    show_toast(&message);
+                }
+            }
+        });
+    });
 
     let open_terminal_for_context = Callback::new(move |context_id: String| {
         spawn_local(async move {
@@ -5436,6 +5454,7 @@ fn App() -> impl IntoView {
                             })}
                             <button type="button" class="composer-compute"
                                 class:active=move || agent_menu_open.get() || compute_info_context_id.get().is_some()
+                                class:has-resource=move || execution_contexts.get().iter().any(context_resource_enabled)
                                 title=move || t(locale.get(), "composer.agent_options")
                                 aria-label=move || t(locale.get(), "composer.agent_options")
                                 on:click=move |_| {
@@ -5545,8 +5564,8 @@ fn App() -> impl IntoView {
                                         }>
                                         <span>{move || t(locale.get(), "composer.compute")}</span>
                                         <span class="agent-menu-value">{move || {
-                                            let count = ssh_hosts.get().len();
-                                            if count == 0 { t(locale.get(), "compute.local") }
+                                            let count = execution_contexts.get().iter().filter(|context| context_resource_enabled(context)).count();
+                                            if count == 0 { t(locale.get(), "compute.default_local") }
                                             else { tf(locale.get(), "composer.compute_count", &[("n", &count.to_string())]) }
                                         }}</span>
                                         <span class="agent-menu-chevron">{compose_icon("chevron-right")}</span>
@@ -5644,28 +5663,49 @@ fn App() -> impl IntoView {
                                             }>
                                                 <span>{move || t(locale.get(), "compute.add_host")}</span>
                                             </button>
+                                            <div class="compute-menu-search">
+                                                {compose_icon("search")}
+                                                <input type="search" inputmode="search" autocomplete="off"
+                                                    aria-label=move || t(locale.get(), "compute.search")
+                                                    placeholder=move || t(locale.get(), "compute.search")
+                                                    prop:value=move || compute_search.get()
+                                                    on:input=move |ev| compute_search.set(event_target_value(&ev)) />
+                                            </div>
                                             <div class="agent-menu-separator"></div>
-                                            <button type="button" class="agent-submenu-row" data-context-id="local"
+                                            {move || {
+                                                let query = compute_search.get().trim().to_lowercase();
+                                                ssh_hosts.get().into_iter().filter(|host| {
+                                                    query.is_empty() || host.alias.to_lowercase().contains(&query)
+                                                }).map(|host| {
+                                                let context_id = format!("ssh:{}", host.alias);
+                                                let enabled = execution_contexts.get().iter()
+                                                    .find(|context| context.id == context_id)
+                                                    .is_some_and(context_resource_enabled);
+                                                let toggle_id = context_id.clone();
+                                                view! {
+                                                    <button type="button" class="agent-submenu-row compute-resource-row"
+                                                        class:enabled=enabled data-context-id=context_id.clone()
+                                                        aria-pressed=enabled.to_string()
+                                                        on:click=move |_| {
+                                                            toggle_compute_resource.call((toggle_id.clone(), !enabled));
+                                                        }>
+                                                        <span class="compute-resource-icon">{compose_icon("server")}</span>
+                                                        <span>{host.alias}</span>
+                                                        <span class="compute-resource-state">
+                                                            {if enabled { t(locale.get(), "compute.enabled") } else { t(locale.get(), "compute.disabled") }}
+                                                        </span>
+                                                    </button>
+                                                }
+                                            }).collect_view()}}
+                                            <button type="button" class="agent-submenu-row compute-manage-row"
                                                 on:click=move |_| {
                                                     agent_menu_open.set(false);
                                                     compute_menu_open.set(false);
-                                                    compute_info_context_id.set(Some("local".into()));
+                                                    settings_section.set("environments".into());
+                                                    show_settings.set(true);
                                                 }>
-                                                <span>{move || t(locale.get(), "compute.local")}</span>
+                                                <span>{move || t(locale.get(), "compute.manage")}</span>
                                             </button>
-                                            {move || ssh_hosts.get().into_iter().map(|host| {
-                                                let context_id = format!("ssh:{}", host.alias);
-                                                view! {
-                                                    <button type="button" class="agent-submenu-row" data-context-id=context_id.clone()
-                                                        on:click=move |_| {
-                                                            agent_menu_open.set(false);
-                                                            compute_menu_open.set(false);
-                                                            compute_info_context_id.set(Some(context_id.clone()));
-                                                        }>
-                                                        <span>{host.alias}</span>
-                                                    </button>
-                                                }
-                                            }).collect_view()}
                                         </div>
                                     })}
                                 </div>
@@ -6623,7 +6663,9 @@ fn App() -> impl IntoView {
                                 <div class="rp-contexts">
                                     <div class="context-list-pane">
                                     {move || {
-                                        let contexts = execution_contexts.get();
+                                        let contexts = execution_contexts.get().into_iter()
+                                            .filter(|context| context.kind != "local" && context_resource_enabled(context))
+                                            .collect::<Vec<_>>();
                                         view! { <section class="control-section">
                                         <div class="control-section-head">
                                             <span>{t(loc, "contexts.execution")}</span>
@@ -6727,83 +6769,11 @@ fn App() -> impl IntoView {
                                         <div class="context-actions">
                                             <button type="button" class="rp-hosts-add"
                                                 on:click=move |_| {
-                                                    show_add_host.set(true);
-                                                    spawn_local(async move {
-                                                        let v = invoke("list_ssh_config_aliases", JsValue::UNDEFINED).await;
-                                                        if let Ok(a) = serde_wasm_bindgen::from_value::<Vec<String>>(v) { config_aliases.set(a); }
-                                                    });
-                                                }><span class="gi plus"></span>{t(loc, "hosts.add")}</button>
-                                            <button type="button" class="rp-hosts-add"
-                                                on:click=move |_| {
-                                                    spawn_local(async move {
-                                                        let v = invoke("import_ssh_config_hosts", JsValue::UNDEFINED).await;
-                                                        if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<SshHost>>(v) {
-                                                            ssh_hosts.set(list);
-                                                            refresh_execution_contexts(execution_contexts);
-                                                        }
-                                                    });
-                                                }><span class="gi server"></span>{t(loc, "hosts.import")}</button>
-                                            {is_windows().then(|| view! {
-                                                <button type="button" class="rp-hosts-add context-import-wsl"
-                                                    on:click=move |_| {
-                                                        spawn_local(async move {
-                                                            match invoke_checked("import_wsl_contexts", JsValue::UNDEFINED).await {
-                                                                Ok(value) => match serde_wasm_bindgen::from_value::<Vec<ExecutionContext>>(value) {
-                                                                    Ok(contexts) => execution_contexts.set(contexts),
-                                                                    Err(error) => show_toast(&error.to_string()),
-                                                                },
-                                                                Err(error) => {
-                                                                    let message = localize_backend(locale.get_untracked(), &js_error_text(error));
-                                                                    show_toast(&message);
-                                                                }
-                                                            }
-                                                        });
-                                                    }><span class="gi server"></span>{t(loc, "contexts.import_wsl")}</button>
-                                            })}
+                                                    settings_section.set("environments".into());
+                                                    show_settings.set(true);
+                                                }>{t(loc, "compute.manage")}</button>
                                         </div>
                                     </section> }.into_view()
-                                    }}
-                                    {move || {
-                                        let hs = ssh_hosts.get();
-                                        (!hs.is_empty()).then(|| view! {
-                                        <section class="control-section context-host-registry">
-                                            <div class="control-section-head">
-                                                <span>{t(loc, "hosts.title")}</span>
-                                                <span class="control-count">{hs.len().to_string()}</span>
-                                            </div>
-                                            {hs.into_iter().map(|h| {
-                                                let alias = h.alias.clone();
-                                                let conn = {
-                                                    let mut c = String::new();
-                                                    if let Some(u) = &h.user { c.push_str(u); c.push('@'); }
-                                                    c.push_str(&h.alias);
-                                                    if let Some(p) = h.port { c.push_str(&format!(":{p}")); }
-                                                    c
-                                                };
-                                                view! {
-                                                    <div class="host-card">
-                                                        <div class="host-card-head">
-                                                            <span class="host-card-alias">{h.alias.clone()}</span>
-                                                            <button type="button" class="host-card-remove"
-                                                                on:click=move |_| {
-                                                                    let alias = alias.clone();
-                                                                    let arg = to_value(&serde_json::json!({ "alias": alias })).unwrap();
-                                                                    spawn_local(async move {
-                                                                        let v = invoke("remove_ssh_host", arg).await;
-                                                                        if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<SshHost>>(v) {
-                                                                            ssh_hosts.set(list);
-                                                                            refresh_execution_contexts(execution_contexts);
-                                                                        }
-                                                                    });
-                                                                }>{compose_icon("close")}</button>
-                                                        </div>
-                                                        <div class="host-card-conn">{conn}</div>
-                                                        {h.notes.clone().map(|n| view! { <div class="host-card-notes">{n}</div> })}
-                                                    </div>
-                                                }
-                                            }).collect_view()}
-                                        </section>
-                                        })
                                     }}
                                     </div>
                                 </div>
@@ -7414,6 +7384,7 @@ fn App() -> impl IntoView {
                 skill_filter_tag, skills_search, skills_msg, cred_status, cred_inputs, cred_msg,
                 approval_grants, conns_view, conn_form_open, conn_form_kind, conn_test_msg,
                 custom_conn_tools, custom_conn_tools_loading, custom_conn_tool_errors, pet_status,
+                ssh_hosts, execution_contexts,
             }
             open_project=switch_project
             go_settings_section=Callback::new(move |section: String| go_settings_section(&section))
@@ -7434,6 +7405,61 @@ fn App() -> impl IntoView {
             set_visible_skills_enabled=set_visible_skills_enabled
             install_skill_from=Callback::new(install_skill_from)
             remove_specialist=Callback::new(remove_specialist_fn)
+            open_add_host=Callback::new(move |_: ()| {
+                show_add_host.set(true);
+                spawn_local(async move {
+                    let value = invoke("list_ssh_config_aliases", JsValue::UNDEFINED).await;
+                    if let Ok(aliases) = serde_wasm_bindgen::from_value::<Vec<String>>(value) {
+                        config_aliases.set(aliases);
+                    }
+                });
+            })
+            import_ssh_hosts=Callback::new(move |_: ()| {
+                spawn_local(async move {
+                    let value = invoke("import_ssh_config_hosts", JsValue::UNDEFINED).await;
+                    if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<SshHost>>(value) {
+                        ssh_hosts.set(list);
+                        refresh_execution_contexts(execution_contexts);
+                    }
+                });
+            })
+            import_wsl_contexts=Callback::new(move |_: ()| {
+                spawn_local(async move {
+                    match invoke_checked("import_wsl_contexts", JsValue::UNDEFINED).await {
+                        Ok(value) => match serde_wasm_bindgen::from_value::<Vec<ExecutionContext>>(value) {
+                            Ok(contexts) => execution_contexts.set(contexts),
+                            Err(error) => show_toast(&error.to_string()),
+                        },
+                        Err(error) => {
+                            let message = localize_backend(locale.get_untracked(), &js_error_text(error));
+                            show_toast(&message);
+                        }
+                    }
+                });
+            })
+            remove_ssh_host=Callback::new(move |alias: String| {
+                spawn_local(async move {
+                    let args = to_value(&serde_json::json!({ "alias": alias })).unwrap();
+                    let value = invoke("remove_ssh_host", args).await;
+                    if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<SshHost>>(value) {
+                        ssh_hosts.set(list);
+                        refresh_execution_contexts(execution_contexts);
+                    }
+                });
+            })
+            toggle_compute_resource=toggle_compute_resource
+            probe_compute_resource=Callback::new(move |context_id: String| {
+                spawn_local(async move {
+                    let args = to_value(&serde_json::json!({ "contextId": context_id })).unwrap();
+                    match invoke_checked("probe_execution_context", args).await {
+                        Ok(_) => refresh_execution_contexts(execution_contexts),
+                        Err(error) => {
+                            let message = localize_backend(locale.get_untracked(), &js_error_text(error));
+                            show_toast(&message);
+                        }
+                    }
+                });
+            })
         />
 
         {(!is_windows()).then(|| view! {

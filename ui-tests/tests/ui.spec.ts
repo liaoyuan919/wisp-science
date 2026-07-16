@@ -1145,53 +1145,50 @@ test("pasted image attaches to the composer", async ({ page }) => {
   await expect(page.locator(".msg.user")).not.toContainText("Uploaded files:");
 });
 
-test("compute host menu opens environment info only after selecting one context", async ({ page }) => {
+test("compute menu searches and explicitly enables remote resources", async ({ page }) => {
   await enterApp(page);
 
   const menu = await openComputeMenu(page);
   await expect(menu).toBeVisible();
-  await expect(menu.getByRole("button", { name: "Local", exact: true })).toBeVisible();
-  await expect(menu.getByRole("button", { name: "gpu-server", exact: true })).toBeVisible();
-  await expect(page.getByRole("dialog", { name: "Environment info" })).toHaveCount(0);
+  await expect(menu.getByRole("button", { name: "Local", exact: true })).toHaveCount(0);
+  const search = menu.getByRole("searchbox", { name: "Search servers" });
+  await search.fill("missing");
+  await expect(menu.locator('[data-context-id="ssh:gpu-server"]')).toHaveCount(0);
+  await search.fill("gpu");
+  const server = menu.locator('[data-context-id="ssh:gpu-server"]');
+  await expect(server).toHaveClass(/enabled/);
+  await server.click();
+  await expect.poll(() => lastInvokeArgs(page, "set_execution_context_resource_enabled")).toMatchObject({
+    contextId: "ssh:gpu-server",
+    enabled: false,
+  });
+  await expect(server).not.toHaveClass(/enabled/);
+  await server.click();
+  await expect.poll(() => lastInvokeArgs(page, "set_execution_context_resource_enabled")).toMatchObject({
+    contextId: "ssh:gpu-server",
+    enabled: true,
+  });
+  await expect(page.locator(".composer-compute")).toHaveClass(/has-resource/);
+});
 
-  await menu.getByRole("button", { name: "gpu-server", exact: true }).click();
-  const card = page.getByRole("dialog", { name: "Environment info" });
-  await expect(card).toBeVisible();
-  await expect(menu).toHaveCount(0);
-  await expect.poll(() => card.evaluate((element) => {
-    const toggle = document.querySelector('.topbar [title="Toggle panel"]');
-    if (!(toggle instanceof HTMLElement)) return null;
-    const cardRect = element.getBoundingClientRect();
-    const toggleRect = toggle.getBoundingClientRect();
-    return {
-      rightDelta: Math.round(cardRect.right - toggleRect.right),
-      topGap: Math.round(cardRect.top - toggleRect.bottom),
-    };
-  })).toEqual({ rightDelta: 0, topGap: 18 });
-  const remote = card.locator('.compute-context-entry[data-context-id="ssh:gpu-server"]');
-  await expect(card.locator(".compute-context-entry")).toHaveCount(1);
-  await expect(remote).toHaveClass(/active/);
-  await expect(remote.locator(".compute-context-detail")).toContainText("Runtimes · 1");
-  await expect(remote.locator(".compute-context-detail")).toContainText("Runs · 1");
+test("settings manages servers and probes them with the default environment skill", async ({ page }) => {
+  await enterApp(page);
+  await openSettingsSection(page, "Environments");
 
-  await remote.getByRole("button", { name: "Probe context" }).click();
+  const server = page.locator('.environment-settings-row[data-context-id="ssh:gpu-server"]');
+  await expect(server).toBeVisible();
+  await expect(page.locator('.environment-settings-row[data-context-id="local"]')).toHaveCount(0);
+  await server.getByRole("button", { name: "Probe context" }).click();
   await expect.poll(() => lastInvokeArgs(page, "probe_execution_context")).toMatchObject({
     contextId: "ssh:gpu-server",
   });
 
-  await remote.getByRole("button", { name: "Open details" }).click();
-  await expect(page.getByRole("dialog", { name: "Machine information" })).toContainText("ssh:gpu-server");
-  await expect(card).toHaveCount(0);
-  await page.getByRole("button", { name: "Close details" }).click();
-
-  await openComputeMenu(page);
-  await page.getByRole("menu", { name: "Compute" })
-    .getByRole("button", { name: "Local", exact: true }).click();
-  const localCard = page.getByRole("dialog", { name: "Environment info" });
-  const local = localCard.locator('.compute-context-entry[data-context-id="local"]');
-  await expect(localCard.locator(".compute-context-entry")).toHaveCount(1);
-  await expect(local.locator(".compute-context-detail")).toContainText("Runtimes · 2");
-  await expect(local.locator(".compute-context-detail")).toContainText("Runs · 1");
+  await server.getByRole("button", { name: "Enabled · preferred" }).click();
+  await expect.poll(() => lastInvokeArgs(page, "set_execution_context_resource_enabled")).toMatchObject({
+    contextId: "ssh:gpu-server",
+    enabled: false,
+  });
+  await expect(server.getByRole("button", { name: "Not available" })).toBeVisible();
 });
 
 test("agent menu updates review, reviewer model, and memory preferences", async ({ page }) => {
@@ -1259,9 +1256,9 @@ test("right panel shows execution contexts and runs", async ({ page }) => {
     const hit = document.elementFromPoint(rect.left + 8, rect.top + 8);
     return hit === menu || menu.contains(hit);
   })).toBe(true);
-  await page.getByRole("button", { name: "Contexts" }).click();
+  await page.getByRole("button", { name: "Environment" }).click();
 
-  await expect(page.locator(".context-card", { hasText: "local" })).toContainText("Local machine");
+  await expect(page.locator(".context-card", { hasText: "local" })).toHaveCount(0);
   await expect(page.locator(".context-card", { hasText: "ssh:gpu-server" })).toContainText("NVIDIA A100");
   const sshContext = page.locator(".context-card", { hasText: "ssh:gpu-server" });
   await sshContext.getByRole("button", { name: "Probe context" }).click();
@@ -1339,34 +1336,34 @@ test("context cards open machine, runtime, and runs details in modals", async ({
   await enterApp(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.getByRole("button", { name: "Add panel" }).click();
-  await page.getByRole("button", { name: "Contexts" }).click();
+  await page.getByRole("button", { name: "Environment" }).click();
 
   await expect(page.locator(".context-detail-pane")).toHaveCount(0);
   await expect(page.locator(".runtime-card")).toHaveCount(0);
   await expect(page.locator(".run-card")).toHaveCount(0);
-  const local = page.locator(".context-card", { hasText: "local" });
-  await local.locator(".context-card-select").click();
-  await expect(page.getByRole("dialog", { name: "Machine information" })).toContainText("Local machine");
+  const remote = page.locator(".context-card", { hasText: "ssh:gpu-server" });
+  await remote.locator(".context-card-select").click();
+  await expect(page.getByRole("dialog", { name: "Machine information" })).toContainText("gpu-server");
   await page.getByRole("button", { name: "Close details" }).click();
 
-  await local.getByRole("button", { name: "View runtimes" }).click();
+  await remote.getByRole("button", { name: "View runtimes" }).click();
   await expect(page.getByRole("dialog", { name: "Runtimes" })).toBeVisible();
-  await expect(page.locator('.runtime-card[data-runtime-context="local"]')).toHaveCount(2);
+  await expect(page.locator('.runtime-card[data-runtime-context="ssh:gpu-server"]')).toHaveCount(2);
   await page.getByRole("button", { name: "Close details" }).click();
 
-  await local.getByRole("button", { name: "View runs" }).click();
+  await remote.getByRole("button", { name: "View runs" }).click();
   await expect(page.getByRole("dialog", { name: "Runs" })).toBeVisible();
-  await expect(page.locator(".run-card", { hasText: "Local normalization" })).toBeVisible();
+  await expect(page.locator(".run-card", { hasText: "Kinase screen QC" })).toBeVisible();
 });
 
 test("execution contexts remember Python and R interpreter paths", async ({ page }) => {
   await enterApp(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.getByRole("button", { name: "Add panel" }).click();
-  await page.getByRole("button", { name: "Contexts" }).click();
+  await page.getByRole("button", { name: "Environment" }).click();
 
-  const local = page.locator(".context-card", { hasText: "local" });
-  await local.getByRole("button", { name: "Configure runtime interpreters" }).click();
+  const remote = page.locator(".context-card", { hasText: "ssh:gpu-server" });
+  await remote.getByRole("button", { name: "Configure runtime interpreters" }).click();
   const runtimeModal = page.locator(".runtime-config-modal");
   await expect.poll(() => runtimeModal.locator(".ps-close").evaluate((button) => ({
     headDisplay: getComputedStyle(button.parentElement!).display,
@@ -1381,13 +1378,13 @@ test("execution contexts remember Python and R interpreter paths", async ({ page
   await page.getByRole("button", { name: "Save", exact: true }).click();
 
   await expect.poll(() => lastInvokeArgs(page, "update_execution_context_interpreters")).toMatchObject({
-    contextId: "local",
+    contextId: "ssh:gpu-server",
     pythonExecutable: String.raw`C:\Tools\Python\python.exe`,
     rscriptExecutable: String.raw`C:\Program Files\R\R-4.5.2\bin\Rscript.exe`,
   });
   await expect(page.getByRole("heading", { name: "Runtime interpreters" })).toBeHidden();
 
-  await local.getByRole("button", { name: "Configure runtime interpreters" }).click();
+  await remote.getByRole("button", { name: "Configure runtime interpreters" }).click();
   await expect(python).toHaveValue(String.raw`C:\Tools\Python\python.exe`);
   await expect(rscript).toHaveValue(String.raw`C:\Program Files\R\R-4.5.2\bin\Rscript.exe`);
 });
@@ -1396,40 +1393,16 @@ test("runtime panel shows lifecycle state and controls start stop restart", asyn
   await enterApp(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.getByRole("button", { name: "Add panel" }).click();
-  await page.getByRole("button", { name: "Contexts" }).click();
+  await page.getByRole("button", { name: "Environment" }).click();
 
   await expect(page.locator(".runtime-card")).toHaveCount(0);
-  await page.locator(".context-card", { hasText: "local" }).getByRole("button", { name: "View runtimes" }).click();
+  await page.locator(".context-card", { hasText: "ssh:gpu-server" }).getByRole("button", { name: "View runtimes" }).click();
 
   const localPython = page.locator('.runtime-card[data-runtime-language="python"][data-runtime-context="local"]');
   const localR = page.locator('.runtime-card[data-runtime-language="r"][data-runtime-context="local"]');
   const remotePython = page.locator('.runtime-card[data-runtime-language="python"][data-runtime-context="ssh:gpu-server"]');
   const remoteR = page.locator('.runtime-card[data-runtime-language="r"][data-runtime-context="ssh:gpu-server"]');
 
-  await expect(localPython).toContainText("Ready");
-  await expect(localPython).toContainText("512.0 MB");
-  await expect(localR).toContainText("Dead");
-  await expect(remotePython).toHaveCount(0);
-  await expect(remoteR).toHaveCount(0);
-
-  await localPython.getByRole("button", { name: "Stop" }).click();
-  await expect(localPython).toContainText("Dead");
-  await expect.poll(() => lastInvokeArgs(page, "stop_runtime")).toMatchObject({
-    projectId: "default",
-    contextId: "local",
-    language: "python",
-  });
-
-  await localR.getByRole("button", { name: "Restart" }).click();
-  await expect(localR).toContainText("Ready");
-  await expect.poll(() => lastInvokeArgs(page, "restart_runtime")).toMatchObject({
-    projectId: "default",
-    contextId: "local",
-    language: "r",
-  });
-
-  await page.getByRole("button", { name: "Close details" }).click();
-  await page.locator(".context-card", { hasText: "ssh:gpu-server" }).getByRole("button", { name: "View runtimes" }).click();
   await expect(localPython).toHaveCount(0);
   await expect(localR).toHaveCount(0);
   await expect(remotePython).toContainText("Busy");
@@ -1456,10 +1429,12 @@ test("runtime inspector lists object metadata without loading object contents", 
   await enterApp(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.getByRole("button", { name: "Add panel" }).click();
-  await page.getByRole("button", { name: "Contexts" }).click();
-  await page.locator(".context-card", { hasText: "local" }).getByRole("button", { name: "View runtimes" }).click();
+  await page.getByRole("button", { name: "Environment" }).click();
+  await page.locator(".context-card", { hasText: "ssh:gpu-server" }).getByRole("button", { name: "View runtimes" }).click();
 
-  const runtime = page.locator('.runtime-card[data-runtime-language="python"][data-runtime-context="local"]');
+  const runtime = page.locator('.runtime-card[data-runtime-language="python"][data-runtime-context="ssh:gpu-server"]');
+  await runtime.getByRole("button", { name: "Stop" }).click();
+  await runtime.getByRole("button", { name: "Start" }).click();
   await runtime.getByRole("button", { name: "Refresh objects" }).click();
 
   await expect(runtime.locator(".runtime-object-row", { hasText: "counts" })).toContainText("DataFrame");
@@ -1468,12 +1443,12 @@ test("runtime inspector lists object metadata without loading object contents", 
   await expect(runtime.locator(".runtime-object-row", { hasText: "model" })).toContainText("RandomForestClassifier");
   await expect.poll(() => lastInvokeArgs(page, "inspect_runtime")).toMatchObject({
     projectId: "default",
-    contextId: "local",
+    contextId: "ssh:gpu-server",
     language: "python",
   });
 });
 
-test("Windows contexts panel imports installed WSL distributions", async ({ page }) => {
+test("Windows environment settings imports installed WSL distributions", async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(navigator, "userAgent", {
       configurable: true,
@@ -1481,29 +1456,21 @@ test("Windows contexts panel imports installed WSL distributions", async ({ page
     });
   });
   await enterApp(page);
-  await page.getByRole("button", { name: "Toggle panel" }).click();
-  await page.getByRole("button", { name: "Add panel" }).click();
-  await page.getByRole("button", { name: "Contexts" }).click();
+  await openSettingsSection(page, "Environments");
 
   await page.getByRole("button", { name: "Import WSL" }).click();
 
   await expect.poll(() => lastInvokeArgs(page, "import_wsl_contexts")).not.toBeNull();
-  await expect(page.locator(".context-card", { hasText: "wsl:Ubuntu-24.04" })).toContainText("Ubuntu-24.04");
 });
 
-test("running run can be cancelled from the contexts panel", async ({ page }) => {
+test("environment panel shows runs only for enabled servers", async ({ page }) => {
   await enterApp(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.getByRole("button", { name: "Add panel" }).click();
-  await page.getByRole("button", { name: "Contexts" }).click();
-  await page.locator(".context-card", { hasText: "local" }).getByRole("button", { name: "View runs" }).click();
-
-  const run = page.locator(".run-card", { hasText: "Local normalization" });
-  await run.getByRole("button", { name: "Cancel run" }).click();
-  await expect(run).toContainText("cancelled");
-  await expect.poll(async () => page.evaluate(() =>
-    ((window as any).__skillInvokeLog ?? []).some((c: any) => c.cmd === "cancel_run"),
-  )).toBe(true);
+  await page.getByRole("button", { name: "Environment" }).click();
+  await page.locator(".context-card", { hasText: "ssh:gpu-server" }).getByRole("button", { name: "View runs" }).click();
+  await expect(page.locator(".run-card", { hasText: "Kinase screen QC" })).toBeVisible();
+  await expect(page.locator(".run-card", { hasText: "Local normalization" })).toHaveCount(0);
 });
 
 test("clicking a figure opens the artifact modal with provenance", async ({ page }) => {
@@ -2470,14 +2437,7 @@ test("macOS uses the native title bar without the integrated header", async ({ b
   await page.locator(".proj-card-main").first().click();
   await expect(newSessionButton(page)).toBeVisible();
   await openComputeMenu(page);
-  await page.getByRole("menu", { name: "Compute" })
-    .getByRole("button", { name: "gpu-server", exact: true }).click();
-  const card = page.getByRole("dialog", { name: "Environment info" });
-  await expect.poll(() => card.evaluate((element) => {
-    const toggle = document.querySelector('.topbar [title="Toggle panel"]');
-    if (!(toggle instanceof HTMLElement)) return null;
-    return Math.round(element.getBoundingClientRect().top - toggle.getBoundingClientRect().bottom);
-  })).toBe(18);
+  await expect(page.locator('.compute-resource-row[data-context-id="ssh:gpu-server"]')).toBeVisible();
 
   await context.close();
 });

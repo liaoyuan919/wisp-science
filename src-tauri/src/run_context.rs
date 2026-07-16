@@ -697,6 +697,14 @@ async fn create_run_record(
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Execution context not found: {}", request.context_id))?;
+    if ctx.kind != wisp_store::ExecutionContextKind::Local
+        && !crate::ssh_hosts::context_resource_enabled(&ctx)
+    {
+        return Err(format!(
+            "Execution context {} is not enabled as a compute resource",
+            request.context_id
+        ));
+    }
     let run_id = uuid::Uuid::new_v4().to_string();
     let output_specs = request.output_specs.unwrap_or_default();
     let input_refs = request.input_paths.unwrap_or_default();

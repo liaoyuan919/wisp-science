@@ -622,6 +622,14 @@ pub(super) fn context_capability_summary(ctx: &ExecutionContext) -> String {
                 parts.push(s.to_string());
             }
         }
+        if v.get("probe_skill").and_then(|x| x.as_str()).is_some()
+            && v.get("gpu_summary").is_none_or(serde_json::Value::is_null)
+        {
+            parts.push("No GPU".into());
+        }
+        if let Some(privilege) = v.get("privilege").and_then(|x| x.as_str()) {
+            parts.push(privilege.to_string());
+        }
     }
     if parts.is_empty() {
         ctx.last_probe_status
@@ -3008,6 +3016,7 @@ pub(super) fn settings_section_label(loc: Locale, section: &str) -> String {
     match section {
         "appearance" => t(loc, "settings.nav.appearance"),
         "pet" => t(loc, "settings.nav.pet"),
+        "environments" => t(loc, "settings.nav.environments"),
         "models" => t(loc, "settings.nav.models"),
         "specialists" => t(loc, "settings.nav.specialists"),
         "memory" => t(loc, "settings.nav.memory"),
@@ -3018,6 +3027,13 @@ pub(super) fn settings_section_label(loc: Locale, section: &str) -> String {
         _ => t(loc, "settings.title"),
     }
     .into()
+}
+
+pub(super) fn context_resource_enabled(context: &ExecutionContext) -> bool {
+    serde_json::from_str::<serde_json::Value>(&context.config_json)
+        .ok()
+        .and_then(|config| config.get("resource_enabled")?.as_bool())
+        .unwrap_or(false)
 }
 
 /// A field within a credential service group: (credential id, i18n label key,

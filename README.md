@@ -79,17 +79,21 @@ The CLI auto-loads the bundled `skills/` catalog and wires the bundled Python
 and optional system-R REPLs. Python provisions a uv venv at
 `.wisp/python/.venv` on first run; R uses `Rscript` from PATH and requires
 `jsonlite` in that R environment. In the desktop app, Python and R interpreter
-paths are saved per execution context from the Contexts panel or the agent's
+paths are saved per execution context from Settings → Environments or the agent's
 `set_runtime_interpreter` tool, so `local`, WSL, and each SSH server can use
 different environments without host environment variables. Each runtime card's
 **Configure path** action opens these per-context Python and R settings. The tool restarts
 the current project's matching REPL when needed, so a failed runtime can recover
 without restarting the Wisp app; restarting clears that REPL's in-memory state.
 The composer's agent-options menu groups Auto-review, Reviewer model, Memory,
-Specialist, and Compute controls in one place. Compute opens the fixed host
-picker with Local first and configured SSH hosts below it; selecting one host
-opens an environment card for that context with its probe summary, runtime/run
-counts, and shortcuts to details, probing, and a terminal.
+Specialist, and Compute controls in one place. Local compute is always available;
+the searchable Compute menu only lists configured remote servers. A server must
+be explicitly enabled before the agent can use it, and enabled servers are
+preferred for suitable work. Settings → Environments owns adding, importing,
+removing, enabling, and probing servers. Probe uses the bundled
+`probe-compute-environment` skill to persist hardware, scheduler, runtime, and
+privilege facts; the Environment side panel only shows currently enabled remote
+servers.
 Each Python or R cell is limited to 1 MiB of source so a malformed request cannot
 exhaust the persistent worker before execution begins.
 
