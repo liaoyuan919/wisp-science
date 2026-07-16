@@ -419,6 +419,8 @@ pub(crate) struct Settings {
     pub(crate) locale: String,
     #[serde(default)]
     pub(crate) workspace_dir: String,
+    #[serde(default = "default_max_iter")]
+    pub(crate) max_iter: usize,
     #[serde(default)]
     pub(crate) max_tokens: u64,
     #[serde(default)]
@@ -445,6 +447,10 @@ fn default_sync_backend() -> String {
     "relay".into()
 }
 
+fn default_max_iter() -> usize {
+    100
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -455,6 +461,7 @@ impl Default for Settings {
             has_api_key: false,
             locale: Locale::En.code().into(),
             workspace_dir: String::new(),
+            max_iter: default_max_iter(),
             max_tokens: 8192,
             reasoning_effort: String::new(),
             supports_vision: false,

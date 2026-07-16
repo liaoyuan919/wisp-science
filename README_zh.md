@@ -111,7 +111,8 @@ cargo tauri build --target universal-apple-darwin
 
 桌面应用把 API 密钥存入操作系统密钥环，并把模型配置保存在
 `.wisp/wisp.sqlite`（Settings → Models）。配置可指向远程 API 提供商，字段
-说明见[模型配置](docs/model-configuration.md)。对话也会持久化到该 SQLite
+说明见[模型配置](docs/model-configuration.md)。每轮模型/工具循环上限可在
+**设置 → 常规 → 每轮最大 Agent 迭代次数**中调整（默认 100）。对话也会持久化到该 SQLite
 数据库：每轮消息都会追加到当前会话 frame，重启后可恢复完整历史。无界面
 CLI 继续使用 `.wisp/session.json`，便于迁移。
 

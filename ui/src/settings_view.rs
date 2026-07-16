@@ -376,6 +376,16 @@ pub(super) fn SettingsView(
                                 prop:value={move || settings.get().workspace_dir}
                                 placeholder=move || bootstrap.get().map(|b| b.workspace).unwrap_or_default() />
                         </label>
+                        <label class="span-2">{move || t(locale.get(), "settings.max_iter")}
+                            <input data-testid="max-iter" type="number" min="1" step="1"
+                                on:input=move |ev| settings.update(|s| {
+                                    if let Ok(value) = event_target_input(&ev).value().parse() {
+                                        s.max_iter = value;
+                                    }
+                                })
+                                prop:value=move || settings.get().max_iter.to_string() />
+                            <span class="settings-field-hint">{move || t(locale.get(), "settings.max_iter_hint")}</span>
+                        </label>
                         <div class="span-2 settings-sync-block">
                             <h3>{move || t(locale.get(), "settings.sync.title")}</h3>
                             <p class="settings-field-hint">{move || t(locale.get(), "settings.sync.hint")}</p>
