@@ -90,12 +90,14 @@ environment table with bounded object names, types, values/shapes, and sizes.
 The composer's agent-options menu groups Auto-review, Reviewer model, Memory,
 Specialist, and Compute controls in one place. Local compute is always available;
 the searchable Compute menu only lists configured remote servers. A server must
-be explicitly enabled before the agent can use it, and enabled servers are
-preferred for suitable work. Settings → Environments owns adding, importing,
-removing, enabling, and probing servers. Probe uses the bundled
+be explicitly selected for the current conversation before the agent can use it,
+and selected servers are preferred for suitable work. The selection is isolated
+per conversation. Settings → Environments always shows local compute and owns
+adding, importing, removing, configuring, and probing environments; it does not
+control conversation resource selection. Probe uses the bundled
 `probe-compute-environment` skill to persist hardware, scheduler, runtime, and
-privilege facts; the Environment side panel only shows currently enabled remote
-servers.
+privilege facts. The Environment side panel always shows local compute plus the
+remote servers selected for the current conversation.
 Each Python or R cell is limited to 1 MiB of source so a malformed request cannot
 exhaust the persistent worker before execution begins.
 

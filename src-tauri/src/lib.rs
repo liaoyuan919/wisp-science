@@ -39,6 +39,7 @@ mod run_context;
 mod runtime_config_tool;
 mod runtime_launcher;
 mod seed;
+mod session_context_tool;
 mod session_export;
 mod settings_commands;
 mod skill_commands;
@@ -2560,16 +2561,21 @@ async fn wire_runtimes_and_mcp(
     agent: &mut wisp_core::Agent,
     runtime_manager: &wisp_runtime::RuntimeManager,
     project_id: &str,
+    frame_id: &str,
     app_data: &std::path::Path,
     store: &Store,
     connector_allow: Option<&HashSet<String>>,
 ) -> Vec<String> {
     let mut errors = vec![];
     agent.add_tool(Box::new(
-        runtime_config_tool::SetRuntimeInterpreterTool::new(
+        session_context_tool::SessionExecutionContextTool::new(
+            Box::new(runtime_config_tool::SetRuntimeInterpreterTool::new(
+                store.clone(),
+                runtime_manager.clone(),
+                project_id,
+            )),
             store.clone(),
-            runtime_manager.clone(),
-            project_id,
+            frame_id,
         ),
     ));
     let py_env = match wisp_runtime::PythonEnv::ensure(app_data) {
@@ -2583,10 +2589,16 @@ async fn wire_runtimes_and_mcp(
     let service_env = models::service_env();
     let worker_path = kernel_worker_path();
     if worker_path.is_file() {
-        agent.add_tool(Box::new(wisp_runtime::ReplTool::new(
-            runtime_manager.clone(),
-            project_id,
-        )));
+        agent.add_tool(Box::new(
+            session_context_tool::SessionExecutionContextTool::new(
+                Box::new(wisp_runtime::ReplTool::new(
+                    runtime_manager.clone(),
+                    project_id,
+                )),
+                store.clone(),
+                frame_id,
+            ),
+        ));
     } else {
         errors.push(format!(
             "Kernel worker not found at {}",
@@ -2596,10 +2608,16 @@ async fn wire_runtimes_and_mcp(
 
     let r_worker_path = r_kernel_worker_path();
     if r_worker_path.is_file() {
-        agent.add_tool(Box::new(wisp_runtime::RTool::new(
-            runtime_manager.clone(),
-            project_id,
-        )));
+        agent.add_tool(Box::new(
+            session_context_tool::SessionExecutionContextTool::new(
+                Box::new(wisp_runtime::RTool::new(
+                    runtime_manager.clone(),
+                    project_id,
+                )),
+                store.clone(),
+                frame_id,
+            ),
+        ));
     } else {
         errors.push(format!(
             "R runtime worker not found at {}",
@@ -3016,8 +3034,11 @@ async fn send_message(
         };
         let refs = references.as_deref().unwrap_or_default();
         let skills = active_skill_index(&state.store, &ap).await;
-        let injected_context =
+        let mut injected_context =
             resolve_composer_references(&state.store, refs, &frame_id, &skills).await?;
+        if let Some(compute) = ssh_hosts::stored_compute_section(&state.store, &frame_id).await {
+            injected_context.push(compute);
+        }
         let artifact_references = resolve_acp_artifact_references(&state.store, refs).await?;
         let runtime = {
             let mut sessions = state.sessions.lock().await;
@@ -3201,13 +3222,19 @@ async fn send_message(
             store: state.store.clone(),
         }));
         match state.store.load_messages(&frame_id).await {
-            Ok(msgs) => agent.ctx.messages = msgs,
+            Ok(msgs) => {
+                agent.ctx.messages = msgs;
+                if let Some(message) = agent.ctx.messages.first_mut() {
+                    if let wisp_llm::Content::Text(prompt) = &mut message.content {
+                        ssh_hosts::strip_legacy_compute_section(prompt);
+                    }
+                }
+            }
             Err(e) => tracing::warn!("load session from sqlite failed: {e}"),
         }
         rt.set_last_seq(agent.ctx.messages.len() as i64);
         if agent.ctx.is_empty() {
-            let compute = ssh_hosts::stored_compute_section(&state.store).await;
-            agent.seed_system_prompt(&skills, compute);
+            agent.seed_system_prompt(&skills, None);
         }
         if let Some(spec) = &specialist {
             if agent.ctx.messages.len() == 1 && !spec.instructions.trim().is_empty() {
@@ -3231,6 +3258,7 @@ async fn send_message(
             &mut agent,
             &state.runtime_manager,
             &ap.id,
+            &frame_id,
             &state.app_data,
             &state.store,
             connector_allow.as_ref(),
@@ -3252,6 +3280,9 @@ async fn send_message(
     );
     if !resume {
         agent.ctx.clear_runtime_injections();
+        if let Some(compute) = ssh_hosts::stored_compute_section(&state.store, &frame_id).await {
+            agent.ctx.inject_user(compute);
+        }
         let skills = active_skill_index(&state.store, &ap).await;
         let refs = references.unwrap_or_default();
         for injection in
@@ -6183,7 +6214,8 @@ pub fn run() {
             context_probe::probe_execution_context,
             runtime_launcher::update_execution_context_interpreters,
             ssh_hosts::list_ssh_hosts,
-            ssh_hosts::set_execution_context_resource_enabled,
+            ssh_hosts::list_session_execution_context_ids,
+            ssh_hosts::set_session_execution_context_enabled,
             ssh_hosts::add_ssh_host,
             ssh_hosts::remove_ssh_host,
             ssh_hosts::list_ssh_config_aliases,

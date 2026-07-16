@@ -288,6 +288,43 @@ async fn background_run_can_be_cancelled_without_waiting_for_the_command() {
 }
 
 #[tokio::test]
+async fn remote_run_is_rejected_when_not_selected_for_its_session() {
+    let tmp = std::env::temp_dir().join(format!(
+        "wisp_remote_run_selection_{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = wisp_store::Store::open(&tmp).await.unwrap();
+    store.create_project("p", "proj", "").await.unwrap();
+    store.create_frame("f", "p", "OPERON", "m").await.unwrap();
+    store
+        .upsert_execution_context(&wisp_store::ExecutionContext::new("ssh:gpu", "GPU").unwrap())
+        .await
+        .unwrap();
+    let request = SubmitRunRequest {
+        context_id: "ssh:gpu".into(),
+        command: "echo remote".into(),
+        title: None,
+        timeout_secs: None,
+        input_paths: None,
+        output_specs: None,
+    };
+    let runner = FakeRunRunner {
+        output: Ok(RunCommandOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }),
+    };
+
+    let error = submit_run_with_runner(&store, "p", Some("f"), request.clone(), &runner, None)
+        .await
+        .unwrap_err();
+    assert!(error.contains("not selected for this session"));
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[tokio::test]
 async fn ssh_run_detaches_persists_handle_and_finishes_from_poller() {
     let tmp = std::env::temp_dir().join(format!("wisp_ssh_lifecycle_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp).unwrap();
@@ -298,13 +335,14 @@ async fn ssh_run_detaches_persists_handle_and_finishes_from_poller() {
         .create_project("p", "proj", &tmp.to_string_lossy())
         .await
         .unwrap();
+    store.create_frame("f", "p", "OPERON", "m").await.unwrap();
     let mut context = wisp_store::ExecutionContext::new("ssh:gpu", "GPU").unwrap();
-    context.config_json = serde_json::json!({
-        "alias": "gpu",
-        "resource_enabled": true
-    })
-    .to_string();
+    context.config_json = serde_json::json!({ "alias": "gpu" }).to_string();
     store.upsert_execution_context(&context).await.unwrap();
+    store
+        .set_session_execution_context_enabled("f", "ssh:gpu", true)
+        .await
+        .unwrap();
     let runner = Arc::new(ScriptedRunRunner::new(vec![
         ok_output("__WISP_PREPARED__\n"),
         ok_output("__WISP_HANDLE__:token-will-be-replaced"),
@@ -322,7 +360,7 @@ async fn ssh_run_detaches_persists_handle_and_finishes_from_poller() {
         .submit(
             store.clone(),
             "p".into(),
-            None,
+            Some("f".into()),
             SubmitRunRequest {
                 context_id: "ssh:gpu".into(),
                 command: command.into(),

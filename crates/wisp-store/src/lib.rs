@@ -47,6 +47,7 @@ const SESSION_UI_EVENTS_MIGRATION: &str = "0009_session_ui_events";
 const PROJECT_SYNC_STATE_MIGRATION: &str = "0010_project_sync_state";
 const SESSION_HISTORY_INDEX_MIGRATION: &str = "0011_session_history_index";
 const MESSAGE_RESOURCE_LINKS_MIGRATION: &str = "0012_message_resource_links";
+const SESSION_EXECUTION_CONTEXTS_MIGRATION: &str = "0013_session_execution_contexts";
 
 #[derive(Clone)]
 pub struct Store {
@@ -179,6 +180,28 @@ impl Store {
             Self::apply_message_resource_links(pool).await?;
             Self::record_migration(pool, MESSAGE_RESOURCE_LINKS_MIGRATION).await?;
         }
+        if !Self::migration_applied(pool, SESSION_EXECUTION_CONTEXTS_MIGRATION).await? {
+            Self::apply_session_execution_contexts(pool).await?;
+            Self::record_migration(pool, SESSION_EXECUTION_CONTEXTS_MIGRATION).await?;
+        }
+        Ok(())
+    }
+
+    async fn apply_session_execution_contexts(pool: &SqlitePool) -> Result<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS session_execution_contexts (\
+             frame_id TEXT NOT NULL REFERENCES frames(id) ON DELETE CASCADE, \
+             context_id TEXT NOT NULL REFERENCES execution_contexts(id) ON DELETE CASCADE, \
+             created_at INTEGER NOT NULL, PRIMARY KEY(frame_id,context_id))",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS ix_session_execution_contexts_context \
+             ON session_execution_contexts(context_id)",
+        )
+        .execute(pool)
+        .await?;
         Ok(())
     }
 

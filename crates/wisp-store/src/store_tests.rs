@@ -792,6 +792,61 @@ async fn execution_context_store_roundtrip() {
 }
 
 #[tokio::test]
+async fn execution_context_selection_is_isolated_per_session() {
+    let tmp = std::env::temp_dir().join(format!(
+        "wisp_store_session_contexts_{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = Store::open(&tmp).await.unwrap();
+    store.create_project("p", "Project", "").await.unwrap();
+    store.create_frame("f1", "p", "OPERON", "m").await.unwrap();
+    store.create_frame("f2", "p", "OPERON", "m").await.unwrap();
+    store
+        .upsert_execution_context(&ExecutionContext::new("ssh:gpu", "GPU").unwrap())
+        .await
+        .unwrap();
+
+    store
+        .set_session_execution_context_enabled("f1", "ssh:gpu", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .list_session_execution_context_ids("f1")
+            .await
+            .unwrap(),
+        vec!["ssh:gpu"]
+    );
+    assert!(store
+        .list_session_execution_context_ids("f2")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .session_execution_context_enabled("f1", "ssh:gpu")
+        .await
+        .unwrap());
+    assert!(store
+        .set_session_execution_context_enabled("f1", "local", true)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("always available"));
+
+    store
+        .set_session_execution_context_enabled("f1", "ssh:gpu", false)
+        .await
+        .unwrap();
+    assert!(store
+        .list_session_execution_context_ids("f1")
+        .await
+        .unwrap()
+        .is_empty());
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[tokio::test]
 async fn store_open_records_migrations_and_seeds_local_context() {
     let tmp = std::env::temp_dir().join(format!(
         "wisp_store_migrations_{}.sqlite",
@@ -820,6 +875,7 @@ async fn store_open_records_migrations_and_seeds_local_context() {
             PROJECT_SYNC_STATE_MIGRATION.to_string(),
             SESSION_HISTORY_INDEX_MIGRATION.to_string(),
             MESSAGE_RESOURCE_LINKS_MIGRATION.to_string(),
+            SESSION_EXECUTION_CONTEXTS_MIGRATION.to_string(),
         ]
     );
 

@@ -184,6 +184,17 @@ CREATE TABLE IF NOT EXISTS execution_contexts (
 );
 CREATE INDEX IF NOT EXISTS ix_execution_contexts_kind ON execution_contexts(kind);
 
+-- Remote compute resources selected for one conversation. Local execution is
+-- deliberately absent because it is always available.
+CREATE TABLE IF NOT EXISTS session_execution_contexts (
+    frame_id   TEXT NOT NULL REFERENCES frames(id) ON DELETE CASCADE,
+    context_id TEXT NOT NULL REFERENCES execution_contexts(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(frame_id, context_id)
+);
+CREATE INDEX IF NOT EXISTS ix_session_execution_contexts_context
+    ON session_execution_contexts(context_id);
+
 CREATE TABLE IF NOT EXISTS runs (
     id                 TEXT PRIMARY KEY,
     project_id         TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,

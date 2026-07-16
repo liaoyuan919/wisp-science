@@ -53,10 +53,77 @@ impl Store {
 
     pub async fn delete_execution_context(&self, id: &str) -> Result<()> {
         ExecutionContextKind::from_id(id)?;
+        sqlx::query("DELETE FROM session_execution_contexts WHERE context_id=?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         sqlx::query("DELETE FROM execution_contexts WHERE id=?")
             .bind(id)
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    pub async fn set_session_execution_context_enabled(
+        &self,
+        frame_id: &str,
+        context_id: &str,
+        enabled: bool,
+    ) -> Result<()> {
+        let context = self
+            .get_execution_context(context_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Execution context not found: {context_id}"))?;
+        if context.kind == ExecutionContextKind::Local {
+            anyhow::bail!("Local compute is always available");
+        }
+        if self.frame_project_id(frame_id).await?.is_none() {
+            anyhow::bail!("Session not found: {frame_id}");
+        }
+        if enabled {
+            sqlx::query(
+                "INSERT OR IGNORE INTO session_execution_contexts(frame_id,context_id,created_at) \
+                 VALUES(?,?,?)",
+            )
+            .bind(frame_id)
+            .bind(context_id)
+            .bind(chrono::Utc::now().timestamp())
+            .execute(&self.pool)
+            .await?;
+        } else {
+            sqlx::query("DELETE FROM session_execution_contexts WHERE frame_id=? AND context_id=?")
+                .bind(frame_id)
+                .bind(context_id)
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn list_session_execution_context_ids(&self, frame_id: &str) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT context_id FROM session_execution_contexts \
+             WHERE frame_id=? ORDER BY context_id",
+        )
+        .bind(frame_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
+    pub async fn session_execution_context_enabled(
+        &self,
+        frame_id: &str,
+        context_id: &str,
+    ) -> Result<bool> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM session_execution_contexts \
+             WHERE frame_id=? AND context_id=?)",
+        )
+        .bind(frame_id)
+        .bind(context_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0 != 0)
     }
 }

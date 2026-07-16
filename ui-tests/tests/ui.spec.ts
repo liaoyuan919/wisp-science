@@ -49,6 +49,16 @@ async function openComputeMenu(page: Page) {
   return page.getByRole("menu", { name: "Compute" });
 }
 
+async function selectRemoteContext(page: Page) {
+  const menu = await openComputeMenu(page);
+  const server = menu.locator('[data-context-id="ssh:gpu-server"]');
+  if (!(await server.getAttribute("class"))?.includes("enabled")) {
+    await server.click();
+    await expect(server).toHaveClass(/enabled/);
+  }
+  await page.keyboard.press("Escape");
+}
+
 function commandPalette(page: Page) {
   return page.locator("#command-palette-input");
 }
@@ -1145,7 +1155,7 @@ test("pasted image attaches to the composer", async ({ page }) => {
   await expect(page.locator(".msg.user")).not.toContainText("Uploaded files:");
 });
 
-test("compute menu searches and explicitly enables remote resources", async ({ page }) => {
+test("compute menu selects remote resources per session", async ({ page }) => {
   await enterApp(page);
 
   const menu = await openComputeMenu(page);
@@ -1159,19 +1169,22 @@ test("compute menu searches and explicitly enables remote resources", async ({ p
   await expect(menu.locator(".compute-resource-list")).toHaveCSS("overflow-y", "auto");
   await expect(server).toHaveCSS("display", "grid");
   await expect(menu.getByRole("button", { name: "Manage environments in Settings" })).toBeVisible();
-  await expect(server).toHaveClass(/enabled/);
-  await server.click();
-  await expect.poll(() => lastInvokeArgs(page, "set_execution_context_resource_enabled")).toMatchObject({
-    contextId: "ssh:gpu-server",
-    enabled: false,
-  });
   await expect(server).not.toHaveClass(/enabled/);
   await server.click();
-  await expect.poll(() => lastInvokeArgs(page, "set_execution_context_resource_enabled")).toMatchObject({
+  await expect.poll(() => lastInvokeArgs(page, "set_session_execution_context_enabled")).toMatchObject({
+    sessionId: expect.any(String),
     contextId: "ssh:gpu-server",
     enabled: true,
   });
+  const firstSession = (await lastInvokeArgs(page, "set_session_execution_context_enabled")).sessionId;
   await expect(page.locator(".composer-compute")).toHaveClass(/has-resource/);
+
+  await page.keyboard.press("Escape");
+  await newSessionButton(page).click();
+  const nextMenu = await openComputeMenu(page);
+  await expect(nextMenu.locator('[data-context-id="ssh:gpu-server"]')).not.toHaveClass(/enabled/);
+  await expect.poll(async () => (await lastInvokeArgs(page, "list_session_execution_context_ids"))?.sessionId)
+    .not.toBe(firstSession);
 });
 
 test("settings manages servers and probes them with the default environment skill", async ({ page }) => {
@@ -1179,19 +1192,22 @@ test("settings manages servers and probes them with the default environment skil
   await openSettingsSection(page, "Environments");
 
   const server = page.locator('.environment-settings-row[data-context-id="ssh:gpu-server"]');
+  const local = page.locator('.environment-settings-row[data-context-id="local"]');
   await expect(server).toBeVisible();
-  await expect(page.locator('.environment-settings-row[data-context-id="local"]')).toHaveCount(0);
+  await expect(local).toBeVisible();
+  await expect(page.locator(".environment-resource-toggle")).toHaveCount(0);
+
+  await local.getByRole("button", { name: "Configure runtime interpreters" }).click();
+  await expect(page.getByRole("heading", { name: "Runtime interpreters" })).toBeVisible();
+  await expect(page.locator("#runtime-python-executable")).toBeVisible();
+  await expect(page.locator("#runtime-rscript-executable")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".settings-page")).toBeVisible();
+
   await server.getByRole("button", { name: "Probe context" }).click();
   await expect.poll(() => lastInvokeArgs(page, "probe_execution_context")).toMatchObject({
     contextId: "ssh:gpu-server",
   });
-
-  await server.getByRole("button", { name: "Enabled · preferred" }).click();
-  await expect.poll(() => lastInvokeArgs(page, "set_execution_context_resource_enabled")).toMatchObject({
-    contextId: "ssh:gpu-server",
-    enabled: false,
-  });
-  await expect(server.getByRole("button", { name: "Not enabled" })).toBeVisible();
 });
 
 test("Escape closes the topmost environment modal before settings", async ({ page }) => {
@@ -1275,6 +1291,7 @@ test("agent menu updates review, reviewer model, and memory preferences", async 
 
 test("right panel shows execution contexts and runs", async ({ page }) => {
   await enterApp(page);
+  await selectRemoteContext(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.getByRole("button", { name: "Add panel" }).click();
   await expect.poll(() => page.locator(".rp-tab-add-menu").evaluate((menu) => {
@@ -1284,7 +1301,7 @@ test("right panel shows execution contexts and runs", async ({ page }) => {
   })).toBe(true);
   await page.getByRole("button", { name: "Environment" }).click();
 
-  await expect(page.locator(".context-card", { hasText: "local" })).toHaveCount(0);
+  await expect(page.locator(".context-card", { hasText: "local" })).toBeVisible();
   await expect(page.locator(".context-card", { hasText: "ssh:gpu-server" })).toContainText("NVIDIA A100");
   const sshContext = page.locator(".context-card", { hasText: "ssh:gpu-server" });
   await sshContext.getByRole("button", { name: "Probe context" }).click();
@@ -1360,6 +1377,7 @@ test("right panel shows execution contexts and runs", async ({ page }) => {
 
 test("context cards open machine, runtime, and runs details in modals", async ({ page }) => {
   await enterApp(page);
+  await selectRemoteContext(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.getByRole("button", { name: "Add panel" }).click();
   await page.getByRole("button", { name: "Environment" }).click();
@@ -1392,6 +1410,7 @@ test("context cards open machine, runtime, and runs details in modals", async ({
 
 test("execution contexts remember Python and R interpreter paths", async ({ page }) => {
   await enterApp(page);
+  await selectRemoteContext(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.getByRole("button", { name: "Add panel" }).click();
   await page.getByRole("button", { name: "Environment" }).click();
@@ -1425,6 +1444,7 @@ test("execution contexts remember Python and R interpreter paths", async ({ page
 
 test("runtime panel shows lifecycle state and controls start stop restart", async ({ page }) => {
   await enterApp(page);
+  await selectRemoteContext(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.getByRole("button", { name: "Add panel" }).click();
   await page.getByRole("button", { name: "Environment" }).click();
@@ -1461,6 +1481,7 @@ test("runtime panel shows lifecycle state and controls start stop restart", asyn
 
 test("runtime inspector lists object metadata without loading object contents", async ({ page }) => {
   await enterApp(page);
+  await selectRemoteContext(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.getByRole("button", { name: "Add panel" }).click();
   await page.getByRole("button", { name: "Environment" }).click();
@@ -1510,8 +1531,9 @@ test("Windows environment settings imports installed WSL distributions", async (
   await expect.poll(() => lastInvokeArgs(page, "import_wsl_contexts")).not.toBeNull();
 });
 
-test("environment panel shows runs only for enabled servers", async ({ page }) => {
+test("environment panel shows runs only for the selected context", async ({ page }) => {
   await enterApp(page);
+  await selectRemoteContext(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.getByRole("button", { name: "Add panel" }).click();
   await page.getByRole("button", { name: "Environment" }).click();

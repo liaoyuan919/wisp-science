@@ -1,8 +1,8 @@
 use crate::app_support::{
-    build_conn_json, close_details_ancestor, compose_icon, conn_form_from_row, focus_element_soon,
-    join_tags, js_error_text, new_acp_form, new_model_form, profile_to_form, reviewer_backend_key,
-    reviewer_backend_label, reviewer_missing_acp_profile_id, set_reviewer_backend,
-    context_capability_summary, context_resource_enabled, settings_section_label,
+    build_conn_json, close_details_ancestor, compose_icon, conn_form_from_row,
+    context_capability_summary, focus_element_soon, join_tags, js_error_text, new_acp_form,
+    new_model_form, profile_to_form, reviewer_backend_key, reviewer_backend_label,
+    reviewer_missing_acp_profile_id, set_reviewer_backend, settings_section_label,
     settings_subpage_label, skill_matches_filter, CRED_GROUPS,
 };
 use crate::bindings::{invoke, invoke_checked, is_windows};
@@ -123,6 +123,7 @@ pub(super) struct SettingsViewState {
     pub(super) pet_status: RwSignal<PetStatus>,
     pub(super) ssh_hosts: RwSignal<Vec<SshHost>>,
     pub(super) execution_contexts: RwSignal<Vec<ExecutionContext>>,
+    pub(super) runtime_interpreter_form: RwSignal<Option<RuntimeInterpreterForm>>,
 }
 
 #[component]
@@ -151,7 +152,6 @@ pub(super) fn SettingsView(
     import_ssh_hosts: Callback<()>,
     import_wsl_contexts: Callback<()>,
     remove_ssh_host: Callback<String>,
-    toggle_compute_resource: Callback<(String, bool)>,
     probe_compute_resource: Callback<String>,
 ) -> impl IntoView {
     let SettingsViewState {
@@ -206,6 +206,7 @@ pub(super) fn SettingsView(
         pet_status,
         ssh_hosts,
         execution_contexts,
+        runtime_interpreter_form,
     } = state;
     let acp_form_open = create_memo(move |_| acp_form.get().is_some());
     let joining = create_rw_signal(false);
@@ -498,54 +499,64 @@ pub(super) fn SettingsView(
                             {move || {
                                 let contexts = execution_contexts.get();
                                 let hosts = ssh_hosts.get();
-                                if hosts.is_empty() {
-                                    return view! { <div class="settings-list-empty">{t(locale.get(), "hosts.empty")}</div> }.into_view();
+                                if contexts.is_empty() {
+                                    return view! { <div class="settings-list-empty">{t(locale.get(), "environments.empty")}</div> }.into_view();
                                 }
-                                hosts.into_iter().map(|host| {
-                                    let context_id = format!("ssh:{}", host.alias);
-                                    let enabled = contexts.iter()
-                                        .find(|context| context.id == context_id)
-                                        .is_some_and(context_resource_enabled);
-                                    let capability_summary = contexts.iter()
-                                        .find(|context| context.id == context_id)
-                                        .map(|context| format!(" · {}", context_capability_summary(context)));
-                                    let toggle_id = context_id.clone();
-                                    let probe_id = context_id.clone();
-                                    let remove_alias = host.alias.clone();
-                                    let connection = match (&host.user, host.port) {
-                                        (Some(user), Some(port)) => format!("{user}@{}:{port}", host.alias),
-                                        (Some(user), None) => format!("{user}@{}", host.alias),
-                                        (None, Some(port)) => format!("{}:{port}", host.alias),
-                                        (None, None) => host.alias.clone(),
+                                contexts.into_iter().map(|context| {
+                                    let context_id = context.id.clone();
+                                    let title = if context.kind == "local" {
+                                        t(locale.get(), "compute.local").to_string()
+                                    } else if context.label.trim().is_empty() {
+                                        context.id.clone()
+                                    } else {
+                                        context.label.clone()
                                     };
+                                    let connection = context.id.strip_prefix("ssh:")
+                                        .and_then(|alias| hosts.iter().find(|host| host.alias == alias))
+                                        .map(|host| match (&host.user, host.port) {
+                                            (Some(user), Some(port)) => format!("{user}@{}:{port}", host.alias),
+                                            (Some(user), None) => format!("{user}@{}", host.alias),
+                                            (None, Some(port)) => format!("{}:{port}", host.alias),
+                                            (None, None) => host.alias.clone(),
+                                        })
+                                        .unwrap_or_else(|| context.id.clone());
+                                    let capability_summary = format!(" · {}", context_capability_summary(&context));
+                                    let config_context = context.clone();
+                                    let probe_id = context_id.clone();
+                                    let remove_alias = context.id.strip_prefix("ssh:").map(str::to_string);
                                     view! {
                                         <div class="settings-list-row environment-settings-row" data-context-id=context_id>
-                                            <span class="environment-server-icon" class:enabled=enabled>
+                                            <span class="environment-server-icon">
                                                 {compose_icon("server")}
                                             </span>
                                             <div class="settings-list-main">
-                                                <span class="settings-list-title">{host.alias.clone()}</span>
+                                                <span class="settings-list-title">{title}</span>
                                                 <span class="settings-list-sub">
                                                     {connection}
                                                     {capability_summary}
                                                 </span>
                                             </div>
                                             <div class="settings-list-actions">
+                                                <button type="button" class="environment-runtime-config"
+                                                    title=move || t(locale.get(), "contexts.configure_interpreters")
+                                                    aria-label=move || t(locale.get(), "contexts.configure_interpreters")
+                                                    on:click=move |_| runtime_interpreter_form.set(Some(
+                                                        RuntimeInterpreterForm::from_context(&config_context)
+                                                    ))>
+                                                    {t(locale.get(), "runtime.configure")}
+                                                </button>
                                                 <button type="button" class="environment-probe"
                                                     on:click=move |_| probe_compute_resource.call(probe_id.clone())>
                                                     {t(locale.get(), "contexts.probe")}
                                                 </button>
-                                                <button type="button" class="environment-resource-toggle" class:enabled=enabled
-                                                    aria-pressed=enabled.to_string()
-                                                    on:click=move |_| toggle_compute_resource.call((toggle_id.clone(), !enabled))>
-                                                    {if enabled { t(locale.get(), "environments.enabled") } else { t(locale.get(), "environments.disabled") }}
-                                                </button>
-                                                <button type="button" class="settings-list-remove"
-                                                    title=move || t(locale.get(), "environments.remove")
-                                                    aria-label=move || t(locale.get(), "environments.remove")
-                                                    on:click=move |_| remove_ssh_host.call(remove_alias.clone())>
-                                                    {compose_icon("close")}
-                                                </button>
+                                                {remove_alias.map(|alias| view! {
+                                                    <button type="button" class="settings-list-remove"
+                                                        title=move || t(locale.get(), "environments.remove")
+                                                        aria-label=move || t(locale.get(), "environments.remove")
+                                                        on:click=move |_| remove_ssh_host.call(alias.clone())>
+                                                        {compose_icon("close")}
+                                                    </button>
+                                                })}
                                             </div>
                                         </div>
                                     }.into_view()

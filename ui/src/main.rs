@@ -588,6 +588,26 @@ fn App() -> impl IntoView {
     let drag_session = create_rw_signal::<Option<String>>(None);
     let drop_target = create_rw_signal::<Option<String>>(None);
     let active_session = create_rw_signal::<Option<String>>(None);
+    let session_execution_contexts = create_rw_signal::<HashSet<String>>(HashSet::new());
+    create_effect(move |_| {
+        let Some(session_id) = active_session.get() else {
+            session_execution_contexts.set(HashSet::new());
+            return;
+        };
+        session_execution_contexts.set(HashSet::new());
+        spawn_local(async move {
+            let args = to_value(&serde_json::json!({ "sessionId": session_id.clone() })).unwrap();
+            let Ok(value) = invoke_checked("list_session_execution_context_ids", args).await else {
+                return;
+            };
+            let Ok(ids) = serde_wasm_bindgen::from_value::<Vec<String>>(value) else {
+                return;
+            };
+            if active_session.get_untracked().as_deref() == Some(session_id.as_str()) {
+                session_execution_contexts.set(ids.into_iter().collect());
+            }
+        });
+    });
     create_effect(move |_| {
         let Some(session_id) = active_session.get() else {
             active_acp_agent_id.set(None);
@@ -3354,22 +3374,51 @@ fn App() -> impl IntoView {
     let host_identity = create_rw_signal(String::new());
     let host_notes = create_rw_signal(String::new());
 
-    let toggle_compute_resource = Callback::new(move |(context_id, enabled): (String, bool)| {
-        spawn_local(async move {
-            let args = to_value(&serde_json::json!({
-                "contextId": context_id,
-                "enabled": enabled,
-            }))
-            .unwrap();
-            match invoke_checked("set_execution_context_resource_enabled", args).await {
-                Ok(_) => refresh_execution_contexts(execution_contexts),
-                Err(error) => {
-                    let message = localize_backend(locale.get_untracked(), &js_error_text(error));
-                    show_toast(&message);
+    let toggle_session_compute_resource =
+        Callback::new(move |(context_id, enabled): (String, bool)| {
+            spawn_local(async move {
+                let (session_id, created) = match active_session.get_untracked() {
+                    Some(session_id) => (session_id, false),
+                    None => match invoke_checked("new_session", JsValue::UNDEFINED)
+                        .await
+                        .ok()
+                        .and_then(|value| value.as_string())
+                    {
+                        Some(session_id) => (session_id, true),
+                        None => {
+                            show_toast(&t(locale.get_untracked(), "status.send_failed"));
+                            return;
+                        }
+                    },
+                };
+                let args = to_value(&serde_json::json!({
+                    "sessionId": session_id.clone(),
+                    "contextId": context_id,
+                    "enabled": enabled,
+                }))
+                .unwrap();
+                match invoke_checked("set_session_execution_context_enabled", args).await {
+                    Ok(value) => {
+                        let Ok(ids) = serde_wasm_bindgen::from_value::<Vec<String>>(value) else {
+                            return;
+                        };
+                        if created && active_session.get_untracked().is_none() {
+                            active_session.set(Some(session_id.clone()));
+                            items.set(vec![]);
+                            refresh_session_history();
+                        }
+                        if active_session.get_untracked().as_deref() == Some(session_id.as_str()) {
+                            session_execution_contexts.set(ids.into_iter().collect());
+                        }
+                    }
+                    Err(error) => {
+                        let message =
+                            localize_backend(locale.get_untracked(), &js_error_text(error));
+                        show_toast(&message);
+                    }
                 }
-            }
+            });
         });
-    });
 
     let open_terminal_for_context = Callback::new(move |context_id: String| {
         spawn_local(async move {
@@ -3691,6 +3740,11 @@ fn App() -> impl IntoView {
             show_add_host.set(false);
             return;
         }
+        if runtime_interpreter_form.get().is_some() {
+            ev.prevent_default();
+            runtime_interpreter_form.set(None);
+            return;
+        }
         if show_settings.get() && !settings_busy.get() {
             ev.prevent_default();
             show_settings.set(false);
@@ -3735,11 +3789,6 @@ fn App() -> impl IntoView {
         if folder_modal.get().is_some() {
             ev.prevent_default();
             folder_modal.set(None);
-            return;
-        }
-        if runtime_interpreter_form.get().is_some() {
-            ev.prevent_default();
-            runtime_interpreter_form.set(None);
             return;
         }
         if show_proj_settings.get() && !proj_settings_busy.get() {
@@ -5435,7 +5484,7 @@ fn App() -> impl IntoView {
                             })}
                             <button type="button" class="composer-compute"
                                 class:active=move || agent_menu_open.get()
-                                class:has-resource=move || execution_contexts.get().iter().any(context_resource_enabled)
+                                class:has-resource=move || !session_execution_contexts.get().is_empty()
                                 title=move || t(locale.get(), "composer.agent_options")
                                 aria-label=move || t(locale.get(), "composer.agent_options")
                                 on:click=move |_| {
@@ -5544,7 +5593,7 @@ fn App() -> impl IntoView {
                                         }>
                                         <span>{move || t(locale.get(), "composer.compute")}</span>
                                         <span class="agent-menu-value">{move || {
-                                            let count = execution_contexts.get().iter().filter(|context| context_resource_enabled(context)).count();
+                                            let count = session_execution_contexts.get().len();
                                             if count == 0 { t(locale.get(), "compute.default_local") }
                                             else { tf(locale.get(), "composer.compute_count", &[("n", &count.to_string())]) }
                                         }}</span>
@@ -5659,16 +5708,14 @@ fn App() -> impl IntoView {
                                                         query.is_empty() || host.alias.to_lowercase().contains(&query)
                                                     }).map(|host| {
                                                     let context_id = format!("ssh:{}", host.alias);
-                                                    let enabled = execution_contexts.get().iter()
-                                                        .find(|context| context.id == context_id)
-                                                        .is_some_and(context_resource_enabled);
+                                                    let enabled = session_execution_contexts.get().contains(&context_id);
                                                     let toggle_id = context_id.clone();
                                                     view! {
                                                         <button type="button" class="agent-submenu-row compute-resource-row"
                                                             class:enabled=enabled data-context-id=context_id.clone()
                                                             aria-pressed=enabled.to_string()
                                                             on:click=move |_| {
-                                                                toggle_compute_resource.call((toggle_id.clone(), !enabled));
+                                                                toggle_session_compute_resource.call((toggle_id.clone(), !enabled));
                                                             }>
                                                             <span class="compute-resource-icon">{compose_icon("server")}</span>
                                                             <span class="compute-resource-name">{host.alias}</span>
@@ -6520,7 +6567,10 @@ fn App() -> impl IntoView {
                                     <div class="context-list-pane">
                                     {move || {
                                         let contexts = execution_contexts.get().into_iter()
-                                            .filter(|context| context.kind != "local" && context_resource_enabled(context))
+                                            .filter(|context| {
+                                                context.kind == "local"
+                                                    || session_execution_contexts.get().contains(&context.id)
+                                            })
                                             .collect::<Vec<_>>();
                                         view! { <section class="control-section">
                                         <div class="control-section-head">
@@ -7240,7 +7290,7 @@ fn App() -> impl IntoView {
                 skill_filter_tag, skills_search, skills_msg, cred_status, cred_inputs, cred_msg,
                 approval_grants, conns_view, conn_form_open, conn_form_kind, conn_test_msg,
                 custom_conn_tools, custom_conn_tools_loading, custom_conn_tool_errors, pet_status,
-                ssh_hosts, execution_contexts,
+                ssh_hosts, execution_contexts, runtime_interpreter_form,
             }
             open_project=switch_project
             go_settings_section=Callback::new(move |section: String| go_settings_section(&section))
@@ -7303,7 +7353,6 @@ fn App() -> impl IntoView {
                     }
                 });
             })
-            toggle_compute_resource=toggle_compute_resource
             probe_compute_resource=Callback::new(move |context_id: String| {
                 spawn_local(async move {
                     let args = to_value(&serde_json::json!({ "contextId": context_id })).unwrap();

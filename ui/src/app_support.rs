@@ -3090,13 +3090,6 @@ pub(super) fn settings_section_label(loc: Locale, section: &str) -> String {
     .into()
 }
 
-pub(super) fn context_resource_enabled(context: &ExecutionContext) -> bool {
-    serde_json::from_str::<serde_json::Value>(&context.config_json)
-        .ok()
-        .and_then(|config| config.get("resource_enabled")?.as_bool())
-        .unwrap_or(false)
-}
-
 /// A field within a credential service group: (credential id, i18n label key,
 /// whether to mask the value like a password).
 pub(super) struct CredField {

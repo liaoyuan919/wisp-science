@@ -180,7 +180,7 @@ export function tauriMock(): void {
       id: "ssh:gpu-server",
       kind: "ssh",
       label: "gpu-server",
-      config_json: "{\"alias\":\"gpu-server\",\"resource_enabled\":true}",
+      config_json: "{\"alias\":\"gpu-server\"}",
       capabilities_json: "{\"gpu_summary\":\"NVIDIA A100\",\"scheduler\":\"slurm\",\"python_executable\":\"/opt/python/bin/python\",\"rscript_executable\":\"/opt/R/bin/Rscript\",\"r_jsonlite\":true}",
       last_probe_at: 1783482300,
       last_probe_status: "ok",
@@ -189,6 +189,7 @@ export function tauriMock(): void {
       updated_at: 1783482300,
     },
   ];
+  const sessionExecutionContexts: Record<string, string[]> = {};
   let runtimeInfos: any[] = [
     {
       runtimeId: "runtime-python-local",
@@ -610,15 +611,22 @@ export function tauriMock(): void {
             }];
           case "list_execution_contexts":
             return executionContexts;
-          case "set_execution_context_resource_enabled": {
-            const context = executionContexts.find((item) =>
-              item.id === String(arg("contextId") ?? arg("context_id"))
-            );
-            if (!context || context.kind === "local") throw new Error("Execution context not found");
-            const config = JSON.parse(context.config_json || "{}");
-            config.resource_enabled = Boolean(arg("enabled"));
-            context.config_json = JSON.stringify(config);
-            return context;
+          case "list_session_execution_context_ids": {
+            const sessionId = String(arg("sessionId") ?? arg("session_id") ?? "");
+            return [...(sessionExecutionContexts[sessionId] ?? [])];
+          }
+          case "set_session_execution_context_enabled": {
+            const sessionId = String(arg("sessionId") ?? arg("session_id") ?? "");
+            const contextId = String(arg("contextId") ?? arg("context_id") ?? "");
+            const context = executionContexts.find((item) => item.id === contextId);
+            if (!sessionId || !context || context.kind === "local") {
+              throw new Error("Execution context not found");
+            }
+            const selected = new Set(sessionExecutionContexts[sessionId] ?? []);
+            if (Boolean(arg("enabled"))) selected.add(contextId);
+            else selected.delete(contextId);
+            sessionExecutionContexts[sessionId] = [...selected].sort();
+            return [...sessionExecutionContexts[sessionId]];
           }
           case "probe_execution_context":
             return executionContexts.find((context) =>

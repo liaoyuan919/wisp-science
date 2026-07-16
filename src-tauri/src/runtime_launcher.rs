@@ -19,12 +19,11 @@ use wisp_runtime::{
 };
 
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(30);
-const PRESERVED_CONFIG_KEYS: [&str; 5] = [
+const PRESERVED_CONFIG_KEYS: [&str; 4] = [
     "python_executable",
     "python_path",
     "rscript_executable",
     "rscript_path",
-    "resource_enabled",
 ];
 
 pub(crate) fn preserve_interpreter_config(existing: &str, replacement: &str) -> Result<String> {
