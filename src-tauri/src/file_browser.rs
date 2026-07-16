@@ -89,6 +89,9 @@ pub(super) fn mime_for_path(path: &Path) -> &'static str {
         Some("html" | "htm") => "text/html",
         Some("json") => "application/json",
         Some("md") => "text/markdown",
+        Some("r") => "text/x-r",
+        Some("py") => "text/x-python",
+        Some("sh") => "text/x-shellscript",
         Some("fasta" | "fa") => "text/x-fasta",
         Some("pdb") | Some("mol2") | Some("cif") => "chemical/x-pdb",
         Some("sdf" | "mol") => "chemical/x-mdl-molfile",
@@ -573,6 +576,36 @@ mod tests {
         collect_file_search_hits(&base, ".", "notes", 50, &mut hits).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, "notes.txt");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn script_files_are_text_and_unknown_extensions_remain_binary() {
+        let base = std::env::temp_dir().join(format!(
+            "wisp_script_preview_test_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+
+        for (name, mime) in [
+            ("analysis.R", "text/x-r"),
+            ("analysis.py", "text/x-python"),
+            ("analysis.sh", "text/x-shellscript"),
+        ] {
+            std::fs::write(base.join(name), b"print('preview')\n").unwrap();
+            let content = read_file_at(&base, name.into(), None).unwrap();
+            assert_eq!(content.mime, mime);
+            assert_eq!(content.text.as_deref(), Some("print('preview')\n"));
+            assert!(content.base64.is_none());
+        }
+
+        std::fs::write(base.join("analysis.unknown"), b"plain but unsupported\n").unwrap();
+        let unsupported = read_file_at(&base, "analysis.unknown".into(), None).unwrap();
+        assert_eq!(unsupported.mime, "application/octet-stream");
+        assert!(unsupported.text.is_none());
+        assert!(unsupported.base64.is_some());
 
         let _ = std::fs::remove_dir_all(&base);
     }

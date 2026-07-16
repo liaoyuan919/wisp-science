@@ -892,6 +892,8 @@ export function tauriMock(): void {
               { name: "config.json", is_dir: false, size: 64 },
               { name: "model.pdb", is_dir: false, size: 256 },
               { name: "sequences.fasta", is_dir: false, size: 256 },
+              { name: "analysis.R", is_dir: false, size: 128 },
+              { name: "analysis.unknown", is_dir: false, size: 128 },
             ];
           case "list_remote_dir": {
             const path = String(arg("path") ?? "~");
@@ -941,6 +943,12 @@ export function tauriMock(): void {
             }
             if (path.toLowerCase().endsWith(".fasta")) {
               return { path, mime: "text/plain", text: ">seq1\nMKTIIALSYIFCLVFADYKDDDDK\n>seq2\nMKTIIALSYIFCLVFADYKDDDDK\n", base64: null };
+            }
+            if (path.toLowerCase().endsWith(".r")) {
+              return { path, mime: "text/x-r", text: "plot(1:3)\n", base64: null };
+            }
+            if (path.toLowerCase().endsWith(".unknown")) {
+              return { path, mime: "application/octet-stream", text: null, base64: "AA==" };
             }
             if (path.toLowerCase().includes(".pdf")) {
               return { path, mime: "application/pdf", text: null, base64: pdfBase64 };

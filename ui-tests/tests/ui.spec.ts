@@ -1025,6 +1025,25 @@ test("center structure and FASTA previews fill the available height", async ({ p
   await expect.poll(() => heightRatio(".rp-fasta-wrap")).toBeGreaterThan(0.75);
 });
 
+test("script previews show source while unknown file types are explicitly unsupported", async ({ page }) => {
+  await enterApp(page);
+  await page.getByRole("button", { name: "Files" }).click();
+
+  const openInCenter = async (path: string) => {
+    await page.locator(`[data-workspace-path="${path}"]`).click({ button: "right" });
+    await page.locator(".ctx-menu").getByRole("button", { name: "Open in center" }).click();
+  };
+
+  await openInCenter("analysis.R");
+  await expect(page.locator(".center-file-preview")).toContainText("plot(1:3)");
+  await expect.poll(() => lastInvokeArgs(page, "read_file")).toMatchObject({ path: "analysis.R" });
+
+  await openInCenter("analysis.unknown");
+  await expect(page.locator(".center-file-preview .rp-error")).toHaveText(
+    "Preview is not supported for this file type.",
+  );
+});
+
 test("Files browses registered SSH contexts without a real remote host", async ({ page }) => {
   await enterApp(page);
   await page.getByRole("button", { name: "Files" }).click();
