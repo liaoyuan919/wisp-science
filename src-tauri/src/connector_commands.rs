@@ -288,25 +288,25 @@ fn is_oauth_http(connection: &McpConnection) -> bool {
     )
 }
 
-/// Authorize and save an OAuth-backed remote URL connection.
-#[tauri::command]
-pub(super) async fn authorize_http_connection(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    conn: McpConnection,
-) -> Result<(), String> {
-    let resource_url = match &conn.transport {
+fn oauth_http_config(
+    connection: &McpConnection,
+) -> Result<(String, Vec<(String, String)>), String> {
+    match &connection.transport {
         McpTransport::Http {
             url,
+            headers,
             auth: McpHttpAuth::OAuth,
-            ..
-        } if !url.trim().is_empty() => url.trim().to_string(),
-        _ => return Err("OAuth authorization requires a remote URL connection".into()),
-    };
-    let connection_id = conn.id.clone();
-    let had_credential = crate::mcp_oauth::has_credential(&conn.id);
+        } if !url.trim().is_empty() => Ok((url.trim().to_string(), headers.clone())),
+        _ => Err("OAuth authorization requires a remote URL connection".into()),
+    }
+}
 
-    let (listener, pending) = crate::mcp_oauth::begin_authorization(&resource_url)
+async fn authorize_in_browser(
+    app: &tauri::AppHandle,
+    resource_url: &str,
+    credential_id: &str,
+) -> Result<(), String> {
+    let (listener, pending) = crate::mcp_oauth::begin_authorization(resource_url)
         .await
         .map_err(|error| error.to_string())?;
     let authorization_url = pending.authorization_url().to_string();
@@ -316,9 +316,44 @@ pub(super) async fn authorize_http_connection(
             .open_url(&authorization_url, None::<&str>)
             .map_err(|error| format!("open MCP authorization page: {error}"))?;
     }
-    crate::mcp_oauth::finish_authorization(listener, pending, &conn.id)
+    crate::mcp_oauth::finish_authorization(listener, pending, credential_id)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())
+}
+
+/// Authorize an OAuth URL with an ephemeral credential, list its tools, then
+/// remove the credential without saving the connection.
+#[tauri::command]
+pub(super) async fn test_oauth_mcp_connection(
+    app: tauri::AppHandle,
+    conn: McpConnection,
+) -> Result<Vec<wisp_mcp::RemoteTool>, String> {
+    let (resource_url, headers) = oauth_http_config(&conn)?;
+    let credential_id = format!("oauth-test-{}", uuid::Uuid::new_v4());
+    let result = async {
+        authorize_in_browser(&app, &resource_url, &credential_id).await?;
+        let client = crate::mcp_oauth::connect(&credential_id, &resource_url, &headers)
+            .await
+            .map_err(|error| error.to_string())?;
+        client.tools_list().await.map_err(|error| error.to_string())
+    }
+    .await;
+    crate::mcp_oauth::forget(&credential_id);
+    result
+}
+
+/// Authorize and save an OAuth-backed remote URL connection.
+#[tauri::command]
+pub(super) async fn authorize_http_connection(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    conn: McpConnection,
+) -> Result<(), String> {
+    let (resource_url, _) = oauth_http_config(&conn)?;
+    let connection_id = conn.id.clone();
+    let had_credential = crate::mcp_oauth::has_credential(&conn.id);
+
+    authorize_in_browser(&app, &resource_url, &conn.id).await?;
 
     let mut connections = load_mcp_connections(&state.store).await;
     if let Some(existing) = connections.iter().position(|item| item.id == conn.id) {
@@ -353,6 +388,9 @@ mod tests {
             },
         };
         assert!(is_oauth_http(&oauth));
+        let (url, headers) = oauth_http_config(&oauth).unwrap();
+        assert_eq!(url, "https://example.com/mcp");
+        assert!(headers.is_empty());
 
         let plain = McpConnection {
             transport: McpTransport::Http {
@@ -363,5 +401,6 @@ mod tests {
             ..oauth
         };
         assert!(!is_oauth_http(&plain));
+        assert!(oauth_http_config(&plain).is_err());
     }
 }

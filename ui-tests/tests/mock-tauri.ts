@@ -906,6 +906,7 @@ export function tauriMock(): void {
             mockApprovalGrants = [];
             return null;
           case "test_mcp_connection":
+          case "test_oauth_mcp_connection":
             return mockMcpTools;
           case "set_mcp_connection_enabled": {
             const id = arg("id") ?? "";

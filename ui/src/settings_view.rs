@@ -2014,27 +2014,38 @@ pub(super) fn SettingsView(
                                         <div class="settings-status" class:ok=ok class:fail=move||!ok>{msg}</div>
                                     })}
                                     <div class="row settings-footer">
-                                        {move || (!(conn_form_kind.get() == "http"
-                                            && conn_form.get().is_some_and(|form| form.auth == "oauth"))).then(|| view! {
-                                            <button type="button" on:click=move |_| { let f = conn_form.get().unwrap_or_default();
-                                                spawn_local(async move {
-                                                    let conn = build_conn_json(&f, false);
-                                                    match invoke_checked("test_mcp_connection", to_value(&serde_json::json!({"conn": conn})).unwrap()).await {
-                                                        Ok(v) => match serde_wasm_bindgen::from_value::<Vec<ConnectorTool>>(v) {
-                                                            Ok(tools) => {
-                                                                let n = tools.len();
-                                                                if let Some(id) = f.id.clone() {
-                                                                    custom_conn_tools.update(|m| { m.insert(id, tools); });
-                                                                }
-                                                                conn_test_msg.set(Some((true, format!("OK — {n} tools"))));
+                                        <button type="button" disabled=move || oauth_authorizing.get()
+                                            on:click=move |_| { let f = conn_form.get().unwrap_or_default();
+                                            spawn_local(async move {
+                                                let oauth = f.kind == "http" && f.auth == "oauth";
+                                                if oauth {
+                                                    oauth_authorizing.set(true);
+                                                    conn_test_msg.set(Some((true, t(locale.get(), "conn.oauth.waiting").into())));
+                                                }
+                                                let conn = build_conn_json(&f, false);
+                                                let command = if oauth {
+                                                    "test_oauth_mcp_connection"
+                                                } else {
+                                                    "test_mcp_connection"
+                                                };
+                                                match invoke_checked(command, to_value(&serde_json::json!({"conn": conn})).unwrap()).await {
+                                                    Ok(v) => match serde_wasm_bindgen::from_value::<Vec<ConnectorTool>>(v) {
+                                                        Ok(tools) => {
+                                                            let n = tools.len();
+                                                            if let Some(id) = f.id.clone() {
+                                                                custom_conn_tools.update(|m| { m.insert(id, tools); });
                                                             }
-                                                            Err(e) => conn_test_msg.set(Some((false, e.to_string()))),
-                                                        },
-                                                        Err(e) => conn_test_msg.set(Some((false, js_error_text(e)))),
-                                                    }
-                                                });
-                                            }>{move || t(locale.get(),"conn.test")}</button>
-                                        })}
+                                                            conn_test_msg.set(Some((true, format!("OK — {n} tools"))));
+                                                        }
+                                                        Err(e) => conn_test_msg.set(Some((false, e.to_string()))),
+                                                    },
+                                                    Err(e) => conn_test_msg.set(Some((false, js_error_text(e)))),
+                                                }
+                                                if oauth {
+                                                    oauth_authorizing.set(false);
+                                                }
+                                            });
+                                        }>{move || t(locale.get(),"conn.test")}</button>
                                         <button type="button" disabled=move || oauth_authorizing.get()
                                             on:click=move |_| close_settings_subpage.call(())>{move || t(locale.get(),"settings.cancel")}</button>
                                         <button type="button" class="primary" on:click=move |_| { let f = conn_form.get().unwrap_or_default();
@@ -2065,14 +2076,7 @@ pub(super) fn SettingsView(
                                                 }
                                             });
                                         } disabled=move || oauth_authorizing.get()>
-                                            {move || if oauth_authorizing.get() {
-                                                t(locale.get(), "conn.oauth.waiting")
-                                            } else if conn_form_kind.get() == "http"
-                                                && conn_form.get().is_some_and(|form| form.auth == "oauth") {
-                                                t(locale.get(), "conn.oauth.authorize")
-                                            } else {
-                                                t(locale.get(), "settings.save")
-                                            }}
+                                            {move || t(locale.get(), "settings.save")}
                                         </button>
                                     </div>
                                 </div>

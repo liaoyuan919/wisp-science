@@ -2214,6 +2214,7 @@ test("Notion uses the generic Remote URL OAuth connection flow", async ({ page }
   await page.getByRole("button", { name: "Connections" }).click();
 
   await expect.poll(() => lastInvokeArgs(page, "authorize_http_connection")).toBeNull();
+  await expect.poll(() => lastInvokeArgs(page, "test_oauth_mcp_connection")).toBeNull();
   await page.getByRole("button", { name: "Add connection" }).click();
   const type = page.getByLabel("Type");
   await expect(type.locator("option")).toHaveCount(2);
@@ -2223,10 +2224,24 @@ test("Notion uses the generic Remote URL OAuth connection flow", async ({ page }
   await type.selectOption("http");
   await page.getByPlaceholder("https://host/mcp").fill("https://mcp.notion.com/mcp");
   await page.getByLabel("Authentication").selectOption("oauth");
-  await expect(page.getByText("only after authorization succeeds")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Test" })).toHaveCount(0);
+  await expect(page.getByText("Testing does not save the connection.")).toBeVisible();
 
-  await page.getByRole("button", { name: "Authorize and save" }).click();
+  await page.getByRole("button", { name: "Test" }).click();
+  await expect.poll(() => lastInvokeArgs(page, "test_oauth_mcp_connection")).toMatchObject({
+    conn: {
+      name: "Notion",
+      transport: {
+        kind: "http",
+        url: "https://mcp.notion.com/mcp",
+        auth: "oauth",
+      },
+    },
+  });
+  await expect(page.locator(".settings-status")).toHaveText("OK — 2 tools");
+  await expect.poll(() => lastInvokeArgs(page, "authorize_http_connection")).toBeNull();
+  await expect(page.getByLabel("Name")).toHaveValue("Notion");
+
+  await page.getByRole("button", { name: "Save" }).click();
   await expect.poll(() => lastInvokeArgs(page, "authorize_http_connection")).toMatchObject({
     conn: {
       name: "Notion",
