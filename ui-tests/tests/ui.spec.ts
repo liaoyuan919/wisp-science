@@ -1437,7 +1437,28 @@ test("execution contexts remember Python and R interpreter paths", async ({ page
   }))).toEqual({ headDisplay: "flex", buttonDisplay: "flex", width: "30px", border: "0px" });
   const python = page.locator("#runtime-python-executable");
   const rscript = page.locator("#runtime-rscript-executable");
-  await python.fill(String.raw`C:\Tools\Python\python.exe`);
+  const pastedPython = String.raw`C:\Tools\Python\python.exe`;
+  await runtimeModal.evaluate((modal) => modal.setAttribute("data-paste-stable", "true"));
+  await python.evaluate((element, value) => {
+    const input = element as HTMLInputElement;
+    const clipboard = new DataTransfer();
+    clipboard.setData("text/plain", value);
+    input.focus();
+    input.dispatchEvent(new ClipboardEvent("paste", {
+      bubbles: true,
+      cancelable: true,
+      clipboardData: clipboard,
+    }));
+    input.value = value;
+    input.dispatchEvent(new InputEvent("input", {
+      bubbles: true,
+      data: value,
+      inputType: "insertFromPaste",
+    }));
+  }, pastedPython);
+  await expect(python).toHaveValue(pastedPython);
+  await expect(python).toBeFocused();
+  await expect(runtimeModal).toHaveAttribute("data-paste-stable", "true");
   await rscript.fill(String.raw`C:\Program Files\R\R-4.5.2\bin\Rscript.exe`);
   await page.getByRole("button", { name: "Save", exact: true }).click();
 
@@ -1505,6 +1526,17 @@ test("runtime inspector lists object metadata without loading object contents", 
 
   const environment = page.getByRole("region", { name: "Python Environment" });
   await expect(environment).toBeVisible();
+  const runtimeDialog = page.getByRole("dialog", { name: "Runtimes" });
+  const runtimeList = runtimeDialog.locator(".context-modal-section");
+  await expect.poll(async () => {
+    const [listBox, environmentBox] = await Promise.all([
+      runtimeList.boundingBox(),
+      environment.boundingBox(),
+    ]);
+    return listBox && environmentBox
+      ? Math.round(environmentBox.x - listBox.x - listBox.width)
+      : -1;
+  }).toBeGreaterThan(0);
   await expect(environment.locator(".runtime-environment-row", { hasText: "counts" })).toContainText("DataFrame");
   await expect(environment.locator(".runtime-environment-row", { hasText: "counts" })).toContainText("12000000 × 48");
   await expect(environment.locator(".runtime-environment-row", { hasText: "counts" })).toContainText("4.0 GB");
@@ -1519,12 +1551,59 @@ test("runtime inspector lists object metadata without loading object contents", 
   const rRuntime = page.locator('.runtime-card[data-runtime-language="r"][data-runtime-context="ssh:gpu-server"]');
   await rRuntime.getByRole("button", { name: "Start" }).click();
   await rRuntime.getByRole("button", { name: "View R environment" }).click();
-  await expect(page.getByRole("region", { name: "R Environment" })).toBeVisible();
+  const rEnvironment = page.getByRole("region", { name: "R Environment" });
+  await expect(rEnvironment).toBeVisible();
   await expect.poll(() => lastInvokeArgs(page, "inspect_runtime")).toMatchObject({
     projectId: "default",
     contextId: "ssh:gpu-server",
     language: "r",
   });
+
+  await rEnvironment.getByRole("button", { name: "Pin environment to conversation" }).click();
+  await expect(runtimeDialog).toHaveCount(0);
+  await expect(rEnvironment).toBeVisible();
+  await expect(rEnvironment.getByRole("button", { name: "Unpin environment" }))
+    .toHaveAttribute("aria-pressed", "true");
+
+  const beforeDrag = await rEnvironment.boundingBox();
+  await rEnvironment.locator(".runtime-environment-title").evaluate((handle) => {
+    const rect = handle.getBoundingClientRect();
+    const startX = rect.left + rect.width / 2;
+    const startY = rect.top + rect.height / 2;
+    handle.dispatchEvent(new PointerEvent("pointerdown", {
+      bubbles: true,
+      button: 0,
+      pointerId: 7,
+      clientX: startX,
+      clientY: startY,
+    }));
+    handle.dispatchEvent(new PointerEvent("pointermove", {
+      bubbles: true,
+      buttons: 1,
+      pointerId: 7,
+      clientX: startX - 120,
+      clientY: startY + 48,
+    }));
+    handle.dispatchEvent(new PointerEvent("pointerup", {
+      bubbles: true,
+      button: 0,
+      pointerId: 7,
+      clientX: startX - 120,
+      clientY: startY + 48,
+    }));
+  });
+  await expect.poll(async () => {
+    const afterDrag = await rEnvironment.boundingBox();
+    return beforeDrag && afterDrag ? Math.round(beforeDrag.x - afterDrag.x) : 0;
+  }).toBeGreaterThan(100);
+  await expect.poll(async () => {
+    const afterDrag = await rEnvironment.boundingBox();
+    return beforeDrag && afterDrag ? Math.round(afterDrag.y - beforeDrag.y) : 0;
+  }).toBeGreaterThan(30);
+
+  await page.keyboard.press("Escape");
+  await expect(rEnvironment).toHaveCount(0);
+  await expect(page.locator(".rightpane")).toBeVisible();
 });
 
 test("Windows environment settings imports installed WSL distributions", async ({ page }) => {

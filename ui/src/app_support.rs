@@ -890,15 +890,61 @@ fn inspect_runtime_objects(
     });
 }
 
+fn runtime_environment_viewport() -> (i32, i32) {
+    web_sys::window()
+        .map(|window| {
+            let width = window
+                .inner_width()
+                .ok()
+                .and_then(|value| value.as_f64())
+                .unwrap_or(1280.0) as i32;
+            let height = window
+                .inner_height()
+                .ok()
+                .and_then(|value| value.as_f64())
+                .unwrap_or(720.0) as i32;
+            (width, height)
+        })
+        .unwrap_or((1280, 720))
+}
+
+fn clamp_runtime_environment_position(x: i32, y: i32) -> (i32, i32) {
+    const MARGIN: i32 = 16;
+    const PANEL_WIDTH: i32 = 620;
+    const PANEL_HEIGHT: i32 = 560;
+    let (viewport_width, viewport_height) = runtime_environment_viewport();
+    let width = PANEL_WIDTH.min((viewport_width - MARGIN * 2).max(0));
+    let height = PANEL_HEIGHT.min((viewport_height - MARGIN * 2).max(0));
+    (
+        x.clamp(MARGIN, (viewport_width - width - MARGIN).max(MARGIN)),
+        y.clamp(MARGIN, (viewport_height - height - MARGIN).max(MARGIN)),
+    )
+}
+
+fn default_runtime_environment_position() -> (i32, i32) {
+    let (viewport_width, viewport_height) = runtime_environment_viewport();
+    clamp_runtime_environment_position(viewport_width - 636, (viewport_height - 560) / 2)
+}
+
 #[component]
-fn RuntimeEnvironmentPanel(
+pub(super) fn RuntimeEnvironmentPanel(
     selected: RwSignal<Option<RuntimeSlot>>,
+    pinned: RwSignal<bool>,
+    position: RwSignal<(i32, i32)>,
+    context_modal: RwSignal<Option<(String, ContextModalKind)>>,
     locale: RwSignal<Locale>,
     states: RwSignal<HashMap<String, RuntimeObjectState>>,
     runtimes: RwSignal<Vec<RuntimeInfo>>,
 ) -> impl IntoView {
+    let drag_start = Rc::new(Cell::new(None::<(i32, i32, i32, i32, i32)>));
+    let dragging = create_rw_signal(false);
+
     move || {
         selected.get().map(|mut slot| {
+        let drag_start_down = drag_start.clone();
+        let drag_start_move = drag_start.clone();
+        let drag_start_up = drag_start.clone();
+        let drag_start_cancel = drag_start.clone();
         slot.info = runtimes.get().into_iter().find(|runtime| {
             runtime.key.project_id == slot.project_id
                 && runtime.key.context_id == slot.context_id
@@ -920,12 +966,88 @@ fn RuntimeEnvironmentPanel(
 
         view! {
             <section class="runtime-environment-panel" role="region"
+                class:is-pinned=move || pinned.get()
+                class:is-dragging=move || dragging.get()
+                style=move || {
+                    let (x, y) = position.get();
+                    format!("--runtime-environment-x:{x}px;--runtime-environment-y:{y}px")
+                }
                 aria-label=tf(locale.get(), "runtime.environment_title", &[("language", language_label)])>
                 <div class="runtime-environment-head">
-                    <div class="runtime-environment-title">
+                    <div class="runtime-environment-title"
+                        on:pointerdown=move |event: web_sys::PointerEvent| {
+                            if !pinned.get_untracked() || event.button() != 0 {
+                                return;
+                            }
+                            event.prevent_default();
+                            let Some(target) = event.target()
+                                .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                            else {
+                                return;
+                            };
+                            let _ = target.set_pointer_capture(event.pointer_id());
+                            let (x, y) = position.get_untracked();
+                            drag_start_down.set(Some((
+                                event.client_x(),
+                                event.client_y(),
+                                x,
+                                y,
+                                event.pointer_id(),
+                            )));
+                            dragging.set(true);
+                        }
+                        on:pointermove=move |event: web_sys::PointerEvent| {
+                            let Some((start_x, start_y, origin_x, origin_y, _)) = drag_start_move.get() else {
+                                return;
+                            };
+                            event.prevent_default();
+                            position.set(clamp_runtime_environment_position(
+                                origin_x + event.client_x() - start_x,
+                                origin_y + event.client_y() - start_y,
+                            ));
+                        }
+                        on:pointerup=move |event: web_sys::PointerEvent| {
+                            if let Some((_, _, _, _, pointer_id)) = drag_start_up.take() {
+                                if let Some(target) = event.target()
+                                    .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                                {
+                                    let _ = target.release_pointer_capture(pointer_id);
+                                }
+                            }
+                            dragging.set(false);
+                        }
+                        on:pointercancel=move |_| {
+                            drag_start_cancel.set(None);
+                            dragging.set(false);
+                        }>
                         <h3>{tf(locale.get(), "runtime.environment_title", &[("language", language_label)])}</h3>
                         <span>{format!("{} · {}", slot.project_label, slot.context_label)}</span>
                     </div>
+                    <button type="button" class="runtime-environment-pin"
+                        class:active=move || pinned.get()
+                        aria-pressed=move || pinned.get().to_string()
+                        title=move || if pinned.get() {
+                            t(locale.get(), "runtime.unpin_environment")
+                        } else {
+                            t(locale.get(), "runtime.pin_environment")
+                        }
+                        aria-label=move || if pinned.get() {
+                            t(locale.get(), "runtime.unpin_environment")
+                        } else {
+                            t(locale.get(), "runtime.pin_environment")
+                        }
+                        on:click=move |_| {
+                            if pinned.get_untracked() {
+                                pinned.set(false);
+                                if context_modal.get_untracked().is_none() {
+                                    selected.set(None);
+                                }
+                            } else {
+                                position.set(default_runtime_environment_position());
+                                pinned.set(true);
+                                context_modal.set(None);
+                            }
+                        }>{compose_icon("pin")}</button>
                     <span class=status_class>{runtime_status_label(locale.get(), &status)}</span>
                     <button type="button" class="runtime-environment-refresh"
                         title=t(locale.get(), "runtime.inspect_objects")
@@ -945,7 +1067,11 @@ fn RuntimeEnvironmentPanel(
                     <button type="button" class="runtime-environment-close"
                         title=t(locale.get(), "runtime.close_environment")
                         aria-label=t(locale.get(), "runtime.close_environment")
-                        on:click=move |_| selected.set(None)>{compose_icon("close")}</button>
+                        on:click=move |_| {
+                            selected.set(None);
+                            pinned.set(false);
+                            dragging.set(false);
+                        }>{compose_icon("close")}</button>
                 </div>
                 <div class="runtime-environment-table-head" aria-hidden="true">
                     <span>{t(locale.get(), "runtime.object_name")}</span>
@@ -1089,6 +1215,9 @@ pub(super) fn RuntimeCard(
     let restart_context = slot.context_id.clone();
     let restart_language = slot.language.clone();
     let environment_slot = slot.clone();
+    let selected_project = slot.project_id.clone();
+    let selected_context = slot.context_id.clone();
+    let selected_language = slot.language.clone();
     let inspect_project = slot.project_id.clone();
     let inspect_context = slot.context_id.clone();
     let inspect_language = slot.language.clone();
@@ -1100,6 +1229,13 @@ pub(super) fn RuntimeCard(
 
     view! {
         <div class="runtime-card" data-runtime-language=slot.language.clone()
+            class:environment-active=move || runtime_environment.with(|selected| {
+                selected.as_ref().is_some_and(|selected| {
+                    selected.project_id == selected_project
+                        && selected.context_id == selected_context
+                        && selected.language == selected_language
+                })
+            })
             data-runtime-context=slot.context_id.clone() data-runtime-id=runtime_id.clone()>
             <div class="runtime-card-head">
                 <button type="button" class="runtime-language"
@@ -1117,7 +1253,10 @@ pub(super) fn RuntimeCard(
                                 runtimes,
                             );
                         }
-                    }>{language_label}</button>
+                    }>
+                    <span>{language_label}</span>
+                    <span class="runtime-language-open" aria-hidden="true">{compose_icon("chevron-right")}</span>
+                </button>
                 <span class=status_class>{runtime_status_label(locale.get_untracked(), &status)}</span>
             </div>
             <div class="runtime-identity">{identity}</div>
@@ -1201,6 +1340,9 @@ pub(super) enum ContextModalKind {
 #[component]
 pub(super) fn ContextDetailsOverlay(
     modal: RwSignal<Option<(String, ContextModalKind)>>,
+    runtime_environment: RwSignal<Option<RuntimeSlot>>,
+    runtime_environment_pinned: RwSignal<bool>,
+    runtime_environment_position: RwSignal<(i32, i32)>,
     contexts: RwSignal<Vec<ExecutionContext>>,
     runtimes: RwSignal<Vec<RuntimeInfo>>,
     runs: RwSignal<Vec<RunRecord>>,
@@ -1210,11 +1352,11 @@ pub(super) fn ContextDetailsOverlay(
     object_states: RwSignal<HashMap<String, RuntimeObjectState>>,
     locale: RwSignal<Locale>,
 ) -> impl IntoView {
-    let runtime_environment = create_rw_signal(None::<RuntimeSlot>);
     create_effect(move |_| {
         let active = modal.get();
+        let pinned = runtime_environment_pinned.get();
         let should_close = runtime_environment.with_untracked(|selected| {
-            selected.as_ref().is_some_and(|slot| {
+            !pinned && selected.as_ref().is_some_and(|slot| {
                 !matches!(&active, Some((context_id, ContextModalKind::Runtimes)) if context_id == &slot.context_id)
             })
         });
@@ -1250,6 +1392,9 @@ pub(super) fn ContextDetailsOverlay(
         view! {
             <div class="overlay context-details-overlay" role="presentation">
                 <div class="modal context-details-modal" class:runtime-details=kind == ContextModalKind::Runtimes
+                    class:environment-open=move || {
+                        runtime_environment.get().is_some() && !runtime_environment_pinned.get()
+                    }
                     role="dialog" aria-modal="true" aria-label=title.clone()>
                     <div class="ps-head">
                         <div class="context-modal-title">
@@ -1325,8 +1470,12 @@ pub(super) fn ContextDetailsOverlay(
                                             </section>
                                         }
                                     }}
-                                    <RuntimeEnvironmentPanel selected=runtime_environment locale=locale
-                                        states=object_states runtimes=runtimes />
+                                    {move || (!runtime_environment_pinned.get()).then(|| view! {
+                                        <RuntimeEnvironmentPanel selected=runtime_environment
+                                            pinned=runtime_environment_pinned
+                                            position=runtime_environment_position context_modal=modal
+                                            locale=locale states=object_states runtimes=runtimes />
+                                    })}
                                 </div>
                             }.into_view()
                         }
@@ -5660,6 +5809,7 @@ pub(super) fn compose_icon(kind: &str) -> impl IntoView {
         "download" => view! { <path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/> }.into_view(),
         "upload" => view! { <path d="M12 21V9"/><path d="m7 14 5-5 5 5"/><path d="M5 3h14"/> }.into_view(),
         "sync" => view! { <path d="M20 7h-9"/><path d="m16 3 4 4-4 4"/><path d="M4 17h9"/><path d="m8 21-4-4 4-4"/> }.into_view(),
+        "pin" => view! { <path d="M12 17v5"/><path d="M5 17h14"/><path d="m6 3 1 7-3 4h16l-3-4 1-7Z"/> }.into_view(),
         "link" => view! { <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/> }.into_view(),
         "close" => view! { <path d="M18 6 6 18"/><path d="m6 6 12 12"/> }.into_view(),
         "more" => view! { <circle cx="12" cy="5" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1" fill="currentColor" stroke="none"/> }.into_view(),

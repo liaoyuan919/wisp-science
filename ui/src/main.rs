@@ -3362,6 +3362,9 @@ fn App() -> impl IntoView {
     let selected_context_id = create_rw_signal::<Option<String>>(None);
     let context_details_modal = create_rw_signal::<Option<(String, ContextModalKind)>>(None);
     let runtime_interpreter_form = create_rw_signal(None::<RuntimeInterpreterForm>);
+    let runtime_environment = create_rw_signal(None::<RuntimeSlot>);
+    let runtime_environment_pinned = create_rw_signal(false);
+    let runtime_environment_position = create_rw_signal((16, 16));
     let runtime_infos = create_rw_signal::<Vec<RuntimeInfo>>(vec![]);
     let runtime_object_states =
         create_rw_signal::<HashMap<String, RuntimeObjectState>>(HashMap::new());
@@ -3859,6 +3862,12 @@ fn App() -> impl IntoView {
         if side_chat_model_menu_open.get() {
             ev.prevent_default();
             side_chat_model_menu_open.set(false);
+            return;
+        }
+        if runtime_environment_pinned.get() {
+            ev.prevent_default();
+            runtime_environment.set(None);
+            runtime_environment_pinned.set(false);
             return;
         }
 
@@ -7386,11 +7395,19 @@ fn App() -> impl IntoView {
             ssh_hosts=ssh_hosts execution_contexts=execution_contexts
         />
         <ContextDetailsOverlay
-            modal=context_details_modal contexts=execution_contexts runtimes=runtime_infos
+            modal=context_details_modal runtime_environment=runtime_environment
+            runtime_environment_pinned=runtime_environment_pinned
+            runtime_environment_position=runtime_environment_position
+            contexts=execution_contexts runtimes=runtime_infos
             runs=run_records active_project=project_info projects=proj_list
             runtime_interpreter_form=runtime_interpreter_form object_states=runtime_object_states
             locale=locale
         />
+        {move || runtime_environment_pinned.get().then(|| view! {
+            <RuntimeEnvironmentPanel selected=runtime_environment pinned=runtime_environment_pinned
+                position=runtime_environment_position context_modal=context_details_modal
+                locale=locale states=runtime_object_states runtimes=runtime_infos />
+        })}
         <RuntimeInterpreterOverlay
             locale=locale form=runtime_interpreter_form execution_contexts=execution_contexts
             runtimes=runtime_infos

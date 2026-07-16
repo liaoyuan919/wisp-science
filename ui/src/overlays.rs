@@ -86,6 +86,10 @@ pub(super) fn RuntimeInterpreterOverlay(
 ) -> impl IntoView {
     let busy = create_rw_signal(false);
     let error = create_rw_signal(None::<String>);
+    // Render the dialog from its open state, not from the whole editable form.
+    // Otherwise each input event (including paste) replaces the modal DOM and
+    // drops focus.
+    let open = create_memo(move |_| form.with(|value| value.is_some()));
     let save = move |_| {
         let Some(current) = form.get_untracked() else {
             return;
@@ -116,9 +120,7 @@ pub(super) fn RuntimeInterpreterOverlay(
     };
 
     move || {
-        form.get().map(|snapshot| {
-            let context = snapshot.context_label;
-            view! {
+        open.get().then(|| view! {
                 <div class="overlay">
                     <div class="modal runtime-config-modal">
                         <div class="ps-head">
@@ -129,7 +131,12 @@ pub(super) fn RuntimeInterpreterOverlay(
                                 on:click=move |_| form.set(None)>{compose_icon("close")}</button>
                         </div>
                         <p class="runtime-config-hint">{
-                            move || tf(locale.get(), "runtime_config.scope", &[("context", &context)])
+                            move || {
+                                let context = form.with(|value| value.as_ref()
+                                    .map(|value| value.context_label.clone())
+                                    .unwrap_or_default());
+                                tf(locale.get(), "runtime_config.scope", &[("context", &context)])
+                            }
                         }</p>
                         <label>
                             {move || t(locale.get(), "runtime_config.python")}
@@ -165,8 +172,7 @@ pub(super) fn RuntimeInterpreterOverlay(
                         </div>
                     </div>
                 </div>
-            }
-        })
+            })
     }
 }
 
