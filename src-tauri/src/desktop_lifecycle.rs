@@ -5,6 +5,7 @@ use tauri::{
     App, AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
 };
 
+#[cfg(target_os = "windows")]
 pub(crate) const PET_WINDOW_LABEL: &str = "pet";
 
 #[cfg(any(target_os = "windows", test))]

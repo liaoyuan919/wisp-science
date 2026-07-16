@@ -6152,6 +6152,7 @@ pub fn run() {
                 bootstrap,
                 reviewing: Arc::new(StdMutex::new(HashSet::new())),
             };
+            #[cfg(target_os = "windows")]
             let pet_enabled = tauri::async_runtime::block_on(async {
                 state
                     .store

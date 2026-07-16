@@ -472,9 +472,9 @@ mod tests {
 
     #[test]
     fn decodes_file_uris_and_percent_encoded_paths() {
-        let path = reference_path("file:///D:/ZZM/03.%20figures/table.png").unwrap();
+        let _path = reference_path("file:///D:/ZZM/03.%20figures/table.png").unwrap();
         #[cfg(windows)]
-        assert_eq!(path, PathBuf::from(r"D:\ZZM\03. figures\table.png"));
+        assert_eq!(_path, PathBuf::from(r"D:\ZZM\03. figures\table.png"));
         assert_eq!(
             percent_decode("figures/%E5%9B%BE%201.png"),
             "figures/图 1.png"
