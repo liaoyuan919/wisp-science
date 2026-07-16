@@ -1,7 +1,8 @@
 use crate::app_support::{
     build_conn_json, close_details_ancestor, compose_icon, conn_form_from_row, focus_element_soon,
     join_tags, js_error_text, new_acp_form, new_model_form, profile_to_form,
-    settings_section_label, settings_subpage_label, skill_matches_filter, CRED_GROUPS,
+    reviewer_backend_key, reviewer_backend_label, set_reviewer_backend, settings_section_label,
+    settings_subpage_label, skill_matches_filter, CRED_GROUPS,
 };
 use crate::bindings::{invoke, invoke_checked};
 use crate::dto::*;
@@ -131,6 +132,7 @@ pub(super) fn SettingsView(
     save_settings: Callback<web_sys::MouseEvent>,
     save_model_form: Callback<web_sys::MouseEvent>,
     save_specialist_form: Callback<web_sys::MouseEvent>,
+    test_reviewer_form: Callback<web_sys::MouseEvent>,
     validate_model_form: Callback<web_sys::MouseEvent>,
     start_specialist_chat: Callback<web_sys::MouseEvent>,
     refresh_conns: Callback<()>,
@@ -1142,14 +1144,80 @@ pub(super) fn SettingsView(
                                         })}
                                         <label class="span-2">{move || t(locale.get(), "specialists.model")}
                                             <select
-                                                on:change=move |ev| specialist_form.update(|o| if let Some(o)=o { o.model_id = dom_value(&ev); })
-                                                prop:value=move || specialist_form.get().map(|f| f.model_id.clone()).unwrap_or_default()>
-                                                <option value="">{move || t(locale.get(), "specialists.model.follow")}</option>
+                                                data-testid="reviewer-backend-select"
+                                                on:change=move |ev| specialist_form.update(|o| if let Some(o)=o {
+                                                    let value = dom_value(&ev);
+                                                    if o.id == "reviewer" {
+                                                        set_reviewer_backend(o, &value);
+                                                    } else {
+                                                        o.model_id = value;
+                                                    }
+                                                })>
+                                                {move || if specialist_form.get().is_some_and(|f| f.id == "reviewer") {
+                                                    view! {
+                                                        <option value="http:"
+                                                            prop:selected=move || specialist_form.get().is_some_and(|f| reviewer_backend_key(&f) == "http:")>
+                                                            {t(locale.get(), "composer.reviewer.default_http")}
+                                                        </option>
+                                                        <option value="follow_session"
+                                                            prop:selected=move || specialist_form.get().is_some_and(|f| reviewer_backend_key(&f) == "follow_session")>
+                                                            {t(locale.get(), "composer.reviewer.follow_session")}
+                                                        </option>
+                                                    }.into_view()
+                                                } else {
+                                                    view! {
+                                                        <option value=""
+                                                            prop:selected=move || specialist_form.get().is_some_and(|f| f.model_id.is_empty())>
+                                                            {t(locale.get(), "specialists.model.follow")}
+                                                        </option>
+                                                    }.into_view()
+                                                }}
                                                 {move || models.get().into_iter().map(|m| {
-                                                    view! { <option value=m.id.clone()>{m.label.clone()}</option> }
+                                                    let value = if specialist_form.get().is_some_and(|f| f.id == "reviewer") {
+                                                        format!("http:{}", m.id)
+                                                    } else {
+                                                        m.id.clone()
+                                                    };
+                                                    let selected_value = value.clone();
+                                                    view! {
+                                                        <option value=value prop:selected=move || specialist_form.get().is_some_and(|f| {
+                                                            if f.id == "reviewer" {
+                                                                reviewer_backend_key(&f) == selected_value
+                                                            } else {
+                                                                f.model_id == selected_value
+                                                            }
+                                                        })>{m.label.clone()}</option>
+                                                    }
                                                 }).collect_view()}
+                                                {move || specialist_form.get().is_some_and(|f| f.id == "reviewer").then(|| view! {
+                                                    <optgroup label="ACP Agents">
+                                                        {acp_agents.get().into_iter().map(|agent| {
+                                                            let value = format!("acp:{}", agent.id);
+                                                            let selected_value = value.clone();
+                                                            view! {
+                                                                <option value=value prop:selected=move || specialist_form.get().is_some_and(|f| {
+                                                                    reviewer_backend_key(&f) == selected_value
+                                                                })>{format!("{} · ACP", agent.label)}</option>
+                                                            }
+                                                        }).collect_view()}
+                                                    </optgroup>
+                                                })}
                                             </select>
                                         </label>
+                                        {move || specialist_form.get().filter(|f| f.id == "reviewer").map(|reviewer| {
+                                            let backend = reviewer_backend_label(
+                                                &reviewer,
+                                                &models.get(),
+                                                &acp_agents.get(),
+                                                &t(locale.get(), "composer.reviewer.follow_session"),
+                                            ).unwrap_or_else(|| t(locale.get(), "composer.reviewer.default_http"));
+                                            view! {
+                                                <span class="hint span-2" data-testid="reviewer-selected-backend">
+                                                    {tf(locale.get(), "specialists.reviewer.selected_backend", &[("backend", &backend)])}
+                                                </span>
+                                                <span class="hint span-2">{move || t(locale.get(), "specialists.reviewer.test_hint")}</span>
+                                            }
+                                        })}
                                         <div class="span-2 settings-form-grid">
                                             <span class="span-2">{move || t(locale.get(), "specialists.skills")}</span>
                                             <label class="settings-check">
@@ -1204,6 +1272,13 @@ pub(super) fn SettingsView(
                                         <div class="settings-status" class:ok=ok class:fail=move || !ok>{text}</div>
                                     })}
                                     <div class="row settings-footer">
+                                        {move || specialist_form.get().is_some_and(|f| f.id == "reviewer").then(|| view! {
+                                            <button type="button" data-testid="test-reviewer-backend"
+                                                disabled=move || settings_busy.get()
+                                                on:click=move |ev| test_reviewer_form.call(ev)>
+                                                {move || t(locale.get(), "specialists.reviewer.test")}
+                                            </button>
+                                        })}
                                         <button type="button" disabled=move || settings_busy.get() on:click=move |_| close_settings_subpage.call(())>{move || t(locale.get(), "settings.cancel")}</button>
                                             <button type="button" class="primary" disabled=move || settings_busy.get() on:click=move |ev| save_specialist_form.call(ev)>{move || t(locale.get(), "settings.save")}</button>
                                     </div>
@@ -1231,6 +1306,7 @@ pub(super) fn SettingsView(
                                             description: String::new(),
                                             instructions: String::new(),
                                             model_id: String::new(),
+                                            review_backend: None,
                                             skills: None,
                                             connectors: None,
                                             builtin: false,

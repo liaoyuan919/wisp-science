@@ -1153,6 +1153,37 @@ export function tauriMock(): void {
               }, 1200);
               return fid;
             }
+            if (String(arg("message") ?? "").includes("AUTOREVIEWUNREVIEWABLE")) {
+              const incompleteReport = {
+                id: "review-auto-unreviewable",
+                summary: "Review could not establish full traceability because tool output evidence was incomplete.",
+                reviewer_model: "Test ACP Agent",
+                reviewer_effort: "",
+                reviewer_backend: "acp_agent",
+                review_status: "unreviewable",
+                evidence_coverage: 0,
+                coverage_gaps: ["python analysis.py did not persist inspectable output (only status, location, or terminal handle)."],
+                findings: [],
+              };
+              setTimeout(() => {
+                emit("agent", { kind: "User", frame_id: fid, text: msg });
+                emit("agent", { kind: "Text", frame_id: fid, delta: "The ACP analysis completed." });
+                emit("agent", { kind: "ReviewStarted", frame_id: fid });
+                emit("agent", { kind: "Review", frame_id: fid, report: incompleteReport });
+                emit("agent", { kind: "Done", frame_id: fid });
+              }, 30);
+              return fid;
+            }
+            if (String(arg("message") ?? "").includes("AUTOREVIEWFAIL")) {
+              setTimeout(() => {
+                emit("agent", { kind: "User", frame_id: fid, text: msg });
+                emit("agent", { kind: "Text", frame_id: fid, delta: "The primary answer still completed." });
+                emit("agent", { kind: "ReviewStarted", frame_id: fid });
+                emit("agent", { kind: "ReviewFailed", frame_id: fid, message: "ACP reviewer returned invalid JSON" });
+                emit("agent", { kind: "Done", frame_id: fid });
+              }, 30);
+              return fid;
+            }
             if (String(arg("message") ?? "").includes("AUTOREVIEWCLEAN")) {
               const cleanReport = {
                 id: "review-auto-clean",
@@ -1336,6 +1367,29 @@ export function tauriMock(): void {
               ? mockSpecialists.map((s) => (s.id === spec.id ? { ...s, ...spec, builtin: s.builtin, instructions: s.builtin ? s.instructions : spec.instructions } : s))
               : [...mockSpecialists, spec];
             return mockSpecialists;
+          }
+          case "test_reviewer_backend": {
+            const reviewer = plain(arg("reviewer") ?? {});
+            const config = reviewer.review_backend ?? { kind: "http_model", profile_id: reviewer.model_id ?? "" };
+            if (config.kind === "acp_agent") {
+              const profile = mockAcpAgents.find((agent) => agent.id === config.profile_id);
+              if (!profile) throw new Error("The Reviewer ACP Agent profile no longer exists.");
+              return {
+                backend: "acp_agent",
+                model: profile.label,
+                status: "passed",
+                summary: "The reported sample count matches the tool output.",
+              };
+            }
+            const profile = mockModels.find((model) => model.id === config.profile_id)
+              ?? mockModels.find((model) => model.active)
+              ?? mockModels[0];
+            return {
+              backend: "http_model",
+              model: profile?.model ?? profile?.label ?? "default",
+              status: "passed",
+              summary: "The reported sample count matches the tool output.",
+            };
           }
           case "remove_specialist": {
             const id = arg("id");

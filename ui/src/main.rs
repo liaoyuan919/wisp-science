@@ -1294,6 +1294,26 @@ fn App() -> impl IntoView {
                     status_cb.set(t(locale_cb.get(), "status.reviewing"));
                 }
             }
+            AgentEvent::ReviewFailed { frame_id, message } => {
+                set_pet_activity(&frame_id, "failed");
+                flush_now();
+                let loc = locale_cb.get();
+                let text = tf(
+                    loc,
+                    "status.review_failed",
+                    &[("msg", &localize_backend(loc, &message))],
+                );
+                route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
+                    v.push(ChatItem::Assistant {
+                        text: text.clone(),
+                        model: None,
+                        resources: Vec::new(),
+                    });
+                });
+                if active_cb.get().as_deref() == Some(&frame_id) {
+                    status_cb.set(text);
+                }
+            }
             AgentEvent::CorrectionStarted { frame_id, model } => {
                 set_pet_activity(&frame_id, "running");
                 flush_now();
@@ -1322,7 +1342,10 @@ fn App() -> impl IntoView {
             AgentEvent::Review { frame_id, report } => {
                 set_pet_activity(&frame_id, "review");
                 flush_now();
-                let passed = report.findings.is_empty();
+                let passed = report.review_status == "passed"
+                    || (report.review_status.is_empty()
+                        && report.findings.is_empty()
+                        && report.coverage_gaps.is_empty());
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
                     upsert_review(v, report);
                     if passed {
@@ -2569,27 +2592,108 @@ fn App() -> impl IntoView {
         });
     };
 
+    let test_reviewer_form = move |_| {
+        let Some(spec) = specialist_form.get() else {
+            return;
+        };
+        if spec.id != "reviewer" || settings_busy.get() {
+            return;
+        }
+        let loc = locale.get();
+        settings_busy.set(true);
+        model_form_msg.set(Some((
+            true,
+            t(loc, "specialists.reviewer.testing").into(),
+        )));
+        spawn_local(async move {
+            let result = invoke_timeout(
+                "test_reviewer_backend",
+                to_value(&serde_json::json!({ "reviewer": spec })).unwrap(),
+                120_000,
+            )
+            .await;
+            match result {
+                Ok(value) => match serde_wasm_bindgen::from_value::<ReviewerBackendTestResult>(value)
+                {
+                    Ok(result) => {
+                        let backend = match result.backend.as_str() {
+                            "acp_agent" => "ACP",
+                            "http_model" => "HTTP",
+                            other => other,
+                        };
+                        let headline = tf(
+                            loc,
+                            "specialists.reviewer.test_ok",
+                            &[
+                                ("backend", backend),
+                                ("model", &result.model),
+                                ("status", &result.status),
+                            ],
+                        );
+                        model_form_msg.set(Some((
+                            true,
+                            if result.summary.trim().is_empty() {
+                                headline
+                            } else {
+                                format!("{headline} {}", result.summary.trim())
+                            },
+                        )));
+                    }
+                    Err(error) => model_form_msg.set(Some((false, error.to_string()))),
+                },
+                Err(error) => model_form_msg.set(Some((
+                    false,
+                    tf(
+                        loc,
+                        "specialists.reviewer.test_failed",
+                        &[("msg", &localize_backend(loc, &js_error_text(error)))],
+                    ),
+                ))),
+            }
+            settings_busy.set(false);
+        });
+    };
+
     let save_specialist_form = move |_| {
         let Some(spec) = specialist_form.get() else {
             return;
         };
+        let loc = locale.get();
         if spec.name.trim().is_empty() {
-            settings_message.set(Some((false, "Specialist name is required.".into())));
+            model_form_msg.set(Some((
+                false,
+                t(loc, "specialists.name_required").into(),
+            )));
             return;
         }
+        let saved_id = spec.id.clone();
+        let keep_open = saved_id == "reviewer";
         settings_busy.set(true);
+        model_form_msg.set(Some((true, t(loc, "status.saving_settings").into())));
         spawn_local(async move {
             let args = to_value(&serde_json::json!({ "spec": spec })).unwrap();
             match invoke_checked("save_specialist_cmd", args).await {
                 Ok(value) => match serde_wasm_bindgen::from_value::<Vec<Specialist>>(value) {
                     Ok(value) => {
+                        let saved = value.iter().find(|item| item.id == saved_id).cloned();
                         specialists.set(value);
-                        specialist_form.set(None);
-                        settings_message.set(Some((true, "Specialist saved.".into())));
+                        if keep_open {
+                            specialist_form.set(saved);
+                            model_form_msg.set(Some((
+                                true,
+                                t(loc, "specialists.saved").into(),
+                            )));
+                        } else {
+                            specialist_form.set(None);
+                            settings_message.set(Some((
+                                true,
+                                t(loc, "specialists.saved").into(),
+                            )));
+                        }
                     }
-                    Err(error) => settings_message.set(Some((false, error.to_string()))),
+                    Err(error) => model_form_msg.set(Some((false, error.to_string()))),
                 },
-                Err(error) => settings_message.set(Some((false, js_error_text(error)))),
+                Err(error) => model_form_msg.set(Some((false, js_error_text(error)))),
             }
             settings_busy.set(false);
         });
@@ -5266,17 +5370,15 @@ fn App() -> impl IntoView {
                                         }>
                                         <span>{move || t(locale.get(), "composer.reviewer_model")}</span>
                                         <span class="agent-menu-value">{move || {
-                                            let model_id = specialists.get().into_iter()
+                                            specialists.get().into_iter()
                                                 .find(|specialist| specialist.id == "reviewer")
-                                                .map(|reviewer| reviewer.model_id)
-                                                .unwrap_or_default();
-                                            if model_id.is_empty() {
-                                                t(locale.get(), "composer.default")
-                                            } else {
-                                                models.get().into_iter().find(|model| model.id == model_id)
-                                                    .map(|model| model.label)
-                                                    .unwrap_or_else(|| t(locale.get(), "composer.default"))
-                                            }
+                                                .and_then(|reviewer| reviewer_backend_label(
+                                                    &reviewer,
+                                                    &models.get(),
+                                                    &acp_agents.get(),
+                                                    &t(locale.get(), "composer.reviewer.follow_session"),
+                                                ))
+                                                .unwrap_or_else(|| t(locale.get(), "composer.reviewer.default_http"))
                                         }}</span>
                                         <span class="agent-menu-chevron">{compose_icon("chevron-right")}</span>
                                     </button>
@@ -5331,20 +5433,32 @@ fn App() -> impl IntoView {
                                     {move || reviewer_model_menu_open.get().then(|| view! {
                                         <div class="compose-menu agent-submenu reviewer-model-menu" role="menu"
                                             aria-label=move || t(locale.get(), "composer.reviewer_model")>
-                                            {std::iter::once((String::new(), t(locale.get(), "composer.default")))
-                                                .chain(models.get().into_iter().map(|model| (model.id, model.label)))
-                                                .map(|(model_id, label)| {
-                                                    let selected_id = model_id.clone();
+                                            {{
+                                                let mut choices = vec![(
+                                                    "http:".to_string(),
+                                                    t(locale.get(), "composer.reviewer.default_http"),
+                                                ), (
+                                                    "follow_session".to_string(),
+                                                    t(locale.get(), "composer.reviewer.follow_session"),
+                                                )];
+                                                choices.extend(models.get().into_iter().map(|model| {
+                                                    (format!("http:{}", model.id), model.label)
+                                                }));
+                                                choices.extend(acp_agents.get().into_iter().map(|agent| {
+                                                    (format!("acp:{}", agent.id), format!("{} · ACP", agent.label))
+                                                }));
+                                                choices.into_iter().map(|(backend_key, label)| {
+                                                    let selected_key = backend_key.clone();
                                                     let current = specialists.get().into_iter()
                                                         .find(|specialist| specialist.id == "reviewer")
-                                                        .map(|reviewer| reviewer.model_id)
+                                                        .map(|reviewer| reviewer_backend_key(&reviewer))
                                                         .unwrap_or_default();
                                                     view! {
                                                         <button type="button" class="agent-submenu-row"
                                                             on:click=move |_| {
                                                                 let Some(mut reviewer) = specialists.get_untracked().into_iter()
                                                                     .find(|specialist| specialist.id == "reviewer") else { return; };
-                                                                reviewer.model_id = selected_id.clone();
+                                                                set_reviewer_backend(&mut reviewer, &selected_key);
                                                                 spawn_local(async move {
                                                                     let arg = to_value(&serde_json::json!({ "spec": reviewer })).unwrap();
                                                                     if let Ok(value) = invoke_checked("save_specialist_cmd", arg).await {
@@ -5357,10 +5471,11 @@ fn App() -> impl IntoView {
                                                                 reviewer_model_menu_open.set(false);
                                                             }>
                                                             <span>{label}</span>
-                                                            {(current == model_id).then(|| view! { <span class="agent-menu-check">{compose_icon("check")}</span> })}
+                                                            {(current == backend_key).then(|| view! { <span class="agent-menu-check">{compose_icon("check")}</span> })}
                                                         </button>
                                                     }
-                                                }).collect_view()}
+                                                }).collect_view()
+                                            }}
                                         </div>
                                     })}
                                     {move || specialist_menu_open.get().then(|| view! {
@@ -7159,6 +7274,7 @@ fn App() -> impl IntoView {
             save_settings=Callback::new(save_settings)
             save_model_form=Callback::new(save_model_form)
             save_specialist_form=Callback::new(save_specialist_form)
+            test_reviewer_form=Callback::new(test_reviewer_form)
             validate_model_form=Callback::new(validate_model_form)
             start_specialist_chat=start_specialist_chat
             refresh_conns=Callback::new(move |_: ()| refresh_conns())
@@ -7643,6 +7759,8 @@ fn render_item(
         ChatItem::Review(report) => {
             let report = report.clone();
             let count = report.findings.len();
+            let unreviewable = report.review_status == "unreviewable";
+            let coverage = report.evidence_coverage.to_string();
             let count_text = count.to_string();
             let all_resolved = count > 0
                 && report
@@ -7673,6 +7791,7 @@ fn render_item(
                 (model, effort) => format!("{model} · {effort}"),
             };
             let summary = report.summary.clone();
+            let coverage_gaps = report.coverage_gaps.clone();
             let findings = report
                 .findings
                 .into_iter()
@@ -7726,8 +7845,19 @@ fn render_item(
                         </button>
                     </div>
                     <div class="review-summary">{summary}</div>
-                    {(count == 0).then(|| view! {
+                    {(count == 0 && !unreviewable).then(|| view! {
                         <div class="review-empty">"✓ "{move || t(locale.get(), "review.no_findings")}</div>
+                    })}
+                    {unreviewable.then(|| view! {
+                        <div class="review-empty review-unreviewable">
+                            "⚠ "{move || tf(locale.get(), "review.unreviewable", &[("pct", &coverage)])}
+                        </div>
+                    })}
+                    {(!coverage_gaps.is_empty()).then(|| view! {
+                        <details class="review-coverage-gaps">
+                            <summary>{move || t(locale.get(), "review.coverage_gaps")}</summary>
+                            <ul>{coverage_gaps.into_iter().map(|gap| view! { <li>{gap}</li> }).collect_view()}</ul>
+                        </details>
                     })}
                     {findings}
                     {(count > 0).then(|| view! {
