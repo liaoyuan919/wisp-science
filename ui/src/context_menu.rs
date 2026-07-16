@@ -93,7 +93,7 @@ fn editable_text_entry(el: &web_sys::Element) -> Option<web_sys::Element> {
     Some(entry)
 }
 
-fn selection_text() -> Option<String> {
+pub(crate) fn selection_text() -> Option<String> {
     let win = web_sys::window()?;
     let sel = win.get_selection().ok().flatten()?;
     if sel.is_collapsed() {

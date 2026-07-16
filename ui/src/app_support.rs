@@ -1350,6 +1350,35 @@ pub(super) fn message_with_attachments(text: &str, paths: &[String]) -> String {
     }
 }
 
+/// Prefix the message body with quoted-selection snippets as markdown
+/// blockquotes, so both the transcript UI and the agent see the context.
+pub(super) fn message_with_quotes(text: &str, quotes: &[String]) -> String {
+    if quotes.is_empty() {
+        return text.trim().to_string();
+    }
+    let mut out = String::new();
+    for quote in quotes {
+        for line in quote.trim().lines() {
+            out.push_str("> ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out.push_str(text.trim());
+    out.trim_end().to_string()
+}
+
+/// Chip label for a quoted selection: first line, capped at 40 chars.
+pub(super) fn quote_label(text: &str) -> String {
+    let line = text.trim().lines().next().unwrap_or_default();
+    let mut label: String = line.chars().take(40).collect();
+    if line.chars().count() > 40 {
+        label.push('…');
+    }
+    label
+}
+
 /// Build the persisted user-facing turn. Reference labels are deliberately
 /// kept in the message alongside upload paths: the backend still receives the
 /// typed reference ids separately, while a reloaded transcript retains enough
@@ -1358,8 +1387,9 @@ pub(super) fn message_with_composer_context(
     text: &str,
     paths: &[String],
     references: &[ComposerReferenceChip],
+    quotes: &[String],
 ) -> String {
-    let mut message = message_with_attachments(text, paths);
+    let mut message = message_with_attachments(&message_with_quotes(text, quotes), paths);
     let mut artifacts = Vec::new();
     let mut sessions = Vec::new();
     let mut skills = Vec::new();
@@ -2411,8 +2441,8 @@ pub(super) fn start_user_turn(items: &mut Vec<ChatItem>, text: String, model: Op
 mod start_user_turn_tests {
     use super::{
         append_assistant_delta, append_reasoning_delta, composer_text_from_user_message,
-        message_with_attachments, message_with_composer_context, start_user_turn,
-        trailing_queue_start, ComposerReferenceChip,
+        message_with_attachments, message_with_composer_context, message_with_quotes,
+        start_user_turn, trailing_queue_start, ComposerReferenceChip,
     };
     use crate::dto::ChatItem;
 
@@ -2445,9 +2475,24 @@ mod start_user_turn_tests {
             },
         ];
         assert_eq!(
-            message_with_composer_context("Compare these", &["uploads/plot.png".into()], &refs),
+            message_with_composer_context(
+                "Compare these",
+                &["uploads/plot.png".into()],
+                &refs,
+                &[]
+            ),
             "Compare these\n\nUploaded files: uploads/plot.png\n\nAttached artifacts: counts.csv\n\nAttached sessions: Atlas / QC review\n\nSelected skills: bear-review"
         );
+    }
+
+    #[test]
+    fn message_with_quotes_prefixes_blockquotes() {
+        assert_eq!(
+            message_with_quotes("这是什么意思?", &["line one\nline two".into()]),
+            "> line one\n> line two\n\n这是什么意思?"
+        );
+        assert_eq!(message_with_quotes("plain", &[]), "plain");
+        assert_eq!(message_with_quotes("", &["ctx".into()]), "> ctx");
     }
 
     #[test]
