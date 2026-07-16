@@ -1188,7 +1188,30 @@ test("settings manages servers and probes them with the default environment skil
     contextId: "ssh:gpu-server",
     enabled: false,
   });
-  await expect(server.getByRole("button", { name: "Not available" })).toBeVisible();
+  await expect(server.getByRole("button", { name: "Not enabled" })).toBeVisible();
+});
+
+test("Escape closes the topmost environment modal before settings", async ({ page }) => {
+  await enterApp(page);
+  await openSettingsSection(page, "Environments");
+  await page.getByRole("button", { name: "Add SSH host" }).click();
+  await expect(page.locator(".host-modal")).toBeVisible();
+
+  await page.keyboard.press("Escape");
+
+  await expect(page.locator(".host-modal")).toHaveCount(0);
+  await expect(page.locator(".settings-page")).toBeVisible();
+});
+
+test("Escape closes the compute resource menu", async ({ page }) => {
+  await enterApp(page);
+  await openComputeMenu(page);
+  await expect(page.getByRole("menu", { name: "Compute" })).toBeVisible();
+
+  await page.keyboard.press("Escape");
+
+  await expect(page.getByRole("menu", { name: "Compute" })).toHaveCount(0);
+  await expect(page.getByRole("menu", { name: "Agent options" })).toHaveCount(0);
 });
 
 test("agent menu updates review, reviewer model, and memory preferences", async ({ page }) => {

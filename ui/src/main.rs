@@ -3700,6 +3700,11 @@ fn App() -> impl IntoView {
 
         // Overlays that can appear over the projects landing (must run before
         // the show_projects early-return below).
+        if show_add_host.get() {
+            ev.prevent_default();
+            show_add_host.set(false);
+            return;
+        }
         if show_settings.get() && !settings_busy.get() {
             ev.prevent_default();
             show_settings.set(false);
@@ -3744,11 +3749,6 @@ fn App() -> impl IntoView {
         if folder_modal.get().is_some() {
             ev.prevent_default();
             folder_modal.set(None);
-            return;
-        }
-        if show_add_host.get() {
-            ev.prevent_default();
-            show_add_host.set(false);
             return;
         }
         if runtime_interpreter_form.get().is_some() {
@@ -5690,7 +5690,7 @@ fn App() -> impl IntoView {
                                                             toggle_compute_resource.call((toggle_id.clone(), !enabled));
                                                         }>
                                                         <span class="compute-resource-icon">{compose_icon("server")}</span>
-                                                        <span>{host.alias}</span>
+                                                        <span class="compute-resource-name">{host.alias}</span>
                                                         <span class="compute-resource-state">
                                                             {if enabled { t(locale.get(), "compute.enabled") } else { t(locale.get(), "compute.disabled") }}
                                                         </span>
