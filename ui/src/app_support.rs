@@ -23,6 +23,28 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
+const MODEL_SWITCH_WARNING_DISABLED_KEY: &str = "wisp-model-switch-warning-disabled";
+
+pub(super) fn model_switch_warning_disabled() -> bool {
+    web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| {
+            storage
+                .get_item(MODEL_SWITCH_WARNING_DISABLED_KEY)
+                .ok()
+                .flatten()
+        })
+        .is_some_and(|value| value == "1")
+}
+
+pub(super) fn disable_model_switch_warning() {
+    if let Some(storage) = web_sys::window().and_then(|window| {
+        window.local_storage().ok().flatten()
+    }) {
+        let _ = storage.set_item(MODEL_SWITCH_WARNING_DISABLED_KEY, "1");
+    }
+}
+
 pub(super) fn load_theme_mode() -> String {
     web_sys::window()
         .and_then(|w| w.local_storage().ok().flatten())

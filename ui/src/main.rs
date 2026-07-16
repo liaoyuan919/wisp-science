@@ -459,7 +459,30 @@ fn App() -> impl IntoView {
     let project_transition_target = Rc::new(RefCell::new(None::<String>));
     let project_open_gate = Rc::new(RefCell::new(ProjectOpenGate::default()));
     let model_menu_open = create_rw_signal(false);
+    let model_switch_confirm = create_rw_signal::<Option<(String, String)>>(None);
     let status = create_rw_signal(String::new());
+    let switch_http_model = Callback::new(move |(id, dont_ask_again): (String, bool)| {
+        provisional_acp_selection.set(None);
+        active_acp_agent_id.set(None);
+        spawn_local(async move {
+            let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
+            match invoke_checked("set_active_model", arg).await {
+                Ok(v) => {
+                    if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(v) {
+                        models.set(list);
+                    }
+                    if dont_ask_again {
+                        disable_model_switch_warning();
+                    }
+                }
+                Err(err) => {
+                    web_sys::console::warn_1(
+                        &format!("set_active_model failed: {:?}", err).into(),
+                    );
+                }
+            }
+        });
+    });
     let send_mode_menu_open = create_rw_signal(false);
     let side_chat_input = create_rw_signal(String::new());
     let side_chat_items = create_rw_signal::<Vec<ChatItem>>(vec![]);
@@ -5700,6 +5723,7 @@ fn App() -> impl IntoView {
                                                 let acp_locked = active_acp_agent_id.get().is_some() && items.with(|rows| !rows.is_empty());
                                                 list.into_iter().map(|m| {
                                                     let pick_id = m.id.clone();
+                                                    let pick_label = m.label.clone();
                                                     let is_active = m.active;
                                                     let show_sub = !m.model.is_empty() && m.model != m.label;
                                                     view! {
@@ -5712,22 +5736,15 @@ fn App() -> impl IntoView {
                                                                     return;
                                                                 }
                                                                 model_menu_open.set(false);
-                                                                provisional_acp_selection.set(None);
-                                                                active_acp_agent_id.set(None);
+                                                                if is_active {
+                                                                    return;
+                                                                }
                                                                 let id = pick_id.clone();
-                                                                spawn_local(async move {
-                                                                    let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
-                                                                    match invoke_checked("set_active_model", arg).await {
-                                                                        Ok(v) => {
-                                                                            if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(v) {
-                                                                                models.set(list);
-                                                                            }
-                                                                        }
-                                                                        Err(err) => {
-                                                                            web_sys::console::warn_1(&format!("set_active_model failed: {:?}", err).into());
-                                                                        }
-                                                                    }
-                                                                });
+                                                                if model_switch_warning_disabled() {
+                                                                    switch_http_model.call((id, false));
+                                                                } else {
+                                                                    model_switch_confirm.set(Some((id, pick_label.clone())));
+                                                                }
                                                             }>
                                                                 <span class="model-menu-text">
                                                                     <span class="model-menu-label">{m.label.clone()}</span>
@@ -7176,6 +7193,38 @@ fn App() -> impl IntoView {
                 </div>
             </div>
         }.into_view()
+        })}
+
+        {move || model_switch_confirm.get().map(|(id, label)| {
+            let switch_yes = switch_http_model.clone();
+            let switch_without_future_warning = switch_http_model.clone();
+            let yes_id = id.clone();
+            let dont_ask_id = id.clone();
+            view! {
+                <div class="overlay" data-testid="model-switch-confirm-overlay">
+                    <div class="modal confirm-modal" data-testid="model-switch-confirm">
+                        <h2>{move || t(locale.get(), "models.switch_confirm_title")}</h2>
+                        <div class="hint">{move || tf(
+                            locale.get(),
+                            "models.switch_confirm_hint",
+                            &[("model", &label)],
+                        )}</div>
+                        <div class="row">
+                            <button on:click=move |_| model_switch_confirm.set(None)>
+                                {move || t(locale.get(), "models.switch_no")}
+                            </button>
+                            <button on:click=move |_| {
+                                model_switch_confirm.set(None);
+                                switch_without_future_warning.call((dont_ask_id.clone(), true));
+                            }>{move || t(locale.get(), "models.switch_dont_ask")}</button>
+                            <button class="primary" on:click=move |_| {
+                                model_switch_confirm.set(None);
+                                switch_yes.call((yes_id.clone(), false));
+                            }>{move || t(locale.get(), "models.switch_yes")}</button>
+                        </div>
+                    </div>
+                </div>
+            }.into_view()
         })}
 
         {move || show_proj_settings.get().then(|| view! {
