@@ -1,8 +1,8 @@
 use super::{
     bio_domains, clear_idle_agents, connect_mcp, load_approval_scope, load_disabled_connectors,
     load_mcp_connections, load_skip_connectors, load_tool_approvals, refresh_approval_policy,
-    save_json_setting, save_mcp_connections, AppState, ApprovalMode, McpConnection, McpTransport,
-    Scope,
+    save_json_setting, save_mcp_connections, AppState, ApprovalMode, McpConnection, McpHttpAuth,
+    McpTransport, Scope,
 };
 use serde::Serialize;
 use tauri::State;
@@ -26,6 +26,9 @@ pub(super) async fn add_mcp_connection(
     state: State<'_, AppState>,
     conn: McpConnection,
 ) -> Result<(), String> {
+    if is_oauth_http(&conn) {
+        return Err("OAuth connections must be authorized before saving".into());
+    }
     let mut conns = load_mcp_connections(&state.store).await;
     conns.push(conn);
     save_mcp_connections(&state.store, &conns).await?;
@@ -39,11 +42,22 @@ pub(super) async fn update_mcp_connection(
     conn: McpConnection,
 ) -> Result<(), String> {
     let mut conns = load_mcp_connections(&state.store).await;
-    match conns.iter_mut().find(|c| c.id == conn.id) {
-        Some(slot) => *slot = conn,
-        None => return Err("connection not found".into()),
+    if is_oauth_http(&conn) {
+        return Err("OAuth connections must be authorized before saving".into());
     }
+    let connection_id = conn.id.clone();
+    let removed_oauth = match conns.iter_mut().find(|c| c.id == conn.id) {
+        Some(slot) => {
+            let removed_oauth = is_oauth_http(slot);
+            *slot = conn;
+            removed_oauth
+        }
+        None => return Err("connection not found".into()),
+    };
     save_mcp_connections(&state.store, &conns).await?;
+    if removed_oauth {
+        crate::mcp_oauth::forget(&connection_id);
+    }
     clear_idle_agents(&state).await;
     Ok(())
 }
@@ -54,13 +68,13 @@ pub(super) async fn delete_mcp_connection(
     id: String,
 ) -> Result<(), String> {
     let mut conns = load_mcp_connections(&state.store).await;
-    let removed_notion = conns.iter().any(|connection| {
-        connection.id == id && matches!(&connection.transport, McpTransport::Notion)
-    });
+    let removed_oauth = conns
+        .iter()
+        .any(|connection| connection.id == id && is_oauth_http(connection));
     conns.retain(|c| c.id != id);
     save_mcp_connections(&state.store, &conns).await?;
-    if removed_notion {
-        crate::notion::forget(&id);
+    if removed_oauth {
+        crate::mcp_oauth::forget(&id);
     }
     clear_idle_agents(&state).await;
     Ok(())
@@ -103,6 +117,8 @@ struct ConnectorInfo {
     transport: String,
     /// Command/URL line for custom connectors; empty for bundled.
     subtitle: String,
+    /// "none" | "oauth" for remote HTTP connectors; empty otherwise.
+    auth: String,
     /// Tools for bundled connectors (static from domains.json). Custom
     /// connector tools are loaded on demand through `test_mcp_connection`.
     tools: Vec<ConnectorTool>,
@@ -145,14 +161,19 @@ pub(super) async fn list_connectors(state: State<'_, AppState>) -> Result<Connec
             skip_approvals: skip_on,
             transport: String::new(),
             subtitle: String::new(),
+            auth: String::new(),
             tools,
         });
     }
     for c in load_mcp_connections(store).await {
-        let (transport, subtitle) = match &c.transport {
-            McpTransport::Stdio { command, .. } => ("stdio", command.clone()),
-            McpTransport::Http { url, .. } => ("http", url.clone()),
-            McpTransport::Notion => ("notion", crate::notion::MCP_URL.into()),
+        let (transport, subtitle, auth) = match &c.transport {
+            McpTransport::Stdio { command, .. } => ("stdio", command.clone(), String::new()),
+            McpTransport::Http { url, auth, .. } => ("http", url.clone(), auth.as_str().into()),
+            McpTransport::Notion => (
+                "http",
+                crate::mcp_oauth::NOTION_MCP_URL.into(),
+                "oauth".into(),
+            ),
         };
         connectors.push(ConnectorInfo {
             key: c.id,
@@ -162,6 +183,7 @@ pub(super) async fn list_connectors(state: State<'_, AppState>) -> Result<Connec
             skip_approvals: false,
             transport: transport.into(),
             subtitle,
+            auth,
             tools: vec![],
         });
     }
@@ -256,38 +278,35 @@ pub(super) async fn test_mcp_connection(
     Ok(tools)
 }
 
-fn notion_connection(name: &str) -> McpConnection {
-    McpConnection {
-        id: "notion".into(),
-        name: match name.trim() {
-            "" => "Notion".into(),
-            name => name.into(),
-        },
-        enabled: true,
-        transport: McpTransport::Notion,
-    }
+fn is_oauth_http(connection: &McpConnection) -> bool {
+    matches!(
+        &connection.transport,
+        McpTransport::Http {
+            auth: McpHttpAuth::OAuth,
+            ..
+        } | McpTransport::Notion
+    )
 }
 
-/// Add the hosted Notion MCP only after the user explicitly selects it in the
-/// regular Add connection form and completes browser authorization.
+/// Authorize and save an OAuth-backed remote URL connection.
 #[tauri::command]
-pub(super) async fn add_notion_connection(
+pub(super) async fn authorize_http_connection(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-    name: String,
+    conn: McpConnection,
 ) -> Result<(), String> {
-    let connections = load_mcp_connections(&state.store).await;
-    let has_existing = connections
-        .iter()
-        .any(|connection| matches!(&connection.transport, McpTransport::Notion));
-    let replace_unauthorized = has_existing && !crate::notion::has_credential("notion");
-    if has_existing && !replace_unauthorized {
-        return Err(
-            "A Notion connection already exists; remove it before adding another one".into(),
-        );
-    }
+    let resource_url = match &conn.transport {
+        McpTransport::Http {
+            url,
+            auth: McpHttpAuth::OAuth,
+            ..
+        } if !url.trim().is_empty() => url.trim().to_string(),
+        _ => return Err("OAuth authorization requires a remote URL connection".into()),
+    };
+    let connection_id = conn.id.clone();
+    let had_credential = crate::mcp_oauth::has_credential(&conn.id);
 
-    let (listener, pending) = crate::notion::begin_authorization()
+    let (listener, pending) = crate::mcp_oauth::begin_authorization(&resource_url)
         .await
         .map_err(|error| error.to_string())?;
     let authorization_url = pending.authorization_url().to_string();
@@ -295,30 +314,22 @@ pub(super) async fn add_notion_connection(
         use tauri_plugin_opener::OpenerExt;
         app.opener()
             .open_url(&authorization_url, None::<&str>)
-            .map_err(|error| format!("open Notion authorization page: {error}"))?;
+            .map_err(|error| format!("open MCP authorization page: {error}"))?;
     }
-    crate::notion::finish_authorization(listener, pending, "notion")
+    crate::mcp_oauth::finish_authorization(listener, pending, &conn.id)
         .await
         .map_err(|error| error.to_string())?;
 
     let mut connections = load_mcp_connections(&state.store).await;
-    if let Some(existing) = connections
-        .iter()
-        .position(|connection| matches!(&connection.transport, McpTransport::Notion))
-    {
-        if replace_unauthorized {
-            connections[existing] = notion_connection(&name);
-        } else {
-            crate::notion::forget("notion");
-            return Err(
-                "A Notion connection already exists; remove it before adding another one".into(),
-            );
-        }
+    if let Some(existing) = connections.iter().position(|item| item.id == conn.id) {
+        connections[existing] = conn;
     } else {
-        connections.push(notion_connection(&name));
+        connections.push(conn);
     }
     if let Err(error) = save_mcp_connections(&state.store, &connections).await {
-        crate::notion::forget("notion");
+        if !had_credential {
+            crate::mcp_oauth::forget(&connection_id);
+        }
         return Err(error);
     }
     clear_idle_agents(&state).await;
@@ -330,13 +341,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn notion_connection_uses_default_or_custom_name() {
-        let default = notion_connection("  ");
-        assert_eq!(default.id, "notion");
-        assert_eq!(default.name, "Notion");
-        assert!(default.enabled);
-        assert!(matches!(default.transport, McpTransport::Notion));
+    fn identifies_oauth_http_and_legacy_notion_connections() {
+        let oauth = McpConnection {
+            id: "remote".into(),
+            name: "Remote".into(),
+            enabled: true,
+            transport: McpTransport::Http {
+                url: "https://example.com/mcp".into(),
+                headers: vec![],
+                auth: McpHttpAuth::OAuth,
+            },
+        };
+        assert!(is_oauth_http(&oauth));
 
-        assert_eq!(notion_connection("Lab notes").name, "Lab notes");
+        let plain = McpConnection {
+            transport: McpTransport::Http {
+                url: "https://example.com/mcp".into(),
+                headers: vec![],
+                auth: McpHttpAuth::None,
+            },
+            ..oauth
+        };
+        assert!(!is_oauth_http(&plain));
     }
 }

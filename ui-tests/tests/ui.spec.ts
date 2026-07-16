@@ -2208,22 +2208,48 @@ test("custom MCP row opens tools while edit uses a dedicated button", async ({ p
   await expect(page.getByPlaceholder("https://host/mcp")).toHaveValue("https://api.wolai.com/v1/mcp/");
 });
 
-test("Notion is authorized only when selected from Add connection", async ({ page }) => {
+test("Notion uses the generic Remote URL OAuth connection flow", async ({ page }) => {
   await enterApp(page);
   await page.getByRole("button", { name: "Settings" }).click();
   await page.getByRole("button", { name: "Connections" }).click();
 
-  await expect.poll(() => lastInvokeArgs(page, "add_notion_connection")).toBeNull();
+  await expect.poll(() => lastInvokeArgs(page, "authorize_http_connection")).toBeNull();
   await page.getByRole("button", { name: "Add connection" }).click();
-  await page.getByLabel("Type").selectOption("notion");
+  const type = page.getByLabel("Type");
+  await expect(type.locator("option")).toHaveCount(2);
+  await expect(type.locator('option[value="notion"]')).toHaveCount(0);
 
-  await expect(page.getByLabel("Name")).toHaveValue("Notion");
-  await expect(page.getByText("Authorization starts only after you choose Authorize and add.")).toBeVisible();
+  await page.getByLabel("Name").fill("Notion");
+  await type.selectOption("http");
+  await page.getByPlaceholder("https://host/mcp").fill("https://mcp.notion.com/mcp");
+  await page.getByLabel("Authentication").selectOption("oauth");
+  await expect(page.getByText("only after authorization succeeds")).toBeVisible();
   await expect(page.getByRole("button", { name: "Test" })).toHaveCount(0);
 
-  await page.getByRole("button", { name: "Authorize and add" }).click();
-  await expect.poll(() => lastInvokeArgs(page, "add_notion_connection")).toEqual({ name: "Notion" });
-  await expect(page.locator(".settings-list-row", { hasText: "Notion" })).toBeVisible();
+  await page.getByRole("button", { name: "Authorize and save" }).click();
+  await expect.poll(() => lastInvokeArgs(page, "authorize_http_connection")).toMatchObject({
+    conn: {
+      name: "Notion",
+      enabled: true,
+      transport: {
+        kind: "http",
+        url: "https://mcp.notion.com/mcp",
+        auth: "oauth",
+      },
+    },
+  });
+  const row = page.locator(".settings-list-row", { hasText: "Notion" });
+  await expect(row).toContainText("https://mcp.notion.com/mcp");
+  await expect(row).toContainText("OAuth");
+  await expect(row).toContainText("Enabled");
+
+  await row.click();
+  await expect(page.getByText("Service", { exact: true })).toBeVisible();
+  await expect(page.getByText("https://mcp.notion.com/mcp", { exact: true })).toBeVisible();
+  await expect(page.getByText("Status", { exact: true })).toBeVisible();
+  await expect(page.getByText("Enabled", { exact: true })).toBeVisible();
+  await expect(page.getByText("Authentication", { exact: true })).toBeVisible();
+  await expect(page.getByText("OAuth", { exact: true })).toBeVisible();
 });
 
 test("settings validation rejects blank required fields", async ({ page }) => {

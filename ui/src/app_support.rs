@@ -3360,9 +3360,7 @@ pub(super) fn build_conn_json(f: &ConnForm, assign_id: bool) -> serde_json::Valu
             "test".into()
         }
     });
-    let transport = if f.kind == "notion" {
-        serde_json::json!({ "kind": "notion" })
-    } else if f.kind == "http" {
+    let transport = if f.kind == "http" {
         let headers: Vec<(String, String)> = f
             .headers
             .lines()
@@ -3371,7 +3369,8 @@ pub(super) fn build_conn_json(f: &ConnForm, assign_id: bool) -> serde_json::Valu
                     .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
             })
             .collect();
-        serde_json::json!({ "kind": "http", "url": f.url.trim(), "headers": headers })
+        let auth = if f.auth == "oauth" { "oauth" } else { "none" };
+        serde_json::json!({ "kind": "http", "url": f.url.trim(), "headers": headers, "auth": auth })
     } else {
         let args: Vec<String> = f.args.split_whitespace().map(|s| s.to_string()).collect();
         serde_json::json!({ "kind": "stdio", "command": f.command.trim(), "args": args, "env": [], "cwd": null })
@@ -3389,9 +3388,10 @@ pub(super) fn conn_form_from_row(row: &ConnRow) -> ConnForm {
             args: args.join(" "),
             url: String::new(),
             headers: String::new(),
+            auth: "none".into(),
             enabled: row.enabled,
         },
-        ConnTransport::Http { url, headers } => ConnForm {
+        ConnTransport::Http { url, headers, auth } => ConnForm {
             id: Some(row.id.clone()),
             name: row.name.clone(),
             kind: "http".into(),
@@ -3403,16 +3403,22 @@ pub(super) fn conn_form_from_row(row: &ConnRow) -> ConnForm {
                 .map(|(k, v)| format!("{k}: {v}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
+            auth: if auth == "oauth" {
+                "oauth".into()
+            } else {
+                "none".into()
+            },
             enabled: row.enabled,
         },
         ConnTransport::Notion => ConnForm {
             id: Some(row.id.clone()),
             name: row.name.clone(),
-            kind: "notion".into(),
+            kind: "http".into(),
             command: String::new(),
             args: String::new(),
-            url: String::new(),
+            url: "https://mcp.notion.com/mcp".into(),
             headers: String::new(),
+            auth: "oauth".into(),
             enabled: row.enabled,
         },
     }

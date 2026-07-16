@@ -1,8 +1,9 @@
-//! OAuth support for Notion's hosted MCP server.
+//! OAuth support for remote MCP servers.
 //!
-//! The Notion MCP service uses OAuth 2.0 authorization-code flow with PKCE and
-//! dynamic client registration.  Connection metadata is stored as a normal
-//! MCP connection, while every credential remains in `wisp_store::secrets`.
+//! OAuth 2.0 authorization-code flow with PKCE, protected-resource metadata,
+//! and dynamic client registration are handled without exposing credentials
+//! to the UI. Connection metadata stays in normal MCP settings while every
+//! credential remains in `wisp_store::secrets`.
 
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -17,7 +18,7 @@ use tokio::{
 };
 use url::Url;
 
-pub const MCP_URL: &str = "https://mcp.notion.com/mcp";
+pub const NOTION_MCP_URL: &str = "https://mcp.notion.com/mcp";
 const CALLBACK_PATH: &str = "/callback";
 const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
@@ -80,6 +81,10 @@ struct TokenResponse {
 }
 
 fn secret_name(connection_id: &str) -> String {
+    format!("mcp_oauth:{connection_id}")
+}
+
+fn legacy_secret_name(connection_id: &str) -> String {
     format!("notion_oauth:{connection_id}")
 }
 
@@ -88,7 +93,7 @@ fn http_client() -> Result<reqwest::Client> {
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .context("build Notion OAuth HTTP client")
+        .context("build MCP OAuth HTTP client")
 }
 
 fn random_urlsafe(bytes: usize) -> Result<String> {
@@ -106,7 +111,7 @@ fn code_challenge(verifier: &str) -> String {
 fn callback_url(listener: &TcpListener) -> Result<String> {
     let address = listener
         .local_addr()
-        .context("read Notion callback address")?;
+        .context("read MCP OAuth callback address")?;
     Ok(format!(
         "http://127.0.0.1:{}{CALLBACK_PATH}",
         address.port()
@@ -117,7 +122,7 @@ fn callback_url(listener: &TcpListener) -> Result<String> {
 /// `https://mcp.notion.com/mcp`, the discovery URL is therefore
 /// `https://mcp.notion.com/.well-known/oauth-protected-resource/mcp`.
 fn protected_resource_metadata_url(resource: &str) -> Result<Url> {
-    let resource = Url::parse(resource).context("parse Notion MCP resource URL")?;
+    let resource = Url::parse(resource).context("parse MCP resource URL")?;
     let resource_path = resource.path().trim_end_matches('/');
     let mut metadata = resource.clone();
     metadata.set_path(&format!(
@@ -133,10 +138,7 @@ async fn json_response<T: serde::de::DeserializeOwned>(
     operation: &str,
 ) -> Result<T> {
     let status = response.status();
-    let text = response
-        .text()
-        .await
-        .context("read Notion OAuth response")?;
+    let text = response.text().await.context("read MCP OAuth response")?;
     if !status.is_success() {
         return Err(anyhow!(
             "{operation} failed with {status}: {}",
@@ -147,44 +149,47 @@ async fn json_response<T: serde::de::DeserializeOwned>(
 }
 
 /// Bind the loopback callback listener before registering a dynamic client, so
-/// the exact redirect URI is known to Notion before the user opens a browser.
-pub async fn begin_authorization() -> Result<(TcpListener, PendingAuthorization)> {
+/// the exact redirect URI is known before the user opens a browser.
+pub async fn begin_authorization(
+    resource_url: &str,
+) -> Result<(TcpListener, PendingAuthorization)> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
-        .context("bind local Notion OAuth callback")?;
+        .context("bind local MCP OAuth callback")?;
     let redirect_uri = callback_url(&listener)?;
     let client = http_client()?;
 
-    let protected_url = protected_resource_metadata_url(MCP_URL)?;
+    let protected_url = protected_resource_metadata_url(resource_url)?;
     let protected: ProtectedResourceMetadata = json_response(
         client
             .get(protected_url)
             .send()
             .await
-            .context("discover Notion protected resource")?,
-        "Notion OAuth discovery",
+            .context("discover MCP protected resource")?,
+        "MCP OAuth discovery",
     )
     .await?;
     let auth_server = protected
         .authorization_servers
         .first()
-        .ok_or_else(|| anyhow!("Notion OAuth discovery returned no authorization server"))?;
+        .ok_or_else(|| anyhow!("MCP OAuth discovery returned no authorization server"))?;
     let metadata_url = Url::parse(auth_server)
-        .context("parse Notion authorization server URL")?
+        .context("parse MCP authorization server URL")?
         .join("/.well-known/oauth-authorization-server")
-        .context("build Notion OAuth metadata URL")?;
+        .context("build MCP OAuth metadata URL")?;
     let metadata: AuthorizationServerMetadata = json_response(
         client
             .get(metadata_url)
             .send()
             .await
-            .context("discover Notion authorization server")?,
-        "Notion authorization-server discovery",
+            .context("discover MCP authorization server")?,
+        "MCP authorization-server discovery",
     )
     .await?;
-    let registration_endpoint = metadata.registration_endpoint.as_deref().ok_or_else(|| {
-        anyhow!("Notion OAuth server does not support dynamic client registration")
-    })?;
+    let registration_endpoint = metadata
+        .registration_endpoint
+        .as_deref()
+        .ok_or_else(|| anyhow!("MCP OAuth server does not support dynamic client registration"))?;
     let registration: ClientRegistration = json_response(
         client
             .post(registration_endpoint)
@@ -199,15 +204,15 @@ pub async fn begin_authorization() -> Result<(TcpListener, PendingAuthorization)
             }))
             .send()
             .await
-            .context("register Wisp with Notion")?,
-        "Notion dynamic client registration",
+            .context("register Wisp with MCP OAuth server")?,
+        "MCP dynamic client registration",
     )
     .await?;
 
     let code_verifier = random_urlsafe(32)?;
     let state = random_urlsafe(32)?;
-    let mut authorization_url = Url::parse(&metadata.authorization_endpoint)
-        .context("parse Notion authorization endpoint")?;
+    let mut authorization_url =
+        Url::parse(&metadata.authorization_endpoint).context("parse MCP authorization endpoint")?;
     authorization_url
         .query_pairs_mut()
         .append_pair("response_type", "code")
@@ -216,7 +221,7 @@ pub async fn begin_authorization() -> Result<(TcpListener, PendingAuthorization)
         .append_pair("state", &state)
         .append_pair("code_challenge", &code_challenge(&code_verifier))
         .append_pair("code_challenge_method", "S256")
-        .append_pair("resource", MCP_URL)
+        .append_pair("resource", resource_url)
         .append_pair("prompt", "consent");
     Ok((
         listener,
@@ -258,9 +263,9 @@ fn callback_parameters(request: &str) -> Result<(Option<String>, String, Option<
 
 async fn reply_callback(stream: &mut TcpStream, ok: bool, message: &str) {
     let title = if ok {
-        "Notion connected"
+        "MCP connected"
     } else {
-        "Notion connection failed"
+        "MCP connection failed"
     };
     let body = format!(
         "<!doctype html><meta charset=\"utf-8\"><title>{title}</title><h1>{title}</h1><p>{message}</p><p>You can close this tab and return to Wisp.</p>"
@@ -291,8 +296,8 @@ async fn exchange_code(pending: &PendingAuthorization, code: &str) -> Result<Cre
             .form(&form)
             .send()
             .await
-            .context("exchange Notion authorization code")?,
-        "Notion token exchange",
+            .context("exchange MCP authorization code")?,
+        "MCP token exchange",
     )
     .await?;
     Ok(Credential {
@@ -316,29 +321,30 @@ pub async fn finish_authorization(
 ) -> Result<()> {
     let (mut stream, _) = tokio::time::timeout(AUTH_TIMEOUT, listener.accept())
         .await
-        .map_err(|_| anyhow!("Notion authorization timed out after 10 minutes"))?
-        .context("accept Notion OAuth callback")?;
+        .map_err(|_| anyhow!("MCP authorization timed out after 10 minutes"))?
+        .context("accept MCP OAuth callback")?;
     let mut request = vec![0_u8; 16 * 1024];
     let n = stream
         .read(&mut request)
         .await
-        .context("read Notion OAuth callback")?;
+        .context("read MCP OAuth callback")?;
     let result = async {
         let request = std::str::from_utf8(&request[..n]).context("decode OAuth callback")?;
         let (code, state, error) = callback_parameters(request)?;
         if state != pending.state {
             return Err(anyhow!(
-                "Notion OAuth state did not match; authorization was rejected"
+                "MCP OAuth state did not match; authorization was rejected"
             ));
         }
         if let Some(error) = error {
-            return Err(anyhow!("Notion authorization was declined: {error}"));
+            return Err(anyhow!("MCP authorization was declined: {error}"));
         }
-        let code = code.ok_or_else(|| anyhow!("Notion OAuth callback is missing code"))?;
+        let code = code.ok_or_else(|| anyhow!("MCP OAuth callback is missing code"))?;
         let credential = exchange_code(&pending, &code).await?;
-        let secret = serde_json::to_string(&credential).context("serialize Notion credential")?;
+        let secret =
+            serde_json::to_string(&credential).context("serialize MCP OAuth credential")?;
         wisp_store::secrets::Secret::set(&secret_name(connection_id), &secret)
-            .context("save Notion credential in OS keyring")?;
+            .context("save MCP OAuth credential in OS keyring")?;
         Ok(())
     }
     .await;
@@ -353,7 +359,7 @@ async fn refresh(connection_id: &str, credential: &mut Credential) -> Result<()>
     let refresh_token = credential
         .refresh_token
         .clone()
-        .ok_or_else(|| anyhow!("Notion access token expired; reconnect Notion"))?;
+        .ok_or_else(|| anyhow!("MCP access token expired; reconnect the service"))?;
     let mut form = vec![
         ("grant_type", "refresh_token".to_string()),
         ("refresh_token", refresh_token.clone()),
@@ -369,8 +375,8 @@ async fn refresh(connection_id: &str, credential: &mut Credential) -> Result<()>
             .form(&form)
             .send()
             .await
-            .context("refresh Notion access token")?,
-        "Notion token refresh",
+            .context("refresh MCP access token")?,
+        "MCP token refresh",
     )
     .await?;
     credential.access_token = tokens.access_token;
@@ -381,41 +387,50 @@ async fn refresh(connection_id: &str, credential: &mut Credential) -> Result<()>
         .expires_in
         .map(|seconds| Utc::now().timestamp() + seconds);
     let secret =
-        serde_json::to_string(credential).context("serialize refreshed Notion credential")?;
+        serde_json::to_string(credential).context("serialize refreshed MCP OAuth credential")?;
     wisp_store::secrets::Secret::set(&secret_name(connection_id), &secret)
-        .context("save refreshed Notion credential in OS keyring")?;
+        .context("save refreshed MCP OAuth credential in OS keyring")?;
     Ok(())
 }
 
-/// Connect the agent to an authorized Notion workspace, refreshing expiring
+/// Connect the agent to an authorized remote MCP service, refreshing expiring
 /// access tokens before the MCP handshake.
-pub async fn connect(connection_id: &str) -> Result<wisp_mcp::McpClient> {
+pub async fn connect(
+    connection_id: &str,
+    resource_url: &str,
+    headers: &[(String, String)],
+) -> Result<wisp_mcp::McpClient> {
     let raw = wisp_store::secrets::Secret::get(&secret_name(connection_id))
-        .map_err(|_| anyhow!("Notion authorization is not complete; finish it in your browser"))?;
+        .or_else(|_| wisp_store::secrets::Secret::get(&legacy_secret_name(connection_id)))
+        .map_err(|_| anyhow!("OAuth authorization is not complete; reconnect the MCP service"))?;
     let mut credential: Credential =
-        serde_json::from_str(&raw).context("parse saved Notion credential")?;
+        serde_json::from_str(&raw).context("parse saved MCP OAuth credential")?;
     if credential
         .expires_at
         .is_some_and(|expires_at| expires_at <= Utc::now().timestamp() + 60)
     {
         refresh(connection_id, &mut credential).await?;
     }
-    wisp_mcp::McpClient::connect_http(
-        MCP_URL,
-        &[(
-            "Authorization".to_string(),
-            format!("Bearer {}", credential.access_token),
-        )],
-    )
-    .await
+    let mut authorized_headers = headers
+        .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("authorization"))
+        .cloned()
+        .collect::<Vec<_>>();
+    authorized_headers.push((
+        "Authorization".to_string(),
+        format!("Bearer {}", credential.access_token),
+    ));
+    wisp_mcp::McpClient::connect_http(resource_url, &authorized_headers).await
 }
 
 pub fn has_credential(connection_id: &str) -> bool {
     wisp_store::secrets::Secret::get(&secret_name(connection_id)).is_ok()
+        || wisp_store::secrets::Secret::get(&legacy_secret_name(connection_id)).is_ok()
 }
 
 pub fn forget(connection_id: &str) {
     let _ = wisp_store::secrets::Secret::delete(&secret_name(connection_id));
+    let _ = wisp_store::secrets::Secret::delete(&legacy_secret_name(connection_id));
 }
 
 #[cfg(test)]
@@ -433,7 +448,9 @@ mod tests {
     #[test]
     fn protected_resource_metadata_precedes_resource_path() {
         assert_eq!(
-            protected_resource_metadata_url(MCP_URL).unwrap().as_str(),
+            protected_resource_metadata_url(NOTION_MCP_URL)
+                .unwrap()
+                .as_str(),
             "https://mcp.notion.com/.well-known/oauth-protected-resource/mcp"
         );
     }

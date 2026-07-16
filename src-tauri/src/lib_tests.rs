@@ -6,7 +6,8 @@ use super::{
     resolve_acp_artifact_references, resolve_composer_references, resolve_review_backend,
     resolve_workspace, session_runtime_status, should_hide_app_on_macos_close, side_chat_prompt,
     transcript_page_items, update_check_from_release, user_message_start, AgentEvent,
-    ComposerReferenceArg, GithubRelease, McpConnection, McpTransport, MAX_PENDING_UI_EVENT_BYTES,
+    ComposerReferenceArg, GithubRelease, McpConnection, McpHttpAuth, McpTransport,
+    MAX_PENDING_UI_EVENT_BYTES,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -756,6 +757,7 @@ fn mcp_connection_serde_roundtrip() {
         transport: McpTransport::Http {
             url: "https://x/mcp".into(),
             headers: vec![("Authorization".into(), "Bearer t".into())],
+            auth: McpHttpAuth::OAuth,
         },
     };
     let notion = McpConnection {
@@ -777,10 +779,12 @@ fn mcp_connection_serde_roundtrip() {
         transport: McpTransport::Http {
             url: "u".into(),
             headers: vec![],
+            auth: McpHttpAuth::None,
         },
     })
     .unwrap();
     assert_eq!(j["transport"]["kind"], "http");
+    assert_eq!(j["transport"]["auth"], "none");
     let notion_json = serde_json::to_value(&McpConnection {
         id: "notion".into(),
         name: "Notion".into(),
@@ -789,6 +793,24 @@ fn mcp_connection_serde_roundtrip() {
     })
     .unwrap();
     assert_eq!(notion_json["transport"]["kind"], "notion");
+}
+
+#[test]
+fn legacy_notion_connection_normalizes_to_http_oauth() {
+    let mut connections = vec![McpConnection {
+        id: "notion".into(),
+        name: "Notion".into(),
+        enabled: true,
+        transport: McpTransport::Notion,
+    }];
+    crate::normalize_mcp_connections(&mut connections);
+    match &connections[0].transport {
+        McpTransport::Http { url, auth, .. } => {
+            assert_eq!(url, crate::mcp_oauth::NOTION_MCP_URL);
+            assert_eq!(*auth, McpHttpAuth::OAuth);
+        }
+        _ => panic!("legacy Notion transport was not normalized"),
+    }
 }
 
 #[test]

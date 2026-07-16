@@ -1031,6 +1031,8 @@ pub(crate) enum ConnTransport {
         url: String,
         #[serde(default)]
         headers: Vec<(String, String)>,
+        #[serde(default)]
+        auth: String,
     },
     /// OAuth-backed hosted Notion MCP. Credentials never cross the UI bridge.
     Notion,
@@ -1060,13 +1062,12 @@ pub(crate) struct ConnectorInfo {
     pub(crate) key: String,
     pub(crate) name: String,
     pub(crate) kind: String,
-    #[allow(dead_code)]
     pub(crate) enabled: bool,
     pub(crate) skip_approvals: bool,
-    #[allow(dead_code)]
     pub(crate) transport: String,
-    #[allow(dead_code)]
     pub(crate) subtitle: String,
+    #[serde(default)]
+    pub(crate) auth: String,
     pub(crate) tools: Vec<ConnectorTool>,
 }
 #[derive(Clone, serde::Deserialize)]
@@ -1098,6 +1099,7 @@ pub(crate) struct ConnForm {
     pub(crate) args: String,
     pub(crate) url: String,
     pub(crate) headers: String,
+    pub(crate) auth: String,
     pub(crate) enabled: bool,
 }
 

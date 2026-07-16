@@ -167,6 +167,7 @@ export function tauriMock(): void {
         kind: "http",
         url: "https://api.wolai.com/v1/mcp/",
         headers: [],
+        auth: "none",
       },
     },
   ];
@@ -866,18 +867,28 @@ export function tauriMock(): void {
                   skip_approvals: false,
                   transport: "",
                   subtitle: "",
+                  auth: "",
                   tools: [{ name: "biomart_query", mode: "allow", description: "" }],
                 },
-                {
-                  key: "conn-wolai",
-                  name: "wolai_cmp",
+                ...mockMcpConnections.map((connection) => ({
+                  key: connection.id,
+                  name: connection.name,
                   kind: "custom",
-                  enabled: true,
+                  enabled: connection.enabled,
                   skip_approvals: false,
-                  transport: "http",
-                  subtitle: "https://api.wolai.com/v1/mcp/",
+                  transport: connection.transport?.kind === "notion"
+                    ? "http"
+                    : String(connection.transport?.kind ?? ""),
+                  subtitle: connection.transport?.kind === "stdio"
+                    ? String(connection.transport?.command ?? "")
+                    : connection.transport?.kind === "notion"
+                      ? "https://mcp.notion.com/mcp"
+                      : String(connection.transport?.url ?? ""),
+                  auth: connection.transport?.kind === "notion"
+                    ? "oauth"
+                    : String(connection.transport?.auth ?? "none"),
                   tools: [],
-                },
+                })),
               ],
             };
           case "list_approval_grants":
@@ -914,17 +925,14 @@ export function tauriMock(): void {
           case "set_approval_scope":
           case "set_connector_skip_approvals":
             return null;
-          case "add_notion_connection":
+          case "authorize_http_connection": {
+            const connection = plain(arg("conn") ?? {});
             mockMcpConnections = [
-              ...mockMcpConnections.filter((connection) => connection.transport?.kind !== "notion"),
-              {
-                id: "notion",
-                name: String(arg("name") ?? "").trim() || "Notion",
-                enabled: true,
-                transport: { kind: "notion" },
-              },
+              ...mockMcpConnections.filter((item) => item.id !== connection.id),
+              connection,
             ];
             return null;
+          }
           case "set_credential": {
             const id = String(arg("id") ?? "");
             mockCredentials[id] = String(arg("value") ?? "").trim().length > 0;

@@ -29,8 +29,8 @@ mod harvest;
 mod library_commands;
 mod mcp_bridge;
 pub use mcp_bridge::run_mcp_bridge_cli;
+mod mcp_oauth;
 mod models;
-mod notion;
 mod pet_commands;
 mod project_sync;
 mod project_transfer;
@@ -390,6 +390,23 @@ struct MemoryFile {
     bytes: u64,
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum McpHttpAuth {
+    #[default]
+    None,
+    OAuth,
+}
+
+impl McpHttpAuth {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::OAuth => "oauth",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum McpTransport {
@@ -406,9 +423,11 @@ enum McpTransport {
         url: String,
         #[serde(default)]
         headers: Vec<(String, String)>,
+        #[serde(default)]
+        auth: McpHttpAuth,
     },
-    /// Notion's hosted MCP service. OAuth credentials live in the OS keyring,
-    /// never in the connection setting or SQLite.
+    /// Legacy representation written by Notion MCP builds up to `.3`.
+    /// `load_mcp_connections` normalizes it to an OAuth HTTP connection.
     Notion,
 }
 
@@ -2263,14 +2282,28 @@ fn specialist_prompt_section(spec: &specialists::Specialist) -> String {
     format!("\n\n## Specialist: {}\n{}", spec.name, spec.instructions)
 }
 
+fn normalize_mcp_connections(connections: &mut [McpConnection]) {
+    for connection in connections {
+        if matches!(&connection.transport, McpTransport::Notion) {
+            connection.transport = McpTransport::Http {
+                url: mcp_oauth::NOTION_MCP_URL.into(),
+                headers: vec![],
+                auth: McpHttpAuth::OAuth,
+            };
+        }
+    }
+}
+
 async fn load_mcp_connections(store: &Store) -> Vec<McpConnection> {
-    store
+    let mut connections = store
         .get_setting("mcp_connections")
         .await
         .ok()
         .flatten()
         .and_then(|s| serde_json::from_str::<Vec<McpConnection>>(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    normalize_mcp_connections(&mut connections);
+    connections
 }
 
 async fn save_mcp_connections(store: &Store, conns: &[McpConnection]) -> Result<(), String> {
@@ -2446,10 +2479,11 @@ async fn connect_mcp(conn: &McpConnection) -> anyhow::Result<wisp_mcp::McpClient
             }
             wisp_mcp::McpClient::launch_with_command(cmd).await
         }
-        McpTransport::Http { url, headers } => {
-            wisp_mcp::McpClient::connect_http(url, headers).await
-        }
-        McpTransport::Notion => notion::connect(&conn.id).await,
+        McpTransport::Http { url, headers, auth } => match auth {
+            McpHttpAuth::None => wisp_mcp::McpClient::connect_http(url, headers).await,
+            McpHttpAuth::OAuth => mcp_oauth::connect(&conn.id, url, headers).await,
+        },
+        McpTransport::Notion => mcp_oauth::connect(&conn.id, mcp_oauth::NOTION_MCP_URL, &[]).await,
     }
 }
 
@@ -6353,7 +6387,7 @@ pub fn run() {
             open_external_url,
             connector_commands::list_mcp_connections,
             connector_commands::add_mcp_connection,
-            connector_commands::add_notion_connection,
+            connector_commands::authorize_http_connection,
             connector_commands::update_mcp_connection,
             connector_commands::delete_mcp_connection,
             connector_commands::set_mcp_connection_enabled,
