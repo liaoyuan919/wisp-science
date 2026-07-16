@@ -1,6 +1,6 @@
 /* ---------- Center (conversation) ---------- */
 .center {
-  flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
+  flex: 1 1 0; min-width: min(360px, 100%); display: flex; flex-direction: column;
   background: var(--bg-app);
   container-type: inline-size;
   /* Scale with the center pane; cap keeps prose readable on ultra-wide layouts. */

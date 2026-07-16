@@ -55,10 +55,29 @@ const HOME_SEARCH_ARTIFACT_LIMIT: usize = 8;
 const HOME_SEARCH_SESSION_LIMIT: usize = 6;
 const TRANSCRIPT_RENDER_TURNS: usize = 40;
 const TRANSCRIPT_WINDOW_STEP: usize = 20;
+const CENTER_PANE_MIN_WIDTH: f64 = 360.0;
+const RIGHT_PANE_MIN_WIDTH: f64 = 320.0;
+const RIGHT_PANE_MAX_WIDTH: f64 = 900.0;
+const PANE_RESIZER_WIDTH: f64 = 5.0;
+const SIDEBAR_RESIZER_WIDTH: f64 = 10.0;
 const THEME_STORAGE_KEY: &str = "wisp-theme";
 /// Reserved `acp_config_menu_open` key for the session-mode dropdown, kept
 /// distinct from any agent-supplied config option id.
 const ACP_MODE_MENU: &str = "__acp_session_mode";
+
+fn max_right_pane_width(sidebar_open: bool, sidebar_width: f64) -> f64 {
+    let viewport_width = web_sys::window()
+        .and_then(|window| window.inner_width().ok())
+        .and_then(|width| width.as_f64())
+        .unwrap_or(RIGHT_PANE_MAX_WIDTH + CENTER_PANE_MIN_WIDTH + SIDEBAR_W_DEFAULT);
+    let sidebar_space = if sidebar_open {
+        sidebar_width + SIDEBAR_RESIZER_WIDTH
+    } else {
+        0.0
+    };
+    let available = viewport_width - sidebar_space - CENTER_PANE_MIN_WIDTH - PANE_RESIZER_WIDTH;
+    available.clamp(RIGHT_PANE_MIN_WIDTH, RIGHT_PANE_MAX_WIDTH)
+}
 
 #[derive(Default)]
 struct ProjectOpenGate {
@@ -3145,7 +3164,8 @@ fn App() -> impl IntoView {
     let on_resize_move = move |ev: web_sys::MouseEvent| {
         if dragging.get() {
             let dx = drag_start_x.get() - ev.client_x() as f64;
-            right_w.set((drag_start_w.get() + dx).clamp(320.0, 900.0));
+            let max_width = max_right_pane_width(show_sidebar.get(), sidebar_w.get());
+            right_w.set((drag_start_w.get() + dx).clamp(RIGHT_PANE_MIN_WIDTH, max_width));
         }
     };
 
@@ -5933,7 +5953,12 @@ fn App() -> impl IntoView {
             <button type="button" class="rightpane-backdrop"
                 aria-label=move || t(locale.get(), "right.close")
                 on:click=move |_| show_right.set(false)></button>
-            <section class="rightpane" style=move || format!("width:{}px", right_w.get())>
+            <section class="rightpane" style=move || {
+                let width = right_w
+                    .get()
+                    .min(max_right_pane_width(show_sidebar.get(), sidebar_w.get()));
+                format!("width:{width}px")
+            }>
                 <div class="rp-tabs">
                     {move || {
                         let loc = locale.get();
