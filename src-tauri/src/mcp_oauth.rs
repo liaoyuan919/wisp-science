@@ -15,12 +15,13 @@ use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    time::Instant,
 };
 use url::Url;
 
-pub const NOTION_MCP_URL: &str = "https://mcp.notion.com/mcp";
 const CALLBACK_PATH: &str = "/callback";
 const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const CALLBACK_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[derive(Clone)]
 pub struct PendingAuthorization {
@@ -42,6 +43,8 @@ impl PendingAuthorization {
 #[derive(Deserialize)]
 struct ProtectedResourceMetadata {
     authorization_servers: Vec<String>,
+    #[serde(default)]
+    scopes_supported: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -82,10 +85,6 @@ struct TokenResponse {
 
 fn secret_name(connection_id: &str) -> String {
     format!("mcp_oauth:{connection_id}")
-}
-
-fn legacy_secret_name(connection_id: &str) -> String {
-    format!("notion_oauth:{connection_id}")
 }
 
 fn http_client() -> Result<reqwest::Client> {
@@ -133,6 +132,30 @@ fn protected_resource_metadata_url(resource: &str) -> Result<Url> {
     Ok(metadata)
 }
 
+/// RFC 8414 inserts the well-known suffix before an issuer path.
+fn authorization_server_metadata_url(issuer: &str) -> Result<Url> {
+    let issuer = Url::parse(issuer).context("parse MCP authorization server URL")?;
+    let issuer_path = issuer.path().trim_end_matches('/');
+    let mut metadata = issuer.clone();
+    metadata.set_path(&format!(
+        "/.well-known/oauth-authorization-server{issuer_path}"
+    ));
+    metadata.set_query(None);
+    metadata.set_fragment(None);
+    Ok(metadata)
+}
+
+/// OpenID Connect discovery appends its suffix to the issuer path.
+fn openid_configuration_url(issuer: &str) -> Result<Url> {
+    let issuer = Url::parse(issuer).context("parse MCP authorization server URL")?;
+    let issuer_path = issuer.path().trim_end_matches('/');
+    let mut metadata = issuer.clone();
+    metadata.set_path(&format!("{issuer_path}/.well-known/openid-configuration"));
+    metadata.set_query(None);
+    metadata.set_fragment(None);
+    Ok(metadata)
+}
+
 async fn json_response<T: serde::de::DeserializeOwned>(
     response: reqwest::Response,
     operation: &str,
@@ -146,6 +169,36 @@ async fn json_response<T: serde::de::DeserializeOwned>(
         ));
     }
     serde_json::from_str(&text).with_context(|| format!("parse {operation} response"))
+}
+
+async fn discover_authorization_server(
+    client: &reqwest::Client,
+    issuer: &str,
+) -> Result<AuthorizationServerMetadata> {
+    let urls = [
+        authorization_server_metadata_url(issuer)?,
+        openid_configuration_url(issuer)?,
+    ];
+    let mut errors = Vec::new();
+    for url in urls {
+        let result = async {
+            let response = client
+                .get(url.clone())
+                .send()
+                .await
+                .with_context(|| format!("request {url}"))?;
+            json_response(response, "MCP authorization-server discovery").await
+        }
+        .await;
+        match result {
+            Ok(metadata) => return Ok(metadata),
+            Err(error) => errors.push(format!("{url}: {error:#}")),
+        }
+    }
+    Err(anyhow!(
+        "MCP authorization-server discovery failed: {}",
+        errors.join("; ")
+    ))
 }
 
 /// Bind the loopback callback listener before registering a dynamic client, so
@@ -173,19 +226,7 @@ pub async fn begin_authorization(
         .authorization_servers
         .first()
         .ok_or_else(|| anyhow!("MCP OAuth discovery returned no authorization server"))?;
-    let metadata_url = Url::parse(auth_server)
-        .context("parse MCP authorization server URL")?
-        .join("/.well-known/oauth-authorization-server")
-        .context("build MCP OAuth metadata URL")?;
-    let metadata: AuthorizationServerMetadata = json_response(
-        client
-            .get(metadata_url)
-            .send()
-            .await
-            .context("discover MCP authorization server")?,
-        "MCP authorization-server discovery",
-    )
-    .await?;
+    let metadata = discover_authorization_server(&client, auth_server).await?;
     let registration_endpoint = metadata
         .registration_endpoint
         .as_deref()
@@ -196,7 +237,7 @@ pub async fn begin_authorization(
             .header("accept", "application/json")
             .json(&json!({
                 "client_name": "Wisp Science",
-                "client_uri": "https://github.com/chewice/wisp-science-notionMCP",
+                "client_uri": "https://github.com/xuzhougeng/wisp-science",
                 "redirect_uris": [redirect_uri],
                 "grant_types": ["authorization_code", "refresh_token"],
                 "response_types": ["code"],
@@ -211,10 +252,11 @@ pub async fn begin_authorization(
 
     let code_verifier = random_urlsafe(32)?;
     let state = random_urlsafe(32)?;
+    let requested_scopes = protected.scopes_supported;
     let mut authorization_url =
         Url::parse(&metadata.authorization_endpoint).context("parse MCP authorization endpoint")?;
-    authorization_url
-        .query_pairs_mut()
+    let mut query = authorization_url.query_pairs_mut();
+    query
         .append_pair("response_type", "code")
         .append_pair("client_id", &registration.client_id)
         .append_pair("redirect_uri", &redirect_uri)
@@ -223,6 +265,10 @@ pub async fn begin_authorization(
         .append_pair("code_challenge_method", "S256")
         .append_pair("resource", resource_url)
         .append_pair("prompt", "consent");
+    if !requested_scopes.is_empty() {
+        query.append_pair("scope", &requested_scopes.join(" "));
+    }
+    drop(query);
     Ok((
         listener,
         PendingAuthorization {
@@ -237,7 +283,7 @@ pub async fn begin_authorization(
     ))
 }
 
-fn callback_parameters(request: &str) -> Result<(Option<String>, String, Option<String>)> {
+fn callback_request_url(request: &str) -> Result<Url> {
     let target = request
         .lines()
         .next()
@@ -249,6 +295,11 @@ fn callback_parameters(request: &str) -> Result<(Option<String>, String, Option<
     if url.path() != CALLBACK_PATH {
         return Err(anyhow!("unexpected local OAuth callback path"));
     }
+    Ok(url)
+}
+
+fn callback_parameters(request: &str) -> Result<(Option<String>, String, Option<String>)> {
+    let url = callback_request_url(request)?;
     let params = url
         .query_pairs()
         .collect::<std::collections::HashMap<_, _>>();
@@ -261,21 +312,66 @@ fn callback_parameters(request: &str) -> Result<(Option<String>, String, Option<
     Ok((code, state, error))
 }
 
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 async fn reply_callback(stream: &mut TcpStream, ok: bool, message: &str) {
     let title = if ok {
         "MCP connected"
     } else {
         "MCP connection failed"
     };
-    let body = format!(
-        "<!doctype html><meta charset=\"utf-8\"><title>{title}</title><h1>{title}</h1><p>{message}</p><p>You can close this tab and return to Wisp.</p>"
-    );
+    let message = html_escape(message);
+    let body = format!("<!doctype html><meta charset=\"utf-8\"><title>{title}</title><h1>{title}</h1><p>{message}</p><p>You can close this tab and return to Wisp.</p>");
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = stream.write_all(response.as_bytes()).await;
     let _ = stream.shutdown().await;
+}
+
+async fn read_callback_request(stream: &mut TcpStream, deadline: Instant) -> Option<String> {
+    let mut request = Vec::with_capacity(2048);
+    let mut buffer = [0_u8; 2048];
+    while request.len() < 16 * 1024 {
+        let read_deadline = std::cmp::min(deadline, Instant::now() + CALLBACK_READ_TIMEOUT);
+        let n = match tokio::time::timeout_at(read_deadline, stream.read(&mut buffer)).await {
+            Ok(Ok(n)) => n,
+            _ => return None,
+        };
+        if n == 0 {
+            return None;
+        }
+        request.extend_from_slice(&buffer[..n]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let request = std::str::from_utf8(&request).ok()?.to_string();
+    callback_request_url(&request).is_ok().then_some(request)
+}
+
+async fn accept_callback_request(
+    listener: &TcpListener,
+    deadline: Instant,
+) -> Result<(TcpStream, String)> {
+    loop {
+        let (mut stream, _) = tokio::time::timeout_at(deadline, listener.accept())
+            .await
+            .map_err(|_| anyhow!("MCP authorization timed out after 10 minutes"))?
+            .context("accept MCP OAuth callback")?;
+        if let Some(request) = read_callback_request(&mut stream, deadline).await {
+            return Ok((stream, request));
+        }
+        let _ = stream.shutdown().await;
+    }
 }
 
 async fn exchange_code(pending: &PendingAuthorization, code: &str) -> Result<Credential> {
@@ -319,18 +415,10 @@ pub async fn finish_authorization(
     pending: PendingAuthorization,
     connection_id: &str,
 ) -> Result<()> {
-    let (mut stream, _) = tokio::time::timeout(AUTH_TIMEOUT, listener.accept())
-        .await
-        .map_err(|_| anyhow!("MCP authorization timed out after 10 minutes"))?
-        .context("accept MCP OAuth callback")?;
-    let mut request = vec![0_u8; 16 * 1024];
-    let n = stream
-        .read(&mut request)
-        .await
-        .context("read MCP OAuth callback")?;
+    let deadline = Instant::now() + AUTH_TIMEOUT;
+    let (mut stream, request) = accept_callback_request(&listener, deadline).await?;
     let result = async {
-        let request = std::str::from_utf8(&request[..n]).context("decode OAuth callback")?;
-        let (code, state, error) = callback_parameters(request)?;
+        let (code, state, error) = callback_parameters(&request)?;
         if state != pending.state {
             return Err(anyhow!(
                 "MCP OAuth state did not match; authorization was rejected"
@@ -401,7 +489,6 @@ pub async fn connect(
     headers: &[(String, String)],
 ) -> Result<wisp_mcp::McpClient> {
     let raw = wisp_store::secrets::Secret::get(&secret_name(connection_id))
-        .or_else(|_| wisp_store::secrets::Secret::get(&legacy_secret_name(connection_id)))
         .map_err(|_| anyhow!("OAuth authorization is not complete; reconnect the MCP service"))?;
     let mut credential: Credential =
         serde_json::from_str(&raw).context("parse saved MCP OAuth credential")?;
@@ -425,12 +512,10 @@ pub async fn connect(
 
 pub fn has_credential(connection_id: &str) -> bool {
     wisp_store::secrets::Secret::get(&secret_name(connection_id)).is_ok()
-        || wisp_store::secrets::Secret::get(&legacy_secret_name(connection_id)).is_ok()
 }
 
 pub fn forget(connection_id: &str) {
     let _ = wisp_store::secrets::Secret::delete(&secret_name(connection_id));
-    let _ = wisp_store::secrets::Secret::delete(&legacy_secret_name(connection_id));
 }
 
 #[cfg(test)]
@@ -448,10 +533,26 @@ mod tests {
     #[test]
     fn protected_resource_metadata_precedes_resource_path() {
         assert_eq!(
-            protected_resource_metadata_url(NOTION_MCP_URL)
+            protected_resource_metadata_url("https://mcp.notion.com/mcp")
                 .unwrap()
                 .as_str(),
             "https://mcp.notion.com/.well-known/oauth-protected-resource/mcp"
+        );
+    }
+
+    #[test]
+    fn authorization_server_metadata_preserves_issuer_path() {
+        assert_eq!(
+            authorization_server_metadata_url("https://login.example.com/tenant/oauth")
+                .unwrap()
+                .as_str(),
+            "https://login.example.com/.well-known/oauth-authorization-server/tenant/oauth"
+        );
+        assert_eq!(
+            openid_configuration_url("https://login.example.com/tenant/oauth")
+                .unwrap()
+                .as_str(),
+            "https://login.example.com/tenant/oauth/.well-known/openid-configuration"
         );
     }
 
@@ -469,5 +570,37 @@ mod tests {
     #[test]
     fn callback_parser_rejects_other_paths() {
         assert!(callback_parameters("GET /wrong?state=s HTTP/1.1\r\n\r\n").is_err());
+    }
+
+    #[test]
+    fn callback_page_escapes_error_text() {
+        assert_eq!(
+            html_escape("<script>alert('x')</script>"),
+            "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;"
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_listener_skips_empty_preconnect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let preconnect = TcpStream::connect(address).await.unwrap();
+        drop(preconnect);
+
+        let sender = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(address).await.unwrap();
+            stream
+                .write_all(b"GET /callback?code=abc&state=s HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let (_, request) = accept_callback_request(
+            &listener,
+            Instant::now() + std::time::Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        sender.await.unwrap();
+        assert!(request.starts_with("GET /callback?"));
     }
 }

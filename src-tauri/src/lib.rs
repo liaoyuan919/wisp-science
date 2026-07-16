@@ -426,9 +426,6 @@ enum McpTransport {
         #[serde(default)]
         auth: McpHttpAuth,
     },
-    /// Legacy representation written by Notion MCP builds up to `.3`.
-    /// `load_mcp_connections` normalizes it to an OAuth HTTP connection.
-    Notion,
 }
 
 /// A user-configured MCP server connection.
@@ -2282,28 +2279,14 @@ fn specialist_prompt_section(spec: &specialists::Specialist) -> String {
     format!("\n\n## Specialist: {}\n{}", spec.name, spec.instructions)
 }
 
-fn normalize_mcp_connections(connections: &mut [McpConnection]) {
-    for connection in connections {
-        if matches!(&connection.transport, McpTransport::Notion) {
-            connection.transport = McpTransport::Http {
-                url: mcp_oauth::NOTION_MCP_URL.into(),
-                headers: vec![],
-                auth: McpHttpAuth::OAuth,
-            };
-        }
-    }
-}
-
 async fn load_mcp_connections(store: &Store) -> Vec<McpConnection> {
-    let mut connections = store
+    store
         .get_setting("mcp_connections")
         .await
         .ok()
         .flatten()
         .and_then(|s| serde_json::from_str::<Vec<McpConnection>>(&s).ok())
-        .unwrap_or_default();
-    normalize_mcp_connections(&mut connections);
-    connections
+        .unwrap_or_default()
 }
 
 async fn save_mcp_connections(store: &Store, conns: &[McpConnection]) -> Result<(), String> {
@@ -2483,7 +2466,6 @@ async fn connect_mcp(conn: &McpConnection) -> anyhow::Result<wisp_mcp::McpClient
             McpHttpAuth::None => wisp_mcp::McpClient::connect_http(url, headers).await,
             McpHttpAuth::OAuth => mcp_oauth::connect(&conn.id, url, headers).await,
         },
-        McpTransport::Notion => mcp_oauth::connect(&conn.id, mcp_oauth::NOTION_MCP_URL, &[]).await,
     }
 }
 

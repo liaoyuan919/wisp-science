@@ -3410,17 +3410,6 @@ pub(super) fn conn_form_from_row(row: &ConnRow) -> ConnForm {
             },
             enabled: row.enabled,
         },
-        ConnTransport::Notion => ConnForm {
-            id: Some(row.id.clone()),
-            name: row.name.clone(),
-            kind: "http".into(),
-            command: String::new(),
-            args: String::new(),
-            url: "https://mcp.notion.com/mcp".into(),
-            headers: String::new(),
-            auth: "oauth".into(),
-            enabled: row.enabled,
-        },
     }
 }
 

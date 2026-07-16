@@ -760,13 +760,7 @@ fn mcp_connection_serde_roundtrip() {
             auth: McpHttpAuth::OAuth,
         },
     };
-    let notion = McpConnection {
-        id: "notion".into(),
-        name: "Notion".into(),
-        enabled: true,
-        transport: McpTransport::Notion,
-    };
-    for c in [stdio, http, notion] {
+    for c in [stdio, http] {
         let json = serde_json::to_string(&c).unwrap();
         let back: McpConnection = serde_json::from_str(&json).unwrap();
         assert_eq!(serde_json::to_string(&back).unwrap(), json);
@@ -785,32 +779,6 @@ fn mcp_connection_serde_roundtrip() {
     .unwrap();
     assert_eq!(j["transport"]["kind"], "http");
     assert_eq!(j["transport"]["auth"], "none");
-    let notion_json = serde_json::to_value(&McpConnection {
-        id: "notion".into(),
-        name: "Notion".into(),
-        enabled: true,
-        transport: McpTransport::Notion,
-    })
-    .unwrap();
-    assert_eq!(notion_json["transport"]["kind"], "notion");
-}
-
-#[test]
-fn legacy_notion_connection_normalizes_to_http_oauth() {
-    let mut connections = vec![McpConnection {
-        id: "notion".into(),
-        name: "Notion".into(),
-        enabled: true,
-        transport: McpTransport::Notion,
-    }];
-    crate::normalize_mcp_connections(&mut connections);
-    match &connections[0].transport {
-        McpTransport::Http { url, auth, .. } => {
-            assert_eq!(url, crate::mcp_oauth::NOTION_MCP_URL);
-            assert_eq!(*auth, McpHttpAuth::OAuth);
-        }
-        _ => panic!("legacy Notion transport was not normalized"),
-    }
 }
 
 #[test]

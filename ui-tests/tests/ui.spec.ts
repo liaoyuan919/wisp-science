@@ -24,8 +24,8 @@ async function openSettingsSection(page: Page, name: string) {
 
 // The app now boots to the Projects landing screen; open a real project (not
 // the "Example project" card) to reach the chat UI the tests assert against.
-async function enterApp(page: Page) {
-  await page.goto("/");
+async function enterApp(page: Page, path = "/") {
+  await page.goto(path);
   await page.locator(".proj-card-main").first().click();
   await expect(newSessionButton(page)).toBeVisible();
 }
@@ -2265,6 +2265,28 @@ test("Notion uses the generic Remote URL OAuth connection flow", async ({ page }
   await expect(page.getByText("Enabled", { exact: true })).toBeVisible();
   await expect(page.getByText("Authentication", { exact: true })).toBeVisible();
   await expect(page.getByText("OAuth", { exact: true })).toBeVisible();
+});
+
+test("OAuth authorization keeps Cancel available and clears form status", async ({ page }) => {
+  await enterApp(page, "/?mockOAuthPending=1");
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Connections" }).click();
+  await page.getByRole("button", { name: "Add connection" }).click();
+  await page.getByLabel("Name").fill("Hosted MCP");
+  await page.getByLabel("Type").selectOption("http");
+  await page.getByPlaceholder("https://host/mcp").fill("https://example.com/mcp");
+  await page.getByLabel("Authentication").selectOption("oauth");
+  await expect(page.getByPlaceholder("X-Custom-Header: value")).toBeVisible();
+
+  await page.getByRole("button", { name: "Test" }).click();
+  await expect(page.getByText("Complete authorization in your browser…")).toBeVisible();
+  const cancel = page.getByRole("button", { name: "Cancel" });
+  await expect(cancel).toBeEnabled();
+  await cancel.click();
+  await expect(page.getByRole("button", { name: "Add connection" })).toBeVisible();
+
+  await page.evaluate(() => (window as any).__resolveMockOAuth());
+  await expect(page.locator(".settings-status")).toHaveCount(0);
 });
 
 test("settings validation rejects blank required fields", async ({ page }) => {

@@ -169,11 +169,6 @@ pub(super) async fn list_connectors(state: State<'_, AppState>) -> Result<Connec
         let (transport, subtitle, auth) = match &c.transport {
             McpTransport::Stdio { command, .. } => ("stdio", command.clone(), String::new()),
             McpTransport::Http { url, auth, .. } => ("http", url.clone(), auth.as_str().into()),
-            McpTransport::Notion => (
-                "http",
-                crate::mcp_oauth::NOTION_MCP_URL.into(),
-                "oauth".into(),
-            ),
         };
         connectors.push(ConnectorInfo {
             key: c.id,
@@ -284,7 +279,7 @@ fn is_oauth_http(connection: &McpConnection) -> bool {
         McpTransport::Http {
             auth: McpHttpAuth::OAuth,
             ..
-        } | McpTransport::Notion
+        }
     )
 }
 
@@ -376,7 +371,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn identifies_oauth_http_and_legacy_notion_connections() {
+    fn identifies_oauth_http_connections() {
         let oauth = McpConnection {
             id: "remote".into(),
             name: "Remote".into(),

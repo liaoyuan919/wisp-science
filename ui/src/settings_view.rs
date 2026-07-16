@@ -2002,7 +2002,12 @@ pub(super) fn SettingsView(
                                             </select>
                                         </label>
                                         <label>{move || t(locale.get(),"conn.headers")}
-                                            <input placeholder="X-Custom-Header: value" prop:value=move || conn_form.get().map(|f| f.headers.clone()).unwrap_or_default()
+                                            <input placeholder=move || if conn_form.get().is_some_and(|form| form.auth == "oauth") {
+                                                    "X-Custom-Header: value"
+                                                } else {
+                                                    "Authorization: Bearer token"
+                                                }
+                                                prop:value=move || conn_form.get().map(|f| f.headers.clone()).unwrap_or_default()
                                                 disabled=move || oauth_authorizing.get()
                                                 on:input=move |ev| conn_form.update(|o| if let Some(o)=o { o.headers = event_target_input(&ev).value(); }) /></label>
                                     })}
@@ -2046,8 +2051,11 @@ pub(super) fn SettingsView(
                                                 }
                                             });
                                         }>{move || t(locale.get(),"conn.test")}</button>
-                                        <button type="button" disabled=move || oauth_authorizing.get()
-                                            on:click=move |_| close_settings_subpage.call(())>{move || t(locale.get(),"settings.cancel")}</button>
+                                        <button type="button"
+                                            on:click=move |_| {
+                                                oauth_authorizing.set(false);
+                                                close_settings_subpage.call(());
+                                            }>{move || t(locale.get(),"settings.cancel")}</button>
                                         <button type="button" class="primary" on:click=move |_| { let f = conn_form.get().unwrap_or_default();
                                             spawn_local(async move {
                                                 if f.kind == "http" && f.auth == "oauth" {
@@ -2236,9 +2244,6 @@ pub(super) fn SettingsView(
                                 conn_test_msg.set(None);
                             }>{move || t(locale.get(), "conn.add")}</button>
                         </div>
-                        {move || conn_test_msg.get().map(|(ok,msg)| view!{
-                            <div class="settings-status" class:ok=ok class:fail=move||!ok>{msg}</div>
-                        })}
                         <p class="settings-note">{move || t(locale.get(), "settings.applies_new_session")}</p>
                         <div class="settings-list">
                             <div class="settings-list-row">
@@ -2324,11 +2329,9 @@ pub(super) fn SettingsView(
                                     let kind_badge = match &c.transport {
                                         ConnTransport::Stdio { .. } => "stdio",
                                         ConnTransport::Http { .. } => "http",
-                                        ConnTransport::Notion => "http",
                                     };
                                     let auth_badge = match &c.transport {
                                         ConnTransport::Http { auth, .. } if auth == "oauth" => Some("OAuth"),
-                                        ConnTransport::Notion => Some("OAuth"),
                                         _ => None,
                                     };
                                     let enabled = c.enabled;
@@ -2349,7 +2352,6 @@ pub(super) fn SettingsView(
                                                     {match &c.transport {
                                                         ConnTransport::Stdio { command, .. } => command.clone(),
                                                         ConnTransport::Http { url, .. } => url.clone(),
-                                                        ConnTransport::Notion => "https://mcp.notion.com/mcp".into(),
                                                     }}
                                                 </span>
                                                 <span class="settings-list-sub">
