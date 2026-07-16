@@ -6357,7 +6357,6 @@ pub fn run() {
             connector_commands::delete_mcp_connection,
             connector_commands::set_mcp_connection_enabled,
             connector_commands::test_mcp_connection,
-            connector_commands::connect_notion,
             connector_commands::list_connectors,
             connector_commands::set_connector_enabled,
             connector_commands::set_tool_approval,

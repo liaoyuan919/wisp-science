@@ -5,7 +5,7 @@ use super::{
     Scope,
 };
 use serde::Serialize;
-use tauri::{Emitter, Manager, State};
+use tauri::{Manager, State};
 
 #[derive(Serialize, Clone)]
 pub(super) struct McpConnectionsView {
@@ -256,11 +256,44 @@ pub(super) async fn test_mcp_connection(
     Ok(tools)
 }
 
-/// Start Notion's OAuth authorization-code flow. The loopback listener is
-/// bound before the authorization URL is opened so the callback is safe on
-/// Windows, macOS, and Linux without a cloud redirect service.
-#[tauri::command]
-pub(super) async fn connect_notion(app: tauri::AppHandle) -> Result<(), String> {
+fn upsert_notion_connection(connections: &mut Vec<McpConnection>) -> bool {
+    let enabled = connections
+        .iter()
+        .find(|connection| connection.id == "notion")
+        .map(|connection| connection.enabled)
+        .unwrap_or(true);
+    let connection = McpConnection {
+        id: "notion".into(),
+        name: "Notion".into(),
+        enabled,
+        transport: McpTransport::Notion,
+    };
+    if let Some(slot) = connections
+        .iter_mut()
+        .find(|connection| connection.id == "notion")
+    {
+        *slot = connection;
+    } else {
+        connections.push(connection);
+    }
+    enabled
+}
+
+/// Ensure this Notion-focused fork has its built-in connector and authorize it
+/// without adding a dedicated Settings control. On first launch, OAuth opens
+/// in the system browser; subsequent launches reuse the keyring credential.
+pub(super) async fn ensure_notion_authorized(app: tauri::AppHandle) -> Result<(), String> {
+    let enabled = {
+        let state = app.state::<AppState>();
+        let mut connections = load_mcp_connections(&state.store).await;
+        let enabled = upsert_notion_connection(&mut connections);
+        save_mcp_connections(&state.store, &connections).await?;
+        enabled
+    };
+    if !enabled || crate::notion::is_authorized("notion") {
+        return Ok(());
+    }
+
     let (listener, pending) = crate::notion::begin_authorization()
         .await
         .map_err(|error| error.to_string())?;
@@ -271,38 +304,30 @@ pub(super) async fn connect_notion(app: tauri::AppHandle) -> Result<(), String> 
             .open_url(&authorization_url, None::<&str>)
             .map_err(|error| format!("open Notion authorization page: {error}"))?;
     }
-    let app_after_callback = app.clone();
-    tokio::spawn(async move {
-        let result = crate::notion::finish_authorization(listener, pending, "notion").await;
-        let payload = match result {
-            Ok(()) => {
-                let state = app_after_callback.state::<AppState>();
-                let mut connections = load_mcp_connections(&state.store).await;
-                let connection = McpConnection {
-                    id: "notion".into(),
-                    name: "Notion".into(),
-                    enabled: true,
-                    transport: McpTransport::Notion,
-                };
-                if let Some(slot) = connections
-                    .iter_mut()
-                    .find(|connection| connection.id == "notion")
-                {
-                    *slot = connection;
-                } else {
-                    connections.push(connection);
-                }
-                match save_mcp_connections(&state.store, &connections).await {
-                    Ok(()) => {
-                        clear_idle_agents(&state).await;
-                        serde_json::json!({ "ok": true, "message": "Notion connected." })
-                    }
-                    Err(error) => serde_json::json!({ "ok": false, "message": error }),
-                }
-            }
-            Err(error) => serde_json::json!({ "ok": false, "message": error.to_string() }),
-        };
-        let _ = app_after_callback.emit("notion-auth-result", payload);
-    });
+    crate::notion::finish_authorization(listener, pending, "notion")
+        .await
+        .map_err(|error| error.to_string())?;
+    let state = app.state::<AppState>();
+    clear_idle_agents(&state).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notion_connection_defaults_enabled_and_preserves_disabled_choice() {
+        let mut connections = Vec::new();
+        assert!(upsert_notion_connection(&mut connections));
+        assert_eq!(connections.len(), 1);
+        assert!(matches!(connections[0].transport, McpTransport::Notion));
+
+        connections[0].enabled = false;
+        connections[0].name = "old label".into();
+        assert!(!upsert_notion_connection(&mut connections));
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].name, "Notion");
+        assert!(matches!(connections[0].transport, McpTransport::Notion));
+    }
 }

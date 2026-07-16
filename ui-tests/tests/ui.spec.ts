@@ -2195,6 +2195,7 @@ test("custom MCP row opens tools while edit uses a dedicated button", async ({ p
   await enterApp(page);
   await page.getByRole("button", { name: "Settings" }).click();
   await page.getByRole("button", { name: "Connections" }).click();
+  await expect(page.getByRole("button", { name: "Connect Notion" })).toHaveCount(0);
 
   const row = page.locator(".settings-list-row", { hasText: "wolai_cmp" });
   await row.click();
@@ -2205,25 +2206,6 @@ test("custom MCP row opens tools while edit uses a dedicated button", async ({ p
   await row.getByRole("button", { name: "Edit connection" }).click();
   await expect(page.getByLabel("Name")).toHaveValue("wolai_cmp");
   await expect(page.getByPlaceholder("https://host/mcp")).toHaveValue("https://api.wolai.com/v1/mcp/");
-});
-
-test("Notion connection starts browser authorization and shows its result", async ({ page }) => {
-  await enterApp(page);
-  await openSettingsSection(page, "Connections");
-
-  await page.getByRole("button", { name: "Connect Notion" }).click();
-  await expect(page.locator(".settings-status")).toContainText("Opening Notion in your browser");
-  await expect.poll(async () => page.evaluate(() =>
-    ((window as any).__skillInvokeLog ?? []).some((call: any) => call.cmd === "connect_notion"),
-  )).toBe(true);
-
-  await page.evaluate(() => {
-    (window as any).__tauriEmit("notion-auth-result", {
-      ok: true,
-      message: "Notion connected.",
-    });
-  });
-  await expect(page.locator(".settings-status")).toHaveText("Notion connected.");
 });
 
 test("settings validation rejects blank required fields", async ({ page }) => {

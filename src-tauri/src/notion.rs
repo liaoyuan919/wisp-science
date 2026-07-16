@@ -113,6 +113,21 @@ fn callback_url(listener: &TcpListener) -> Result<String> {
     ))
 }
 
+/// RFC 9728 places protected-resource metadata before the resource path. For
+/// `https://mcp.notion.com/mcp`, the discovery URL is therefore
+/// `https://mcp.notion.com/.well-known/oauth-protected-resource/mcp`.
+fn protected_resource_metadata_url(resource: &str) -> Result<Url> {
+    let resource = Url::parse(resource).context("parse Notion MCP resource URL")?;
+    let resource_path = resource.path().trim_end_matches('/');
+    let mut metadata = resource.clone();
+    metadata.set_path(&format!(
+        "/.well-known/oauth-protected-resource{resource_path}"
+    ));
+    metadata.set_query(None);
+    metadata.set_fragment(None);
+    Ok(metadata)
+}
+
 async fn json_response<T: serde::de::DeserializeOwned>(
     response: reqwest::Response,
     operation: &str,
@@ -140,10 +155,10 @@ pub async fn begin_authorization() -> Result<(TcpListener, PendingAuthorization)
     let redirect_uri = callback_url(&listener)?;
     let client = http_client()?;
 
-    let protected_url = format!("{MCP_URL}/.well-known/oauth-protected-resource");
+    let protected_url = protected_resource_metadata_url(MCP_URL)?;
     let protected: ProtectedResourceMetadata = json_response(
         client
-            .get(&protected_url)
+            .get(protected_url)
             .send()
             .await
             .context("discover Notion protected resource")?,
@@ -376,7 +391,7 @@ async fn refresh(connection_id: &str, credential: &mut Credential) -> Result<()>
 /// access tokens before the MCP handshake.
 pub async fn connect(connection_id: &str) -> Result<wisp_mcp::McpClient> {
     let raw = wisp_store::secrets::Secret::get(&secret_name(connection_id))
-        .map_err(|_| anyhow!("Notion is not authorized; connect it from Settings → Connections"))?;
+        .map_err(|_| anyhow!("Notion authorization is not complete; finish it in your browser"))?;
     let mut credential: Credential =
         serde_json::from_str(&raw).context("parse saved Notion credential")?;
     if credential
@@ -395,6 +410,10 @@ pub async fn connect(connection_id: &str) -> Result<wisp_mcp::McpClient> {
     .await
 }
 
+pub fn is_authorized(connection_id: &str) -> bool {
+    wisp_store::secrets::Secret::get(&secret_name(connection_id)).is_ok()
+}
+
 pub fn forget(connection_id: &str) {
     let _ = wisp_store::secrets::Secret::delete(&secret_name(connection_id));
 }
@@ -408,6 +427,14 @@ mod tests {
         assert_eq!(
             code_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    #[test]
+    fn protected_resource_metadata_precedes_resource_path() {
+        assert_eq!(
+            protected_resource_metadata_url(MCP_URL).unwrap().as_str(),
+            "https://mcp.notion.com/.well-known/oauth-protected-resource/mcp"
         );
     }
 

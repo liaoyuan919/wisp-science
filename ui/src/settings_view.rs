@@ -5,7 +5,7 @@ use crate::app_support::{
     reviewer_missing_acp_profile_id, set_reviewer_backend, settings_section_label,
     settings_subpage_label, skill_matches_filter, CRED_GROUPS,
 };
-use crate::bindings::{invoke, invoke_checked, is_windows, listen};
+use crate::bindings::{invoke, invoke_checked, is_windows};
 use crate::dto::*;
 use crate::i18n::{localize_backend, set_document_lang, t, tf, Locale};
 use crate::text::{
@@ -14,7 +14,7 @@ use crate::text::{
 use leptos::*;
 use serde_wasm_bindgen::to_value;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use wasm_bindgen::{closure::Closure, JsCast, JsValue};
+use wasm_bindgen::JsValue;
 
 fn settings_provider_value(provider: &str) -> &'static str {
     match provider.trim() {
@@ -209,33 +209,6 @@ pub(super) fn SettingsView(
         runtime_interpreter_form,
     } = state;
     let acp_form_open = create_memo(move |_| acp_form.get().is_some());
-    // Notion completes OAuth in the system browser. Refresh this page when the
-    // loopback callback reaches the desktop backend, rather than making users
-    // close and reopen Settings to see the connected connector.
-    let notion_refresh_conns = refresh_conns.clone();
-    let notion_status = conn_test_msg;
-    let notion_callback = Closure::wrap(Box::new(move |payload: JsValue| {
-        let result = serde_wasm_bindgen::from_value::<serde_json::Value>(payload)
-            .unwrap_or_else(|_| serde_json::json!({ "ok": false, "message": "Notion authorization returned an invalid response." }));
-        let ok = result.get("ok").and_then(|value| value.as_bool()).unwrap_or(false);
-        let message = result
-            .get("message")
-            .and_then(|value| value.as_str())
-            .unwrap_or("Notion authorization finished.")
-            .to_string();
-        notion_status.set(Some((ok, message)));
-        if ok {
-            notion_refresh_conns.call(());
-        }
-    }) as Box<dyn FnMut(JsValue)>);
-    let notion_callback_js = notion_callback
-        .as_ref()
-        .unchecked_ref::<js_sys::Function>()
-        .clone();
-    notion_callback.forget();
-    spawn_local(async move {
-        let _ = listen("notion-auth-result", &notion_callback_js).await;
-    });
     let joining = create_rw_signal(false);
     let join_code = create_rw_signal(String::new());
     let join_busy = create_rw_signal(false);
@@ -2166,14 +2139,6 @@ pub(super) fn SettingsView(
                                 conn_form.set(Some(ConnForm { kind: "stdio".into(), enabled: true, ..Default::default() }));
                                 conn_test_msg.set(None);
                             }>{move || t(locale.get(), "conn.add")}</button>
-                            <button type="button" class="settings-add-btn" on:click=move |_| {
-                                conn_test_msg.set(Some((true, t(locale.get(), "conn.notion_waiting").into())));
-                                spawn_local(async move {
-                                    if let Err(error) = invoke_checked("connect_notion", JsValue::UNDEFINED).await {
-                                        conn_test_msg.set(Some((false, js_error_text(error))));
-                                    }
-                                });
-                            }>{move || t(locale.get(), "conn.notion_connect")}</button>
                         </div>
                         {move || conn_test_msg.get().map(|(ok,msg)| view!{
                             <div class="settings-status" class:ok=ok class:fail=move||!ok>{msg}</div>

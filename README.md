@@ -272,12 +272,13 @@ Then the agent can call that server's tools (e.g. PubMed search) directly.
 
 ### Notion MCP
 
-In the desktop app, open **Settings → Connections → Connect Notion**. Wisp
-opens Notion's authorization page in your browser and adds the hosted MCP
-server after you approve a workspace. The connection uses the official
+On first launch, this fork automatically opens Notion's authorization page in
+your browser. After you approve a workspace, Wisp adds the hosted MCP server
+without a dedicated connection button. The connection uses the official
 `https://mcp.notion.com/mcp` endpoint; OAuth access and refresh tokens are kept
-in the OS keyring rather than the project database. Disconnecting the Notion
-connection removes its saved credential.
+in the OS keyring rather than the project database. Deleting the Notion
+connection removes its saved credential; disabling it prevents automatic
+authorization on later launches.
 
 The connection applies to newly created agent sessions. Notion controls the
 workspace permissions exposed to the agent, so review write actions before
