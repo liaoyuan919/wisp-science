@@ -154,19 +154,21 @@ pub(super) fn Sidebar(
                     if list.is_empty() && folder_list.is_empty() {
                         return view! { <div class="side-hint">{t(loc, "sidebar.no_sessions")}</div> }.into_view();
                     }
-                    let dragging = drag_session.get();
-                    let dragging_for_make = dragging.clone();
+                    // Whether any folder exists — used to keep the "ungrouped" drop
+                    // zone available (so a session can be dragged out of a folder) without
+                    // reading drag_session here, which would rebuild the whole list mid-drag.
+                    let has_folders = !folder_list.is_empty();
                     let make = move |s: &SessionInfo| {
                         let id = s.id.clone();
                         let id_active = id.clone();
                         let id_attr = id.clone();
                         let id_running = id.clone();
                         let id_drag = id.clone();
+                        let id_dragcls = id.clone();
                         let title = if s.title.trim().is_empty() { t(loc, "sidebar.untitled").into() } else { s.title.clone() };
                         let title_attr = title.clone();
                         let title_tooltip = title.clone();
                         let open = load_session.clone();
-                        let is_dragging = dragging_for_make.as_deref() == Some(id_drag.as_str());
                         let id_click = id.clone();
                         let id_key = id.clone();
                         let id_rename = id.clone();
@@ -180,7 +182,7 @@ pub(super) fn Sidebar(
                                     title=title_tooltip
                                     class:active=move || active_session.get().as_deref() == Some(id_active.as_str())
                                     class:running=move || running.get().contains(&id_running)
-                                    class:dragging=is_dragging
+                                    class:dragging=move || drag_session.get().as_deref() == Some(id_dragcls.as_str())
                                     attr:draggable="true"
                                     data-session-id=id_attr
                                     data-session-title=title_attr
@@ -226,7 +228,6 @@ pub(super) fn Sidebar(
                         .cloned()
                         .collect();
                     let (today, earlier) = bucket_sessions_by_date(&ungrouped);
-                    let target = drop_target.get();
                     let move_to = move_session_to.clone();
                     let folder_views = folder_list.into_iter().map(|f| {
                         let fid = f.id.clone();
@@ -245,7 +246,7 @@ pub(super) fn Sidebar(
                             .filter(|s| s.folder_id.as_deref() == Some(fid.as_str()))
                             .cloned()
                             .collect();
-                        let is_target = target.as_deref() == Some(fid_target.as_str());
+                        let fid_target_cls = fid_target.clone();
                         let fid_target_over_enter = fid_target_over.clone();
                         let fid_rename = fid.clone();
                         let fname_rename = fname.clone();
@@ -254,7 +255,7 @@ pub(super) fn Sidebar(
                         let show_folder_actions = open_folder_actions.clone();
                         view! {
                             <div class="side-folder-wrap"
-                                class:drop-target=is_target
+                                class:drop-target=move || drop_target.get().as_deref() == Some(fid_target_cls.as_str())
                                 data-folder-id=fid.clone()
                                 on:dragenter=move |ev: web_sys::DragEvent| {
                                     allow_drop(&ev);
@@ -315,12 +316,11 @@ pub(super) fn Sidebar(
                             </div>
                         }
                     }).collect_view();
-                    let ungrouped_target = target.as_deref() == Some("ungrouped");
                     view! {
                         {folder_views}
-                        {( !ungrouped.is_empty() || dragging.is_some() ).then(|| view! {
+                        {( !ungrouped.is_empty() || has_folders ).then(|| view! {
                             <div class="side-ungrouped"
-                                class:drop-target=ungrouped_target
+                                class:drop-target=move || drop_target.get().as_deref() == Some("ungrouped")
                                 on:dragenter=move |ev: web_sys::DragEvent| {
                                     allow_drop(&ev);
                                     if drop_target.get().as_deref() != Some("ungrouped") {
