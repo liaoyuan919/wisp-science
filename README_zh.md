@@ -1,9 +1,6 @@
-# wisp-science
+# Wisp Science — 本地优先的 AI 科研工作台
 
 [English](README.md) | [简体中文](README_zh.md)
-
-> **我们的宣言：** Wisp Science 开源、无国界。我们希望打造一个任何地方的
-> 任何人都能使用、研究、改进和分享的科学工作台。
 
 <p>
 <a href="https://github.com/xuzhougeng/wisp-science/releases"><img src="https://img.shields.io/badge/Windows-supported-0078D4" alt="支持 Windows"></a>
@@ -14,11 +11,17 @@
 <a href="https://github.com/xuzhougeng/wisp-science/stargazers"><img src="https://img.shields.io/github/stars/xuzhougeng/wisp-science?style=social" alt="Stars"></a>
 </p>
 
-wisp-science 是一个本地优先的桌面科研助手：它支持任意兼容 OpenAI 或
-Anthropic 的模型，可运行持久化 Python 与 R REPL、调用本地文件系统工具、
-加载可复用的 `SKILL.md` 工作流，并通过内置 MCP 服务访问约 80 个生物学
-数据库。所有功能既可以在 Tauri v2 桌面窗口中使用（Windows 使用 WebView2，
-macOS 使用系统 WebKit），也可以通过无界面 CLI 使用。
+**Wisp Science** 是一个开源、本地优先的桌面 AI 科研助手和科学计算工作台。
+它可连接兼容 OpenAI 或 Anthropic 的模型，在本地、SSH、WSL 和 GPU 计算环境
+中运行持久化 Python 与 R，加载可复用的 Agent Skills（`SKILL.md`），并通过
+内置 Model Context Protocol（MCP）服务访问约 80 个生物信息学与计算生物学
+数据库。
+
+Wisp Science 使用 Rust、Tauri v2 和 Leptos 构建，可作为跨平台桌面应用或
+无界面 CLI 运行。
+
+> **我们的宣言：** Wisp Science 开源、无国界。我们希望打造一个任何地方的
+> 任何人都能使用、研究、改进和分享的科学工作台。
 
 > 当前状态：MVP 垂直切片。Agent 循环、流式模型提供商、工具、Python/R
 > REPL、SQLite 存储、MCP 客户端和 Leptos UI 均可构建并运行。尚未完成的

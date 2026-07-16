@@ -1,10 +1,6 @@
-# wisp-science
+# Wisp Science — Local-first AI research workbench
 
 [English](README.md) | [简体中文](README_zh.md)
-
-> **Our manifesto:** Wisp Science is open source and borderless. We are building
-> a scientific workbench that anyone, anywhere can use, study, improve, and
-> share.
 
 <p>
 <a href="https://github.com/xuzhougeng/wisp-science/releases"><img src="https://img.shields.io/badge/Windows-supported-0078D4" alt="Windows supported"></a>
@@ -15,12 +11,19 @@
 <a href="https://github.com/xuzhougeng/wisp-science/stargazers"><img src="https://img.shields.io/github/stars/xuzhougeng/wisp-science?style=social" alt="Stars"></a>
 </p>
 
-wisp-science is a local-first desktop copilot for science: it talks to any
-OpenAI-compatible or Anthropic model, runs persistent Python and R REPLs, calls
-tools on the local filesystem, loads reusable `SKILL.md` workflows, and
-reaches ~80 biological databases through bundled MCP servers — all from a
-Tauri v2 desktop window (WebView2 on Windows, system WebKit on macOS) or a
-headless CLI.
+**Wisp Science** is an open-source, local-first desktop AI research assistant
+and scientific computing workbench. It connects to OpenAI-compatible and
+Anthropic models, runs persistent Python and R environments on local, SSH, WSL,
+and GPU compute, loads reusable Agent Skills (`SKILL.md`), and reaches ~80
+bioinformatics and computational biology databases through bundled Model
+Context Protocol (MCP) servers.
+
+Built with Rust, Tauri v2, and Leptos, Wisp Science runs as a cross-platform
+desktop app or a headless CLI.
+
+> **Our manifesto:** Wisp Science is open source and borderless. We are building
+> a scientific workbench that anyone, anywhere can use, study, improve, and
+> share.
 
 > Status: MVP vertical slice. The agent loop, streaming providers, tools,
 > Python/R REPLs, SQLite store, MCP client, and Leptos UI all build and run.
