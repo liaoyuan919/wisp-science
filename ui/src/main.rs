@@ -430,6 +430,7 @@ fn App() -> impl IntoView {
     let custom_conn_tools_loading = create_rw_signal(HashSet::<String>::new());
     let custom_conn_tool_errors = create_rw_signal(HashMap::<String, String>::new());
     let open_conn_key = create_rw_signal(None::<String>);
+    let channels_open = create_rw_signal(None::<String>);
     let conn_form = create_rw_signal(None::<ConnForm>);
     let conn_test_msg = create_rw_signal(None::<(bool, String)>);
     // Service credentials (Settings → Credentials, #115). `cred_status` maps a
@@ -2435,6 +2436,7 @@ fn App() -> impl IntoView {
         specialist_form.set(None);
         conn_form.set(None);
         open_conn_key.set(None);
+        channels_open.set(None);
         conn_test_msg.set(None);
         memory_selected.set(None);
         memory_editor.set(String::new());
@@ -7322,7 +7324,7 @@ fn App() -> impl IntoView {
         })}
         <SettingsView
             state=SettingsViewState {
-                locale, theme_mode, light_palette, dark_palette, ui_font_size, code_font_size, show_settings, settings_section, open_conn_key, connectors, model_form,
+                locale, theme_mode, light_palette, dark_palette, ui_font_size, code_font_size, show_settings, settings_section, open_conn_key, channels_open, connectors, model_form,
                 conn_form, memory_selected, specialist_form, settings, bootstrap, settings_message,
                 settings_busy, model_form_open, model_form_key, models, model_form_msg, show_acp_agents,
                 acp_agents, active_acp_agent_id, acp_form, acp_form_msg, acp_infos, specialists,

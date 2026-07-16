@@ -3409,19 +3409,23 @@ test("chat-with-claude creation opens a new session with the interview prompt", 
   )).toBeGreaterThan(0);
 });
 
-test("channels settings: Feishu QR/manual setup and WeChat QR binding", async ({ page }) => {
+test("remote access settings: Feishu QR/manual setup and WeChat QR binding", async ({ page }) => {
   await enterApp(page);
-  await openSettingsSection(page, "Channels");
+  await openSettingsSection(page, "Remote Access");
 
+  // List page: routing note plus one row per bot, toggles disabled until bound.
   await expect(page.getByTestId("channel-routing-help")).toBeVisible();
   await expect(page.getByTestId("channel-routing-help").getByText("/project", { exact: true })).toBeVisible();
   await expect(page.getByTestId("channel-routing-help").getByText("/session", { exact: true })).toBeVisible();
-  await expect(page.getByTestId("feishu-channel-card")).toBeVisible();
-  await expect(page.getByTestId("weixin-channel-card")).toBeVisible();
+  await expect(page.getByTestId("feishu-channel-row")).toBeVisible();
+  await expect(page.getByTestId("weixin-channel-row")).toBeVisible();
   await expect(page.getByTestId("feishu-enabled")).toBeDisabled();
   await expect(page.getByTestId("weixin-enabled")).toBeDisabled();
 
-  // Existing applications still have a manual, keyring-backed setup path.
+  // Feishu subpage: existing applications still have a manual, keyring-backed
+  // setup path.
+  await page.getByTestId("feishu-channel-row").click();
+  await expect(page.getByTestId("feishu-channel-card")).toBeVisible();
   await page.getByTestId("feishu-international").check();
   await page.getByTestId("feishu-app-id").fill("cli_test123");
   await page.getByTestId("feishu-app-secret").fill("secret-xyz");
@@ -3432,7 +3436,6 @@ test("channels settings: Feishu QR/manual setup and WeChat QR binding", async ({
     appId: "cli_test123",
     appSecret: "secret-xyz",
   });
-  await expect(page.getByTestId("feishu-enabled")).toBeEnabled();
 
   // Removing local credentials does not claim to delete the remote app. The
   // one-click path then shows a real QR lifecycle and stores credentials in
@@ -3443,16 +3446,23 @@ test("channels settings: Feishu QR/manual setup and WeChat QR binding", async ({
   await expect(page.getByTestId("feishu-qr")).toBeVisible();
   await expect(page.getByTestId("feishu-unbind")).toBeVisible({ timeout: 10_000 });
   await expect(page.getByTestId("feishu-app-id")).toHaveValue("cli_scan_created");
+
+  // Back on the list the bound bot's toggle is now enabled.
+  await page.locator(".settings-head-back").click();
   await expect(page.getByTestId("feishu-enabled")).toBeEnabled();
 
+  // WeChat subpage: QR binding. The 2s poll hits the mock's immediate
+  // "confirmed": QR goes away and the bind button flips to unbind.
+  await page.getByTestId("weixin-channel-row").click();
   await page.getByTestId("weixin-bind").click();
   await expect(page.getByTestId("weixin-qr")).toBeVisible();
-  // The 2s poll hits the mock's immediate "confirmed": QR goes away and the
-  // bind button flips to unbind.
   await expect(page.getByTestId("weixin-unbind")).toBeVisible({ timeout: 10_000 });
   await expect(page.getByTestId("weixin-qr")).toHaveCount(0);
+
+  await page.locator(".settings-head-back").click();
   await expect(page.getByTestId("weixin-enabled")).toBeEnabled();
 
+  await page.getByTestId("weixin-channel-row").click();
   await page.getByTestId("weixin-unbind").click();
   await expect(page.getByTestId("weixin-bind")).toBeVisible({ timeout: 10_000 });
 });

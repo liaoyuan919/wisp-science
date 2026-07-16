@@ -81,6 +81,7 @@ pub(super) struct SettingsViewState {
     pub(super) show_settings: RwSignal<bool>,
     pub(super) settings_section: RwSignal<String>,
     pub(super) open_conn_key: RwSignal<Option<String>>,
+    pub(super) channels_open: RwSignal<Option<String>>,
     pub(super) connectors: RwSignal<Option<ConnectorsView>>,
     pub(super) model_form: RwSignal<Option<ModelForm>>,
     pub(super) conn_form: RwSignal<Option<ConnForm>>,
@@ -164,6 +165,7 @@ pub(super) fn SettingsView(
         show_settings,
         settings_section,
         open_conn_key,
+        channels_open,
         connectors,
         model_form,
         conn_form,
@@ -346,6 +348,7 @@ pub(super) fn SettingsView(
                         memory_selected.get().as_deref(),
                         specialist_form.get().as_ref(),
                         acp_form.get().as_ref(),
+                        channels_open.get().as_deref(),
                     );
                     view! {
                         <div class="settings-head">
@@ -1886,7 +1889,7 @@ pub(super) fn SettingsView(
                     </div>
                 }.into_view())}
                 {move || (settings_section.get() == "channels").then(|| view! {
-                    <crate::channels_view::ChannelsPane locale=locale/>
+                    <crate::channels_view::ChannelsPane locale=locale open=channels_open/>
                 }.into_view())}
                 {move || (settings_section.get() == "permissions").then(|| view! {
                     <div class="settings-pane settings-pane-list">
