@@ -920,6 +920,13 @@ body:has(.settings-page) .projects-screen { display: none; }
   gap: 20px;
 }
 .channel-bind-row > div { min-width: 0; }
+.channel-bind-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+}
 .channel-bind-row strong, .channels-qr strong { color: var(--text); font-size: 13px; font-weight: 620; }
 .channel-bind-row p, .channels-qr p {
   max-width: 720px;
@@ -949,11 +956,46 @@ body:has(.settings-page) .projects-screen { display: none; }
   box-shadow: var(--shadow-sm);
 }
 .channels-qr-frame img { display: block; width: 100%; height: 100%; }
+.channels-qr-copy { min-width: 0; }
+.channels-feishu-qr {
+  margin: 16px -18px 0;
+  padding: 18px;
+  background: color-mix(in srgb, #3370ff 4%, var(--bg-elev));
+}
+.channels-feishu-qr.terminal .channels-qr-frame { opacity: .32; filter: grayscale(1); }
+.channels-feishu-qr .channel-secondary { margin-top: 10px; }
+.channel-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 18px 0 14px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+.channel-divider::before, .channel-divider::after {
+  content: "";
+  height: 1px;
+  flex: 1 1 auto;
+  background: var(--border);
+}
+.channel-divider > span { flex: 0 0 auto; }
+.channel-region-option { gap: 7px !important; }
+.channel-check-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+.channel-check-row input { width: 16px; height: 16px; min-height: 0; margin: 0; }
 @media (max-width: 700px) {
   .channel-card-head, .channel-bind-row { align-items: flex-start; }
   .channel-card-head { flex-direction: column; gap: 13px; }
   .channel-head-actions { width: 100%; justify-content: space-between; }
   .channel-bind-row { flex-direction: column; gap: 12px; }
+  .channel-bind-actions { width: 100%; justify-content: stretch; }
+  .channel-bind-actions button { flex: 1 1 auto; }
   .channel-bind-row button { width: 100%; }
   .channel-card-foot { align-items: flex-start; flex-direction: column; }
   .channel-card-foot button { width: 100%; }

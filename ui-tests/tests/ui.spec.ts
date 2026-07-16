@@ -3409,7 +3409,7 @@ test("chat-with-claude creation opens a new session with the interview prompt", 
   )).toBeGreaterThan(0);
 });
 
-test("channels settings: feishu save and wechat QR binding", async ({ page }) => {
+test("channels settings: Feishu QR/manual setup and WeChat QR binding", async ({ page }) => {
   await enterApp(page);
   await openSettingsSection(page, "Channels");
 
@@ -3418,16 +3418,32 @@ test("channels settings: feishu save and wechat QR binding", async ({ page }) =>
   await expect(page.getByTestId("channel-routing-help").getByText("/session", { exact: true })).toBeVisible();
   await expect(page.getByTestId("feishu-channel-card")).toBeVisible();
   await expect(page.getByTestId("weixin-channel-card")).toBeVisible();
+  await expect(page.getByTestId("feishu-enabled")).toBeDisabled();
   await expect(page.getByTestId("weixin-enabled")).toBeDisabled();
 
+  // Existing applications still have a manual, keyring-backed setup path.
+  await page.getByTestId("feishu-international").check();
   await page.getByTestId("feishu-app-id").fill("cli_test123");
   await page.getByTestId("feishu-app-secret").fill("secret-xyz");
   await page.getByTestId("feishu-save").click();
   await expect.poll(() => lastInvokeArgs(page, "set_feishu_channel")).toMatchObject({
     enabled: false,
+    international: true,
     appId: "cli_test123",
     appSecret: "secret-xyz",
   });
+  await expect(page.getByTestId("feishu-enabled")).toBeEnabled();
+
+  // Removing local credentials does not claim to delete the remote app. The
+  // one-click path then shows a real QR lifecycle and stores credentials in
+  // the backend without exposing the secret to the webview.
+  await page.getByTestId("feishu-unbind").click();
+  await expect(page.getByTestId("feishu-bind")).toBeVisible();
+  await page.getByTestId("feishu-bind").click();
+  await expect(page.getByTestId("feishu-qr")).toBeVisible();
+  await expect(page.getByTestId("feishu-unbind")).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByTestId("feishu-app-id")).toHaveValue("cli_scan_created");
+  await expect(page.getByTestId("feishu-enabled")).toBeEnabled();
 
   await page.getByTestId("weixin-bind").click();
   await expect(page.getByTestId("weixin-qr")).toBeVisible();

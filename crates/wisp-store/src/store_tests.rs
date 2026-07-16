@@ -46,6 +46,42 @@ async fn roundtrip() {
 }
 
 #[tokio::test]
+async fn last_user_message_session_ignores_later_assistant_activity() {
+    let tmp = std::env::temp_dir().join(format!(
+        "wisp_store_last_user_session_{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = Store::open(&tmp).await.unwrap();
+    store.create_project("p", "proj", "").await.unwrap();
+    store
+        .create_frame("older", "p", "OPERON", "m")
+        .await
+        .unwrap();
+    store
+        .create_frame("latest", "p", "OPERON", "m")
+        .await
+        .unwrap();
+    store
+        .append_message("older", 1, &Message::user("first"))
+        .await
+        .unwrap();
+    store
+        .append_message("latest", 1, &Message::user("second"))
+        .await
+        .unwrap();
+    store
+        .append_message("older", 2, &Message::assistant("finishes later"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.last_user_message_session().await.unwrap(),
+        Some(("latest".into(), "p".into()))
+    );
+    let _ = std::fs::remove_file(tmp);
+}
+
+#[tokio::test]
 async fn session_pages_are_stable_when_timestamps_match() {
     let tmp = std::env::temp_dir().join(format!("wisp_pages_{}.sqlite", uuid::Uuid::new_v4()));
     let store = Store::open(&tmp).await.unwrap();

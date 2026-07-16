@@ -5,7 +5,7 @@
 
 use crate::app_support::js_error_text;
 use crate::bindings::invoke_checked;
-use crate::dto::{ChannelsStatus, WeixinBindStart};
+use crate::dto::{ChannelsStatus, FeishuBindPoll, FeishuBindStart, WeixinBindStart};
 use crate::i18n::{localize_backend, t, Locale};
 use crate::text::{event_target_checked, event_target_input};
 use leptos::*;
@@ -46,6 +46,10 @@ pub(super) fn ChannelsPane(locale: RwSignal<Locale>) -> impl IntoView {
     let status = create_rw_signal(None::<ChannelsStatus>);
     let feishu_app_id = create_rw_signal(String::new());
     let feishu_secret = create_rw_signal(String::new());
+    let feishu_international = create_rw_signal(false);
+    let feishu_qr = create_rw_signal(None::<FeishuBindStart>);
+    let feishu_bind_state = create_rw_signal(String::new());
+    let feishu_poll_gen = create_rw_signal(0usize);
     let msg = create_rw_signal(None::<(bool, String)>);
     let qr = create_rw_signal(None::<WeixinBindStart>);
     // Bumped to cancel a stale QR poll loop (new scan, unbind, unmount race).
@@ -56,6 +60,7 @@ pub(super) fn ChannelsPane(locale: RwSignal<Locale>) -> impl IntoView {
             if let Ok(v) = invoke_checked("channels_status", JsValue::UNDEFINED).await {
                 if let Ok(s) = serde_wasm_bindgen::from_value::<ChannelsStatus>(v) {
                     let _ = feishu_app_id.try_set(s.feishu_app_id.clone());
+                    let _ = feishu_international.try_set(s.feishu_international);
                     let _ = status.try_set(Some(s));
                 }
             }
@@ -66,6 +71,7 @@ pub(super) fn ChannelsPane(locale: RwSignal<Locale>) -> impl IntoView {
     let save_feishu = Callback::new(move |enabled: bool| {
         let arg = to_value(&serde_json::json!({
             "enabled": enabled,
+            "international": feishu_international.get_untracked(),
             "appId": feishu_app_id.get_untracked().trim(),
             "appSecret": feishu_secret.get_untracked(),
         }))
@@ -83,6 +89,143 @@ pub(super) fn ChannelsPane(locale: RwSignal<Locale>) -> impl IntoView {
                     let _ = msg.try_set(Some((
                         false,
                         localize_backend(locale.get_untracked(), &js_error_text(e)),
+                    )));
+                }
+            }
+            refresh.call(());
+        });
+    });
+
+    let start_feishu_bind = Callback::new(move |_: ()| {
+        let generation = feishu_poll_gen.get_untracked() + 1;
+        feishu_poll_gen.set(generation);
+        let previous_flow_id = feishu_qr.get_untracked().map(|bind| bind.flow_id);
+        feishu_qr.set(None);
+        feishu_bind_state.set("requesting".into());
+        msg.set(None);
+        spawn_local(async move {
+            if let Some(flow_id) = previous_flow_id {
+                let cancel_arg =
+                    to_value(&serde_json::json!({ "flowId": flow_id })).unwrap();
+                let _ = invoke_checked("feishu_bind_cancel", cancel_arg).await;
+            }
+            let arg = to_value(&serde_json::json!({
+                "international": feishu_international.get_untracked(),
+            }))
+            .unwrap();
+            let bind = match invoke_checked("feishu_bind_start", arg).await {
+                Ok(value) => match serde_wasm_bindgen::from_value::<FeishuBindStart>(value) {
+                    Ok(bind) => bind,
+                    Err(error) => {
+                        let _ = feishu_bind_state.try_set("error".into());
+                        let _ = msg.try_set(Some((false, error.to_string())));
+                        return;
+                    }
+                },
+                Err(error) => {
+                    let _ = feishu_bind_state.try_set("error".into());
+                    let _ = msg.try_set(Some((
+                        false,
+                        localize_backend(locale.get_untracked(), &js_error_text(error)),
+                    )));
+                    return;
+                }
+            };
+            let flow_id = bind.flow_id.clone();
+            let _ = feishu_qr.try_set(Some(bind));
+            let _ = feishu_bind_state.try_set("waiting".into());
+            let mut retry_after_ms = 0_u64;
+            loop {
+                if retry_after_ms > 0 {
+                    sleep_ms(retry_after_ms.min(i32::MAX as u64) as i32).await;
+                }
+                match feishu_poll_gen.try_get_untracked() {
+                    Some(current) if current == generation => {}
+                    _ => return,
+                }
+                let arg = to_value(&serde_json::json!({ "flowId": flow_id })).unwrap();
+                let poll = match invoke_checked("feishu_bind_poll", arg).await {
+                    Ok(value) => match serde_wasm_bindgen::from_value::<FeishuBindPoll>(value) {
+                        Ok(poll) => poll,
+                        Err(error) => {
+                            let _ = feishu_bind_state.try_set("error".into());
+                            let _ = msg.try_set(Some((false, error.to_string())));
+                            return;
+                        }
+                    },
+                    Err(error) => {
+                        let _ = feishu_bind_state.try_set("error".into());
+                        let _ = msg.try_set(Some((
+                            false,
+                            localize_backend(locale.get_untracked(), &js_error_text(error)),
+                        )));
+                        return;
+                    }
+                };
+                match poll.state.as_str() {
+                    "confirmed" => {
+                        let _ = feishu_app_id.try_set(poll.app_id);
+                        let _ = feishu_qr.try_set(None);
+                        let _ = feishu_bind_state.try_set("confirmed".into());
+                        let _ = msg.try_set(Some((
+                            true,
+                            t(locale.get_untracked(), "channels.feishu.bound").into(),
+                        )));
+                        refresh.call(());
+                        return;
+                    }
+                    "denied" => {
+                        let _ = feishu_bind_state.try_set("denied".into());
+                        let _ = msg.try_set(Some((
+                            false,
+                            t(locale.get_untracked(), "channels.feishu.denied").into(),
+                        )));
+                        return;
+                    }
+                    "expired" => {
+                        let _ = feishu_bind_state.try_set("expired".into());
+                        let _ = msg.try_set(Some((
+                            false,
+                            t(locale.get_untracked(), "channels.feishu.qr_expired").into(),
+                        )));
+                        return;
+                    }
+                    _ => retry_after_ms = poll.retry_after_ms.max(500),
+                }
+            }
+        });
+    });
+
+    let cancel_feishu_bind = Callback::new(move |_: ()| {
+        feishu_poll_gen.update(|generation| *generation += 1);
+        let flow_id = feishu_qr.get_untracked().map(|bind| bind.flow_id);
+        feishu_qr.set(None);
+        feishu_bind_state.set(String::new());
+        if let Some(flow_id) = flow_id {
+            spawn_local(async move {
+                let arg = to_value(&serde_json::json!({ "flowId": flow_id })).unwrap();
+                let _ = invoke_checked("feishu_bind_cancel", arg).await;
+            });
+        }
+    });
+
+    let unbind_feishu = Callback::new(move |_: ()| {
+        feishu_poll_gen.update(|generation| *generation += 1);
+        feishu_qr.set(None);
+        spawn_local(async move {
+            match invoke_checked("feishu_unbind", JsValue::UNDEFINED).await {
+                Ok(_) => {
+                    let _ = feishu_app_id.try_set(String::new());
+                    let _ = feishu_secret.try_set(String::new());
+                    let _ = msg.try_set(Some((
+                        true,
+                        t(locale.get_untracked(), "channels.feishu.unbound").into(),
+                    )));
+                }
+                Err(error) => {
+                    let _ = msg.try_set(Some((
+                        false,
+                        localize_backend(locale.get_untracked(), &js_error_text(error)),
                     )));
                 }
             }
@@ -224,18 +367,24 @@ pub(super) fn ChannelsPane(locale: RwSignal<Locale>) -> impl IntoView {
                     </div>
                     <div class="channel-head-actions">
                         <span class=move || {
-                            let state = status.get().unwrap_or_default().feishu_state;
-                            format!("channel-state channel-state-{}", state_tone(&state))
+                            let s = status.get().unwrap_or_default();
+                            let state = if s.feishu_bound { s.feishu_state.as_str() } else { "stopped" };
+                            format!("channel-state channel-state-{}", state_tone(state))
                         } data-testid="feishu-state">
                             <i aria-hidden="true"></i>
                             {move || {
                                 let s = status.get().unwrap_or_default();
-                                state_label(locale.get(), &s.feishu_state)
+                                if s.feishu_bound {
+                                    state_label(locale.get(), &s.feishu_state)
+                                } else {
+                                    t(locale.get(), "channels.feishu.not_bound").to_string()
+                                }
                             }}
                         </span>
                         <label class="toggle channel-toggle">
                             <input type="checkbox" data-testid="feishu-enabled"
                                 aria-label=move || t(locale.get(), "channels.feishu.toggle")
+                                prop:disabled=move || !status.get().map(|s| s.feishu_bound).unwrap_or(false)
                                 prop:checked=move || status.get().map(|s| s.feishu_enabled).unwrap_or(false)
                                 on:change=move |ev| save_feishu.call(event_target_checked(&ev)) />
                             <span class="toggle-track" aria-hidden="true"></span>
@@ -244,7 +393,118 @@ pub(super) fn ChannelsPane(locale: RwSignal<Locale>) -> impl IntoView {
                 </header>
 
                 <div class="channel-card-body">
+                    <div class="channel-bind-row channel-feishu-bind">
+                        <div>
+                            <strong>{move || {
+                                if status.get().map(|s| s.feishu_bound).unwrap_or(false) {
+                                    t(locale.get(), "channels.feishu.bound_app")
+                                } else {
+                                    t(locale.get(), "channels.feishu.scan_title")
+                                }
+                            }}</strong>
+                            <p>{move || {
+                                let s = status.get().unwrap_or_default();
+                                if s.feishu_bound {
+                                    format!(
+                                        "{} · {}",
+                                        s.feishu_app_id,
+                                        if s.feishu_international {
+                                            t(locale.get(), "channels.feishu.region_lark")
+                                        } else {
+                                            t(locale.get(), "channels.feishu.region_cn")
+                                        }
+                                    )
+                                } else {
+                                    t(locale.get(), "channels.feishu.scan_hint").to_string()
+                                }
+                            }}</p>
+                        </div>
+                        <div class="channel-bind-actions">
+                            {move || {
+                                if feishu_qr.get().is_some() {
+                                    view! {
+                                        <button type="button" data-testid="feishu-bind-cancel"
+                                            on:click=move |_| cancel_feishu_bind.call(())>
+                                            {move || t(locale.get(), "settings.cancel")}
+                                        </button>
+                                    }.into_view()
+                                } else {
+                                    view! {
+                                        <button type="button" class="primary" data-testid="feishu-bind"
+                                            on:click=move |_| start_feishu_bind.call(())>
+                                            {move || {
+                                                if status.get().map(|s| s.feishu_bound).unwrap_or(false) {
+                                                    t(locale.get(), "channels.feishu.recreate")
+                                                } else {
+                                                    t(locale.get(), "channels.feishu.bind")
+                                                }
+                                            }}
+                                        </button>
+                                    }.into_view()
+                                }
+                            }}
+                            {move || status.get().map(|s| s.feishu_bound).unwrap_or(false).then(|| view! {
+                                <button type="button" data-testid="feishu-unbind"
+                                    on:click=move |_| unbind_feishu.call(())>
+                                    {move || t(locale.get(), "channels.feishu.unbind")}
+                                </button>
+                            })}
+                        </div>
+                    </div>
+
+                    {move || feishu_qr.get().map(|bind| {
+                        let terminal = matches!(feishu_bind_state.get().as_str(), "expired" | "denied" | "error");
+                        let qr_image = bind.qr_image.clone();
+                        let expires_in_seconds = bind.expires_in_seconds;
+                        view! {
+                            <div class="channels-qr channels-feishu-qr" class:terminal=terminal data-testid="feishu-qr">
+                                <div class="channels-qr-frame">
+                                    <img src=qr_image alt="Feishu app registration QR" />
+                                </div>
+                                <div class="channels-qr-copy">
+                                    <strong>{move || match feishu_bind_state.get().as_str() {
+                                        "expired" => t(locale.get(), "channels.feishu.qr_expired"),
+                                        "denied" => t(locale.get(), "channels.feishu.denied"),
+                                        "error" => t(locale.get(), "channels.state.error"),
+                                        _ => t(locale.get(), "channels.feishu.qr_title"),
+                                    }}</strong>
+                                    <p>{move || {
+                                        if terminal {
+                                            t(locale.get(), "channels.feishu.retry_hint").to_string()
+                                        } else {
+                                            format!(
+                                                "{} · {} {}",
+                                                t(locale.get(), "channels.feishu.qr_hint"),
+                                                expires_in_seconds / 60,
+                                                t(locale.get(), "channels.feishu.minutes")
+                                            )
+                                        }
+                                    }}</p>
+                                    {terminal.then(|| view! {
+                                        <button type="button" class="channel-secondary" data-testid="feishu-bind-retry"
+                                            on:click=move |_| start_feishu_bind.call(())>
+                                            {move || t(locale.get(), "channels.feishu.retry")}
+                                        </button>
+                                    })}
+                                </div>
+                            </div>
+                        }
+                    })}
+
+                    <div class="channel-divider">
+                        <span>{move || t(locale.get(), "channels.feishu.manual")}</span>
+                    </div>
                     <div class="settings-form-grid channel-fields">
+                        <label class="span-2 channel-region-option">
+                            <span>{move || t(locale.get(), "channels.feishu.region")}</span>
+                            <span class="channel-check-row">
+                                <input type="checkbox" data-testid="feishu-international"
+                                    prop:disabled=move || feishu_qr.get().is_some()
+                                    prop:checked=move || feishu_international.get()
+                                    on:change=move |ev| feishu_international.set(event_target_checked(&ev)) />
+                                <span>{move || t(locale.get(), "channels.feishu.international")}</span>
+                            </span>
+                        </label>
                         <label class="span-2">
                             <span>{move || t(locale.get(), "channels.feishu.app_id")}</span>
                             <input type="text" data-testid="feishu-app-id"

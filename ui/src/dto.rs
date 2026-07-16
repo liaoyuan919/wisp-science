@@ -454,6 +454,10 @@ pub(crate) struct ChannelsStatus {
     #[serde(default)]
     pub(crate) feishu_enabled: bool,
     #[serde(default)]
+    pub(crate) feishu_bound: bool,
+    #[serde(default)]
+    pub(crate) feishu_international: bool,
+    #[serde(default)]
     pub(crate) feishu_app_id: String,
     #[serde(default)]
     pub(crate) feishu_has_secret: bool,
@@ -476,6 +480,21 @@ pub(crate) struct ChannelsStatus {
 pub(crate) struct WeixinBindStart {
     pub(crate) qrcode: String,
     pub(crate) qr_image: String,
+}
+
+/// Mirrors the opaque Feishu OAuth device-flow DTOs from `src-tauri`.
+#[derive(Deserialize, Clone)]
+pub(crate) struct FeishuBindStart {
+    pub(crate) flow_id: String,
+    pub(crate) qr_image: String,
+    pub(crate) expires_in_seconds: u64,
+}
+
+#[derive(Deserialize, Clone)]
+pub(crate) struct FeishuBindPoll {
+    pub(crate) state: String,
+    pub(crate) retry_after_ms: u64,
+    pub(crate) app_id: String,
 }
 
 fn default_max_iter() -> i64 {

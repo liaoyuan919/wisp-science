@@ -147,6 +147,8 @@ export function tauriMock(): void {
   };
   const mockChannels = {
     feishu_enabled: false,
+    feishu_bound: false,
+    feishu_international: false,
     feishu_app_id: "",
     feishu_has_secret: false,
     feishu_state: "stopped",
@@ -156,6 +158,7 @@ export function tauriMock(): void {
     weixin_state: "stopped",
     weixin_detail: "",
   };
+  let mockFeishuPollCount = 0;
   let mockApprovalGrants = [
     {
       scope: "global",
@@ -623,16 +626,46 @@ export function tauriMock(): void {
             return { ...mockChannels };
           case "set_feishu_channel":
             mockChannels.feishu_enabled = Boolean(arg("enabled"));
+            mockChannels.feishu_international = Boolean(arg("international"));
             mockChannels.feishu_app_id = String(arg("appId") ?? "");
-            if (String(arg("appSecret") ?? "").trim()) mockChannels.feishu_has_secret = true;
+            if (String(arg("appSecret") ?? "").trim()) {
+              mockChannels.feishu_has_secret = true;
+            }
+            mockChannels.feishu_bound = Boolean(mockChannels.feishu_app_id && mockChannels.feishu_has_secret);
             mockChannels.feishu_state = mockChannels.feishu_enabled ? "running" : "stopped";
+            return null;
+          case "feishu_bind_start":
+            mockFeishuPollCount = 0;
+            return {
+              flow_id: "mock-feishu-flow",
+              qr_image: "data:image/svg+xml;base64," + btoa('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 21 21"><rect width="21" height="21" fill="white"/><path d="M1 1h6v6H1zm2 2v2h2V3zM14 1h6v6h-6zm2 2v2h2V3zM1 14h6v6H1zm2 2v2h2v-2zM9 2h2v2H9zm2 3h2v2h-2zM8 8h3v3H8zm5 0h2v2h-2zm3 1h4v2h-4zM9 13h2v2H9zm3-2h2v4h-2zm3 2h2v2h-2zm3 0h2v4h-2zm-9 4h3v3H9zm5-1h3v2h-3zm1 3h5v1h-5z" fill="black"/></svg>'),
+              expires_in_seconds: 600,
+            };
+          case "feishu_bind_poll":
+            mockFeishuPollCount += 1;
+            if (mockFeishuPollCount === 1) {
+              return { state: "pending", retry_after_ms: 500, app_id: "" };
+            }
+            mockChannels.feishu_bound = true;
+            mockChannels.feishu_has_secret = true;
+            mockChannels.feishu_app_id = "cli_scan_created";
+            mockChannels.feishu_international = Boolean(arg("international") ?? mockChannels.feishu_international);
+            return { state: "confirmed", retry_after_ms: 0, app_id: mockChannels.feishu_app_id };
+          case "feishu_bind_cancel":
+            return null;
+          case "feishu_unbind":
+            mockChannels.feishu_bound = false;
+            mockChannels.feishu_enabled = false;
+            mockChannels.feishu_has_secret = false;
+            mockChannels.feishu_app_id = "";
+            mockChannels.feishu_state = "stopped";
             return null;
           case "set_weixin_channel":
             mockChannels.weixin_enabled = Boolean(arg("enabled"));
             mockChannels.weixin_state = mockChannels.weixin_enabled ? "running" : "stopped";
             return null;
           case "weixin_bind_start":
-            return { qrcode: "mock-qr", qr_image: "data:image/svg+xml;base64,PHN2Zy8+" };
+            return { qrcode: "mock-qr", qr_image: "data:image/svg+xml;base64," + btoa('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 21 21"><rect width="21" height="21" fill="white"/><path d="M1 1h6v6H1zm2 2v2h2V3zM14 1h6v6h-6zm2 2v2h2V3zM1 14h6v6H1zm2 2v2h2v-2zM9 2h2v2H9zm2 3h2v2h-2zM8 8h3v3H8zm5 0h2v2h-2zm3 1h4v2h-4zM9 13h2v2H9zm3-2h2v4h-2zm3 2h2v2h-2zm3 0h2v4h-2zm-9 4h3v3H9zm5-1h3v2h-3zm1 3h5v1h-5z" fill="black"/></svg>') };
           case "weixin_bind_poll":
             mockChannels.weixin_bound = true;
             return "confirmed";
