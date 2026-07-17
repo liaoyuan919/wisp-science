@@ -115,6 +115,8 @@ cargo tauri build    # 在 target/release/bundle 下生成 MSI/NSIS 安装程序
 隔离在 `ui/dist-dev` 与 `ui/dist-test`，发布构建继续使用 `ui/dist`，避免正在
 运行的开发或测试服务器与 `cargo tauri build` 并发复制优化后的 WASM 文件。
 
+当图片或 PDF 内容超出可见区域时，预览支持缩放和拖拽平移，包括 100% 缩放状态。
+
 在 macOS 上使用相同命令（`cargo tauri build` 会在
 `target/release/bundle` 下生成 `.app` 和 `.dmg`）。
 `src-tauri/tauri.macos.conf.json` 会由 Tauri 自动合并，以跨平台的

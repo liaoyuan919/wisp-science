@@ -5876,16 +5876,34 @@ fn ZoomableFilePreview(dom_id: String, path: String, kind: String) -> impl IntoV
                 })}
             </div>
             <div id=viewport_id class="file-preview-zoom-viewport"
-                class:is-zoomed=move || { zoom.get() > 100 }
                 class:is-dragging=move || { is_dragging.get() }
                 class:is-cropping=move || { crop_mode.get() }
                 on:pointerdown=move |ev: web_sys::PointerEvent| {
-                    if ev.button() != 0 || crop_mode.get_untracked() || zoom.get_untracked() <= 100 {
+                    if ev.button() != 0 || crop_mode.get_untracked() {
+                        return;
+                    }
+                    // PDF glyphs remain drag-selectable for quoting. Starting
+                    // on the surrounding page/whitespace pans the preview.
+                    if ev
+                        .target()
+                        .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                        .and_then(|target| target.closest(".rp-pdf-textlayer span").ok().flatten())
+                        .is_some()
+                    {
                         return;
                     }
                     let Some(viewport) = viewport_for_pointerdown() else {
                         return;
                     };
+                    // Zoom percentage is not a reliable proxy for pannability:
+                    // a tall image or PDF page can overflow the modal at 100%.
+                    // Only capture the drag when there is actual scrollable
+                    // content in at least one direction.
+                    if viewport.scroll_width() <= viewport.client_width()
+                        && viewport.scroll_height() <= viewport.client_height()
+                    {
+                        return;
+                    }
                     ev.prevent_default();
                     let _ = viewport.set_pointer_capture(ev.pointer_id());
                     drag_start_down.set(Some((
