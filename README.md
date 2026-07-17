@@ -214,12 +214,25 @@ Full setup, Claude example, Windows notes, and troubleshooting:
 
 ### Composer references and search
 
-In a desktop conversation, type `@` to attach a saved artifact, `#` to attach
-a saved session (including another project), or `/` to apply an enabled skill
-to the next turn. Attachments are explicit, removable chips; cross-project
-artifacts stay at their original local path and are never copied automatically.
-The same references work with ACP Agents: selected skills and session context
-are sent as ACP text blocks, while artifacts are sent as file links.
+In a desktop conversation, type `@` to attach a saved artifact, an uploaded
+file, an execution context, or a language runtime; `#` to attach a saved
+session (including another project); or `/` to apply an enabled skill to the
+next turn. Attachments are explicit, removable chips; cross-project artifacts
+stay at their original local path and are never copied automatically. The same
+references work with ACP Agents: selected skills and session context are sent
+as ACP text blocks, while artifacts are sent as file links.
+
+Files you uploaded are artifacts too, so they already appear under `@`; they
+carry an **Upload** badge that separates them from files the agent produced.
+
+`@` also reaches compute. Naming an execution context (`@CPU1`) points the turn
+at that server and turns it on for the conversation, so you do not have to
+enable it in the compute menu first — local compute needs no toggle and is
+always available. Naming a runtime (`@runtime_R`) points the turn at the
+persistent Python or R session on that context, which keeps its variables
+between calls, so the agent inspects live state instead of re-running earlier
+work. Runtime entries appear only for contexts where that interpreter is
+configured or probed. Referencing a runtime does not start it.
 
 Use Ctrl+K on Windows/Linux or Cmd+K on macOS to search projects, artifacts,
 sessions, and common commands. Enter opens the selected result; Shift+Enter

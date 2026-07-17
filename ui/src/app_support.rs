@@ -158,6 +158,15 @@ pub(super) enum ComposerPickerItem {
     Artifact(ArtifactInfo),
     Session(SessionSearchInfo),
     Skill(SkillRow),
+    Context {
+        id: String,
+        label: String,
+    },
+    Runtime {
+        context_id: String,
+        context_label: String,
+        language: String,
+    },
 }
 
 #[derive(Clone)]
@@ -173,6 +182,15 @@ pub(super) enum ComposerReferenceChip {
     },
     Skill {
         name: String,
+    },
+    Context {
+        id: String,
+        label: String,
+    },
+    Runtime {
+        context_id: String,
+        context_label: String,
+        language: String,
     },
 }
 
@@ -199,6 +217,12 @@ impl ComposerReferenceChip {
             Self::Artifact { id, .. } => format!("artifact:{id}"),
             Self::Session { id, .. } => format!("session:{id}"),
             Self::Skill { name } => format!("skill:{name}"),
+            Self::Context { id, .. } => format!("context:{id}"),
+            Self::Runtime {
+                context_id,
+                language,
+                ..
+            } => format!("runtime:{context_id}:{language}"),
         }
     }
 
@@ -210,6 +234,12 @@ impl ComposerReferenceChip {
                 project_name,
                 ..
             } => format!("{project_name} / {title}"),
+            Self::Context { label, .. } => label.clone(),
+            Self::Runtime {
+                context_label,
+                language,
+                ..
+            } => format!("{} · {context_label}", language_display(language)),
         }
     }
 
@@ -218,6 +248,8 @@ impl ComposerReferenceChip {
             Self::Artifact { .. } => "artifact",
             Self::Session { .. } => "session",
             Self::Skill { .. } => "skill",
+            Self::Context { .. } => "context",
+            Self::Runtime { .. } => "runtime",
         }
     }
 
@@ -226,6 +258,15 @@ impl ComposerReferenceChip {
             Self::Artifact { id, .. } => ComposerReferenceArg::Artifact { id: id.clone() },
             Self::Session { id, .. } => ComposerReferenceArg::Session { id: id.clone() },
             Self::Skill { name } => ComposerReferenceArg::Skill { name: name.clone() },
+            Self::Context { id, .. } => ComposerReferenceArg::Context { id: id.clone() },
+            Self::Runtime {
+                context_id,
+                language,
+                ..
+            } => ComposerReferenceArg::Runtime {
+                context_id: context_id.clone(),
+                language: language.clone(),
+            },
         }
     }
 }
@@ -589,6 +630,25 @@ pub(super) fn refresh_execution_contexts(into: RwSignal<Vec<ExecutionContext>>) 
     });
 }
 
+pub(super) fn refresh_session_execution_contexts(
+    into: RwSignal<HashSet<String>>,
+    active_session: RwSignal<Option<String>>,
+    session_id: String,
+) {
+    spawn_local(async move {
+        let args = to_value(&serde_json::json!({ "sessionId": session_id.clone() })).unwrap();
+        let Ok(value) = invoke_checked("list_session_execution_context_ids", args).await else {
+            return;
+        };
+        let Ok(ids) = serde_wasm_bindgen::from_value::<Vec<String>>(value) else {
+            return;
+        };
+        if active_session.get_untracked().as_deref() == Some(session_id.as_str()) {
+            into.set(ids.into_iter().collect());
+        }
+    });
+}
+
 pub(super) fn refresh_runtimes(into: RwSignal<Vec<RuntimeInfo>>) {
     spawn_local(async move {
         let value = invoke("list_runtimes", JsValue::UNDEFINED).await;
@@ -682,6 +742,57 @@ pub(super) fn context_capability_summary(ctx: &ExecutionContext) -> String {
     }
 }
 
+pub(super) fn language_display(language: &str) -> &str {
+    match language {
+        "r" => "R",
+        "python" => "Python",
+        other => other,
+    }
+}
+
+/// Compute-context entries for the composer `@` menu: every execution context
+/// as a server target, plus a runtime entry per available language on it.
+/// Query tokens (split on non-alphanumerics, so `runtime_R` works) must all
+/// match the entry's descriptive haystack.
+pub(super) fn mention_compute_entries(
+    query: &str,
+    contexts: &[ExecutionContext],
+) -> Vec<ComposerPickerItem> {
+    let query = query.to_lowercase();
+    let tokens: Vec<&str> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let matches =
+        |haystack: String| tokens.iter().all(|t| haystack.to_lowercase().contains(t));
+    let mut items = Vec::new();
+    for ctx in contexts {
+        let label = if ctx.label.trim().is_empty() {
+            ctx.id.clone()
+        } else {
+            ctx.label.clone()
+        };
+        if matches(format!("server {} {} {label}", ctx.kind, ctx.id)) {
+            items.push(ComposerPickerItem::Context {
+                id: ctx.id.clone(),
+                label: label.clone(),
+            });
+        }
+        for language in ["python", "r"] {
+            if context_runtime_available(ctx, language)
+                && matches(format!("runtime {language} {} {} {label}", ctx.kind, ctx.id))
+            {
+                items.push(ComposerPickerItem::Runtime {
+                    context_id: ctx.id.clone(),
+                    context_label: label.clone(),
+                    language: language.to_string(),
+                });
+            }
+        }
+    }
+    items
+}
+
 fn context_runtime_available(ctx: &ExecutionContext, language: &str) -> bool {
     if ctx.kind == "local" && language == "python" {
         return true;
@@ -723,7 +834,7 @@ fn context_runtime_available(ctx: &ExecutionContext, language: &str) -> bool {
 
 #[cfg(test)]
 mod runtime_slot_tests {
-    use super::context_runtime_available;
+    use super::{context_runtime_available, mention_compute_entries, ComposerPickerItem};
     use crate::dto::ExecutionContext;
 
     fn context(
@@ -771,6 +882,39 @@ mod runtime_slot_tests {
             ),
             "r"
         ));
+    }
+
+    #[test]
+    fn mention_entries_match_servers_and_runtimes() {
+        let contexts = vec![context(
+            "ssh",
+            r#"{"rscript_executable":"/usr/bin/Rscript","r_jsonlite":true}"#,
+            Some("ok"),
+        )];
+        // Empty query lists the server plus its available runtime.
+        let all = mention_compute_entries("", &contexts);
+        assert!(all
+            .iter()
+            .any(|item| matches!(item, ComposerPickerItem::Context { id, .. } if id == "ssh:test")));
+        assert!(all.iter().any(|item| matches!(
+            item,
+            ComposerPickerItem::Runtime { language, .. } if language == "r"
+        )));
+        // `runtime_R` style queries tokenize on the underscore and drop the
+        // server entry (its haystack has no "runtime" token).
+        let runtimes = mention_compute_entries("runtime_R", &contexts);
+        assert!(runtimes.iter().any(|item| matches!(
+            item,
+            ComposerPickerItem::Runtime { language, .. } if language == "r"
+        )));
+        assert!(!runtimes
+            .iter()
+            .any(|item| matches!(item, ComposerPickerItem::Context { .. })));
+        // Server label match.
+        assert!(mention_compute_entries("test", &contexts)
+            .iter()
+            .any(|item| matches!(item, ComposerPickerItem::Context { .. })));
+        assert!(mention_compute_entries("nomatch", &contexts).is_empty());
     }
 }
 
@@ -1725,6 +1869,8 @@ pub(super) fn message_with_composer_context(
     let mut artifacts = Vec::new();
     let mut sessions = Vec::new();
     let mut skills = Vec::new();
+    let mut contexts = Vec::new();
+    let mut runtimes = Vec::new();
     for reference in references {
         match reference {
             ComposerReferenceChip::Artifact { name, .. } => artifacts.push(name.clone()),
@@ -1734,12 +1880,16 @@ pub(super) fn message_with_composer_context(
                 ..
             } => sessions.push(format!("{project_name} / {title}")),
             ComposerReferenceChip::Skill { name } => skills.push(name.clone()),
+            ComposerReferenceChip::Context { label, .. } => contexts.push(label.clone()),
+            ComposerReferenceChip::Runtime { .. } => runtimes.push(reference.label()),
         }
     }
     for (label, values) in [
         ("Attached artifacts", artifacts),
         ("Attached sessions", sessions),
         ("Selected skills", skills),
+        ("Target environments", contexts),
+        ("Target runtimes", runtimes),
     ] {
         if values.is_empty() {
             continue;
@@ -2805,6 +2955,15 @@ mod start_user_turn_tests {
             ComposerReferenceChip::Skill {
                 name: "bear-review".into(),
             },
+            ComposerReferenceChip::Context {
+                id: "ssh:cpu1".into(),
+                label: "CPU1".into(),
+            },
+            ComposerReferenceChip::Runtime {
+                context_id: "local".into(),
+                context_label: "Local".into(),
+                language: "r".into(),
+            },
         ];
         assert_eq!(
             message_with_composer_context(
@@ -2813,7 +2972,7 @@ mod start_user_turn_tests {
                 &refs,
                 &[]
             ),
-            "Compare these\n\nUploaded files: uploads/plot.png\n\nAttached artifacts: counts.csv\n\nAttached sessions: Atlas / QC review\n\nSelected skills: bear-review"
+            "Compare these\n\nUploaded files: uploads/plot.png\n\nAttached artifacts: counts.csv\n\nAttached sessions: Atlas / QC review\n\nSelected skills: bear-review\n\nTarget environments: CPU1\n\nTarget runtimes: R · Local"
         );
     }
 
@@ -5858,6 +6017,8 @@ pub(super) fn composer_text_from_user_message(text: &str) -> String {
         "\n\nAttached artifacts: ",
         "\n\nAttached sessions: ",
         "\n\nSelected skills: ",
+        "\n\nTarget environments: ",
+        "\n\nTarget runtimes: ",
     ]
     .iter()
     .filter_map(|marker| text.find(marker))

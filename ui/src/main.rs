@@ -617,18 +617,7 @@ fn App() -> impl IntoView {
             return;
         };
         session_execution_contexts.set(HashSet::new());
-        spawn_local(async move {
-            let args = to_value(&serde_json::json!({ "sessionId": session_id.clone() })).unwrap();
-            let Ok(value) = invoke_checked("list_session_execution_context_ids", args).await else {
-                return;
-            };
-            let Ok(ids) = serde_wasm_bindgen::from_value::<Vec<String>>(value) else {
-                return;
-            };
-            if active_session.get_untracked().as_deref() == Some(session_id.as_str()) {
-                session_execution_contexts.set(ids.into_iter().collect());
-            }
-        });
+        refresh_session_execution_contexts(session_execution_contexts, active_session, session_id);
     });
     create_effect(move |_| {
         let Some(session_id) = active_session.get() else {
@@ -934,6 +923,9 @@ fn App() -> impl IntoView {
     let picker_index = create_rw_signal(0usize);
     let picker_artifacts = create_rw_signal(Vec::<ArtifactInfo>::new());
     let picker_sessions = create_rw_signal(Vec::<SessionSearchInfo>::new());
+    // Declared up here (not with the other context-view signals) so the
+    // composer @ menu can offer servers and runtimes alongside artifacts.
+    let execution_contexts = create_rw_signal::<Vec<ExecutionContext>>(vec![]);
     create_effect(move |_| {
         let Some(mode) = picker_mode.get() else {
             return;
@@ -995,7 +987,10 @@ fn App() -> impl IntoView {
                         std::cmp::Reverse(a.ts),
                     )
                 });
-                rows.into_iter().map(ComposerPickerItem::Artifact).collect()
+                let mut items: Vec<_> =
+                    rows.into_iter().map(ComposerPickerItem::Artifact).collect();
+                items.extend(mention_compute_entries(&query, &execution_contexts.get()));
+                items
             }
             Some(ComposerPickerMode::Session) => {
                 let current_project = project_info.get().map(|p| p.id);
@@ -1044,6 +1039,18 @@ fn App() -> impl IntoView {
                 project_name: s.project_name,
             },
             ComposerPickerItem::Skill(s) => ComposerReferenceChip::Skill { name: s.name },
+            ComposerPickerItem::Context { id, label } => {
+                ComposerReferenceChip::Context { id, label }
+            }
+            ComposerPickerItem::Runtime {
+                context_id,
+                context_label,
+                language,
+            } => ComposerReferenceChip::Runtime {
+                context_id,
+                context_label,
+                language,
+            },
         };
         input.update(|s| {
             if let Some((at, _, _)) = active_composer_trigger(s) {
@@ -1747,6 +1754,14 @@ fn App() -> impl IntoView {
             .iter()
             .map(ComposerReferenceChip::arg)
             .collect::<Vec<_>>();
+        // An @-referenced server turns itself on for the session backend-side;
+        // re-read the enabled set afterwards so the sidebar toggles agree.
+        let touches_contexts = reference_args.iter().any(|reference| {
+            matches!(
+                reference,
+                ComposerReferenceArg::Context { .. } | ComposerReferenceArg::Runtime { .. }
+            )
+        });
         if message.trim().is_empty()
             && paths.is_empty()
             && reference_args.is_empty()
@@ -1851,6 +1866,13 @@ fn App() -> impl IntoView {
                 Ok(_) => {
                     if let Some(agent_id) = agent_id {
                         active_acp_agent_id.set(Some(agent_id));
+                    }
+                    if touches_contexts {
+                        refresh_session_execution_contexts(
+                            session_execution_contexts,
+                            active_session,
+                            id.clone(),
+                        );
                     }
                     refresh_session_history();
                 }
@@ -3401,7 +3423,6 @@ fn App() -> impl IntoView {
         }
     });
     let ssh_hosts = create_rw_signal::<Vec<SshHost>>(vec![]);
-    let execution_contexts = create_rw_signal::<Vec<ExecutionContext>>(vec![]);
     let selected_context_id = create_rw_signal::<Option<String>>(None);
     let context_details_modal = create_rw_signal::<Option<(String, ContextModalKind)>>(None);
     let runtime_interpreter_form = create_rw_signal(None::<RuntimeInterpreterForm>);
@@ -5369,6 +5390,8 @@ fn App() -> impl IntoView {
                                 let (icon, meta_key) = match kind {
                                     "skill" => ("skill", "attachment.skill"),
                                     "session" => ("chat", "attachment.session"),
+                                    "context" => ("server", "attachment.context"),
+                                    "runtime" => ("terminal", "attachment.runtime"),
                                     _ => ("doc", "attachment.artifact"),
                                 };
                                 view! {
@@ -5453,9 +5476,25 @@ fn App() -> impl IntoView {
                                     <div class="mention-group-label">{t(loc, title)}</div>
                                     {matches.into_iter().enumerate().map(|(i, item)| {
                                         let (name, sub, icon) = match item {
-                                            ComposerPickerItem::Artifact(a) => (a.name, format!("{} · {}", a.session_title.unwrap_or_default(), a.project_name.unwrap_or_default()), "attach"),
+                                            // Uploads are artifacts too, so the origin badge is the
+                                            // only thing separating a file the user dropped in from
+                                            // one the agent produced.
+                                            ComposerPickerItem::Artifact(a) => {
+                                                let source = format!("{} · {}", a.session_title.unwrap_or_default(), a.project_name.unwrap_or_default());
+                                                if a.origin.as_deref() == Some("upload") {
+                                                    (a.name, format!("{} · {source}", t(loc, "composer.ref_upload")), "upload")
+                                                } else {
+                                                    (a.name, source, "attach")
+                                                }
+                                            }
                                             ComposerPickerItem::Session(s) => (s.title, s.project_name, "review"),
                                             ComposerPickerItem::Skill(s) => (s.name, s.description, "skill"),
+                                            ComposerPickerItem::Context { id, label } => (label, id, "server"),
+                                            ComposerPickerItem::Runtime { context_id, context_label, language } => (
+                                                format!("{} runtime", language_display(&language)),
+                                                format!("{context_label} · {context_id}"),
+                                                "terminal",
+                                            ),
                                         };
                                         view! {
                                             <button type="button" class="mention-item" class:active=move || picker_index.get() == i
