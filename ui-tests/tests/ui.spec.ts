@@ -1259,6 +1259,7 @@ test("Files browses registered SSH contexts without a real remote host", async (
   await page.getByRole("button", { name: "Files" }).click();
 
   await page.getByRole("combobox", { name: "File location" }).selectOption("ssh:gpu-server");
+  await expect(page.getByRole("combobox", { name: "File location" })).toHaveValue("ssh:gpu-server");
   await expect(page.getByRole("textbox", { name: "Remote path" })).toHaveValue("/home/research");
   await expect(page.locator('.remote-dir[data-remote-path="/home/research/projects"]')).toBeVisible();
   const remoteFile = page.locator('.remote-file[data-remote-path="/home/research/notes.txt"]');
@@ -1287,6 +1288,11 @@ test("Files browses registered SSH contexts without a real remote host", async (
 
   await page.getByRole("button", { name: "Parent directory" }).click();
   await expect(page.getByRole("textbox", { name: "Remote path" })).toHaveValue("/home/research");
+
+  await page.getByRole("combobox", { name: "File location" }).selectOption("local");
+  await expect(page.getByRole("combobox", { name: "File location" })).toHaveValue("local");
+  await expect(page.getByRole("textbox", { name: "Remote path" })).toHaveCount(0);
+  await expect(page.locator('[data-workspace-path="report.csv"]')).toBeVisible();
 });
 
 test("pasted image attaches to the composer", async ({ page }) => {
@@ -1462,13 +1468,13 @@ test("right panel shows execution contexts and runs", async ({ page }) => {
   await enterApp(page);
   await selectRemoteContext(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
-  await page.getByRole("button", { name: "Add panel" }).click();
-  await expect.poll(() => page.locator(".rp-tab-add-menu").evaluate((menu) => {
-    const rect = menu.getBoundingClientRect();
-    const hit = document.elementFromPoint(rect.left + 8, rect.top + 8);
-    return hit === menu || menu.contains(hit);
-  })).toBe(true);
-  await page.getByRole("button", { name: "Environment" }).click();
+  const rightPanel = page.locator(".rightpane");
+  await expect(rightPanel.locator(".rp-tab")).toHaveCount(3);
+  await expect(rightPanel.getByRole("button", { name: "Artifacts", exact: true })).toBeVisible();
+  await expect(rightPanel.getByRole("button", { name: "Files", exact: true })).toBeVisible();
+  await expect(rightPanel.getByRole("button", { name: "Environment", exact: true })).toBeVisible();
+  await expect(rightPanel.getByRole("button", { name: /^Notebook/ })).toHaveCount(0);
+  await rightPanel.getByRole("button", { name: "Environment", exact: true }).click();
 
   await expect(page.locator(".context-card", { hasText: "local" })).toBeVisible();
   await expect(page.locator(".context-card", { hasText: "ssh:gpu-server" })).toContainText("NVIDIA A100");
@@ -1548,8 +1554,7 @@ test("SSH failures show that automatic retry was stopped", async ({ page }) => {
   await enterApp(page);
   await selectRemoteContext(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
-  await page.getByRole("button", { name: "Add panel" }).click();
-  await page.getByRole("button", { name: "Environment" }).click();
+  await page.getByRole("button", { name: "Environment", exact: true }).click();
 
   await page.evaluate(() => {
     const context = (window as any).__mockExecutionContexts.find(
@@ -1584,8 +1589,7 @@ test("context cards open machine, runtime, and runs details in modals", async ({
   await enterApp(page);
   await selectRemoteContext(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
-  await page.getByRole("button", { name: "Add panel" }).click();
-  await page.getByRole("button", { name: "Environment" }).click();
+  await page.getByRole("button", { name: "Environment", exact: true }).click();
 
   await expect(page.locator(".context-detail-pane")).toHaveCount(0);
   await expect(page.locator(".runtime-card")).toHaveCount(0);
@@ -1619,8 +1623,7 @@ test("execution contexts remember Python and R interpreter paths", async ({ page
   await enterApp(page);
   await selectRemoteContext(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
-  await page.getByRole("button", { name: "Add panel" }).click();
-  await page.getByRole("button", { name: "Environment" }).click();
+  await page.getByRole("button", { name: "Environment", exact: true }).click();
 
   const remote = page.locator(".context-card", { hasText: "ssh:gpu-server" });
   await remote.getByRole("button", { name: "Configure runtime interpreters" }).click();
@@ -1674,8 +1677,7 @@ test("runtime panel shows lifecycle state and controls start stop restart", asyn
   await enterApp(page);
   await selectRemoteContext(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
-  await page.getByRole("button", { name: "Add panel" }).click();
-  await page.getByRole("button", { name: "Environment" }).click();
+  await page.getByRole("button", { name: "Environment", exact: true }).click();
 
   await expect(page.locator(".runtime-card")).toHaveCount(0);
   await page.locator(".context-card", { hasText: "ssh:gpu-server" }).getByRole("button", { name: "View runtimes" }).click();
@@ -1711,8 +1713,7 @@ test("runtime inspector lists object metadata without loading object contents", 
   await enterApp(page);
   await selectRemoteContext(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
-  await page.getByRole("button", { name: "Add panel" }).click();
-  await page.getByRole("button", { name: "Environment" }).click();
+  await page.getByRole("button", { name: "Environment", exact: true }).click();
   await page.locator(".context-card", { hasText: "ssh:gpu-server" }).getByRole("button", { name: "View runtimes" }).click();
 
   const runtime = page.locator('.runtime-card[data-runtime-language="python"][data-runtime-context="ssh:gpu-server"]');
@@ -1821,8 +1822,7 @@ test("environment panel shows runs only for the selected context", async ({ page
   await enterApp(page);
   await selectRemoteContext(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
-  await page.getByRole("button", { name: "Add panel" }).click();
-  await page.getByRole("button", { name: "Environment" }).click();
+  await page.getByRole("button", { name: "Environment", exact: true }).click();
   await page.locator(".context-card", { hasText: "ssh:gpu-server" }).getByRole("button", { name: "View runs" }).click();
   await expect(page.locator(".run-card", { hasText: "Kinase screen QC" })).toBeVisible();
   await expect(page.locator(".run-card", { hasText: "Local normalization" })).toHaveCount(0);
@@ -3755,6 +3755,7 @@ test("code lives in Notebook instead of Artifacts", async ({ page }) => {
   await expect(page.getByText(/60,675 genes/)).toBeVisible({ timeout: 10_000 });
 
   await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.getByRole("button", { name: "Add panel" }).click();
   await page.getByRole("button", { name: "Notebook (2)", exact: true }).click();
 
   const cells = page.locator(".notebook-cell");
@@ -3775,6 +3776,7 @@ test("R tool calls project into a highlighted Notebook cell", async ({ page }) =
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("R summary complete.")).toBeVisible({ timeout: 10_000 });
   await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.getByRole("button", { name: "Add panel" }).click();
   await page.getByRole("button", { name: "Notebook (1)", exact: true }).click();
 
   const cell = page.locator(".notebook-cell");
@@ -3791,6 +3793,7 @@ test("an SVG star saves a Notebook cell in the global library", async ({ page })
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText(/60,675 genes/)).toBeVisible({ timeout: 10_000 });
   await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.getByRole("button", { name: "Add panel" }).click();
   await page.getByRole("button", { name: "Notebook (2)", exact: true }).click();
 
   const cell = page.locator(".notebook-cell").first();
