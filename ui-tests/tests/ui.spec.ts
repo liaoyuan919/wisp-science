@@ -1819,6 +1819,8 @@ test("PDF artifacts render inside the app without a browser PDF plugin", async (
   await expect(page.getByRole("button", { name: "Previous page" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Next page" }).locator("svg")).toBeVisible();
   await expect(modal.locator('embed[type="application/pdf"]')).toHaveCount(0);
+  // A selectable text layer sits over the canvas so PDF text can be added to chat.
+  await expect(renderedPage.locator(".rp-pdf-textlayer")).toContainText("PDF preview works");
 });
 
 test("PDF artifacts switch pages with toolbar buttons, arrow keys, and Page Up/Down", async ({ page }) => {
@@ -1852,6 +1854,53 @@ test("PDF artifacts switch pages with toolbar buttons, arrow keys, and Page Up/D
   await expect(modal.locator('.rp-pdf-page[data-page="1"][data-rendered="true"]')).toBeVisible();
 });
 
+test("PDF text can be selected and added to chat", async ({ page }) => {
+  await enterApp(page);
+  await composer(page).fill("open paper.pdf");
+  await page.getByRole("button", { name: "Send" }).click();
+  await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.locator('.rp-tile[data-artifact-name="paper.pdf"] .rp-tile-main').click();
+
+  const layer = page.locator(".artifact-modal .rp-pdf-textlayer");
+  await expect(layer).toContainText("PDF preview works");
+
+  // Select a text-layer span and raise the shared quote popup (the modal
+  // figure's data-file-path ancestor drives it — same path as md/docx).
+  await layer.locator("span").first().evaluate((el) => {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(range);
+    window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+  });
+  const popup = page.locator(".selection-popup");
+  await expect(popup).toBeVisible();
+  await popup.getByRole("button", { name: "Add to chat" }).click();
+  await expect(page.locator(".composer-reference-chips .quote")).toContainText("PDF preview works");
+});
+
+test("DOCX text in the modal (Files browser) can be added to chat", async ({ page }) => {
+  await enterApp(page);
+  await page.getByRole("button", { name: "Files" }).click();
+  await page.locator('.fb-row[data-workspace-path*="manuscript.docx"]').click();
+
+  const docx = page.locator(".artifact-modal .rp-docx");
+  await expect(docx).toContainText("Differential expression of FX-cell markers");
+  const heading = docx.getByText("Differential expression of FX-cell markers").first();
+  // Modal preview text must stay selectable despite the overlay's user-select:none.
+  await heading.evaluate((el) => {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(range);
+    window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+  });
+  await page.locator(".selection-popup").getByRole("button", { name: "Add to chat" }).click();
+  await expect(page.locator(".composer-reference-chips .quote")).toContainText("Differential expression");
+});
+
 test("DOCX artifacts render offline with headings, tables, and equations", async ({ page }) => {
   await enterApp(page);
   await composer(page).fill("open manuscript.docx");
@@ -1868,6 +1917,34 @@ test("DOCX artifacts render offline with headings, tables, and equations", async
   await expect(docx.locator("math").first()).toBeAttached();
   // The wrapping preview carries data-file-path so P2 selection/annotate works here too.
   await expect(page.locator('.rp-file-preview[data-file-path*="manuscript.docx"]')).toBeVisible();
+
+  // #274: a tall docx must be scrollable in the right pane (not trapped by a
+  // fixed-height .rp-docx). The .rp-view container owns the scroll.
+  const view = page.locator(".rp-view");
+  await docx.locator(".docx-wrapper").evaluate((el) => {
+    (el as HTMLElement).style.minHeight = "4000px";
+  });
+  await expect.poll(() => view.evaluate((el) => el.scrollHeight - el.clientHeight)).toBeGreaterThan(100);
+  await view.evaluate((el) => { el.scrollTop = 500; });
+  await expect.poll(() => view.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+});
+
+test("DOCX opened from the Files browser scrolls inside the modal (#274)", async ({ page }) => {
+  await enterApp(page);
+  // Files browser → docx opens in the artifact modal (like the tester's flow).
+  await page.getByRole("button", { name: "Files" }).click();
+  await page.locator('.fb-row[data-workspace-path*="manuscript.docx"]').click();
+
+  const docx = page.locator(".artifact-modal .rp-docx");
+  await expect(docx.locator(".docx-wrapper section.docx").first()).toBeVisible();
+  // A tall document must scroll inside .rp-docx — the modal figure clips, so the
+  // bounded height has to reach .rp-docx (the #274 "can't scroll down" bug).
+  await docx.locator(".docx-wrapper").evaluate((el) => {
+    (el as HTMLElement).style.minHeight = "4000px";
+  });
+  await expect.poll(() => docx.evaluate((el) => el.scrollHeight - el.clientHeight)).toBeGreaterThan(100);
+  await docx.evaluate((el) => { el.scrollTop = 800; });
+  await expect.poll(() => docx.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
 });
 
 test("Markdown center preview can be edited in place and saved", async ({ page }) => {
@@ -1969,6 +2046,36 @@ test("image preview context menu copies the image", async ({ page, context }) =>
   await page.getByRole("button", { name: "Copy image" }).click();
   await expect(page.locator(".copy-toast")).toHaveText("Copied");
   await expect.poll(() => page.evaluate(() => (window as any).__copiedImageTypes)).toContain("image/png");
+});
+
+test("image region can be cropped and attached to the composer", async ({ page }) => {
+  await enterApp(page);
+  await composer(page).fill("make a volcano plot volcano.png");
+  await page.getByRole("button", { name: "Send" }).click();
+  await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.locator('.rp-tile[data-artifact-name="volcano.png"] .rp-tile-main').click();
+  const image = page.locator(".artifact-modal .rp-img");
+  await expect(image).toBeVisible();
+
+  // Toggle crop mode → the capture layer appears.
+  await page.getByRole("button", { name: "Select a region to ask about" }).click();
+  const layer = page.locator(".file-preview-crop-layer");
+  await expect(layer).toBeVisible();
+
+  // Rubber-band a rectangle inside the image.
+  const box = (await image.boundingBox())!;
+  await page.mouse.move(box.x + 20, box.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 120, box.y + 100, { steps: 4 });
+  await expect(page.locator(".file-preview-crop-rect")).toBeVisible();
+  await page.mouse.up();
+
+  // The crop uploads as a PNG and attaches to the composer (region_*.png).
+  await expect.poll(() => lastInvokeArgs(page, "upload_file"))
+    .toMatchObject({ filename: expect.stringMatching(/^region_.*\.png$/) });
+  await expect(page.locator(".composer-attachments .composer-attachment.ready")).toContainText("region_");
+  // Crop mode auto-exits after a successful crop.
+  await expect(layer).toHaveCount(0);
 });
 
 test("artifact panel normalizes png/pdf shorthand to the previewable image", async ({ page }) => {
