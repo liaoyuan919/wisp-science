@@ -1,8 +1,8 @@
-use super::AppState;
+use super::{desktop_lifecycle, AppState};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs, path::Path};
-use tauri::State;
+use tauri::{Emitter, State};
 
 const MAX_SPRITESHEET_BYTES: u64 = 16 * 1024 * 1024;
 const SPRITE_WIDTH: u32 = 1536;
@@ -291,6 +291,27 @@ pub(super) async fn get_pet_runtime_status(
         waiting,
         reviewing,
     })
+}
+
+#[tauri::command]
+pub(super) async fn open_pet_session(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    let project_id = state
+        .store
+        .frame_project_id(&session_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Session not found".to_string())?;
+    desktop_lifecycle::activate_workspace(&app);
+    app.emit_to(
+        "main",
+        "pet-open-session",
+        serde_json::json!({ "projectId": project_id, "sessionId": session_id }),
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

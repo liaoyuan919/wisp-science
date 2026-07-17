@@ -6356,6 +6356,7 @@ pub fn run() {
             settings_commands::set_credential,
             pet_commands::get_pet,
             pet_commands::get_pet_runtime_status,
+            pet_commands::open_pet_session,
             desktop_lifecycle::set_pet_window_visible,
             models::list_models,
             models::save_model,
