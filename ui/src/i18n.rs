@@ -373,6 +373,8 @@ fn lookup(locale: Locale, key: &str) -> Option<&'static str> {
         (Locale::En, "runtime.run_file") => Some("Run this script in its runtime"),
         (Locale::En, "runtime.console") => Some("Runtime console"),
         (Locale::En, "runtime.console_clear") => Some("Clear console"),
+        (Locale::En, "runtime.console_omitted") => Some("… {n} submitted lines omitted …"),
+        (Locale::En, "runtime.worker_closed") => Some("The runtime process exited unexpectedly. Restart it before running more code."),
         (Locale::En, "runtime.unavailable") => Some("Unavailable"),
         (Locale::En, "runtime.unavailable_hint") => Some("Probe this context or configure its interpreter. R also requires jsonlite."),
         (Locale::En, "runtime.generation") => Some("Generation"),
@@ -1295,6 +1297,8 @@ fn lookup(locale: Locale, key: &str) -> Option<&'static str> {
         (Locale::Zh, "runtime.run_file") => Some("在 runtime 中运行整个脚本"),
         (Locale::Zh, "runtime.console") => Some("Runtime 控制台"),
         (Locale::Zh, "runtime.console_clear") => Some("清空控制台"),
+        (Locale::Zh, "runtime.console_omitted") => Some("… 已省略 {n} 行提交代码 …"),
+        (Locale::Zh, "runtime.worker_closed") => Some("Runtime 进程意外退出，请重启后再运行代码。"),
         (Locale::Zh, "runtime.unavailable") => Some("不可用"),
         (Locale::Zh, "runtime.unavailable_hint") => Some("请先探测该环境或配置解释器；R 还需要 jsonlite。"),
         (Locale::Zh, "runtime.generation") => Some("代次"),
@@ -1960,6 +1964,7 @@ pub fn localize_backend(locale: Locale, msg: &str) -> String {
         "Synchronize this project successfully before copying its device code." => {
             t(locale, "err.sync_code_before_first")
         }
+        "kernel worker closed protocol stdout" => t(locale, "runtime.worker_closed"),
         "selected folder has no SKILL.md" => t(locale, "err.skill_no_md"),
         "select a skill folder or a SKILL.md file" => t(locale, "err.skill_pick"),
         "SKILL.md has no frontmatter (--- block)" => t(locale, "err.skill_no_frontmatter"),

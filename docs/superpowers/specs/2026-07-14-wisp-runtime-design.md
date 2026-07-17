@@ -557,7 +557,9 @@ Anthropic API rejects. Flooding the transcript with every REPL iteration would
 also re-send that output on every later turn. The existing "add to chat" action
 remains the way to hand a result to the agent. The console is in-memory for the
 same reason the runtime is: a log that outlived its process would describe
-variables that no longer exist.
+variables that no longer exist. In the center preview it is a bounded bottom
+dock with its own normal scroll surface; it does not overlay the source, and a
+long submitted script is summarized instead of duplicated in full.
 
 R is optional. Missing `Rscript`/`jsonlite` is a capability state, not a global app
 bootstrap failure. Existing Python bootstrap remains because the app-managed Python

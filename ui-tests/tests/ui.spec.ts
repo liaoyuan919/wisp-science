@@ -1173,6 +1173,23 @@ test("R scripts bind to a runtime and run selections or the whole file in it", a
   // Submitted code is echoed behind a prompt, then its output.
   await expect(console_).toContainText("> library(Seurat)");
   await expect(console_).toContainText("[r @ ssh:gpu-server] library(Seurat)");
+  await expect(page.locator(".center-file-preview")).toHaveCSS("overflow", "hidden");
+  await expect(page.locator(".center-file-console")).not.toHaveCSS("position", "sticky");
+
+  // The output is a bounded dock below the independently scrolling source,
+  // never a sticky layer covering the code preview.
+  const dockLayout = await page.locator(".center-file-preview").evaluate((preview) => {
+    const source = preview.querySelector(".rp-code")!.getBoundingClientRect();
+    const console_ = preview.querySelector(".center-file-console")!.getBoundingClientRect();
+    return {
+      sourceBottom: Math.round(source.bottom),
+      consoleTop: Math.round(console_.top),
+      consoleHeight: Math.round(console_.height),
+      viewportHeight: window.innerHeight,
+    };
+  });
+  expect(dockLayout.consoleTop).toBeGreaterThanOrEqual(dockLayout.sourceBottom);
+  expect(dockLayout.consoleHeight).toBeLessThanOrEqual(Math.round(dockLayout.viewportHeight * 0.32) + 1);
 
   // Selecting code offers running just that selection — the RStudio reflex.
   // highlight.js splits the source into spans, so select one it produces.
