@@ -24,6 +24,12 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
 const MODEL_SWITCH_WARNING_DISABLED_KEY: &str = "wisp-model-switch-warning-disabled";
+const SSH_RETRY_STOPPED_MARKER: &str = "ssh automatic retry stopped";
+
+thread_local! {
+    static RUN_REFRESH_INITIALIZED: Cell<bool> = const { Cell::new(false) };
+    static SSH_RETRY_TOASTED_RUNS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
 
 pub(super) fn model_switch_warning_disabled() -> bool {
     web_sys::window()
@@ -592,13 +598,49 @@ pub(super) fn refresh_runtimes(into: RwSignal<Vec<RuntimeInfo>>) {
     });
 }
 
-pub(super) fn refresh_runs(into: RwSignal<Vec<RunRecord>>) {
+pub(super) fn refresh_runs(into: RwSignal<Vec<RunRecord>>, locale: RwSignal<Locale>) {
     spawn_local(async move {
         let v = invoke("list_runs", JsValue::UNDEFINED).await;
         if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<RunRecord>>(v) {
+            let initialized = RUN_REFRESH_INITIALIZED.with(Cell::get);
+            let stopped_runs = list
+                .iter()
+                .filter(|run| {
+                    matches!(run.status.as_str(), "failed" | "lost")
+                        && run.last_poll_error.as_deref().is_some_and(|error| {
+                            error
+                                .to_ascii_lowercase()
+                                .contains(SSH_RETRY_STOPPED_MARKER)
+                        })
+                })
+                .map(|run| run.id.clone())
+                .collect::<Vec<_>>();
+            let should_toast = SSH_RETRY_TOASTED_RUNS.with(|seen| {
+                let mut seen = seen.borrow_mut();
+                let mut added = false;
+                for run_id in stopped_runs {
+                    if seen.insert(run_id) {
+                        added = true;
+                    }
+                }
+                initialized && added
+            });
             into.set(list);
+            RUN_REFRESH_INITIALIZED.with(|ready| ready.set(true));
+            if should_toast {
+                show_warning_toast(&t(locale.get_untracked(), "runs.ssh_retry_stopped"));
+            }
         }
     });
+}
+
+pub(super) fn show_probe_stopped_toast(value: &JsValue, locale: RwSignal<Locale>) {
+    let Ok(context) = serde_wasm_bindgen::from_value::<ExecutionContext>(value.clone()) else {
+        return;
+    };
+    if context.last_probe_status.as_deref() == Some("error") {
+        show_warning_toast(&t(locale.get_untracked(), "contexts.probe_stopped"));
+    }
 }
 
 pub(super) fn context_capability_summary(ctx: &ExecutionContext) -> String {
@@ -1495,7 +1537,7 @@ pub(super) fn ContextDetailsOverlay(
                                                     <button type="button" class="icon-btn control-refresh"
                                                         title=t(locale.get(), "runs.refresh")
                                                         aria-label=t(locale.get(), "runs.refresh")
-                                                        on:click=move |_| refresh_runs(runs)>{compose_icon("sync")}</button>
+                                                        on:click=move |_| refresh_runs(runs, locale)>{compose_icon("sync")}</button>
                                                 </div>
                                             </div>
                                             {if rows.is_empty() {
@@ -1536,7 +1578,7 @@ pub(super) fn ContextDetailsOverlay(
                                                                         spawn_local(async move {
                                                                             let arg = to_value(&serde_json::json!({ "runId": run_id })).unwrap();
                                                                             let _ = invoke("cancel_run", arg).await;
-                                                                            refresh_runs(runs);
+                                                                            refresh_runs(runs, locale);
                                                                         });
                                                                     }>{compose_icon("close")}</button>
                                                             }

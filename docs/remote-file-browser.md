@@ -14,7 +14,10 @@ directory and supports:
 Remote browsing uses the existing `ssh:<alias>` `ExecutionContext` connection
 snapshot and the system OpenSSH client. It honors the configured SSH alias,
 user, port, identity-file path, SSH config, and agent. No private-key contents
-are stored in SQLite or copied by the browser.
+are stored in SQLite or copied by the browser. Batch SSH/SCP always enables
+OpenSSH `IdentitiesOnly` so unrelated agent keys are not offered to the server;
+agent-only users with a non-default key must name its `IdentityFile` in Wisp or
+SSH config.
 
 This first version does not preview remote files. Search, upload, rename, and
 deletion are also intentionally out of scope. Downloads are explicit user

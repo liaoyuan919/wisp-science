@@ -417,6 +417,116 @@ async fn ssh_run_detaches_persists_handle_and_finishes_from_poller() {
 }
 
 #[tokio::test]
+async fn ssh_launch_failure_stops_after_the_first_attempt() {
+    let tmp = std::env::temp_dir().join(format!("wisp_ssh_stage_once_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("input.fasta"), b">seq\nACGT\n").unwrap();
+    let store = wisp_store::Store::open(&tmp.join("wisp.sqlite"))
+        .await
+        .unwrap();
+    store
+        .create_project("p", "proj", &tmp.to_string_lossy())
+        .await
+        .unwrap();
+    store.create_frame("f", "p", "OPERON", "m").await.unwrap();
+    let mut context = wisp_store::ExecutionContext::new("ssh:gpu", "GPU").unwrap();
+    context.config_json = serde_json::json!({ "alias": "gpu" }).to_string();
+    store.upsert_execution_context(&context).await.unwrap();
+    store
+        .set_session_execution_context_enabled("f", "ssh:gpu", true)
+        .await
+        .unwrap();
+    let runner = Arc::new(ScriptedRunRunner::new(vec![
+        ok_output("__WISP_PREPARED__\n"),
+        ok_output(""),
+        Err("temporary SSH disconnect".into()),
+    ]));
+    runner
+        .synthesize_launch_ack
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let manager = RunManager::with_runner(runner.clone());
+
+    let submitted = manager
+        .submit(
+            store.clone(),
+            "p".into(),
+            Some("f".into()),
+            SubmitRunRequest {
+                context_id: "ssh:gpu".into(),
+                command: "wc -l input.fasta".into(),
+                title: None,
+                timeout_secs: Some(60),
+                input_paths: Some(vec!["input.fasta".into()]),
+                output_specs: None,
+            },
+            Some(tmp.clone()),
+        )
+        .await
+        .unwrap();
+
+    let finished = wait_for_terminal(&store, &submitted.run_id).await;
+    assert_eq!(finished.status, wisp_store::RunStatus::Failed);
+    assert!(finished
+        .last_poll_error
+        .as_deref()
+        .unwrap()
+        .contains(SSH_RETRY_STOPPED_MARKER));
+    let commands = runner.commands.lock().unwrap();
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| command.program == "scp")
+            .count(),
+        1
+    );
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| command.script == "launch SSH Run")
+            .count(),
+        1
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+async fn recovery_fails_unconfirmed_ssh_run_without_reconnecting() {
+    let tmp = std::env::temp_dir().join(format!("wisp_ssh_stale_start_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let store = wisp_store::Store::open(&tmp.join("wisp.sqlite"))
+        .await
+        .unwrap();
+    store
+        .create_project("p", "proj", &tmp.to_string_lossy())
+        .await
+        .unwrap();
+    let mut run = wisp_store::RunRecord::new("stale", "p", "ssh:gpu", "Stale", "ssh_direct");
+    run.command = Some("echo stale".into());
+    run.timeout_secs = Some(60);
+    run.last_poll_error = Some("connection timed out".into());
+    run.remote_workdir = Some("~/.wisp-science/runs/stale".into());
+    run.remote_handle_json = Some(serde_json::to_string(&test_handle("stale", false)).unwrap());
+    store.create_run(&run).await.unwrap();
+    store
+        .update_run_status("stale", wisp_store::RunStatus::Submitted)
+        .await
+        .unwrap();
+    let runner = Arc::new(ScriptedRunRunner::new(Vec::new()));
+    let manager = RunManager::with_runner(runner.clone());
+
+    assert_eq!(manager.recover(&store).await.unwrap(), 0);
+    let finished = wait_for_terminal(&store, "stale").await;
+    assert_eq!(finished.status, wisp_store::RunStatus::Failed);
+    assert!(finished
+        .last_poll_error
+        .as_deref()
+        .unwrap()
+        .contains(SSH_RETRY_STOPPED_MARKER));
+    assert!(runner.commands.lock().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
 async fn recovery_reattaches_ssh_after_transient_error_and_marks_local_lost() {
     let tmp = std::env::temp_dir().join(format!("wisp_ssh_recover_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp).unwrap();
@@ -461,6 +571,46 @@ async fn recovery_reattaches_ssh_after_transient_error_and_marks_local_lost() {
         store.get_run("local-run").await.unwrap().unwrap().status,
         wisp_store::RunStatus::Lost
     );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+async fn confirmed_ssh_run_stops_polling_after_authentication_failure() {
+    let tmp = std::env::temp_dir().join(format!("wisp_ssh_auth_stop_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let store = wisp_store::Store::open(&tmp.join("wisp.sqlite"))
+        .await
+        .unwrap();
+    store
+        .create_project("p", "proj", &tmp.to_string_lossy())
+        .await
+        .unwrap();
+
+    let mut run = wisp_store::RunRecord::new("remote", "p", "ssh:gpu", "Remote", "ssh_direct");
+    run.command = Some("long-analysis".into());
+    run.timeout_secs = Some(3600);
+    run.remote_workdir = Some("~/.wisp-science/runs/remote".into());
+    run.remote_handle_json = Some(serde_json::to_string(&test_handle("remote", true)).unwrap());
+    store.create_run(&run).await.unwrap();
+    store
+        .update_run_status("remote", wisp_store::RunStatus::Running)
+        .await
+        .unwrap();
+
+    let runner = Arc::new(ScriptedRunRunner::new(vec![Err(
+        "Permission denied (publickey).".into(),
+    )]));
+    let manager = RunManager::with_runner(runner.clone());
+
+    assert_eq!(manager.recover(&store).await.unwrap(), 0);
+    let finished = wait_for_terminal(&store, "remote").await;
+    assert_eq!(finished.status, wisp_store::RunStatus::Lost);
+    assert!(finished
+        .last_poll_error
+        .as_deref()
+        .unwrap()
+        .contains(SSH_RETRY_STOPPED_MARKER));
+    assert_eq!(runner.commands.lock().unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -724,13 +874,87 @@ fn test_handle(run_id: &str, confirmed: bool) -> RemoteRunHandle {
         },
         workdir: format!(".wisp-science/runs/{run_id}"),
         token: "test-token".into(),
+        inputs_staged: false,
         pgid: confirmed.then_some(4242),
         start_time: confirmed.then_some(999),
     }
 }
 
+#[test]
+fn permanent_remote_start_errors_require_user_intervention() {
+    for error in [
+        "SSH prepare failed with exit 255: Permission denied (publickey,password).",
+        "Received disconnect: Too many authentication failures",
+        "SSH input staging failed: Could not resolve hostname server",
+        "Host key verification failed.",
+        "kex_exchange_identification: read: Connection reset by peer",
+        "kex_exchange_identification: Connection closed by remote host",
+    ] {
+        assert!(permanent_remote_start_error(error), "{error}");
+    }
+    assert!(!permanent_remote_start_error(
+        "SSH launch failed: connection timed out"
+    ));
+}
+
+#[test]
+fn remote_poll_transport_errors_back_off_without_exceeding_the_lease() {
+    assert_eq!(remote_poll_delay_secs(0), 5);
+    assert_eq!(remote_poll_delay_secs(1), 5);
+    assert_eq!(remote_poll_delay_secs(2), 10);
+    assert_eq!(remote_poll_delay_secs(3), 20);
+    assert_eq!(remote_poll_delay_secs(100), 20);
+    assert!(remote_poll_delay_secs(100) < ACTIVE_LEASE_SECS as u64);
+}
+
+#[test]
+fn persisted_ssh_handles_without_staging_flag_remain_compatible() {
+    let handle: RemoteRunHandle = serde_json::from_str(
+        r#"{"kind":"ssh_direct","connection":{"alias":"gpu"},"workdir":".wisp-science/runs/old","token":"old-token","pgid":null,"start_time":null}"#,
+    )
+    .unwrap();
+    assert!(!handle.inputs_staged());
+}
+
+#[test]
+fn ssh_start_keeps_a_lease_longer_than_the_input_staging_timeout() {
+    let pending = RemoteRun {
+        run_id: "pending".into(),
+        project_id: "p".into(),
+        frame_id: None,
+        command: "echo pending".into(),
+        timeout: Duration::from_secs(60),
+        input_refs: vec!["input.fasta".into()],
+        output_specs: Vec::new(),
+        harvest_root: None,
+        handle: test_handle("pending", false),
+    };
+    assert!(REMOTE_START_LEASE_SECS > 300);
+    assert_eq!(
+        remote_lifecycle_lease_secs(&pending),
+        REMOTE_START_LEASE_SECS
+    );
+
+    let mut running = pending;
+    running.handle = test_handle("running", true);
+    assert_eq!(remote_lifecycle_lease_secs(&running), ACTIVE_LEASE_SECS);
+}
+
+#[cfg(windows)]
+#[test]
+fn scp_local_paths_strip_windows_extended_length_prefixes() {
+    assert_eq!(
+        scp_local_path(std::path::Path::new(r"\\?\E:\shui-jue\input.fasta")),
+        r"E:\shui-jue\input.fasta"
+    );
+    assert_eq!(
+        scp_local_path(std::path::Path::new(r"\\?\UNC\server\share\input.fasta")),
+        r"\\server\share\input.fasta"
+    );
+}
+
 async fn wait_for_terminal(store: &wisp_store::Store, run_id: &str) -> wisp_store::RunRecord {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let run = store.get_run(run_id).await.unwrap().unwrap();
             if run.status.is_terminal() {

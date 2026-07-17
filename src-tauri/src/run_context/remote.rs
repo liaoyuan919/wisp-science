@@ -111,6 +111,7 @@ pub(super) fn remote_parts(
             token,
             pgid,
             start_time,
+            ..
         } => (connection, workdir, token, *pgid, *start_time),
     }
 }
@@ -144,11 +145,13 @@ pub(super) fn handle_from_ack(
             connection,
             workdir,
             token,
+            inputs_staged,
             ..
         } if token == ack_token => Ok(RemoteRunHandle::SshDirect {
             connection: connection.clone(),
             workdir: workdir.clone(),
             token: token.clone(),
+            inputs_staged: *inputs_staged,
             pgid: Some(pgid),
             start_time: Some(start_time),
         }),
@@ -289,11 +292,7 @@ pub(super) async fn stage_remote_inputs(
     let input_paths = resolve_input_paths(root, &remote.input_refs)?;
     let (connection, workdir, _, _, _) = remote_parts(&remote.handle);
     let mut args = connection.scp_option_args()?;
-    args.extend(
-        input_paths
-            .iter()
-            .map(|path| path.to_string_lossy().into_owned()),
-    );
+    args.extend(input_paths.iter().map(|path| scp_local_path(path)));
     args.push(format!("{}:{workdir}/inputs/", connection.target()?));
     checked_output(
         "SSH input staging",
@@ -312,6 +311,20 @@ pub(super) async fn stage_remote_inputs(
             .await,
     )?;
     Ok(())
+}
+
+pub(super) fn scp_local_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        if let Some(path) = path.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{path}");
+        }
+        if let Some(path) = path.strip_prefix(r"\\?\") {
+            return path.to_string();
+        }
+    }
+    path.into_owned()
 }
 
 pub(super) fn launch_payload(handle: &RemoteRunHandle) -> String {
@@ -375,15 +388,35 @@ pub(super) async fn ensure_remote_started(
     store: &wisp_store::Store,
     owner_id: &str,
     runner: &dyn RunCommandRunner,
-    remote: &RemoteRun,
+    remote: &mut RemoteRun,
 ) -> Result<RemoteRunHandle, String> {
     if remote.handle.is_confirmed() {
         return Ok(remote.handle.clone());
     }
     match prepare_remote(runner, remote).await? {
-        PrepareRemote::Existing(handle) => Ok(handle),
+        PrepareRemote::Existing(handle) => {
+            remote.handle = handle.clone();
+            Ok(handle)
+        }
         PrepareRemote::Prepared => {
-            stage_remote_inputs(runner, remote).await?;
+            if !remote.input_refs.is_empty() && !remote.handle.inputs_staged() {
+                stage_remote_inputs(runner, remote).await?;
+                remote.handle.mark_inputs_staged();
+                let handle_json =
+                    serde_json::to_string(&remote.handle).map_err(|e| e.to_string())?;
+                if !store
+                    .set_run_remote_handle_owned(
+                        &remote.run_id,
+                        owner_id,
+                        &handle_json,
+                        &remote.handle.display_workdir(),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?
+                {
+                    return Err("SSH lifecycle lease expired after input staging".into());
+                }
+            }
             let run = store
                 .get_run(&remote.run_id)
                 .await
@@ -652,17 +685,41 @@ pub(super) fn remote_terminal_status(exit_code: i64) -> wisp_store::RunStatus {
     }
 }
 
-pub(super) fn remote_poll_interval() -> Duration {
+pub(super) fn remote_poll_delay_secs(consecutive_transport_errors: u32) -> u64 {
+    match consecutive_transport_errors {
+        0 | 1 => 5,
+        2 => 10,
+        _ => 20,
+    }
+}
+
+pub(super) fn remote_poll_interval(consecutive_transport_errors: u32) -> Duration {
     if cfg!(test) {
         Duration::from_millis(10)
     } else {
-        Duration::from_secs(5)
+        Duration::from_secs(remote_poll_delay_secs(consecutive_transport_errors))
     }
 }
 
 pub(super) fn permanent_remote_start_error(error: &str) -> bool {
-    error.contains("requires setsid")
-        || error.contains("requires timeout")
-        || error.contains("requires bash")
-        || error.contains("process group did not start")
+    let error = error.to_ascii_lowercase();
+    [
+        "requires setsid",
+        "requires timeout",
+        "requires bash",
+        "process group did not start",
+        "permission denied",
+        "too many authentication failures",
+        "host key verification failed",
+        "could not resolve hostname",
+        "could not resolve host",
+        "name or service not known",
+        "no such identity",
+        "bad configuration option",
+        "connection reset",
+        "connection closed",
+        "kex_exchange_identification",
+    ]
+    .iter()
+    .any(|message| error.contains(message))
 }

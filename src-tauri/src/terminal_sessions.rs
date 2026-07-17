@@ -514,7 +514,16 @@ mod tests {
         assert_eq!(spec.program, "ssh");
         assert_eq!(
             spec.args,
-            ["-tt", "-p", "2222", "-i", "/keys/lab key", "alice@gpu"]
+            [
+                "-tt",
+                "-p",
+                "2222",
+                "-o",
+                "IdentitiesOnly=yes",
+                "-i",
+                "/keys/lab key",
+                "alice@gpu"
+            ]
         );
         assert!(!spec.args.iter().any(|arg| arg.contains("BatchMode")));
         assert_eq!(spec.display_cwd, "~");
