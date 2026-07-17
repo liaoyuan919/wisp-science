@@ -1,13 +1,13 @@
 use super::desktop_lifecycle::{should_activate_workspace_window, should_hide_workspace_on_close};
 use super::{
-    branch_title, copy_dir_recursive, events_to_items, merge_pending_ui_event,
-    message_uses_resource_bindings, messages_to_items, parse_disabled_skills,
-    parse_enabled_skill_names, parse_skill_tags, parse_ssh_artifact_uri, persist_ui_events,
-    resolve_acp_artifact_references, resolve_composer_references, resolve_review_backend,
-    resolve_workspace, session_runtime_status, should_hide_app_on_macos_close, side_chat_prompt,
-    transcript_page_items, update_check_from_release, user_message_start, AgentEvent,
-    ComposerReferenceArg, GithubRelease, McpConnection, McpHttpAuth, McpTransport,
-    MAX_PENDING_UI_EVENT_BYTES,
+    branch_title, copy_dir_recursive, enable_referenced_contexts, events_to_items,
+    merge_pending_ui_event, message_uses_resource_bindings, messages_to_items,
+    parse_disabled_skills, parse_enabled_skill_names, parse_skill_tags, parse_ssh_artifact_uri,
+    persist_ui_events, resolve_acp_artifact_references, resolve_composer_references,
+    resolve_review_backend, resolve_workspace, session_runtime_status,
+    should_hide_app_on_macos_close, side_chat_prompt, transcript_page_items,
+    update_check_from_release, user_message_start, AgentEvent, ComposerReferenceArg, GithubRelease,
+    McpConnection, McpHttpAuth, McpTransport, MAX_PENDING_UI_EVENT_BYTES,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -377,6 +377,10 @@ async fn composer_references_resolve_artifact_session_and_skill() {
     )
     .unwrap();
     let skills = wisp_skills::SkillIndex::load(&[base.join("skills")]);
+    store
+        .upsert_execution_context(&wisp_store::ExecutionContext::new("ssh:gpu", "GPU").unwrap())
+        .await
+        .unwrap();
     let refs = vec![
         ComposerReferenceArg::Artifact {
             id: "artifact".into(),
@@ -387,6 +391,13 @@ async fn composer_references_resolve_artifact_session_and_skill() {
         ComposerReferenceArg::Skill {
             name: "test-skill".into(),
         },
+        ComposerReferenceArg::Context {
+            id: "ssh:gpu".into(),
+        },
+        ComposerReferenceArg::Runtime {
+            context_id: "ssh:gpu".into(),
+            language: "r".into(),
+        },
     ];
     let injected = resolve_composer_references(&store, &refs, "target", &skills)
         .await
@@ -395,6 +406,18 @@ async fn composer_references_resolve_artifact_session_and_skill() {
     assert!(injected.contains("data.csv"));
     assert!(injected.contains("prior result"));
     assert!(injected.contains("Use the test workflow"));
+    assert!(injected.contains("GPU (context_id: ssh:gpu, kind: ssh)"));
+    assert!(injected.contains("r runtime on GPU (context_id: ssh:gpu)"));
+    assert!(resolve_composer_references(
+        &store,
+        &[ComposerReferenceArg::Context {
+            id: "ssh:missing".into()
+        }],
+        "target",
+        &skills,
+    )
+    .await
+    .is_err());
     let acp_artifacts = resolve_acp_artifact_references(&store, &refs)
         .await
         .unwrap();
@@ -414,6 +437,63 @@ async fn composer_references_resolve_artifact_session_and_skill() {
     )
     .await
     .is_err());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[tokio::test]
+async fn at_mentioning_a_server_turns_it_on_for_the_session() {
+    let base = std::env::temp_dir().join(format!("wisp_ctx_on_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&base).unwrap();
+    let store = wisp_store::Store::open(&base.join("wisp.sqlite"))
+        .await
+        .unwrap();
+    store
+        .create_project("p", "P", &base.to_string_lossy())
+        .await
+        .unwrap();
+    store.create_frame("f", "p", "OPERON", "m").await.unwrap();
+    store
+        .upsert_execution_context(&wisp_store::ExecutionContext::new("local", "Local").unwrap())
+        .await
+        .unwrap();
+    store
+        .upsert_execution_context(&wisp_store::ExecutionContext::new("ssh:cpu1", "CPU1").unwrap())
+        .await
+        .unwrap();
+    assert!(store
+        .list_session_execution_context_ids("f")
+        .await
+        .unwrap()
+        .is_empty());
+
+    // A runtime reference enables the server it lives on, same as naming the
+    // server directly. Local needs no toggle, and a stale id must not error.
+    enable_referenced_contexts(
+        &store,
+        &[
+            ComposerReferenceArg::Runtime {
+                context_id: "ssh:cpu1".into(),
+                language: "r".into(),
+            },
+            ComposerReferenceArg::Context { id: "local".into() },
+            ComposerReferenceArg::Context {
+                id: "ssh:gone".into(),
+            },
+        ],
+        "f",
+    )
+    .await;
+    assert_eq!(
+        store.list_session_execution_context_ids("f").await.unwrap(),
+        vec!["ssh:cpu1".to_string()]
+    );
+
+    // The prompt's compute section is rendered from that stored set, so the
+    // just-enabled server has to appear in it this same turn.
+    let compute = super::ssh_hosts::stored_compute_section(&store, "f")
+        .await
+        .unwrap();
+    assert!(compute.contains("ssh:cpu1"));
     let _ = std::fs::remove_dir_all(&base);
 }
 

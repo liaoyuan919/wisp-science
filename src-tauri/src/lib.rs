@@ -370,9 +370,22 @@ struct SessionSearchInfo {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ComposerReferenceArg {
-    Artifact { id: String },
-    Session { id: String },
-    Skill { name: String },
+    Artifact {
+        id: String,
+    },
+    Session {
+        id: String,
+    },
+    Skill {
+        name: String,
+    },
+    Context {
+        id: String,
+    },
+    Runtime {
+        context_id: String,
+        language: String,
+    },
 }
 
 #[derive(Serialize, Clone)]
@@ -2853,8 +2866,18 @@ async fn resolve_composer_references(
     let mut artifact_lines = Vec::new();
     let mut session_blocks = Vec::new();
     let mut skill_blocks = Vec::new();
+    let mut context_lines = Vec::new();
+    let mut runtime_lines = Vec::new();
     let mut session_count = 0usize;
     let mut session_bytes = 0usize;
+
+    let context_label = |context: &wisp_store::ExecutionContext| {
+        if context.label.trim().is_empty() {
+            context.id.clone()
+        } else {
+            context.label.clone()
+        }
+    };
 
     for reference in refs {
         match reference {
@@ -2932,6 +2955,43 @@ async fn resolve_composer_references(
                 })?;
                 skill_blocks.push(wisp_skills::render_skill(skill));
             }
+            ComposerReferenceArg::Context { id } => {
+                if !seen.insert(format!("context:{id}")) {
+                    continue;
+                }
+                let context = store
+                    .get_execution_context(id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("Referenced environment '{id}' no longer exists."))?;
+                context_lines.push(format!(
+                    "- {} (context_id: {id}, kind: {})",
+                    context_label(&context),
+                    context.kind.as_str()
+                ));
+            }
+            ComposerReferenceArg::Runtime {
+                context_id,
+                language,
+            } => {
+                if !seen.insert(format!("runtime:{context_id}:{language}")) {
+                    continue;
+                }
+                if language != "python" && language != "r" {
+                    return Err(format!("Unknown runtime language '{language}'."));
+                }
+                let context = store
+                    .get_execution_context(context_id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| {
+                        format!("Referenced environment '{context_id}' no longer exists.")
+                    })?;
+                runtime_lines.push(format!(
+                    "- {language} runtime on {} (context_id: {context_id}): call the `{language}` tool with this context_id.",
+                    context_label(&context)
+                ));
+            }
         }
     }
 
@@ -2943,6 +3003,18 @@ async fn resolve_composer_references(
         ));
     }
     injections.extend(session_blocks);
+    if !context_lines.is_empty() {
+        injections.push(format!(
+            "The user directed this request at these execution contexts. Run this turn's work there — submit commands with `run_in_context` using the context id, and pass the same `context_id` to the `python`/`r` tools for interactive analysis:\n{}",
+            context_lines.join("\n")
+        ));
+    }
+    if !runtime_lines.is_empty() {
+        injections.push(format!(
+            "The user referenced these persistent language runtimes. Each keeps its variables between calls, so inspect state directly (R: `ls()`, `str(x)`; Python: `dir()`, `type(x)`) instead of re-running earlier work:\n{}",
+            runtime_lines.join("\n")
+        ));
+    }
     if !skill_blocks.is_empty() {
         injections.push(format!(
             "The user explicitly selected these skills for this turn. Follow their guidance:\n\n{}",
@@ -2950,6 +3022,40 @@ async fn resolve_composer_references(
         ));
     }
     Ok(injections)
+}
+
+/// Turn on every execution context the composer referenced, so `@CPU1` alone
+/// puts that server in the session instead of requiring the sidebar toggle.
+/// Must run before `stored_compute_section`, which renders the prompt's compute
+/// section from exactly this stored set.
+///
+/// Best-effort: local compute is always on (the store rejects enabling it), and
+/// a context that no longer exists is left to `resolve_composer_references`,
+/// which reports it with a user-facing message a moment later.
+async fn enable_referenced_contexts(store: &Store, refs: &[ComposerReferenceArg], frame_id: &str) {
+    let mut seen = HashSet::new();
+    for reference in refs {
+        let id = match reference {
+            ComposerReferenceArg::Context { id } => id,
+            ComposerReferenceArg::Runtime { context_id, .. } => context_id,
+            _ => continue,
+        };
+        if !seen.insert(id) {
+            continue;
+        }
+        match store.get_execution_context(id).await {
+            Ok(Some(context)) if context.kind != wisp_store::ExecutionContextKind::Local => {
+                if let Err(e) = store
+                    .set_session_execution_context_enabled(frame_id, id, true)
+                    .await
+                {
+                    tracing::warn!("enable referenced context {id} failed: {e}");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("load referenced context {id} failed: {e}"),
+        }
+    }
 }
 
 /// Resolve artifact references to files that can be passed to an ACP Agent as
@@ -3063,6 +3169,7 @@ async fn send_message(
         let skills = active_skill_index(&state.store, &ap).await;
         let mut injected_context =
             resolve_composer_references(&state.store, refs, &frame_id, &skills).await?;
+        enable_referenced_contexts(&state.store, refs, &frame_id).await;
         if let Some(compute) = ssh_hosts::stored_compute_section(&state.store, &frame_id).await {
             injected_context.push(compute);
         }
@@ -3323,11 +3430,12 @@ async fn send_message(
     );
     if !resume {
         agent.ctx.clear_runtime_injections();
+        let refs = references.unwrap_or_default();
+        enable_referenced_contexts(&state.store, &refs, &frame_id).await;
         if let Some(compute) = ssh_hosts::stored_compute_section(&state.store, &frame_id).await {
             agent.ctx.inject_user(compute);
         }
         let skills = active_skill_index(&state.store, &ap).await;
-        let refs = references.unwrap_or_default();
         for injection in
             resolve_composer_references(&state.store, &refs, &frame_id, &skills).await?
         {

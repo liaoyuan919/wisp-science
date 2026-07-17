@@ -53,6 +53,8 @@
     ncbi_api_key: false,
     ncbi_email: false,
   };
+  // frame_id -> enabled execution context ids, mirroring session_execution_contexts.
+  const sessionContexts = {};
   const mockChannels = {
     feishu_enabled: false,
     feishu_bound: false,
@@ -69,7 +71,11 @@
 
   window.__TAURI__ = {
     core: {
-      invoke: async (cmd, args) => {
+      invoke: async (cmd, rawArgs) => {
+        // serde_wasm_bindgen renders Rust structs as JS objects but `json!`
+        // maps as JS Maps, so property access alone silently misses half the
+        // call sites.
+        const args = rawArgs instanceof Map ? Object.fromEntries(rawArgs) : rawArgs;
         switch (cmd) {
           case "list_sessions":
             return sessions;
@@ -212,6 +218,36 @@
               memory_files: [],
               project,
             };
+          case "search_artifacts": {
+            const q = String(args?.query ?? "").toLowerCase();
+            return [
+              { id: "u1", name: "counts.csv", kind: "text/csv", path: project.root + "/uploads/counts.csv", ts: 1719900000, project_id: "default", project_name: project.name, session_id: "s1", session_title: "查找文献, FX-cell", size_bytes: 2048, origin: "upload" },
+              { id: "u2", name: "samples.xlsx", kind: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", path: project.root + "/uploads/samples.xlsx", ts: 1719890000, project_id: "default", project_name: project.name, session_id: "s1", session_title: "查找文献, FX-cell", size_bytes: 8192, origin: "upload" },
+              { id: "a1", name: "report.csv", kind: "text/csv", path: project.root + "/report.csv", ts: 1719880000, project_id: "default", project_name: project.name, session_id: "s1", session_title: "查找文献, FX-cell", size_bytes: 4096, origin: "output" },
+            ].filter((a) => !q || a.name.toLowerCase().includes(q));
+          }
+          case "list_ssh_hosts":
+            return [{ alias: "cpu1", user: "researcher", port: 22, identity_file: null, notes: "Mock CPU host" }];
+          case "list_execution_contexts":
+            return [
+              { id: "local", kind: "local", label: "Local", config_json: "{}", capabilities_json: "{}", last_probe_at: null, last_probe_status: null, last_probe_error: null, created_at: 1, updated_at: 1 },
+              {
+                id: "ssh:cpu1", kind: "ssh", label: "CPU1",
+                config_json: JSON.stringify({ host: "cpu1", python_executable: "/usr/bin/python3", rscript_executable: "/usr/bin/Rscript" }),
+                capabilities_json: JSON.stringify({ python_executable: "/usr/bin/python3", rscript_executable: "/usr/bin/Rscript", r_jsonlite: true }),
+                last_probe_at: 1, last_probe_status: "ok", last_probe_error: null, created_at: 1, updated_at: 1,
+              },
+            ];
+          case "list_session_execution_context_ids":
+            return [...(sessionContexts[String(args?.sessionId ?? args?.session_id ?? "")] ?? [])];
+          case "set_session_execution_context_enabled": {
+            const sid = String(args?.sessionId ?? args?.session_id ?? "");
+            const cid = String(args?.contextId ?? args?.context_id ?? "");
+            const on = new Set(sessionContexts[sid] ?? []);
+            if (args?.enabled) on.add(cid); else on.delete(cid);
+            sessionContexts[sid] = [...on].sort();
+            return sessionContexts[sid];
+          }
           case "list_dir":
             return [
               { name: "data", is_dir: true, size: 0 },
@@ -263,6 +299,14 @@
           case "send_message": {
             const fid = (args && (args.sessionId ?? args.session_id)) || "mock-frame";
             const msg = (args && args.message) || "";
+            // Mirror enable_referenced_contexts: an @-referenced non-local
+            // server turns itself on for the session.
+            const on = new Set(sessionContexts[fid] ?? []);
+            for (const ref of args?.references ?? []) {
+              const cid = ref.kind === "context" ? ref.id : ref.kind === "runtime" ? ref.context_id : null;
+              if (cid && cid !== "local") on.add(cid);
+            }
+            sessionContexts[fid] = [...on].sort();
             if (String(msg).includes("MDLIST")) {
               const md = [
                 "FX细胞（FX cell）是一种常用于病毒学研究的人源细胞系，具有以下特点：",
