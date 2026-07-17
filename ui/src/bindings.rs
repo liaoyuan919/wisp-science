@@ -55,6 +55,10 @@ extern "C" {
     pub(crate) fn native_drop_in_composer(payload: JsValue) -> bool;
     #[wasm_bindgen(js_name = upload_input_files)]
     pub(crate) async fn upload_input_files(input_id: &str) -> JsValue;
+    #[wasm_bindgen(js_name = preview_selection)]
+    pub(crate) fn preview_selection() -> String;
+    #[wasm_bindgen(js_name = clear_selection)]
+    pub(crate) fn clear_selection();
 }
 
 #[wasm_bindgen(module = "/src/scroll.js")]

@@ -677,6 +677,7 @@ pub(crate) fn file_kind(path: &str) -> Option<&'static str> {
         // Plain FASTA → syntax-highlighted text (web-dist Hae → text preview)
         "fasta" | "fa" | "fas" | "fna" | "faa" | "ffn" | "frn" => "fasta",
         "md" => "markdown",
+        "docx" => "docx",
         "html" | "htm" => "html",
         "nwk" | "newick" | "treefile" | "tre" => "text",
         "json" => "json",

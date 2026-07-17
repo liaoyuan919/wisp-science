@@ -14,10 +14,11 @@ mod text;
 mod window_titlebar;
 
 use bindings::{
-    attach_chat_autoscroll, force_chat_bottom, invoke, invoke_checked, invoke_timeout, is_mac,
-    is_windows, listen, listen_native_file_drop, mount_terminal, native_drop_in_composer,
-    open_external_url, pasted_image_count, preserve_chat_prepend_position, schedule_chat_follow,
-    set_terminal_active, unmount_terminal, CHAT_SCROLLER_ID, CHAT_THREAD_ID,
+    attach_chat_autoscroll, clear_selection, force_chat_bottom, invoke, invoke_checked,
+    invoke_timeout, is_mac, is_windows, listen, listen_native_file_drop, mount_terminal,
+    native_drop_in_composer, open_external_url, pasted_image_count, preserve_chat_prepend_position,
+    preview_selection, schedule_chat_follow, set_terminal_active, unmount_terminal,
+    CHAT_SCROLLER_ID, CHAT_THREAD_ID,
 };
 use context_menu::{ContextMenuPortal, CtxMenu};
 use dto::*;
@@ -816,6 +817,19 @@ fn App() -> impl IntoView {
     let center_files = create_rw_signal::<Vec<CenterFileTab>>(vec![]);
     let center_file = create_rw_signal::<Option<String>>(None);
     let center_file_open = create_memo(move |_| center_file.get().is_some());
+    // Inline editor for Markdown/text center previews: Some((path, buffer)) while
+    // editing that file. `center_reload` bumps to force the preview to re-read
+    // after a save. See `editable_center_kind`.
+    let center_edit = create_rw_signal::<Option<(String, String)>>(None);
+    let center_edit_busy = create_rw_signal(false);
+    let center_edit_msg = create_rw_signal::<Option<String>>(None);
+    let center_reload = create_rw_signal(0u32);
+    // Abandon any in-progress edit when the active center file changes.
+    create_effect(move |_| {
+        let _ = center_file.get();
+        center_edit.set(None);
+        center_edit_msg.set(None);
+    });
     let center_tabs_by_session =
         create_rw_signal::<HashMap<String, (Vec<CenterFileTab>, Option<String>)>>(HashMap::new());
     let previous_center_session = Rc::new(RefCell::new(None::<String>));
@@ -907,8 +921,10 @@ fn App() -> impl IntoView {
     // Quoted chat selections waiting in the composer; folded into the message
     // body as blockquotes on send (no backend-side reference type needed).
     let composer_quotes = create_rw_signal::<Vec<String>>(vec![]);
-    // Floating action popup over a chat text selection: (text, viewport x, y).
-    let selection_popup = create_rw_signal::<Option<(String, i32, i32)>>(None);
+    // Floating action popup over a text selection: (text, source file path, x, y).
+    // The source path is Some only when the selection is inside a file preview —
+    // it gates the "annotate" action and names the review sidecar.
+    let selection_popup = create_rw_signal::<Option<(String, Option<String>, i32, i32)>>(None);
     let picker_mode = create_rw_signal(None::<ComposerPickerMode>);
     let picker_query = create_rw_signal(String::new());
     let picker_index = create_rw_signal(0usize);
@@ -3957,6 +3973,38 @@ fn App() -> impl IntoView {
         }
     });
 
+    // Selecting text inside any file preview (tagged `data-file-path`) raises the
+    // same quote popup the chat uses, plus an "annotate" action. Runs on window
+    // so it covers the center preview, the artifact modal, and the right pane
+    // uniformly. Fires after the chat's own element handler during bubbling, so
+    // it only clears/replaces a *preview* popup (source == Some) and never stomps
+    // a chat selection popup.
+    window_event_listener(ev::mouseup, move |ev| {
+        use wasm_bindgen::JsCast;
+        // Clicking a popup button is itself a mouseup — ignore it so it can't
+        // re-capture the selection and race the button's own click handler.
+        let in_popup = ev
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+            .and_then(|el| el.closest(".selection-popup").ok().flatten())
+            .is_some();
+        if in_popup {
+            return;
+        }
+        let json = preview_selection();
+        if json.is_empty() {
+            if matches!(selection_popup.get_untracked(), Some((_, Some(_), _, _))) {
+                selection_popup.set(None);
+            }
+            return;
+        }
+        if let Ok(sel) = serde_json::from_str::<PreviewSelection>(&json) {
+            if !sel.text.trim().is_empty() {
+                selection_popup.set(Some((sel.text, Some(sel.path), sel.x, sel.y)));
+            }
+        }
+    });
+
     // Dismiss the selection popup on any press outside it: starting a new
     // selection, clicking the composer, or clicking elsewhere in the app.
     window_event_listener(ev::mousedown, move |ev| {
@@ -4810,23 +4858,121 @@ fn App() -> impl IntoView {
             {move || center_file.get().and_then(|path| {
                 center_files.get().into_iter().find(|file| file.path == path)
             }).map(|file| {
-                let dom_id = format!("center-file-{}", file.path);
+                // `center_reload` in the dom_id forces the preview to re-read the
+                // file after an inline save.
+                let dom_id = format!("center-file-{}-{}", center_reload.get(), file.path);
+                let path = file.path.clone();
+                let kind = file.kind.clone();
+                // Immutable artifact/version tabs aren't real filesystem paths, so
+                // they stay read-only; only real workspace files are editable.
+                let can_edit = editable_center_kind(&kind)
+                    && !path.starts_with("artifact:")
+                    && !path.starts_with("artifact-version:");
+                let editing = create_memo({
+                    let path = path.clone();
+                    move |_| matches!(center_edit.get(), Some((p, _)) if p == path)
+                });
+                let start_edit = {
+                    let path = path.clone();
+                    move |_| {
+                        let path = path.clone();
+                        center_edit_msg.set(None);
+                        center_edit_busy.set(true);
+                        spawn_local(async move {
+                            let arg = to_value(&tauri_args::read_file(&path, Some(32 * 1024 * 1024))).unwrap();
+                            match invoke_checked("read_file", arg).await {
+                                Ok(v) => match serde_wasm_bindgen::from_value::<FileContent>(v) {
+                                    Ok(fc) => center_edit.set(Some((path, fc.text.unwrap_or_default()))),
+                                    Err(_) => center_edit_msg.set(Some(tf(locale.get(), "err.file_not_found", &[("path", &path)]))),
+                                },
+                                Err(e) => center_edit_msg.set(Some(localize_backend(locale.get(), &js_error_text(e)))),
+                            }
+                            center_edit_busy.set(false);
+                        });
+                    }
+                };
+                let save_edit = {
+                    let path = path.clone();
+                    move |_| {
+                        let Some((_, body)) = center_edit.get_untracked() else { return; };
+                        let path = path.clone();
+                        center_edit_msg.set(None);
+                        center_edit_busy.set(true);
+                        spawn_local(async move {
+                            let arg = to_value(&serde_json::json!({ "path": path, "content": body })).unwrap();
+                            match invoke_checked("write_file", arg).await {
+                                Ok(_) => {
+                                    center_edit.set(None);
+                                    center_reload.update(|n| *n = n.wrapping_add(1));
+                                }
+                                Err(e) => center_edit_msg.set(Some(localize_backend(locale.get(), &js_error_text(e)))),
+                            }
+                            center_edit_busy.set(false);
+                        });
+                    }
+                };
                 view! {
-                    <div class="center-file-preview" data-preview-kind=file.kind.clone()>
-                        <div class="center-file-head"><span>{file.path.clone()}</span></div>
-                        <WorkspaceFilePreview dom_id=dom_id path=file.path kind=file.kind />
+                    <div class="center-file-preview" data-preview-kind=kind.clone()
+                        data-file-path=path.clone()>
+                        <div class="center-file-head">
+                            <span>{path.clone()}</span>
+                            <div class="spacer"></div>
+                            {can_edit.then(|| {
+                                let save_edit = save_edit.clone();
+                                let start_edit = start_edit.clone();
+                                view! {
+                                    {move || center_edit_msg.get().map(|m| view! { <span class="center-file-msg">{m}</span> })}
+                                    {move || if editing.get() {
+                                        let save_edit = save_edit.clone();
+                                        view! {
+                                            <button type="button" class="center-file-btn"
+                                                disabled=move || center_edit_busy.get()
+                                                on:click=move |_| center_edit.set(None)>
+                                                {move || t(locale.get(), "editor.cancel")}</button>
+                                            <button type="button" class="center-file-btn primary"
+                                                disabled=move || center_edit_busy.get()
+                                                on:click=save_edit>
+                                                {move || t(locale.get(), "editor.save")}</button>
+                                        }.into_view()
+                                    } else {
+                                        let start_edit = start_edit.clone();
+                                        view! {
+                                            <button type="button" class="center-file-btn"
+                                                disabled=move || center_edit_busy.get()
+                                                on:click=start_edit>
+                                                {move || t(locale.get(), "editor.edit")}</button>
+                                        }.into_view()
+                                    }}
+                                }
+                            })}
+                        </div>
+                        {move || if editing.get() {
+                            view! {
+                                <textarea class="center-file-editor" spellcheck="false"
+                                    prop:value=move || center_edit.get().map(|(_, b)| b).unwrap_or_default()
+                                    on:input=move |ev| {
+                                        let v = event_target_value(&ev);
+                                        center_edit.update(|state| { if let Some((_, b)) = state { *b = v; } });
+                                    }></textarea>
+                            }.into_view()
+                        } else {
+                            view! { <WorkspaceFilePreview dom_id=dom_id.clone() path=path.clone() kind=kind.clone() /> }.into_view()
+                        }}
                     </div>
                 }
             })}
-            {move || selection_popup.get().map(|(text, x, y)| {
+            {move || selection_popup.get().map(|(text, source, x, y)| {
                 let quote = text.clone();
-                let explain = text;
+                let explain = text.clone();
+                let annotate_text = text;
+                let annotate_source = source.clone();
                 view! {
                     <div class="selection-popup" style=format!("left:{x}px;top:{y}px")>
                         <button type="button" class="selection-popup-btn"
                             on:click=move |_| {
                                 composer_quotes.update(|items| items.push(quote.clone()));
                                 selection_popup.set(None);
+                                clear_selection();
                                 focus_composer();
                             }>
                             {compose_icon("plus")}
@@ -4839,18 +4985,50 @@ fn App() -> impl IntoView {
                                     &[explain.clone()],
                                 );
                                 selection_popup.set(None);
+                                clear_selection();
                                 send_side_chat(question);
                             }>
                             {compose_icon("chat")}
                             <span>{t(locale.get(), "selection.explain")}</span>
                         </button>
+                        // Annotate → append the passage to reviews/<file>.md, which the
+                        // agent reads back with its ordinary tools. Only offered when the
+                        // selection came from a file preview (source path known).
+                        {annotate_source.map(|src| {
+                            let quote = annotate_text.clone();
+                            view! {
+                                <button type="button" class="selection-popup-btn"
+                                    on:click=move |_| {
+                                        let quote = quote.clone();
+                                        let src = src.clone();
+                                        let loc = locale.get();
+                                        selection_popup.set(None);
+                                        clear_selection();
+                                        spawn_local(async move {
+                                            let arg = to_value(&serde_json::json!({
+                                                "sourcePath": src, "quote": quote,
+                                            })).unwrap();
+                                            match invoke_checked("append_review_note", arg).await {
+                                                Ok(v) => {
+                                                    let path = v.as_string().unwrap_or_default();
+                                                    status.set(tf(loc, "selection.annotated", &[("path", &path)]));
+                                                }
+                                                Err(e) => status.set(localize_backend(loc, &js_error_text(e))),
+                                            }
+                                        });
+                                    }>
+                                    {compose_icon("doc")}
+                                    <span>{t(locale.get(), "selection.annotate")}</span>
+                                </button>
+                            }
+                        })}
                     </div>
                 }
             })}
             <div class="chat" id=CHAT_SCROLLER_ID class:center-hidden=move || center_file.get().is_some()
                 on:mouseup=move |ev| {
                     let popup = context_menu::selection_text()
-                        .map(|text| (text, ev.client_x(), ev.client_y()));
+                        .map(|text| (text, None, ev.client_x(), ev.client_y()));
                     selection_popup.set(popup);
                 }
                 on:scroll=move |_| {

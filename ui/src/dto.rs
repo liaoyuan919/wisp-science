@@ -276,6 +276,17 @@ pub(crate) fn active_model_label(models: &[ModelProfile]) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Selection captured from a file preview by `api.js`'s `preview_selection`.
+/// Coordinates are viewport-relative (for the fixed-position quote popup).
+#[derive(Deserialize, Clone)]
+pub(crate) struct PreviewSelection {
+    pub(crate) text: String,
+    #[serde(default)]
+    pub(crate) path: String,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub(crate) struct ArtifactInfo {
     pub(crate) id: String,

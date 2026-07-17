@@ -27,6 +27,15 @@ foreach ($f in $files) {
   Copy-Item $from (Join-Path $dst $name) -Force
 }
 
+# docx-preview 0.4.0 is a committed, self-contained ESM bundle (docx-preview +
+# jszip, no bare imports) built with:
+#   esbuild entry.js --bundle --format=esm --outfile=docx-preview.mjs --minify
+# where entry.js is `export { renderAsync, defaultOptions } from 'docx-preview';`
+# It is not in web-dist, so verify it stays present like the PDF.js assets.
+if (-not (Test-Path (Join-Path $dst "docx-preview.mjs"))) {
+  throw "Missing committed docx-preview asset: docx-preview.mjs"
+}
+
 # PDF.js 5.4.296 is kept as a stable, committed module/worker pair because the
 # upstream web-dist only contains the main library folded into a React chunk.
 # The wasm decoders (JPEG2000 figures, ICC colors) are fetched from wasmUrl at

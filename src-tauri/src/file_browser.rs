@@ -84,6 +84,9 @@ pub(super) fn mime_for_path(path: &Path) -> &'static str {
         Some("webp") => "image/webp",
         Some("svg") => "image/svg+xml",
         Some("pdf") => "application/pdf",
+        Some("docx") => {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
         Some("csv") => "text/csv",
         Some("tsv") => "text/tab-separated-values",
         Some("html" | "htm") => "text/html",
@@ -434,6 +437,99 @@ pub(super) fn read_file(
     read_file_at(&state.active(window.label()).root, path, max_bytes)
 }
 
+/// Derive the `reviews/<stem>.md` sidecar path for a previewed source file and
+/// append a quoted passage to it. The sidecar is plain Markdown so the agent
+/// reads it back with its ordinary read/grep tools — no new protocol. Returns
+/// the sidecar's path relative to the project root (for a UI confirmation).
+pub(super) fn append_review_note_at(
+    root: &Path,
+    source_path: &str,
+    quote: &str,
+    note: Option<&str>,
+) -> Result<String, String> {
+    let quote = quote.trim();
+    if quote.is_empty() {
+        return Err("nothing selected to annotate".into());
+    }
+    // Name the sidecar after the source file's stem; a bare selection with no
+    // source still lands in a shared `reviews/notes.md`.
+    let stem = Path::new(source_path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "notes".into());
+    let reviews_dir = root.join("reviews");
+    std::fs::create_dir_all(&reviews_dir)
+        .map_err(|e| format!("could not create reviews folder: {e}"))?;
+
+    let rel = format!("reviews/{stem}.md");
+    let real = wisp_tools::safety::validate_file_path(root, &rel)?;
+
+    let source_name = Path::new(source_path)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| source_path.to_string());
+    let quoted = quote
+        .lines()
+        .map(|line| format!("> {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut block = format!("\n{quoted}\n\n— {source_name}\n");
+    if let Some(note) = note.map(str::trim).filter(|n| !n.is_empty()) {
+        block = format!("\n{quoted}\n\n{note}\n\n— {source_name}\n");
+    }
+    // Seed a heading the first time so the file reads as a review document.
+    let mut out = String::new();
+    if !real.exists() {
+        out.push_str(&format!("# Review notes — {source_name}\n"));
+    }
+    out.push_str(&block);
+
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&real)
+        .map_err(|e| format!("could not open review file: {e}"))?;
+    file.write_all(out.as_bytes())
+        .map_err(|e| format!("could not write review note: {e}"))?;
+    Ok(rel)
+}
+
+/// Overwrite a text file inside the project root with edited content. Used by
+/// the preview's inline editor for Markdown/plain-text files. Rejects paths
+/// outside the root via the shared validator; the parent directory must exist.
+pub(super) fn write_file_at(root: &Path, path: &str, content: &str) -> Result<(), String> {
+    let real = wisp_tools::safety::validate_file_path(root, path)?;
+    std::fs::write(&real, content).map_err(|e| format!("could not write file: {e}"))
+}
+
+#[tauri::command]
+pub(super) fn write_file(
+    state: State<'_, AppState>,
+    window: WebviewWindow,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    write_file_at(&state.active(window.label()).root, &path, &content)
+}
+
+#[tauri::command]
+pub(super) fn append_review_note(
+    state: State<'_, AppState>,
+    window: WebviewWindow,
+    source_path: String,
+    quote: String,
+    note: Option<String>,
+) -> Result<String, String> {
+    append_review_note_at(
+        &state.active(window.label()).root,
+        &source_path,
+        &quote,
+        note.as_deref(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,6 +702,59 @@ mod tests {
         assert_eq!(unsupported.mime, "application/octet-stream");
         assert!(unsupported.text.is_none());
         assert!(unsupported.base64.is_some());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn append_review_note_creates_sidecar_and_appends_quotes() {
+        let base = std::env::temp_dir().join(format!(
+            "wisp_review_note_test_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+
+        let rel = append_review_note_at(&base, "paper/manuscript.docx", "line one\nline two", None)
+            .unwrap();
+        assert_eq!(rel, "reviews/manuscript.md");
+        let body = std::fs::read_to_string(base.join(&rel)).unwrap();
+        assert!(body.starts_with("# Review notes — manuscript.docx"));
+        assert!(body.contains("> line one\n> line two"));
+        assert!(body.contains("— manuscript.docx"));
+
+        // A second note with a comment appends without re-adding the heading.
+        append_review_note_at(&base, "paper/manuscript.docx", "another passage", Some("fix wording"))
+            .unwrap();
+        let body = std::fs::read_to_string(base.join(&rel)).unwrap();
+        assert_eq!(body.matches("# Review notes").count(), 1);
+        assert!(body.contains("> another passage"));
+        assert!(body.contains("fix wording"));
+
+        // Empty selection is rejected; path traversal is blocked by validate_file_path.
+        assert!(append_review_note_at(&base, "x", "   ", None).is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn write_file_overwrites_within_root_and_blocks_escape() {
+        let base = std::env::temp_dir().join(format!(
+            "wisp_write_file_test_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("notes.md"), b"# old\n").unwrap();
+
+        write_file_at(&base, "notes.md", "# new\n\nedited body\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(base.join("notes.md")).unwrap(),
+            "# new\n\nedited body\n"
+        );
+
+        // Escaping the root is refused.
+        assert!(write_file_at(&base, "../escape.md", "nope").is_err());
 
         let _ = std::fs::remove_dir_all(&base);
     }
