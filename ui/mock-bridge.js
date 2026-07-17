@@ -60,6 +60,7 @@
     ].join("\n"),
     py: "import scanpy as sc\n\ndef load(path: str):\n    # 读取 h5ad\n    return sc.read_h5ad(path)\n",
     toml: '[project]\nname = "ifnb-pbmc"\nchannels = ["conda-forge"]\n\n[tasks]\nrun = "Rscript 01-metacell.R"\n',
+    html: "<h1>Remote report</h1><p>Rendered straight from the SSH host.</p>",
     ipynb: JSON.stringify({
       metadata: { kernelspec: { language: "python" } },
       cells: [
@@ -298,6 +299,19 @@
               { name: "analysis.ipynb", is_dir: false, size: 8192 },
             ];
           case "read_file":
+            return mockFile(argValue(args, "path"));
+          case "list_remote_dir":
+            return {
+              path: String(argValue(args, "path") ?? "~") === "~" ? "/home/researcher" : String(argValue(args, "path")),
+              entries: [
+                { name: "results", is_dir: true, size: 0 },
+                { name: "report.html", is_dir: false, size: 3072 },
+                { name: "analysis.ipynb", is_dir: false, size: 8192 },
+                { name: "01-metacell.R", is_dir: false, size: 2048 },
+                { name: "run.py", is_dir: false, size: 1024 },
+              ],
+            };
+          case "read_remote_file":
             return mockFile(argValue(args, "path"));
           case "execute_runtime": {
             const code = String(argValue(args, "code") ?? "");

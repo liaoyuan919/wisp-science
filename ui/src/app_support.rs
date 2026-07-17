@@ -5506,6 +5506,50 @@ pub(super) fn artifact_version_id_path(path: &str) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
+/// The remote-preview path spelling: `remote:ssh:<alias>:<path>`. Returns the
+/// execution-context id (`ssh:<alias>`) and the path on that host. SSH aliases
+/// never contain `:` (see `remote_file_download_uri`), so the split after the
+/// alias is unambiguous even though remote paths may contain colons.
+pub(super) fn remote_file_path(path: &str) -> Option<(&str, &str)> {
+    let ctx_and_path = path.strip_prefix("remote:")?;
+    let after_kind = ctx_and_path.strip_prefix("ssh:")?;
+    let alias_end = after_kind.find(':')?;
+    let remote_path = &after_kind[alias_end + 1..];
+    (alias_end > 0 && !remote_path.is_empty())
+        .then(|| (&ctx_and_path[.."ssh:".len() + alias_end], remote_path))
+}
+
+#[cfg(test)]
+mod remote_file_path_tests {
+    use super::remote_file_path;
+
+    #[test]
+    fn splits_context_id_from_remote_path() {
+        assert_eq!(
+            remote_file_path("remote:ssh:gpu-server:/home/research/report.html"),
+            Some(("ssh:gpu-server", "/home/research/report.html"))
+        );
+        assert_eq!(
+            remote_file_path("remote:ssh:gpu:~/analysis.ipynb"),
+            Some(("ssh:gpu", "~/analysis.ipynb"))
+        );
+        // Colons inside the remote path stay with the path.
+        assert_eq!(
+            remote_file_path("remote:ssh:gpu:/data/a:b.py"),
+            Some(("ssh:gpu", "/data/a:b.py"))
+        );
+    }
+
+    #[test]
+    fn rejects_other_spellings() {
+        assert_eq!(remote_file_path("reviews/notes.md"), None);
+        assert_eq!(remote_file_path("artifact:abc"), None);
+        assert_eq!(remote_file_path("remote:ssh:gpu:"), None);
+        assert_eq!(remote_file_path("remote:ssh::/x"), None);
+        assert_eq!(remote_file_path("remote:local:/x"), None);
+    }
+}
+
 #[component]
 pub(super) fn CsvFilePreview(path: String) -> impl IntoView {
     let locale = use_locale();
@@ -5517,34 +5561,12 @@ pub(super) fn CsvFilePreview(path: String) -> impl IntoView {
         spawn_local(async move {
             table.set(None);
             err.set(None);
-            let v = match artifact_version_id_path(&path) {
-                Some(version_id) => {
-                    invoke(
-                        "read_artifact_version",
-                        to_value(&serde_json::json!({ "versionId": version_id })).unwrap(),
-                    )
-                    .await
+            let fc = match load_file_content(&path, loc).await {
+                Ok(fc) => fc,
+                Err(e) => {
+                    err.set(Some(e));
+                    return;
                 }
-                None => match artifact_id_path(&path) {
-                    Some(id) => {
-                        invoke(
-                            "read_artifact",
-                            to_value(&serde_json::json!({ "id": id })).unwrap(),
-                        )
-                        .await
-                    }
-                    None => {
-                        invoke(
-                            "read_file",
-                            to_value(&serde_json::json!({ "path": path })).unwrap(),
-                        )
-                        .await
-                    }
-                },
-            };
-            let Ok(fc) = serde_wasm_bindgen::from_value::<FileContent>(v) else {
-                err.set(Some(tf(loc, "err.file_not_found", &[("path", &path)])));
-                return;
             };
             match fc.text.as_deref().and_then(parse_csv_text) {
                 Some(t) => table.set(Some(t)),
@@ -5559,30 +5581,32 @@ pub(super) fn CsvFilePreview(path: String) -> impl IntoView {
     }
 }
 
-/// Read a workspace file, an artifact, or a pinned artifact version — the three
-/// path spellings a preview can be handed — into its `FileContent`.
+/// Read a workspace file, a remote (SSH) file, an artifact, or a pinned
+/// artifact version — the four path spellings a preview can be handed — into
+/// its `FileContent`. All previews route through here so every kind (html,
+/// notebook, code, image, …) works for every spelling.
 async fn load_file_content(path: &str, loc: Locale) -> Result<FileContent, String> {
-    let result = match artifact_version_id_path(path) {
-        Some(version_id) => {
-            invoke_checked(
-                "read_artifact_version",
-                to_value(&serde_json::json!({ "versionId": version_id })).unwrap(),
-            )
-            .await
-        }
-        None => match artifact_id_path(path) {
-            Some(id) => {
-                invoke_checked("read_artifact", to_value(&serde_json::json!({ "id": id })).unwrap())
-                    .await
-            }
-            None => {
-                invoke_checked(
-                    "read_file",
-                    to_value(&tauri_args::read_file(path, Some(32 * 1024 * 1024))).unwrap(),
-                )
-                .await
-            }
-        },
+    let result = if let Some((context_id, remote_path)) = remote_file_path(path) {
+        invoke_checked(
+            "read_remote_file",
+            to_value(&serde_json::json!({ "contextId": context_id, "path": remote_path }))
+                .unwrap(),
+        )
+        .await
+    } else if let Some(version_id) = artifact_version_id_path(path) {
+        invoke_checked(
+            "read_artifact_version",
+            to_value(&serde_json::json!({ "versionId": version_id })).unwrap(),
+        )
+        .await
+    } else if let Some(id) = artifact_id_path(path) {
+        invoke_checked("read_artifact", to_value(&serde_json::json!({ "id": id })).unwrap()).await
+    } else {
+        invoke_checked(
+            "read_file",
+            to_value(&tauri_args::read_file(path, Some(32 * 1024 * 1024))).unwrap(),
+        )
+        .await
     };
     match result {
         Ok(v) => serde_wasm_bindgen::from_value::<FileContent>(v)
@@ -6063,55 +6087,16 @@ pub(super) fn FilePreview(dom_id: String, path: String, kind: String) -> impl In
         spawn_local(async move {
             let doc = web_sys::window().and_then(|w| w.document());
             let el = doc.as_ref().and_then(|d| d.get_element_by_id(&dom_id));
-            // Allow up to the backend's 32 MB ceiling so a large produced figure or
-            // PDF still renders (the default 8 MB cap silently rejected them, #35).
-            // On failure, surface the real backend error (size limit / outside project
-            // root / …) instead of a blanket "file not found".
-            let result = match artifact_version_id_path(&path) {
-                Some(version_id) => {
-                    invoke_checked(
-                        "read_artifact_version",
-                        to_value(&serde_json::json!({ "versionId": version_id })).unwrap(),
-                    )
-                    .await
-                }
-                None => match artifact_id_path(&path) {
-                    Some(id) => {
-                        invoke_checked(
-                            "read_artifact",
-                            to_value(&serde_json::json!({ "id": id })).unwrap(),
-                        )
-                        .await
-                    }
-                    None => {
-                        invoke_checked(
-                            "read_file",
-                            to_value(&tauri_args::read_file(&path, Some(32 * 1024 * 1024)))
-                                .unwrap(),
-                        )
-                        .await
-                    }
-                },
-            };
-            let fc = match result {
-                Ok(v) => match serde_wasm_bindgen::from_value::<FileContent>(v) {
-                    Ok(fc) => fc,
-                    Err(_) => {
-                        if let Some(el) = el {
-                            el.set_class_name("rp-heavy rp-error");
-                            el.set_text_content(Some(&tf(
-                                loc,
-                                "err.file_not_found",
-                                &[("path", &path)],
-                            )));
-                        }
-                        return;
-                    }
-                },
-                Err(err) => {
+            // `load_file_content` reads up to the backend's 32 MB ceiling so a large
+            // produced figure or PDF still renders (the default 8 MB cap silently
+            // rejected them, #35), and surfaces the real backend error (size limit /
+            // outside project root / …) instead of a blanket "file not found".
+            let fc = match load_file_content(&path, loc).await {
+                Ok(fc) => fc,
+                Err(message) => {
                     if let Some(el) = el {
                         el.set_class_name("rp-heavy rp-error");
-                        el.set_text_content(Some(&localize_backend(loc, &js_error_text(err))));
+                        el.set_text_content(Some(&message));
                     }
                     return;
                 }
@@ -6157,10 +6142,15 @@ pub(super) fn FilePreview(dom_id: String, path: String, kind: String) -> impl In
                     })
                     .to_string(),
                 ),
-                "html" => (
-                    "html",
-                    serde_json::json!({ "text": fc.text, "path": fc.path }).to_string(),
-                ),
+                "html" => {
+                    // A remote file's path would resolve as a local file:// base
+                    // href; better no base at all than the wrong machine's.
+                    let base = remote_file_path(&path).is_none().then_some(fc.path.as_str());
+                    (
+                        "html",
+                        serde_json::json!({ "text": fc.text, "path": base }).to_string(),
+                    )
+                }
                 "structure" => (
                     "structure",
                     serde_json::json!({ "text": fc.text, "format": "pdb" }).to_string(),
@@ -6280,7 +6270,18 @@ pub(super) fn editable_center_kind(kind: &str) -> bool {
 }
 
 /// Fire the native save dialog to download a workspace file (backend copies it).
+/// Remote-preview paths go out as the ssh:// spelling `download_file` already
+/// understands, so the modal's download button works for remote files too.
 pub(super) fn download_artifact(path: String) {
+    let path = match remote_file_path(&path) {
+        Some((context_id, remote_path)) => {
+            match crate::context_menu::remote_file_download_uri(context_id, remote_path) {
+                Some(uri) => uri,
+                None => return,
+            }
+        }
+        None => path,
+    };
     spawn_local(async move {
         let arg = to_value(&serde_json::json!({ "path": path })).unwrap();
         let _ = invoke("download_file", arg).await;
