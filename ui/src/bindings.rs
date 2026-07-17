@@ -67,6 +67,8 @@ extern "C" {
         width: f64,
         height: f64,
     ) -> JsValue;
+    #[wasm_bindgen(js_name = attach_cropped_region)]
+    pub(crate) fn attach_cropped_region(path: &str, jump_to_chat: bool);
 }
 
 #[wasm_bindgen(module = "/src/scroll.js")]

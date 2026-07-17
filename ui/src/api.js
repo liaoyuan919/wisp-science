@@ -110,10 +110,9 @@ export async function upload_files(files) {
 
 /**
  * Crop a rectangular region (given in viewport/client pixels) from the image
- * inside `#hostId`, upload it as a PNG, and dispatch `wisp:region-attach` with
- * the saved workspace path so the App can attach it to the composer. Maps the
- * client rect to the image's natural pixels via getBoundingClientRect, so it is
- * correct under any zoom/pan. Returns the path, or "" on failure.
+ * inside `#hostId` and upload it as a PNG. Maps the client rect to the image's
+ * natural pixels via getBoundingClientRect, so it is correct under any zoom/pan.
+ * Returns the saved workspace path, or "" on failure.
  * @param {string} hostId @param {number} left @param {number} top @param {number} width @param {number} height
  */
 export async function crop_region_to_upload(hostId, left, top, width, height) {
@@ -122,6 +121,11 @@ export async function crop_region_to_upload(hostId, left, top, width, height) {
   if (!img || !img.naturalWidth) return "";
   const rect = img.getBoundingClientRect();
   if (rect.width < 1 || rect.height < 1) return "";
+  // The browser emits a click after the crop's pointerup. Do not return the
+  // path (which mounts action buttons) until that click has fully dispatched.
+  const gestureFinished = new Promise((resolve) => {
+    window.addEventListener("click", resolve, { capture: true, once: true });
+  });
   const scaleX = img.naturalWidth / rect.width;
   const scaleY = img.naturalHeight / rect.height;
   let sx = (left - rect.left) * scaleX;
@@ -147,8 +151,15 @@ export async function crop_region_to_upload(hostId, left, top, width, height) {
   const ok = results.find((r) => r.ok && r.info);
   const path = ok?.info?.path;
   if (!path) return "";
-  window.dispatchEvent(new CustomEvent("wisp:region-attach", { detail: String(path) }));
+  await gestureFinished;
   return String(path);
+}
+
+/** Attach an uploaded crop, optionally returning from its preview to chat. */
+export function attach_cropped_region(path, jumpToChat) {
+  window.dispatchEvent(new CustomEvent("wisp:region-attach", {
+    detail: { path: String(path), jumpToChat: Boolean(jumpToChat) },
+  }));
 }
 
 function pastedImageName(file, index) {

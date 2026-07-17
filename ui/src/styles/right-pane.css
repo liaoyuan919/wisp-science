@@ -419,6 +419,9 @@
 .file-preview-crop-btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .file-preview-crop-layer { position: absolute; inset: 0; z-index: 3; cursor: crosshair; touch-action: none; }
 .file-preview-crop-rect { position: fixed; z-index: 4; border: 1.5px solid var(--clay); background: color-mix(in srgb, var(--clay) 18%, transparent); pointer-events: none; }
+.file-preview-crop-rect.selected { border-width: 2px; box-shadow: 0 0 0 1px color-mix(in srgb, var(--bg-elev) 70%, transparent); }
+.file-preview-crop-label { position: absolute; top: 6px; left: 6px; padding: 3px 7px; border-radius: 5px; background: var(--clay); color: var(--on-clay); font-size: 11px; font-weight: 650; white-space: nowrap; box-shadow: var(--shadow-sm); }
+.file-preview-crop-actions { cursor: default; }
 .file-preview-zoom-content .rp-img { display: block; width: 100%; max-width: none; height: auto; margin: 0 auto; user-select: none; -webkit-user-drag: none; }
 .rp-html {
   width: 100%;
