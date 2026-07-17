@@ -4038,15 +4038,20 @@ fn App() -> impl IntoView {
         }
     });
 
-    // A cropped image region (from a preview) uploads in JS and fires this event
-    // with the saved workspace path; attach it to the composer and focus it.
+    // A cropped image region fires this only after the user chooses one of the
+    // preview popup actions. The jump action also exits either preview surface.
     window_event_listener_untyped("wisp:region-attach", move |ev| {
         use wasm_bindgen::JsCast;
-        let path = ev
+        let Some(detail) = ev
             .dyn_ref::<web_sys::CustomEvent>()
-            .and_then(|ce| ce.detail().as_string())
-            .unwrap_or_default();
-        if attach_ready_path(attachments, path) {
+            .and_then(|ce| serde_wasm_bindgen::from_value::<RegionAttach>(ce.detail()).ok())
+        else {
+            return;
+        };
+        attach_ready_path(attachments, detail.path);
+        if detail.jump_to_chat {
+            modal_artifact.set(None);
+            center_file.set(None);
             focus_composer();
         }
     });

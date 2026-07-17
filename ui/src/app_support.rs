@@ -3,8 +3,9 @@ use super::{
     THEME_STORAGE_KEY,
 };
 use crate::bindings::{
-    crop_region_to_upload, invoke, invoke_checked, mount_preview, open_external_url,
-    schedule_highlight, upload_files, upload_input_files, upload_pasted_images,
+    attach_cropped_region, crop_region_to_upload, invoke, invoke_checked, mount_preview,
+    open_external_url, schedule_highlight, upload_files, upload_input_files,
+    upload_pasted_images,
 };
 use crate::dto::*;
 use crate::i18n::{localize_backend, t, tf, use_locale, Locale};
@@ -5740,30 +5741,41 @@ fn ZoomableFilePreview(dom_id: String, path: String, kind: String) -> impl IntoV
     let is_dragging = create_rw_signal(false);
     let drag_start = Rc::new(Cell::new(None::<(i32, i32, i32, i32)>));
     let viewport_id = unique_dom_id("preview-viewport");
-    // Region-crop (images only): drag a rectangle → crop → attach to chat.
+    // Region-crop (images only): drag a rectangle, then choose how to attach it.
     let is_image = kind == "image";
     let crop_mode = create_rw_signal(false);
     let crop_busy = create_rw_signal(false);
+    let crop_path = create_rw_signal(None::<String>);
     // Live rubber-band rect in client (viewport) pixels: (left, top, right, bottom).
     let crop_rect = create_rw_signal(None::<(f64, f64, f64, f64)>);
     let crop_host_id = dom_id.clone();
     let finish_crop = Callback::new(move |()| {
+        if crop_busy.get_untracked() || crop_path.get_untracked().is_some() {
+            return;
+        }
         let Some((l, t, r, b)) = crop_rect.get_untracked() else {
             return;
         };
-        crop_rect.set(None);
         let (left, top) = (l.min(r), t.min(b));
         let (w, h) = ((l - r).abs(), (t - b).abs());
         // Ignore stray clicks; require a real region.
         if w < 8.0 || h < 8.0 {
+            crop_rect.set(None);
             return;
         }
         let host_id = crop_host_id.clone();
         crop_busy.set(true);
         spawn_local(async move {
-            let _ = crop_region_to_upload(&host_id, left, top, w, h).await;
+            let path = crop_region_to_upload(&host_id, left, top, w, h)
+                .await
+                .as_string()
+                .unwrap_or_default();
             crop_busy.set(false);
-            crop_mode.set(false);
+            if path.is_empty() {
+                crop_rect.set(None);
+            } else {
+                crop_path.set(Some(path));
+            }
         });
     });
     let adjust_zoom = move |delta: i16| {
@@ -5816,7 +5828,11 @@ fn ZoomableFilePreview(dom_id: String, path: String, kind: String) -> impl IntoV
                         aria-pressed=move || crop_mode.get().to_string()
                         title=move || t(locale.get(), "preview.select_region")
                         aria-label=move || t(locale.get(), "preview.select_region")
-                        on:click=move |_| { crop_rect.set(None); crop_mode.update(|m| *m = !*m); }>
+                        on:click=move |_| {
+                            crop_rect.set(None);
+                            crop_path.set(None);
+                            crop_mode.update(|m| *m = !*m);
+                        }>
                         {compose_icon("crop")}
                     </button>
                 })}
@@ -5876,7 +5892,12 @@ fn ZoomableFilePreview(dom_id: String, path: String, kind: String) -> impl IntoV
                 {move || crop_mode.get().then(|| view! {
                     <div class="file-preview-crop-layer"
                         on:pointerdown=move |ev: web_sys::PointerEvent| {
-                            if ev.button() != 0 { return; }
+                            if ev.button() != 0
+                                || crop_busy.get_untracked()
+                                || crop_path.get_untracked().is_some()
+                            {
+                                return;
+                            }
                             ev.prevent_default();
                             if let Some(target) = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()) {
                                 let _ = target.set_pointer_capture(ev.pointer_id());
@@ -5885,6 +5906,9 @@ fn ZoomableFilePreview(dom_id: String, path: String, kind: String) -> impl IntoV
                             crop_rect.set(Some((x, y, x, y)));
                         }
                         on:pointermove=move |ev: web_sys::PointerEvent| {
+                            if crop_busy.get_untracked() || crop_path.get_untracked().is_some() {
+                                return;
+                            }
                             crop_rect.update(|r| {
                                 if let Some((l, t, _, _)) = *r {
                                     *r = Some((l, t, ev.client_x() as f64, ev.client_y() as f64));
@@ -5893,13 +5917,60 @@ fn ZoomableFilePreview(dom_id: String, path: String, kind: String) -> impl IntoV
                         }
                         on:pointerup=move |_| finish_crop.call(())
                         on:pointercancel=move |_| crop_rect.set(None)>
-                        {move || crop_rect.get().map(|(l, t, r, b)| {
+                        {move || crop_rect.get().map(|(left, top, right, bottom)| {
+                            let selected = crop_path.get().is_some();
                             let style = format!(
                                 "left:{}px;top:{}px;width:{}px;height:{}px",
-                                l.min(r), t.min(b), (l - r).abs(), (t - b).abs(),
+                                left.min(right),
+                                top.min(bottom),
+                                (left - right).abs(),
+                                (top - bottom).abs(),
                             );
-                            view! { <div class="file-preview-crop-rect" style=style></div> }
+                            view! {
+                                <div class="file-preview-crop-rect" class:selected=selected style=style>
+                                    {selected.then(|| view! {
+                                        <span class="file-preview-crop-label">
+                                            {move || t(locale.get(), "preview.region_selected")}
+                                        </span>
+                                    })}
+                                </div>
+                            }
                         })}
+                        {move || crop_path.get().and_then(|path| crop_rect.get().map(|(left, top, right, bottom)| {
+                            let add_path = path.clone();
+                            let jump_path = path;
+                            let x = (left + right) / 2.0;
+                            let y = top.min(bottom);
+                            let style = format!(
+                                "left:clamp(190px,{x}px,calc(100vw - 190px));top:max(52px,{y}px)",
+                            );
+                            view! {
+                                <div class="selection-popup file-preview-crop-actions" style=style
+                                    on:pointerdown=|ev: web_sys::PointerEvent| ev.stop_propagation()
+                                    on:pointerup=|ev: web_sys::PointerEvent| ev.stop_propagation()>
+                                    <button type="button" class="selection-popup-btn"
+                                        on:click=move |_| {
+                                            crop_path.set(None);
+                                            crop_rect.set(None);
+                                            crop_mode.set(false);
+                                            attach_cropped_region(&add_path, false);
+                                        }>
+                                        {compose_icon("plus")}
+                                        <span>{move || t(locale.get(), "selection.add_to_chat")}</span>
+                                    </button>
+                                    <button type="button" class="selection-popup-btn"
+                                        on:click=move |_| {
+                                            crop_path.set(None);
+                                            crop_rect.set(None);
+                                            crop_mode.set(false);
+                                            attach_cropped_region(&jump_path, true);
+                                        }>
+                                        {compose_icon("chat")}
+                                        <span>{move || t(locale.get(), "selection.add_to_chat_and_jump")}</span>
+                                    </button>
+                                </div>
+                            }
+                        }))}
                     </div>
                 })}
             </div>

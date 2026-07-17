@@ -287,6 +287,14 @@ pub(crate) struct PreviewSelection {
     pub(crate) y: i32,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RegionAttach {
+    pub(crate) path: String,
+    #[serde(default)]
+    pub(crate) jump_to_chat: bool,
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub(crate) struct ArtifactInfo {
     pub(crate) id: String,

@@ -2251,7 +2251,7 @@ test("image preview context menu copies the image", async ({ page, context }) =>
   await expect.poll(() => page.evaluate(() => (window as any).__copiedImageTypes)).toContain("image/png");
 });
 
-test("image region can be cropped and attached to the composer", async ({ page }) => {
+test("image crop stays highlighted until it is added to chat", async ({ page }) => {
   await enterApp(page);
   await composer(page).fill("make a volcano plot volcano.png");
   await page.getByRole("button", { name: "Send" }).click();
@@ -2273,12 +2273,49 @@ test("image region can be cropped and attached to the composer", async ({ page }
   await expect(page.locator(".file-preview-crop-rect")).toBeVisible();
   await page.mouse.up();
 
-  // The crop uploads as a PNG and attaches to the composer (region_*.png).
+  // Uploading prepares the crop, but does not attach it before the user chooses.
   await expect.poll(() => lastInvokeArgs(page, "upload_file"))
     .toMatchObject({ filename: expect.stringMatching(/^region_.*\.png$/) });
+  const actions = page.locator(".file-preview-crop-actions");
+  await expect(actions.getByRole("button", { name: "Add to chat", exact: true })).toBeVisible();
+  await expect(actions.getByRole("button", { name: "Add to chat and jump back to chat" })).toBeVisible();
+  await expect(page.locator(".file-preview-crop-rect.selected")).toContainText("Selected region");
+  await expect(page.locator(".composer-attachments .composer-attachment.ready")).toHaveCount(0);
+
+  // Plain Add keeps the preview open and only then attaches the PNG.
+  await actions.getByRole("button", { name: "Add to chat", exact: true }).click();
   await expect(page.locator(".composer-attachments .composer-attachment.ready")).toContainText("region_");
-  // Crop mode auto-exits after a successful crop.
+  await expect(page.locator(".artifact-modal")).toBeVisible();
   await expect(layer).toHaveCount(0);
+});
+
+test("image crop can be added and jump back from the preview to chat", async ({ page }) => {
+  await enterApp(page);
+  await composer(page).fill("make a volcano plot volcano.png");
+  await page.getByRole("button", { name: "Send" }).click();
+  await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.locator('.rp-tile[data-artifact-name="volcano.png"] .rp-tile-main').click();
+  await page.getByRole("button", { name: "Open in center" }).click();
+
+  const image = page.locator(".center-file-preview .rp-img");
+  await expect(image).toBeVisible();
+  await page.getByRole("button", { name: "Select a region to ask about" }).click();
+  const box = (await image.boundingBox())!;
+  await page.mouse.move(box.x + 20, box.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 120, box.y + 100, { steps: 4 });
+  await page.mouse.up();
+
+  const jump = page
+    .locator(".file-preview-crop-actions")
+    .getByRole("button", { name: "Add to chat and jump back to chat" });
+  await expect(jump).toBeVisible();
+  await expect(page.locator(".composer-attachments .composer-attachment.ready")).toHaveCount(0);
+  await jump.click();
+
+  await expect(page.locator(".composer-attachments .composer-attachment.ready")).toContainText("region_");
+  await expect(page.locator(".center-file-preview")).toHaveCount(0);
+  await expect(composer(page)).toBeFocused();
 });
 
 test("artifact panel normalizes png/pdf shorthand to the previewable image", async ({ page }) => {

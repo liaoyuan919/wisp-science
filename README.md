@@ -225,6 +225,11 @@ as ACP text blocks, while artifacts are sent as file links.
 Files you uploaded are artifacts too, so they already appear under `@`; they
 carry an **Upload** badge that separates them from files the agent produced.
 
+Image previews include a region-selection tool. After you drag a region, Wisp
+keeps it highlighted and asks whether to add the crop to chat while staying in
+the preview, or add it and jump back to the conversation. The crop is not
+attached until you choose an action.
+
 `@` also reaches compute. Naming an execution context (`@CPU1`) points the turn
 at that server and turns it on for the conversation, so you do not have to
 enable it in the compute menu first — local compute needs no toggle and is
