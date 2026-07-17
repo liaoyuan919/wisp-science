@@ -104,8 +104,13 @@ per conversation. Settings → Environments always shows local compute and owns
 adding, importing, removing, configuring, and probing environments; it does not
 control conversation resource selection. Probe uses the bundled
 `probe-compute-environment` skill to persist hardware, scheduler, runtime, and
-privilege facts. The Environment side panel always shows local compute plus the
-remote servers selected for the current conversation.
+privilege facts. An SSH probe performs all checks through one authenticated
+connection. Batch SSH/SCP always enables OpenSSH `IdentitiesOnly`; configure an
+`IdentityFile` in Wisp or SSH config when using a non-default agent key. A failed
+SSH probe, upload, or launch is not retried automatically: Wisp shows a warning
+and requires a manual retry after the connection is checked. The Environment
+side panel always shows local compute plus the remote servers selected for the
+current conversation.
 Each Python or R cell is limited to 1 MiB of source so a malformed request cannot
 exhaust the persistent worker before execution begins.
 

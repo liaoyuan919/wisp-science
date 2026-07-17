@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tauri::State;
 
 const PROBE_SKILL_NAME: &str = "probe-compute-environment";
 const PROBE_SKILL: &str = include_str!("../../skills/probe-compute-environment/SKILL.md");
+const PROBE_VALUE_BEGIN: &str = "__WISP_PROBE_VALUE_BEGIN__";
+const PROBE_VALUE_END: &str = "__WISP_PROBE_VALUE_END__";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeResult {
@@ -129,181 +132,324 @@ pub fn probe_context_with_runner(
     ctx: &wisp_store::ExecutionContext,
     runner: &mut dyn ProbeRunner,
 ) -> Result<ProbeResult, String> {
-    let os = run_required(
-        ctx,
-        runner,
-        platform_script(
-            ctx,
-            "uname -s",
-            "[System.Runtime.InteropServices.RuntimeInformation]::OSDescription",
-        ),
-    )?;
-    let arch = run_required(
-        ctx,
-        runner,
-        platform_script(
-            ctx,
-            "uname -m",
-            "[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture",
-        ),
-    )?;
-    let hostname = run_required(
-        ctx,
-        runner,
-        platform_script(ctx, "hostname", "$env:COMPUTERNAME"),
-    )?;
-    let cpu_count = run_optional(
-        ctx,
-        runner,
-        platform_script(
-            ctx,
-            "getconf _NPROCESSORS_ONLN",
-            "$env:NUMBER_OF_PROCESSORS",
-        ),
-    )
-    .and_then(|s| s.parse::<u32>().ok());
-    let gpu_summary = run_optional(ctx, runner, "nvidia-smi -L");
-    let scheduler = run_optional(
-        ctx,
-        runner,
-        platform_script(
-            ctx,
-            "command -v sbatch || command -v qsub || command -v bsub",
-            "Get-Command sbatch,qsub,bsub -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source",
-        ),
-    )
-    .and_then(|s| scheduler_from_command(&s));
+    let (specs, mut values) = probe_specs(ctx)?;
+    let discovered = if ctx.kind == wisp_store::ExecutionContextKind::Ssh {
+        run_bundled_ssh_probe(ctx, runner, &specs)?
+    } else {
+        run_sequential_probe(ctx, runner, &specs)?
+    };
+    values.extend(discovered);
+    probe_result(values)
+}
+
+struct ProbeSpec {
+    key: &'static str,
+    script: String,
+    required: bool,
+}
+
+fn probe_specs(
+    ctx: &wisp_store::ExecutionContext,
+) -> Result<(Vec<ProbeSpec>, HashMap<&'static str, String>), String> {
     let configured_python = configured_interpreter(ctx, "python_executable", "python_path")?;
-    let python_executable = configured_python.clone().or_else(|| {
-        run_optional(
-            ctx,
-            runner,
-            platform_script(
+    let configured_rscript = configured_interpreter(ctx, "rscript_executable", "rscript_path")?;
+    let mut values = HashMap::new();
+    if let Some(executable) = configured_python.as_ref() {
+        values.insert("python_executable", executable.clone());
+    }
+    if let Some(executable) = configured_rscript.as_ref() {
+        values.insert("rscript_executable", executable.clone());
+    }
+
+    let mut specs = vec![
+        ProbeSpec {
+            key: "os",
+            script: platform_script(
+                ctx,
+                "uname -s",
+                "[System.Runtime.InteropServices.RuntimeInformation]::OSDescription",
+            )
+            .into(),
+            required: true,
+        },
+        ProbeSpec {
+            key: "arch",
+            script: platform_script(
+                ctx,
+                "uname -m",
+                "[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture",
+            )
+            .into(),
+            required: true,
+        },
+        ProbeSpec {
+            key: "hostname",
+            script: platform_script(ctx, "hostname", "$env:COMPUTERNAME").into(),
+            required: true,
+        },
+        ProbeSpec {
+            key: "cpu_count",
+            script: platform_script(
+                ctx,
+                "getconf _NPROCESSORS_ONLN",
+                "$env:NUMBER_OF_PROCESSORS",
+            )
+            .into(),
+            required: false,
+        },
+        ProbeSpec {
+            key: "gpu_summary",
+            script: "nvidia-smi -L".into(),
+            required: false,
+        },
+        ProbeSpec {
+            key: "scheduler",
+            script: platform_script(
+                ctx,
+                "command -v sbatch || command -v qsub || command -v bsub",
+                "Get-Command sbatch,qsub,bsub -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source",
+            )
+            .into(),
+            required: false,
+        },
+    ];
+    if configured_python.is_none() {
+        specs.push(ProbeSpec {
+            key: "python_executable",
+            script: platform_script(
                 ctx,
                 "command -v python3 || command -v python",
                 "(Get-Command python -ErrorAction SilentlyContinue).Source",
-            ),
-        )
-    });
-    let python_version_script = configured_python.as_deref().map_or_else(
-        || {
-            platform_script(
-                ctx,
-                "python3 --version 2>&1 || python --version 2>&1",
-                "python --version 2>&1",
             )
-            .to_string()
-        },
-        |executable| interpreter_command(ctx, executable, "--version 2>&1"),
-    );
-    let python_version = run_optional(ctx, runner, &python_version_script);
-    let configured_rscript = configured_interpreter(ctx, "rscript_executable", "rscript_path")?;
-    let rscript_executable = configured_rscript.clone().or_else(|| {
-        run_optional(
-            ctx,
-            runner,
-            platform_script(
+            .into(),
+            required: false,
+        });
+    }
+    specs.push(ProbeSpec {
+        key: "python_version",
+        script: configured_python.as_deref().map_or_else(
+            || {
+                platform_script(
+                    ctx,
+                    "python3 --version 2>&1 || python --version 2>&1",
+                    "python --version 2>&1",
+                )
+                .to_string()
+            },
+            |executable| interpreter_command(ctx, executable, "--version 2>&1"),
+        ),
+        required: false,
+    });
+    if configured_rscript.is_none() {
+        specs.push(ProbeSpec {
+            key: "rscript_executable",
+            script: platform_script(
                 ctx,
                 "command -v Rscript",
                 "(Get-Command Rscript -ErrorAction SilentlyContinue).Source",
+            )
+            .into(),
+            required: false,
+        });
+    }
+    specs.extend([
+        ProbeSpec {
+            key: "r_version",
+            script: configured_rscript.as_deref().map_or_else(
+                || {
+                    platform_script(ctx, "Rscript --version 2>&1", "Rscript --version 2>&1")
+                        .to_string()
+                },
+                |executable| interpreter_command(ctx, executable, "--version 2>&1"),
             ),
-        )
-    });
-    let r_version_script = configured_rscript.as_deref().map_or_else(
-        || platform_script(ctx, "Rscript --version 2>&1", "Rscript --version 2>&1").to_string(),
-        |executable| interpreter_command(ctx, executable, "--version 2>&1"),
-    );
-    let r_version = run_optional(ctx, runner, &r_version_script);
-    let r_jsonlite_script = configured_rscript.as_deref().map_or_else(
-        || {
-            platform_script(
-                ctx,
-                "Rscript --vanilla -e 'cat(requireNamespace(\"jsonlite\", quietly=TRUE))' 2>/dev/null",
-                "Rscript --vanilla -e \"cat(requireNamespace('jsonlite', quietly=TRUE))\" 2>$null",
-            )
-            .to_string()
+            required: false,
         },
-        |executable| {
-            interpreter_command(
-                ctx,
-                executable,
-                platform_script(
-                    ctx,
-                    "--vanilla -e 'cat(requireNamespace(\"jsonlite\", quietly=TRUE))' 2>/dev/null",
-                    "--vanilla -e \"cat(requireNamespace('jsonlite', quietly=TRUE))\" 2>$null",
-                ),
-            )
+        ProbeSpec {
+            key: "r_jsonlite",
+            script: configured_rscript.as_deref().map_or_else(
+                || {
+                    platform_script(
+                        ctx,
+                        "Rscript --vanilla -e 'cat(requireNamespace(\"jsonlite\", quietly=TRUE))' 2>/dev/null",
+                        "Rscript --vanilla -e \"cat(requireNamespace('jsonlite', quietly=TRUE))\" 2>$null",
+                    )
+                    .to_string()
+                },
+                |executable| {
+                    interpreter_command(
+                        ctx,
+                        executable,
+                        platform_script(
+                            ctx,
+                            "--vanilla -e 'cat(requireNamespace(\"jsonlite\", quietly=TRUE))' 2>/dev/null",
+                            "--vanilla -e \"cat(requireNamespace('jsonlite', quietly=TRUE))\" 2>$null",
+                        ),
+                    )
+                },
+            ),
+            required: false,
         },
-    );
-    let r_jsonlite = run_optional(ctx, runner, &r_jsonlite_script)
-        .map(|value| value.eq_ignore_ascii_case("true"));
-    let conda = run_optional(
-        ctx,
-        runner,
-        platform_script(
-            ctx,
-            "command -v conda",
-            "(Get-Command conda -ErrorAction SilentlyContinue).Source",
-        ),
-    );
-    let mamba = run_optional(
-        ctx,
-        runner,
-        platform_script(
-            ctx,
-            "command -v mamba",
-            "(Get-Command mamba -ErrorAction SilentlyContinue).Source",
-        ),
-    );
-    let modulecmd = run_optional(
-        ctx,
-        runner,
-        platform_script(
-            ctx,
-            "command -v modulecmd",
-            "(Get-Command modulecmd -ErrorAction SilentlyContinue).Source",
-        ),
-    );
-    let home = run_optional(
-        ctx,
-        runner,
-        platform_script(ctx, "printf '%s' \"$HOME\"", "$HOME"),
-    );
-    let pwd = run_optional(
-        ctx,
-        runner,
-        platform_script(ctx, "pwd", "(Get-Location).Path"),
-    );
-    let privilege = run_optional(
-        ctx,
-        runner,
-        platform_script(
-            ctx,
-            "if [ \"$(id -u)\" = 0 ]; then printf root; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then printf sudo; else printf unprivileged; fi",
-            "if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { 'root' } else { 'unprivileged' }",
-        ),
-    );
+        ProbeSpec {
+            key: "conda",
+            script: platform_script(
+                ctx,
+                "command -v conda",
+                "(Get-Command conda -ErrorAction SilentlyContinue).Source",
+            )
+            .into(),
+            required: false,
+        },
+        ProbeSpec {
+            key: "mamba",
+            script: platform_script(
+                ctx,
+                "command -v mamba",
+                "(Get-Command mamba -ErrorAction SilentlyContinue).Source",
+            )
+            .into(),
+            required: false,
+        },
+        ProbeSpec {
+            key: "modulecmd",
+            script: platform_script(
+                ctx,
+                "command -v modulecmd",
+                "(Get-Command modulecmd -ErrorAction SilentlyContinue).Source",
+            )
+            .into(),
+            required: false,
+        },
+        ProbeSpec {
+            key: "home",
+            script: platform_script(ctx, "printf '%s' \"$HOME\"", "$HOME").into(),
+            required: false,
+        },
+        ProbeSpec {
+            key: "pwd",
+            script: platform_script(ctx, "pwd", "(Get-Location).Path").into(),
+            required: false,
+        },
+        ProbeSpec {
+            key: "privilege",
+            script: platform_script(
+                ctx,
+                "if [ \"$(id -u)\" = 0 ]; then printf root; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then printf sudo; else printf unprivileged; fi",
+                "if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { 'root' } else { 'unprivileged' }",
+            )
+            .into(),
+            required: false,
+        },
+    ]);
+    Ok((specs, values))
+}
 
+fn run_sequential_probe(
+    ctx: &wisp_store::ExecutionContext,
+    runner: &mut dyn ProbeRunner,
+    specs: &[ProbeSpec],
+) -> Result<HashMap<&'static str, String>, String> {
+    let mut values = HashMap::new();
+    for spec in specs {
+        match run_probe_command(ctx, runner, &spec.script) {
+            Ok(Some(value)) => {
+                values.insert(spec.key, value);
+            }
+            Ok(None) if spec.required => {
+                return Err(format!("probe command returned no output: {}", spec.script));
+            }
+            Err(error) if spec.required => {
+                return Err(format!("probe command failed for {}: {error}", spec.script));
+            }
+            Ok(None) | Err(_) => {}
+        }
+    }
+    Ok(values)
+}
+
+fn bundled_probe_script(specs: &[ProbeSpec]) -> String {
+    let mut script = String::from("set +e\n");
+    for spec in specs {
+        script.push_str(&format!(
+            "printf '%s\\n' '{PROBE_VALUE_BEGIN}:{}'\n{{\n{}\n}} 2>/dev/null\nprintf '\\n%s\\n' '{PROBE_VALUE_END}:{}'\n",
+            spec.key, spec.script, spec.key
+        ));
+    }
+    script.push_str("exit 0\n");
+    script
+}
+
+fn parse_bundled_value(stdout: &str, key: &str) -> Option<String> {
+    let begin = format!("{PROBE_VALUE_BEGIN}:{key}\n");
+    let end = format!("\n{PROBE_VALUE_END}:{key}");
+    let (_, value) = stdout.split_once(&begin)?;
+    let (value, _) = value.split_once(&end)?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn run_bundled_ssh_probe(
+    ctx: &wisp_store::ExecutionContext,
+    runner: &mut dyn ProbeRunner,
+    specs: &[ProbeSpec],
+) -> Result<HashMap<&'static str, String>, String> {
+    let script = bundled_probe_script(specs);
+    let command = build_probe_command(ctx, &script)?;
+    let output = runner.run(&command)?;
+    if output.status != 0 {
+        let detail = if output.stderr.trim().is_empty() {
+            output.stdout.trim()
+        } else {
+            output.stderr.trim()
+        };
+        return Err(format!(
+            "SSH probe failed with exit {}: {detail}",
+            output.status
+        ));
+    }
+    let mut values = HashMap::new();
+    for spec in specs {
+        match parse_bundled_value(&output.stdout, spec.key) {
+            Some(value) => {
+                values.insert(spec.key, value);
+            }
+            None if spec.required => {
+                return Err(format!("probe command returned no output: {}", spec.script));
+            }
+            None => {}
+        }
+    }
+    Ok(values)
+}
+
+fn probe_result(values: HashMap<&'static str, String>) -> Result<ProbeResult, String> {
+    let required = |key: &'static str| {
+        values
+            .get(key)
+            .cloned()
+            .ok_or_else(|| format!("probe result omitted required field: {key}"))
+    };
+    let optional = |key: &'static str| values.get(key).cloned();
+    let python_version = optional("python_version");
     Ok(ProbeResult {
         probe_skill: PROBE_SKILL_NAME.into(),
-        os: Some(os),
-        arch: Some(arch),
-        hostname: Some(hostname),
-        cpu_count,
-        gpu_summary,
-        scheduler,
+        os: Some(required("os")?),
+        arch: Some(required("arch")?),
+        hostname: Some(required("hostname")?),
+        cpu_count: optional("cpu_count").and_then(|value| value.parse::<u32>().ok()),
+        gpu_summary: optional("gpu_summary"),
+        scheduler: optional("scheduler").and_then(|value| scheduler_from_command(&value)),
         python: python_version.clone(),
-        python_executable,
+        python_executable: optional("python_executable"),
         python_version,
-        rscript_executable,
-        r_version,
-        r_jsonlite,
-        conda,
-        mamba,
-        modulecmd,
-        home,
-        pwd,
-        privilege,
+        rscript_executable: optional("rscript_executable"),
+        r_version: optional("r_version"),
+        r_jsonlite: optional("r_jsonlite").map(|value| value.eq_ignore_ascii_case("true")),
+        conda: optional("conda"),
+        mamba: optional("mamba"),
+        modulecmd: optional("modulecmd"),
+        home: optional("home"),
+        pwd: optional("pwd"),
+        privilege: optional("privilege"),
     })
 }
 
@@ -359,26 +505,6 @@ fn interpreter_command(
     } else {
         format!("'{}' {arguments}", executable.replace('\'', "'\"'\"'"))
     }
-}
-
-fn run_required(
-    ctx: &wisp_store::ExecutionContext,
-    runner: &mut dyn ProbeRunner,
-    script: &str,
-) -> Result<String, String> {
-    match run_probe_command(ctx, runner, script) {
-        Ok(Some(value)) => Ok(value),
-        Ok(None) => Err(format!("probe command returned no output: {script}")),
-        Err(e) => Err(format!("probe command failed for {script}: {e}")),
-    }
-}
-
-fn run_optional(
-    ctx: &wisp_store::ExecutionContext,
-    runner: &mut dyn ProbeRunner,
-    script: &str,
-) -> Option<String> {
-    run_probe_command(ctx, runner, script).ok().flatten()
 }
 
 fn run_probe_command(
@@ -460,7 +586,6 @@ pub async fn probe_execution_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     #[test]
     fn wraps_probe_commands_for_local_ssh_and_wsl() {
@@ -482,6 +607,8 @@ mod tests {
                 "-o",
                 "ConnectTimeout=10",
                 "-T",
+                "-o",
+                "IdentitiesOnly=yes",
                 "gpu-box",
                 "uname -s",
             ]
@@ -516,6 +643,8 @@ mod tests {
                 "-T",
                 "-p",
                 "2222",
+                "-o",
+                "IdentitiesOnly=yes",
                 "-i",
                 "/home/alice/.ssh/lab key",
                 "alice@gpu-box",
@@ -526,7 +655,7 @@ mod tests {
 
     #[test]
     fn fake_runner_collects_probe_capabilities() {
-        let ctx = wisp_store::ExecutionContext::new("ssh:gpu-box", "GPU").unwrap();
+        let ctx = wisp_store::ExecutionContext::new("wsl:Ubuntu", "GPU").unwrap();
         let mut runner = FakeRunner::new([
             ("uname -s", "Linux"),
             ("uname -m", "x86_64"),
@@ -601,7 +730,7 @@ mod tests {
 
     #[test]
     fn probe_uses_persisted_interpreters_instead_of_path_discovery() {
-        let mut ctx = wisp_store::ExecutionContext::new("ssh:cpu2", "CPU2").unwrap();
+        let mut ctx = wisp_store::ExecutionContext::new("wsl:Ubuntu", "CPU2").unwrap();
         ctx.config_json = serde_json::json!({
             "python_executable": "/opt/conda env/bin/python",
             "rscript_executable": "/opt/R 4.5/bin/Rscript"
@@ -636,6 +765,53 @@ mod tests {
             Some("/opt/R 4.5/bin/Rscript")
         );
         assert_eq!(probe.r_jsonlite, Some(true));
+    }
+
+    #[test]
+    fn ssh_probe_collects_every_field_through_one_connection() {
+        let ctx = wisp_store::ExecutionContext::new("ssh:gpu-box", "GPU").unwrap();
+        let mut runner = OneShotRunner {
+            output: ProbeCommandOutput {
+                status: 0,
+                stdout: bundled_output(&[
+                    ("os", "Linux"),
+                    ("arch", "x86_64"),
+                    ("hostname", "gpu01"),
+                    ("cpu_count", "64"),
+                    ("gpu_summary", "GPU 0: NVIDIA A100"),
+                ]),
+                stderr: String::new(),
+            },
+            commands: Vec::new(),
+        };
+
+        let probe = probe_context_with_runner(&ctx, &mut runner).unwrap();
+
+        assert_eq!(runner.commands.len(), 1);
+        assert_eq!(runner.commands[0].program, "ssh");
+        assert!(runner.commands[0].script.contains("uname -s"));
+        assert!(runner.commands[0].script.contains("nvidia-smi -L"));
+        assert_eq!(probe.os.as_deref(), Some("Linux"));
+        assert_eq!(probe.cpu_count, Some(64));
+        assert_eq!(probe.gpu_summary.as_deref(), Some("GPU 0: NVIDIA A100"));
+    }
+
+    #[test]
+    fn ssh_probe_surfaces_authentication_failure_from_its_only_connection() {
+        let ctx = wisp_store::ExecutionContext::new("ssh:gpu-box", "GPU").unwrap();
+        let mut runner = OneShotRunner {
+            output: ProbeCommandOutput {
+                status: 255,
+                stdout: String::new(),
+                stderr: "Permission denied (publickey).".into(),
+            },
+            commands: Vec::new(),
+        };
+
+        let error = probe_context_with_runner(&ctx, &mut runner).unwrap_err();
+
+        assert_eq!(runner.commands.len(), 1);
+        assert!(error.contains("Permission denied (publickey)"));
     }
 
     #[tokio::test]
@@ -703,5 +879,26 @@ mod tests {
         fn run(&mut self, _command: &ProbeCommand) -> Result<ProbeCommandOutput, String> {
             Err("boom".into())
         }
+    }
+
+    struct OneShotRunner {
+        output: ProbeCommandOutput,
+        commands: Vec<ProbeCommand>,
+    }
+
+    impl ProbeRunner for OneShotRunner {
+        fn run(&mut self, command: &ProbeCommand) -> Result<ProbeCommandOutput, String> {
+            self.commands.push(command.clone());
+            Ok(self.output.clone())
+        }
+    }
+
+    fn bundled_output(values: &[(&str, &str)]) -> String {
+        values
+            .iter()
+            .map(|(key, value)| {
+                format!("{PROBE_VALUE_BEGIN}:{key}\n{value}\n{PROBE_VALUE_END}:{key}\n")
+            })
+            .collect()
     }
 }

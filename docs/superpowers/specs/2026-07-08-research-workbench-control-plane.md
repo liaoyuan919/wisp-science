@@ -45,7 +45,7 @@ A consumable output: figure, table, report, model, PDB/mmCIF, notebook, markdown
 
 - Store startup records schema migrations and always registers the `local` execution context.
 - `run_in_context` submits local/WSL direct processes or an SSH-direct Run. SSH Runs use a per-Run remote control directory, an isolated `inputs/` staging directory, an idempotent submission token, a detached timeout-controlled process group, persisted PGID/start-time handle, stdout/stderr tails, and a SQLite-owned poller lease. The conversation is not the job lifetime.
-- `get_run` reads the persisted lifecycle. `cancel_run` moves SSH work to `cancelling` and records `cancelled` only after the remote process group confirms termination. Transient SSH errors remain retryable; startup reattaches active SSH handles while non-reattachable local/WSL processes become `lost`.
+- `get_run` reads the persisted lifecycle. `cancel_run` moves SSH work to `cancelling` and records `cancelled` only after the remote process group confirms termination. Batch SSH/SCP uses `IdentitiesOnly=yes`, and an SSH upload or launch failure stops after its first attempt and requires a manual retry; an unconfirmed persisted start error is failed during recovery without reconnecting. Confirmed SSH handles remain reattachable, but authentication, host-key, and handshake failures stop polling immediately while temporary transport failures back off from 5 to 10 to 20 seconds without relaunching work. Non-reattachable local/WSL processes become `lost`, and successfully staged inputs remain persisted.
 - SSH submission can stage explicit project-relative files into the remote `inputs/` directory. Exact `ssh://` outputs can be registered as remote Artifact references without syncing their bytes. Relative remote glob enumeration/download, scheduler submission, and scheduler-aware cancellation remain future work.
 - The Contexts UI refreshes active Runs, shows remote workdirs, output tails, and poll errors, and exposes cancellation without keeping an agent turn open.
 - Each registered context can open independent ephemeral interactive terminals in a resizable, tabbed bottom dock. The `+` menu selects any registered context, including one already used by another live tab. Local, WSL, and system-OpenSSH launch adapters share one PTY-backed TerminalSession manager; xterm instances mount directly in the main webview so Tauri channels never cross iframe boundaries. Hiding the dock keeps live views attached, while explicit termination ends the active process. Terminal buffers are not persisted and tracked computation continues to use Runs.
@@ -56,7 +56,7 @@ A consumable output: figure, table, report, model, PDB/mmCIF, notebook, markdown
 
 ### M1: ExecutionContext v0
 
-Persist contexts, import SSH aliases, detect WSL distros, run capability probes, show contexts to the agent and UI.
+Persist contexts, import SSH aliases, detect WSL distros, run capability probes, show contexts to the agent and UI. Remote capability checks share one authenticated SSH session per probe, and an explicitly configured identity file suppresses unrelated ssh-agent identities.
 
 ### M2: Run Manager v1
 

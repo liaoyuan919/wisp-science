@@ -78,9 +78,7 @@ impl SshConnection {
         if let Some(port) = self.port {
             args.extend(["-p".into(), port.to_string()]);
         }
-        if let Some(identity_file) = &self.identity_file {
-            args.extend(["-i".into(), identity_file.clone()]);
-        }
+        push_batch_identity_args(&mut args, self.identity_file.as_deref());
         args.push(self.target()?);
         Ok(args)
     }
@@ -94,9 +92,7 @@ impl SshConnection {
         if let Some(port) = self.port {
             args.extend(["-p".into(), port.to_string()]);
         }
-        if let Some(identity_file) = &self.identity_file {
-            args.extend(["-i".into(), identity_file.clone()]);
-        }
+        push_interactive_identity_args(&mut args, self.identity_file.as_deref());
         args.push(self.target()?);
         Ok(args)
     }
@@ -107,9 +103,7 @@ impl SshConnection {
         if let Some(port) = self.port {
             args.extend(["-P".into(), port.to_string()]);
         }
-        if let Some(identity_file) = &self.identity_file {
-            args.extend(["-i".into(), identity_file.clone()]);
-        }
+        push_batch_identity_args(&mut args, self.identity_file.as_deref());
         Ok(args)
     }
 
@@ -140,6 +134,24 @@ fn common_option_args() -> Vec<String> {
         "-o".into(),
         "ConnectTimeout=10".into(),
     ]
+}
+
+fn push_batch_identity_args(args: &mut Vec<String>, identity_file: Option<&str>) {
+    args.extend(["-o".into(), "IdentitiesOnly=yes".into()]);
+    if let Some(identity_file) = identity_file {
+        args.extend(["-i".into(), identity_file.into()]);
+    }
+}
+
+fn push_interactive_identity_args(args: &mut Vec<String>, identity_file: Option<&str>) {
+    if let Some(identity_file) = identity_file {
+        args.extend([
+            "-o".into(),
+            "IdentitiesOnly=yes".into(),
+            "-i".into(),
+            identity_file.into(),
+        ]);
+    }
 }
 
 fn validate_connection_name(label: &str, value: &str) -> Result<(), String> {
@@ -918,6 +930,8 @@ Host -unsafe bad/name !negated
                 "-T",
                 "-p",
                 "2222",
+                "-o",
+                "IdentitiesOnly=yes",
                 "-i",
                 "/home/alice/.ssh/lab key",
                 "alice@gpu-box",
@@ -932,6 +946,8 @@ Host -unsafe bad/name !negated
                 "ConnectTimeout=10",
                 "-P",
                 "2222",
+                "-o",
+                "IdentitiesOnly=yes",
                 "-i",
                 "/home/alice/.ssh/lab key",
             ]
@@ -942,6 +958,8 @@ Host -unsafe bad/name !negated
                 "-tt",
                 "-p",
                 "2222",
+                "-o",
+                "IdentitiesOnly=yes",
                 "-i",
                 "/home/alice/.ssh/lab key",
                 "alice@gpu-box",
@@ -959,6 +977,16 @@ Host -unsafe bad/name !negated
         let connection = SshConnection::from_execution_context(&ctx).unwrap();
         assert_eq!(connection.target().unwrap(), "gpu-box");
         assert_eq!(connection.ssh_args().unwrap().last().unwrap(), "gpu-box");
+        assert!(connection
+            .ssh_args()
+            .unwrap()
+            .windows(2)
+            .any(|args| args == ["-o", "IdentitiesOnly=yes"]));
+        assert!(connection
+            .scp_option_args()
+            .unwrap()
+            .windows(2)
+            .any(|args| args == ["-o", "IdentitiesOnly=yes"]));
         assert!(!connection
             .scp_option_args()
             .unwrap()

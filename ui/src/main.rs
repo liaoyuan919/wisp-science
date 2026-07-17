@@ -3506,10 +3506,10 @@ fn App() -> impl IntoView {
     }
     refresh_execution_contexts(execution_contexts);
     refresh_runtimes(runtime_infos);
-    refresh_runs(run_records);
+    refresh_runs(run_records, locale);
     {
         let refresh = Closure::wrap(Box::new(move || {
-            refresh_runs(run_records);
+            refresh_runs(run_records, locale);
         }) as Box<dyn FnMut()>);
         let _ = web_sys::window().and_then(|window| {
             window
@@ -4443,7 +4443,7 @@ fn App() -> impl IntoView {
                 ensure_right_tab(RightTab::Hosts, show_right, open_right_tabs, right_tab);
                 refresh_execution_contexts(execution_contexts);
                 refresh_runtimes(runtime_infos);
-                refresh_runs(run_records);
+                refresh_runs(run_records, locale);
             }
             "side-chat" => {
                 ensure_right_tab(RightTab::SideChat, show_right, open_right_tabs, right_tab)
@@ -5713,7 +5713,7 @@ fn App() -> impl IntoView {
                                         refresh_memory();
                                         refresh_execution_contexts(execution_contexts);
                                         refresh_runtimes(runtime_infos);
-                                        refresh_runs(run_records);
+                                        refresh_runs(run_records, locale);
                                     }
                                 }>
                                 {compose_icon("controls")}
@@ -6184,7 +6184,7 @@ fn App() -> impl IntoView {
                                                 RightTab::Hosts => {
                                                     refresh_execution_contexts(execution_contexts);
                                                     refresh_runtimes(runtime_infos);
-                                                    refresh_runs(run_records);
+                                                    refresh_runs(run_records, locale);
                                                 }
                                                 _ => {}
                                             }
@@ -6241,7 +6241,7 @@ fn App() -> impl IntoView {
                                                         RightTab::Hosts => {
                                                             refresh_execution_contexts(execution_contexts);
                                                             refresh_runtimes(runtime_infos);
-                                                            refresh_runs(run_records);
+                                                            refresh_runs(run_records, locale);
                                                         }
                                                         _ => {}
                                                     }
@@ -6868,7 +6868,8 @@ fn App() -> impl IntoView {
                                                                         spawn_local(async move {
                                                                             let arg = to_value(&serde_json::json!({ "contextId": context_id })).unwrap();
                                                                             match invoke_checked("probe_execution_context", arg).await {
-                                                                                Ok(_) => {
+                                                                                Ok(value) => {
+                                                                                    show_probe_stopped_toast(&value, locale);
                                                                                     refresh_execution_contexts(execution_contexts);
                                                                                     refresh_runtimes(runtime_infos);
                                                                                 }
@@ -7577,7 +7578,10 @@ fn App() -> impl IntoView {
                 spawn_local(async move {
                     let args = to_value(&serde_json::json!({ "contextId": context_id })).unwrap();
                     match invoke_checked("probe_execution_context", args).await {
-                        Ok(_) => refresh_execution_contexts(execution_contexts),
+                        Ok(value) => {
+                            show_probe_stopped_toast(&value, locale);
+                            refresh_execution_contexts(execution_contexts);
+                        }
                         Err(error) => {
                             let message = localize_backend(locale.get_untracked(), &js_error_text(error));
                             show_toast(&message);

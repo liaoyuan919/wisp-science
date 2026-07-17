@@ -1384,6 +1384,42 @@ test("right panel shows execution contexts and runs", async ({ page }) => {
   )).toBeGreaterThan(1);
 });
 
+test("SSH failures show that automatic retry was stopped", async ({ page }) => {
+  await enterApp(page);
+  await selectRemoteContext(page);
+  await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.getByRole("button", { name: "Add panel" }).click();
+  await page.getByRole("button", { name: "Environment" }).click();
+
+  await page.evaluate(() => {
+    const context = (window as any).__mockExecutionContexts.find(
+      (item: any) => item.id === "ssh:gpu-server",
+    );
+    context.last_probe_status = "error";
+    context.last_probe_error = "Permission denied (publickey).";
+  });
+  const remote = page.locator(".context-card", { hasText: "ssh:gpu-server" });
+  await remote.getByRole("button", { name: "Probe context" }).click();
+  await expect(page.locator(".copy-toast-warning")).toHaveText(
+    "SSH probe failed. Automatic retry was stopped to protect the server; check the connection and retry manually.",
+  );
+  await expect(page.locator(".copy-toast-warning")).toBeHidden({ timeout: 3_000 });
+
+  await page.evaluate(() => {
+    const run = (window as any).__mockRuns.find((item: any) => item.id === "run-kinase-001");
+    run.status = "failed";
+    run.exit_code = 69;
+    run.last_poll_error =
+      "SSH automatic retry stopped after the first failed attempt to protect the server. Manual retry is required. Connection reset by peer.";
+  });
+  await remote.getByRole("button", { name: "View runs" }).click();
+  await page.getByRole("dialog", { name: "Runs" })
+    .getByRole("button", { name: "Refresh runs" }).click();
+  await expect(page.locator(".copy-toast-warning")).toHaveText(
+    "SSH failed. Automatic retry was stopped to protect the server; check the connection and retry manually.",
+  );
+});
+
 test("context cards open machine, runtime, and runs details in modals", async ({ page }) => {
   await enterApp(page);
   await selectRemoteContext(page);

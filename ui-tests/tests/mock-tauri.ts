@@ -215,6 +215,7 @@ export function tauriMock(): void {
       updated_at: 1783482300,
     },
   ];
+  (window as any).__mockExecutionContexts = executionContexts;
   const sessionExecutionContexts: Record<string, string[]> = {};
   let runtimeInfos: any[] = [
     {
@@ -309,6 +310,7 @@ export function tauriMock(): void {
       env_snapshot_json: "{}",
     },
   ];
+  (window as any).__mockRuns = runs;
   const artifacts = [
     { id: "art-tree", name: "nif3.treefile", kind: "text/treefile", path: "nif3.treefile", ts: Math.floor(Date.now() / 1000), project_id: "default", project_name: "wisp-science", session_id: "s-current", session_title: "Current analysis", origin: "output" },
     { id: "art-profile", name: "plddt_profile.png", kind: "image/png", path: "plddt_profile.png", ts: Math.floor(Date.now() / 1000), project_id: "default", project_name: "wisp-science", session_id: "s-old", session_title: "Older structure run", origin: "output" },

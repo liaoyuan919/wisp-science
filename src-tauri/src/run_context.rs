@@ -12,6 +12,10 @@ use tokio::sync::Mutex;
 mod remote;
 mod tools;
 
+#[cfg(test)]
+use remote::remote_poll_delay_secs;
+#[cfg(all(test, windows))]
+use remote::scp_local_path;
 #[cfg(all(test, unix))]
 use remote::{cancel_payload, launch_payload, poll_payload, prepare_payload};
 use remote::{
@@ -197,6 +201,8 @@ enum RemoteRunHandle {
         connection: crate::ssh_hosts::SshConnection,
         workdir: String,
         token: String,
+        #[serde(default)]
+        inputs_staged: bool,
         pgid: Option<i64>,
         start_time: Option<u64>,
     },
@@ -208,6 +214,18 @@ impl RemoteRunHandle {
             Self::SshDirect {
                 pgid, start_time, ..
             } => pgid.is_some() && start_time.is_some(),
+        }
+    }
+
+    fn inputs_staged(&self) -> bool {
+        match self {
+            Self::SshDirect { inputs_staged, .. } => *inputs_staged,
+        }
+    }
+
+    fn mark_inputs_staged(&mut self) {
+        match self {
+            Self::SshDirect { inputs_staged, .. } => *inputs_staged = true,
         }
     }
 
@@ -247,6 +265,7 @@ pub struct RunManager {
 const REMOTE_START_LEASE_SECS: i64 = 360;
 const ACTIVE_LEASE_SECS: i64 = 30;
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+const SSH_RETRY_STOPPED_MARKER: &str = "SSH automatic retry stopped";
 
 impl RunManager {
     pub async fn has_in_flight_project(
@@ -486,8 +505,9 @@ impl RunManager {
         if self.active.lock().await.contains_key(&remote.run_id) {
             return Ok(false);
         }
+        let lease_secs = remote_lifecycle_lease_secs(&remote);
         let claimed = store
-            .claim_run_lifecycle(&remote.run_id, &self.owner_id, ACTIVE_LEASE_SECS)
+            .claim_run_lifecycle(&remote.run_id, &self.owner_id, lease_secs)
             .await
             .map_err(|e| e.to_string())?;
         if !claimed {
@@ -514,7 +534,7 @@ impl RunManager {
                     Ok(()) => break,
                     Err(error) => {
                         tracing::warn!(run_id = %task_run_id, "SSH run lifecycle failed: {error}");
-                        tokio::time::sleep(remote_poll_interval()).await;
+                        tokio::time::sleep(remote_poll_interval(1)).await;
                         match store.get_run(&task_run_id).await {
                             Ok(Some(run)) if !run.status.is_terminal() => {}
                             Ok(_) => break,
@@ -769,6 +789,7 @@ async fn create_run_record(
             connection: crate::ssh_hosts::SshConnection::from_execution_context(&ctx)?,
             workdir: format!(".wisp-science/runs/{run_id}"),
             token: uuid::Uuid::new_v4().to_string(),
+            inputs_staged: false,
             pgid: None,
             start_time: None,
         };
@@ -860,15 +881,60 @@ async fn finish_remote_run(
     Ok(())
 }
 
+fn ssh_retry_stopped_error(error: &str) -> String {
+    if error.contains(SSH_RETRY_STOPPED_MARKER) {
+        error.to_string()
+    } else {
+        format!(
+            "{SSH_RETRY_STOPPED_MARKER} after the first failed attempt to protect the server. Manual retry is required. {error}"
+        )
+    }
+}
+
+fn remote_lifecycle_lease_secs(remote: &RemoteRun) -> i64 {
+    if remote.handle.is_confirmed() {
+        ACTIVE_LEASE_SECS
+    } else {
+        REMOTE_START_LEASE_SECS
+    }
+}
+
+async fn fail_remote_start(
+    store: &wisp_store::Store,
+    owner_id: &str,
+    remote: &RemoteRun,
+    error: &str,
+) -> Result<(), String> {
+    let error_tail = tail(error);
+    store
+        .record_run_poll_owned(&remote.run_id, owner_id, None, None, Some(error))
+        .await
+        .map_err(|e| e.to_string())?;
+    store
+        .update_run_output_owned(&remote.run_id, owner_id, None, Some(&error_tail))
+        .await
+        .map_err(|e| e.to_string())?;
+    finish_remote_run(
+        store,
+        owner_id,
+        remote,
+        wisp_store::RunStatus::Failed,
+        Some(69),
+    )
+    .await
+}
+
 async fn remote_lifecycle(
     store: &wisp_store::Store,
     runner: &dyn RunCommandRunner,
     owner_id: &str,
     mut remote: RemoteRun,
 ) -> Result<(), String> {
+    let mut consecutive_transport_errors = 0_u32;
     loop {
+        let lease_secs = remote_lifecycle_lease_secs(&remote);
         if !store
-            .renew_run_lifecycle(&remote.run_id, owner_id, ACTIVE_LEASE_SECS)
+            .renew_run_lifecycle(&remote.run_id, owner_id, lease_secs)
             .await
             .map_err(|e| e.to_string())?
         {
@@ -880,6 +946,19 @@ async fn remote_lifecycle(
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Run not found: {}", remote.run_id))?;
         if run.status.is_terminal() {
+            return Ok(());
+        }
+
+        if !remote.handle.is_confirmed()
+            && run.status == wisp_store::RunStatus::Submitted
+            && run.last_poll_error.is_some()
+        {
+            let error = ssh_retry_stopped_error(
+                run.last_poll_error
+                    .as_deref()
+                    .unwrap_or("unknown SSH error"),
+            );
+            fail_remote_start(store, owner_id, &remote, &error).await?;
             return Ok(());
         }
 
@@ -907,17 +986,6 @@ async fn remote_lifecycle(
                         return Ok(());
                     }
                     Err(error) => {
-                        if permanent_remote_start_error(&error) {
-                            finish_remote_run(
-                                store,
-                                owner_id,
-                                &remote,
-                                wisp_store::RunStatus::Cancelled,
-                                None,
-                            )
-                            .await?;
-                            return Ok(());
-                        }
                         store
                             .record_run_poll_owned(
                                 &remote.run_id,
@@ -928,37 +996,24 @@ async fn remote_lifecycle(
                             )
                             .await
                             .map_err(|e| e.to_string())?;
-                        tokio::time::sleep(remote_poll_interval()).await;
-                        continue;
+                        finish_remote_run(
+                            store,
+                            owner_id,
+                            &remote,
+                            wisp_store::RunStatus::Cancelled,
+                            None,
+                        )
+                        .await?;
+                        return Ok(());
                     }
                 }
             } else {
-                match ensure_remote_started(store, owner_id, runner, &remote).await {
+                match ensure_remote_started(store, owner_id, runner, &mut remote).await {
                     Ok(handle) => remote.handle = handle,
                     Err(error) => {
-                        if permanent_remote_start_error(&error) {
-                            finish_remote_run(
-                                store,
-                                owner_id,
-                                &remote,
-                                wisp_store::RunStatus::Failed,
-                                Some(69),
-                            )
-                            .await?;
-                            return Ok(());
-                        }
-                        store
-                            .record_run_poll_owned(
-                                &remote.run_id,
-                                owner_id,
-                                None,
-                                None,
-                                Some(&error),
-                            )
-                            .await
-                            .map_err(|e| e.to_string())?;
-                        tokio::time::sleep(remote_poll_interval()).await;
-                        continue;
+                        let error = ssh_retry_stopped_error(&error);
+                        fail_remote_start(store, owner_id, &remote, &error).await?;
+                        return Ok(());
                     }
                 }
             }
@@ -1031,15 +1086,39 @@ async fn remote_lifecycle(
                     return Ok(());
                 }
                 Err(error) => {
+                    if permanent_remote_start_error(&error) {
+                        let error = ssh_retry_stopped_error(&error);
+                        store
+                            .record_run_poll_owned(
+                                &remote.run_id,
+                                owner_id,
+                                None,
+                                None,
+                                Some(&error),
+                            )
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        finish_remote_run(
+                            store,
+                            owner_id,
+                            &remote,
+                            wisp_store::RunStatus::Lost,
+                            None,
+                        )
+                        .await?;
+                        return Ok(());
+                    }
                     store
                         .record_run_poll_owned(&remote.run_id, owner_id, None, None, Some(&error))
                         .await
                         .map_err(|e| e.to_string())?;
+                    consecutive_transport_errors = consecutive_transport_errors.saturating_add(1);
                 }
             }
         } else {
             match poll_remote(runner, &remote.handle).await {
                 Ok(poll) => {
+                    consecutive_transport_errors = 0;
                     store
                         .record_run_poll_owned(
                             &remote.run_id,
@@ -1109,16 +1188,39 @@ async fn remote_lifecycle(
                     }
                 }
                 Err(error) => {
-                    // Transport failures are transient. The persisted handle lets a
-                    // later poll or a restarted app reattach without duplicating work.
+                    if permanent_remote_start_error(&error) {
+                        let error = ssh_retry_stopped_error(&error);
+                        store
+                            .record_run_poll_owned(
+                                &remote.run_id,
+                                owner_id,
+                                None,
+                                None,
+                                Some(&error),
+                            )
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        finish_remote_run(
+                            store,
+                            owner_id,
+                            &remote,
+                            wisp_store::RunStatus::Lost,
+                            None,
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    // The process is confirmed on the server, so temporary transport
+                    // failures retain the handle and back off instead of relaunching.
                     store
                         .record_run_poll_owned(&remote.run_id, owner_id, None, None, Some(&error))
                         .await
                         .map_err(|e| e.to_string())?;
+                    consecutive_transport_errors = consecutive_transport_errors.saturating_add(1);
                 }
             }
         }
-        tokio::time::sleep(remote_poll_interval()).await;
+        tokio::time::sleep(remote_poll_interval(consecutive_transport_errors)).await;
     }
 }
 
