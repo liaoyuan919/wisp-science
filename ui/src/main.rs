@@ -4174,6 +4174,27 @@ fn App() -> impl IntoView {
             });
         })
     };
+    let pet_open_project = open_project_transition;
+    let pet_open_cb = Closure::wrap(Box::new(move |payload: JsValue| {
+        let Ok(target) = serde_wasm_bindgen::from_value::<serde_json::Value>(payload) else {
+            return;
+        };
+        let Some(project_id) = target.get("projectId").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        let Some(session_id) = target.get("sessionId").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        pet_open_project.call((project_id.to_string(), Some(session_id.to_string())));
+    }) as Box<dyn FnMut(JsValue)>);
+    let pet_open_js = pet_open_cb
+        .as_ref()
+        .unchecked_ref::<js_sys::Function>()
+        .clone();
+    pet_open_cb.forget();
+    spawn_local(async move {
+        let _ = listen("pet-open-session", &pet_open_js).await;
+    });
     // Switch the active project inline (same guarded flow as the Projects screen).
     let switch_project = {
         let open_project_transition = open_project_transition;

@@ -3278,6 +3278,10 @@ test("desktop pet remains independent and reflects global agent state", async ({
   });
   await expect(pet).toHaveAttribute("data-state", "waiting");
   await expect(pet.getByText("Needs you")).toBeVisible();
+  await pet.click();
+  await expect.poll(() => lastInvokeArgs(page, "open_pet_session")).toMatchObject({
+    sessionId: "pet-frame",
+  });
 
   await page.evaluate(() => {
     (window as any).__tauriEmit("agent", { kind: "Text", frame_id: "pet-frame", delta: "continuing" });
@@ -3296,6 +3300,19 @@ test("desktop pet remains independent and reflects global agent state", async ({
     (window as any).__tauriEmit("agent", { kind: "Done", frame_id: "pet-frame" });
   });
   await expect(pet).toHaveAttribute("data-state", "jumping");
+});
+
+test("pet navigation opens the project and session that need the user", async ({ page }) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    (window as any).__tauriEmit("pet-open-session", {
+      projectId: "other",
+      sessionId: "pet-frame",
+    });
+  });
+
+  await expect.poll(() => lastInvokeArgs(page, "open_project")).toMatchObject({ id: "other" });
+  await expect.poll(() => lastInvokeArgs(page, "load_session")).toMatchObject({ id: "pet-frame" });
 });
 
 test("a sync conflict requires an explicit authoritative device choice", async ({ page }) => {

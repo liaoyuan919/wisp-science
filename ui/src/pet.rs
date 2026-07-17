@@ -11,6 +11,7 @@ use wasm_bindgen::{closure::Closure, JsCast, JsValue};
 struct DesktopPetActivity {
     running: HashSet<String>,
     waiting: HashSet<String>,
+    waiting_target: Option<String>,
     reviewing: HashSet<String>,
     transient: String,
     sequence: u64,
@@ -31,12 +32,24 @@ impl DesktopPetActivity {
     fn replace_from_snapshot(&mut self, snapshot: PetRuntimeSnapshot) {
         self.running = snapshot.running.into_iter().collect();
         self.waiting = snapshot.waiting.into_iter().collect();
+        self.retarget_waiting();
         self.reviewing = snapshot.reviewing.into_iter().collect();
         self.transient.clear();
     }
 
+    fn retarget_waiting(&mut self) {
+        if self
+            .waiting_target
+            .as_ref()
+            .is_none_or(|frame_id| !self.waiting.contains(frame_id))
+        {
+            self.waiting_target = self.waiting.iter().next().cloned();
+        }
+    }
+
     fn mark_running(&mut self, frame_id: String) {
         self.waiting.remove(&frame_id);
+        self.retarget_waiting();
         self.reviewing.remove(&frame_id);
         self.running.insert(frame_id);
         self.transient.clear();
@@ -44,13 +57,15 @@ impl DesktopPetActivity {
 
     fn mark_waiting(&mut self, frame_id: String) {
         self.running.insert(frame_id.clone());
-        self.waiting.insert(frame_id);
+        self.waiting.insert(frame_id.clone());
+        self.waiting_target = Some(frame_id);
         self.transient.clear();
     }
 
     fn finish(&mut self, frame_id: &str, transient: &str) {
         self.running.remove(frame_id);
         self.waiting.remove(frame_id);
+        self.retarget_waiting();
         self.reviewing.remove(frame_id);
         self.transient = transient.to_string();
         self.sequence = self.sequence.wrapping_add(1);
@@ -76,6 +91,7 @@ impl DesktopPetActivity {
             } => self.mark_running(frame_id),
             AgentEvent::ReviewStarted { frame_id } | AgentEvent::Review { frame_id, .. } => {
                 self.waiting.remove(&frame_id);
+                self.retarget_waiting();
                 self.running.insert(frame_id.clone());
                 self.reviewing.insert(frame_id);
                 self.transient.clear();
@@ -231,6 +247,18 @@ pub(crate) fn PetDesktop() -> impl IntoView {
             <button id="wisp-pet" class="wisp-pet desktop-pet" type="button"
                 data-testid="wisp-pet"
                 data-tauri-drag-region="deep"
+                on:click:undelegated=move |_| {
+                    let Some(session_id) = activity.with_untracked(|current| current.waiting_target.clone()) else {
+                        return;
+                    };
+                    spawn_local(async move {
+                        let args = serde_wasm_bindgen::to_value(
+                            &serde_json::json!({ "sessionId": session_id }),
+                        )
+                        .unwrap_or(JsValue::UNDEFINED);
+                        let _ = invoke("open_pet_session", args).await;
+                    });
+                }
                 aria-label=move || {
                     let current = activity.get();
                     let name = status.get().asset.map(|asset| asset.display_name)
