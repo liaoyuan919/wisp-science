@@ -223,8 +223,11 @@ textarea.host-input { min-height:64px; resize:vertical; }
   max-height: 52vh; overflow: auto; display: flex; justify-content: flex-start; align-items: flex-start;
   background: var(--bg-sunken); border-radius: var(--radius-sm); padding: 8px;
 }
-/* Image/PDF pan inside their own zoom viewport, so the figure box must clip, not scroll. */
-.artifact-modal .am-figure.zoomable-preview { height: 52vh; overflow: hidden; }
+/* Image/PDF pan inside their own zoom viewport, so the figure box must clip, not
+   scroll. Column layout puts the zoom wrapper on the bounded main axis; leaving
+   the default row axis lets a tall 100% page grow to its intrinsic height and
+   then get clipped without creating overflow in the viewport. */
+.artifact-modal .am-figure.zoomable-preview { height: 52vh; overflow: hidden; flex-direction: column; }
 /* DOCX renders a tall document that scrolls inside its own .rp-docx surface.
    The mount div (.rp-heavy) must be a flex-column filler so the bounded height
    reaches .rp-docx — otherwise its auto height breaks the chain and the figure

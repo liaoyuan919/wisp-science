@@ -146,6 +146,9 @@ outputs are isolated in `ui/dist-dev` and `ui/dist-test`; release packaging
 continues to use `ui/dist`. This prevents a running dev/test server from racing
 with `cargo tauri build` while it copies the optimized WASM bundle.
 
+Image and PDF previews can be zoomed and drag-panned whenever their content
+extends beyond the visible viewport, including at 100% zoom.
+
 On macOS, run the same commands from a shell (`cargo tauri build` emits a
 `.app` and `.dmg` under `target/release/bundle`). `src-tauri/tauri.macos.conf.json`
 is auto-merged by Tauri to replace the PowerShell `beforeBuildCommand` with a

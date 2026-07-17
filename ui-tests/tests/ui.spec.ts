@@ -1960,6 +1960,39 @@ test("PDF artifacts render inside the app without a browser PDF plugin", async (
   const pageWidthAt100 = await renderedPage.evaluate((el) => el.getBoundingClientRect().width);
   const textSpan = renderedPage.locator(".rp-pdf-textlayer span").first();
   const textWidthAt100 = await textSpan.evaluate((el) => el.getBoundingClientRect().width);
+  // A fit-width page can still be taller than the modal. It must be pannable at
+  // 100%; panning depends on actual overflow, not on zoom being above 100%.
+  const viewport = modal.locator(".file-preview-zoom-viewport");
+  await expect.poll(() => viewport.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+  await viewport.evaluate((el) => {
+    const rect = el.getBoundingClientRect();
+    const x = rect.left + rect.width * 0.5;
+    const startY = rect.top + rect.height * 0.7;
+    const endY = rect.top + rect.height * 0.25;
+    el.dispatchEvent(new PointerEvent("pointerdown", {
+      bubbles: true,
+      button: 0,
+      pointerId: 3,
+      clientX: x,
+      clientY: startY,
+    }));
+    el.dispatchEvent(new PointerEvent("pointermove", {
+      bubbles: true,
+      button: 0,
+      buttons: 1,
+      pointerId: 3,
+      clientX: x,
+      clientY: endY,
+    }));
+    el.dispatchEvent(new PointerEvent("pointerup", {
+      bubbles: true,
+      button: 0,
+      pointerId: 3,
+      clientX: x,
+      clientY: endY,
+    }));
+  });
+  await expect.poll(() => viewport.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
   await page.getByRole("button", { name: "Zoom in" }).click();
   await page.getByRole("button", { name: "Zoom in" }).click();
   await expect(page.getByRole("button", { name: "Reset zoom" })).toHaveText("150%");
@@ -2032,16 +2065,17 @@ test("PDF text can be selected and added to chat", async ({ page }) => {
   const layer = page.locator(".artifact-modal .rp-pdf-textlayer");
   await expect(layer).toContainText("PDF preview works");
 
-  // Select a text-layer span and raise the shared quote popup (the modal
-  // figure's data-file-path ancestor drives it — same path as md/docx).
-  await layer.locator("span").first().evaluate((el) => {
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    const sel = window.getSelection()!;
-    sel.removeAllRanges();
-    sel.addRange(range);
-    window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
-  });
+  // Drag-select a text-layer span with real pointer input. The zoom viewport
+  // must leave glyph drags to text selection while blank-page drags pan.
+  const span = layer.locator("span").first();
+  await span.scrollIntoViewIfNeeded();
+  const box = await span.boundingBox();
+  if (!box) throw new Error("PDF text span has no bounding box");
+  const y = box.y + box.height * 0.5;
+  await page.mouse.move(box.x + 2, y);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width - 2, y, { steps: 5 });
+  await page.mouse.up();
   const popup = page.locator(".selection-popup");
   await expect(popup).toBeVisible();
   await popup.getByRole("button", { name: "Add to chat" }).click();

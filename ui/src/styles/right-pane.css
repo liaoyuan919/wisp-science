@@ -397,8 +397,7 @@
    overflows by the scrollbar's width. Reserving the gutter up front keeps that
    measurement honest, and stops pages of differing height shifting the view
    sideways as you page through. */
-.file-preview-zoom-viewport { position: relative; flex: 1 1 auto; min-height: 0; overflow: auto; scrollbar-gutter: stable; text-align: center; overscroll-behavior: contain; }
-.file-preview-zoom-viewport.is-zoomed { cursor: grab; }
+.file-preview-zoom-viewport { position: relative; flex: 1 1 auto; min-height: 0; overflow: auto; scrollbar-gutter: stable; text-align: center; overscroll-behavior: contain; cursor: grab; }
 .file-preview-zoom-viewport.is-dragging { cursor: grabbing; user-select: none; }
 .file-preview-zoom-viewport.is-cropping { cursor: crosshair; }
 /* --preview-zoom is set here (inline style) for descendants to read, but only
