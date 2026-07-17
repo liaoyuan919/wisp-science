@@ -5,6 +5,9 @@ use std::path::Path;
 use tauri::{State, WebviewWindow};
 
 const REMOTE_DIR_PROTOCOL: &[u8] = b"WISP_REMOTE_DIR_V1\0";
+const REMOTE_FILE_PROTOCOL: &[u8] = b"WISP_REMOTE_FILE_V1\0";
+/// Same ceiling as local previews: `read_file` caps at 32 MB.
+const REMOTE_FILE_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub(super) struct DirEntry {
@@ -20,33 +23,33 @@ pub(super) struct DirectoryListing {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RemoteDirectoryCommand {
+struct RemoteCommand {
     program: String,
     args: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RemoteDirectoryOutput {
+struct RemoteOutput {
     status: i32,
     stdout: Vec<u8>,
     stderr: String,
 }
 
-trait RemoteDirectoryRunner: Send {
-    fn run(&mut self, command: &RemoteDirectoryCommand) -> Result<RemoteDirectoryOutput, String>;
+trait RemoteRunner: Send {
+    fn run(&mut self, command: &RemoteCommand) -> Result<RemoteOutput, String>;
 }
 
-struct ProcessRemoteDirectoryRunner;
+struct ProcessRemoteRunner;
 
-impl RemoteDirectoryRunner for ProcessRemoteDirectoryRunner {
-    fn run(&mut self, command: &RemoteDirectoryCommand) -> Result<RemoteDirectoryOutput, String> {
+impl RemoteRunner for ProcessRemoteRunner {
+    fn run(&mut self, command: &RemoteCommand) -> Result<RemoteOutput, String> {
         let mut process = std::process::Command::new(&command.program);
         process.args(&command.args);
         wisp_tools::process::hide_console(&mut process);
         let output = process
             .output()
             .map_err(|e| format!("failed to run {}: {e}", command.program))?;
-        Ok(RemoteDirectoryOutput {
+        Ok(RemoteOutput {
             status: output.status.code().unwrap_or(-1),
             stdout: output.stdout,
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
@@ -54,7 +57,7 @@ impl RemoteDirectoryRunner for ProcessRemoteDirectoryRunner {
     }
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub(super) struct FileContent {
     path: String,
     mime: String,
@@ -226,10 +229,10 @@ pub(super) fn list_dir(
 
 fn validate_remote_path(path: &str) -> Result<(), String> {
     if path.len() > 4096 {
-        return Err("Remote directory path exceeds 4096 bytes".into());
+        return Err("Remote path exceeds 4096 bytes".into());
     }
     if path.contains(['\0', '\n', '\r']) {
-        return Err("Remote directory path must not contain NUL or line breaks".into());
+        return Err("Remote path must not contain NUL or line breaks".into());
     }
     Ok(())
 }
@@ -286,28 +289,28 @@ done"#
 fn build_remote_directory_command(
     context: &wisp_store::ExecutionContext,
     path: Option<&str>,
-) -> Result<RemoteDirectoryCommand, String> {
+) -> Result<RemoteCommand, String> {
     let connection = crate::ssh_hosts::SshConnection::from_execution_context(context)?;
     let mut args = connection.ssh_args()?;
     args.push(remote_directory_script(path)?);
-    Ok(RemoteDirectoryCommand {
+    Ok(RemoteCommand {
         program: "ssh".into(),
         args,
     })
 }
 
-fn protocol_payload(stdout: &[u8]) -> Result<&[u8], String> {
+/// Slice off everything before (and including) the protocol marker, so login
+/// banners and motd noise never reach the parser.
+fn protocol_payload<'a>(stdout: &'a [u8], marker: &[u8]) -> Result<&'a [u8], String> {
     stdout
-        .windows(REMOTE_DIR_PROTOCOL.len())
-        .position(|window| window == REMOTE_DIR_PROTOCOL)
-        .map(|start| &stdout[start + REMOTE_DIR_PROTOCOL.len()..])
-        .ok_or_else(|| {
-            "Remote directory response did not contain the expected protocol marker".into()
-        })
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .map(|start| &stdout[start + marker.len()..])
+        .ok_or_else(|| "Remote response did not contain the expected protocol marker".into())
 }
 
 fn parse_remote_directory(stdout: &[u8]) -> Result<DirectoryListing, String> {
-    let fields = protocol_payload(stdout)?
+    let fields = protocol_payload(stdout, REMOTE_DIR_PROTOCOL)?
         .split(|byte| *byte == 0)
         .collect::<Vec<_>>();
     let Some(path) = fields.first().filter(|field| !field.is_empty()) else {
@@ -353,7 +356,7 @@ fn parse_remote_directory(stdout: &[u8]) -> Result<DirectoryListing, String> {
 fn list_remote_dir_with_runner(
     context: &wisp_store::ExecutionContext,
     path: Option<&str>,
-    runner: &mut dyn RemoteDirectoryRunner,
+    runner: &mut dyn RemoteRunner,
 ) -> Result<DirectoryListing, String> {
     let command = build_remote_directory_command(context, path)?;
     let output = runner.run(&command)?;
@@ -371,6 +374,88 @@ fn list_remote_dir_with_runner(
     parse_remote_directory(&output.stdout)
 }
 
+/// POSIX-sh script that size-checks then streams one remote file. The marker
+/// separates the payload from login banners; the size guard runs remotely so a
+/// runaway file never crosses the wire just to be rejected here.
+fn remote_file_script(path: &str) -> Result<String, String> {
+    let path = remote_path_expression(Some(path))?;
+    let cap = REMOTE_FILE_MAX_BYTES;
+    Ok(format!(
+        r#"LC_ALL=C
+f={path}
+case "$f" in -*) f="./$f" ;; esac
+if [ ! -f "$f" ]; then
+  printf 'Cannot read remote file: %s\n' "$f" >&2
+  exit 66
+fi
+size=$(stat -c '%s' "$f" 2>/dev/null) ||
+  size=$(stat -f '%z' "$f" 2>/dev/null) ||
+  size=0
+if [ "$size" -gt {cap} ]; then
+  printf 'Remote file exceeds {cap} byte limit: %s\n' "$f" >&2
+  exit 67
+fi
+printf 'WISP_REMOTE_FILE_V1\000'
+cat "$f""#
+    ))
+}
+
+fn build_remote_file_command(
+    context: &wisp_store::ExecutionContext,
+    path: &str,
+) -> Result<RemoteCommand, String> {
+    let connection = crate::ssh_hosts::SshConnection::from_execution_context(context)?;
+    let mut args = connection.ssh_args()?;
+    args.push(remote_file_script(path)?);
+    Ok(RemoteCommand {
+        program: "ssh".into(),
+        args,
+    })
+}
+
+fn read_remote_file_with_runner(
+    context: &wisp_store::ExecutionContext,
+    path: &str,
+    runner: &mut dyn RemoteRunner,
+) -> Result<FileContent, String> {
+    let command = build_remote_file_command(context, path)?;
+    let output = runner.run(&command)?;
+    if output.status != 0 {
+        let detail = if output.stderr.is_empty() {
+            "no error details returned".to_string()
+        } else {
+            output.stderr
+        };
+        return Err(format!(
+            "Remote file request failed (exit {}): {detail}",
+            output.status
+        ));
+    }
+    let bytes = protocol_payload(&output.stdout, REMOTE_FILE_PROTOCOL)?.to_vec();
+    let mime = mime_for_path(Path::new(path));
+    Ok(file_content_from_bytes(path.to_string(), mime, bytes))
+}
+
+#[tauri::command]
+pub(super) async fn read_remote_file(
+    state: State<'_, AppState>,
+    context_id: String,
+    path: String,
+) -> Result<FileContent, String> {
+    let context = state
+        .store
+        .get_execution_context(&context_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Execution context not found: {context_id}"))?;
+    tokio::task::spawn_blocking(move || {
+        let mut runner = ProcessRemoteRunner;
+        read_remote_file_with_runner(&context, &path, &mut runner)
+    })
+    .await
+    .map_err(|e| format!("Remote file task failed: {e}"))?
+}
+
 #[tauri::command]
 pub(super) async fn list_remote_dir(
     state: State<'_, AppState>,
@@ -384,7 +469,7 @@ pub(super) async fn list_remote_dir(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Execution context not found: {context_id}"))?;
     tokio::task::spawn_blocking(move || {
-        let mut runner = ProcessRemoteDirectoryRunner;
+        let mut runner = ProcessRemoteRunner;
         list_remote_dir_with_runner(&context, path.as_deref(), &mut runner)
     })
     .await
@@ -406,27 +491,34 @@ pub(super) fn read_file_at(
         return Err(format!("file exceeds {cap} byte limit"));
     }
     let bytes = std::fs::read(&real).map_err(|e| format!("{e}"))?;
-    let path_str = real.to_string_lossy().into_owned();
+    Ok(file_content_from_bytes(
+        real.to_string_lossy().into_owned(),
+        mime,
+        bytes,
+    ))
+}
+
+/// The shared text-vs-binary decision for previews, local or remote: named text
+/// mimes go out as text, unnamed extensions are sniffed, the rest is base64.
+fn file_content_from_bytes(path: String, mime: &'static str, bytes: Vec<u8>) -> FileContent {
     if is_text_mime(mime)
         || mime == "chemical/x-pdb"
         || mime == "chemical/x-mdl-molfile"
         || (mime == "application/octet-stream" && looks_like_text(&bytes))
     {
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        Ok(FileContent {
-            path: path_str,
+        FileContent {
+            path,
             mime: mime.into(),
-            text: Some(text),
+            text: Some(String::from_utf8_lossy(&bytes).into_owned()),
             base64: None,
-        })
+        }
     } else {
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        Ok(FileContent {
-            path: path_str,
+        FileContent {
+            path,
             mime: mime.into(),
             text: None,
-            base64: Some(b64),
-        })
+            base64: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
+        }
     }
 }
 
@@ -538,13 +630,13 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    struct FakeRemoteDirectoryRunner {
-        output: Option<Result<RemoteDirectoryOutput, String>>,
-        commands: Vec<RemoteDirectoryCommand>,
+    struct FakeRemoteRunner {
+        output: Option<Result<RemoteOutput, String>>,
+        commands: Vec<RemoteCommand>,
     }
 
-    impl FakeRemoteDirectoryRunner {
-        fn returning(output: RemoteDirectoryOutput) -> Self {
+    impl FakeRemoteRunner {
+        fn returning(output: RemoteOutput) -> Self {
             Self {
                 output: Some(Ok(output)),
                 commands: Vec::new(),
@@ -552,11 +644,11 @@ mod tests {
         }
     }
 
-    impl RemoteDirectoryRunner for FakeRemoteDirectoryRunner {
+    impl RemoteRunner for FakeRemoteRunner {
         fn run(
             &mut self,
-            command: &RemoteDirectoryCommand,
-        ) -> Result<RemoteDirectoryOutput, String> {
+            command: &RemoteCommand,
+        ) -> Result<RemoteOutput, String> {
             self.commands.push(command.clone());
             self.output.take().expect("fake output configured")
         }
@@ -606,7 +698,7 @@ mod tests {
     #[test]
     fn remote_directory_runner_parses_banner_and_sorts_directories_first() {
         let stdout = b"login banner\nWISP_REMOTE_DIR_V1\0/home/research\0f\012\0notes.txt\0d\00\0projects\0f\03\0a.csv\0".to_vec();
-        let mut runner = FakeRemoteDirectoryRunner::returning(RemoteDirectoryOutput {
+        let mut runner = FakeRemoteRunner::returning(RemoteOutput {
             status: 0,
             stdout,
             stderr: String::new(),
@@ -638,7 +730,7 @@ mod tests {
 
     #[test]
     fn remote_directory_runner_surfaces_ssh_failure() {
-        let mut runner = FakeRemoteDirectoryRunner::returning(RemoteDirectoryOutput {
+        let mut runner = FakeRemoteRunner::returning(RemoteOutput {
             status: 255,
             stdout: Vec::new(),
             stderr: "Permission denied".into(),
@@ -647,6 +739,65 @@ mod tests {
             list_remote_dir_with_runner(&ssh_context(), Some("~"), &mut runner).unwrap_err();
         assert!(error.contains("exit 255"));
         assert!(error.contains("Permission denied"));
+    }
+
+    #[test]
+    fn remote_file_command_quotes_path_and_guards_size() {
+        let command =
+            build_remote_file_command(&ssh_context(), "/work/O'Brien results.html").unwrap();
+        assert_eq!(command.program, "ssh");
+        let script = command.args.last().unwrap();
+        assert!(script.contains("f='/work/O'\"'\"'Brien results.html'"));
+        assert!(script.contains("WISP_REMOTE_FILE_V1\\000"));
+        assert!(script.contains(&format!("-gt {REMOTE_FILE_MAX_BYTES}")));
+        assert!(script.contains("cat \"$f\""));
+    }
+
+    #[test]
+    fn remote_file_runner_sniffs_text_after_banner() {
+        let stdout = b"motd noise\nWISP_REMOTE_FILE_V1\0print('hi')\n".to_vec();
+        let mut runner = FakeRemoteRunner::returning(RemoteOutput {
+            status: 0,
+            stdout,
+            stderr: String::new(),
+        });
+        let content =
+            read_remote_file_with_runner(&ssh_context(), "~/analysis.py", &mut runner).unwrap();
+        assert_eq!(content.mime, "text/x-python");
+        assert_eq!(content.text.as_deref(), Some("print('hi')\n"));
+        assert!(content.base64.is_none());
+        assert_eq!(content.path, "~/analysis.py");
+    }
+
+    #[test]
+    fn remote_file_runner_returns_binary_as_base64() {
+        let stdout = b"WISP_REMOTE_FILE_V1\0\x89PNG\0\x01".to_vec();
+        let mut runner = FakeRemoteRunner::returning(RemoteOutput {
+            status: 0,
+            stdout,
+            stderr: String::new(),
+        });
+        let content =
+            read_remote_file_with_runner(&ssh_context(), "/plots/figure.png", &mut runner).unwrap();
+        assert_eq!(content.mime, "image/png");
+        assert!(content.text.is_none());
+        assert_eq!(
+            content.base64.as_deref(),
+            Some(base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\0\x01").as_str())
+        );
+    }
+
+    #[test]
+    fn remote_file_runner_surfaces_size_limit_failure() {
+        let mut runner = FakeRemoteRunner::returning(RemoteOutput {
+            status: 67,
+            stdout: Vec::new(),
+            stderr: "Remote file exceeds 33554432 byte limit: /big.bam".into(),
+        });
+        let error =
+            read_remote_file_with_runner(&ssh_context(), "/big.bam", &mut runner).unwrap_err();
+        assert!(error.contains("exit 67"));
+        assert!(error.contains("byte limit"));
     }
 
     #[test]

@@ -17,8 +17,6 @@
 .fb-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; cursor: pointer; font: inherit; color: var(--text); transition: border-color .12s ease; }
 .fb-row:hover { border-color: var(--clay); }
 .fb-row.dir { background: var(--bg-sunken); }
-.fb-row.remote-file { cursor: default; }
-.fb-row.remote-file:hover { border-color: var(--border); }
 .fb-row-action { width: 26px; height: 26px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--text-faint); cursor: pointer; }
 .fb-row-action:hover, .fb-row-action:focus-visible { border-color: var(--border-strong); background: var(--bg-sunken); color: var(--clay-strong); }
 .fb-row-action .gi, .fb-row-action svg { width: 15px; height: 15px; }

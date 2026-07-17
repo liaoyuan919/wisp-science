@@ -4930,15 +4930,19 @@ fn App() -> impl IntoView {
                 let dom_id = format!("center-file-{}-{}", center_reload.get(), file.path);
                 let path = file.path.clone();
                 let kind = file.kind.clone();
-                // Immutable artifact/version tabs aren't real filesystem paths, so
-                // they stay read-only; only real workspace files are editable.
+                // Immutable artifact/version tabs aren't real filesystem paths, and
+                // remote files can't be written back over SSH, so those stay
+                // read-only; only real workspace files are editable.
                 let can_edit = editable_center_kind(&kind)
                     && !path.starts_with("artifact:")
-                    && !path.starts_with("artifact-version:");
+                    && !path.starts_with("artifact-version:")
+                    && remote_file_path(&path).is_none();
                 // R/Python scripts bind to a persistent runtime and can be run in
-                // it. Immutable artifact tabs have no workspace path to run from.
+                // it. Immutable artifact tabs have no workspace path to run from,
+                // and remote previews have no local file for the runtime to read.
                 let run_language = (!path.starts_with("artifact:")
-                    && !path.starts_with("artifact-version:"))
+                    && !path.starts_with("artifact-version:")
+                    && remote_file_path(&path).is_none())
                     .then(|| runtime_language(&path))
                     .flatten();
                 let run_ctx = RuntimeRunCtx {
@@ -6941,10 +6945,24 @@ fn App() -> impl IntoView {
                                                             }.into_view()
                                                         } else {
                                                             let download_uri = context_menu::remote_file_download_uri(&source, &full);
+                                                            let preview_path = format!("remote:{source}:{full}");
+                                                            let preview_key = preview_path.clone();
+                                                            // The row can't be a <button> (it nests the download
+                                                            // one), so spell out the button semantics the local
+                                                            // rows get for free.
                                                             view! {
                                                                 <div class="fb-row remote-file" data-remote-path=full
                                                                     data-remote-context=source.clone()
-                                                                    title=t(loc, "files.remote_read_only")>
+                                                                    role="button" tabindex="0"
+                                                                    on:click=move |_| {
+                                                                        open_workspace_file(preview_path.clone(), modal_artifact);
+                                                                    }
+                                                                    on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                                                        if ev.key() == "Enter" || ev.key() == " " {
+                                                                            ev.prevent_default();
+                                                                            open_workspace_file(preview_key.clone(), modal_artifact);
+                                                                        }
+                                                                    }>
                                                                     <span class="fb-icon">{compose_icon("doc")}</span>
                                                                     <span class="fb-name">{name}</span>
                                                                     <span class="fb-size">{format_bytes(entry.size)}</span>
