@@ -876,6 +876,7 @@ fn context_runtime_available(ctx: &ExecutionContext, language: &str) -> bool {
 mod runtime_slot_tests {
     use super::{context_runtime_available, mention_compute_entries, ComposerPickerItem};
     use crate::dto::ExecutionContext;
+    use crate::i18n::Locale;
 
     fn context(
         kind: &str,
@@ -979,8 +980,33 @@ mod runtime_slot_tests {
     #[test]
     fn console_echo_prefixes_every_submitted_line() {
         assert_eq!(
-            super::console_echo("library(Seurat)\nlibrary(dplyr)"),
+            super::console_echo("library(Seurat)\nlibrary(dplyr)", Locale::En),
             "> library(Seurat)\n> library(dplyr)"
+        );
+    }
+
+    #[test]
+    fn console_echo_bounds_long_script_previews() {
+        let code = (1..=40)
+            .map(|line| format!("line_{line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let echo = super::console_echo(&code, Locale::En);
+        assert_eq!(echo.lines().count(), 11);
+        assert!(echo.contains("> line_1"));
+        assert!(echo.contains("> … 30 submitted lines omitted …"));
+        assert!(echo.contains("> line_40"));
+        assert!(!echo.contains("> line_20"));
+
+        let zh_echo = super::console_echo(&code, Locale::Zh);
+        assert!(zh_echo.contains("> … 已省略 30 行提交代码 …"));
+    }
+
+    #[test]
+    fn closed_worker_error_is_user_facing() {
+        assert_eq!(
+            crate::i18n::localize_backend(Locale::Zh, "kernel worker closed protocol stdout"),
+            "Runtime 进程意外退出，请重启后再运行代码。"
         );
     }
 
@@ -1187,8 +1213,36 @@ pub(super) type RuntimeConsoles = HashMap<String, String>;
 
 /// R and Python consoles echo submitted code behind a prompt. Keeping that here
 /// is what lets one flat log stay readable as alternating input and output.
-fn console_echo(code: &str) -> String {
-    code.lines()
+fn console_echo(code: &str, locale: Locale) -> String {
+    const MAX_LINES: usize = 12;
+    const HEAD_LINES: usize = 7;
+    const TAIL_LINES: usize = 3;
+
+    let lines = code.lines().collect::<Vec<_>>();
+    let visible = if lines.len() <= MAX_LINES {
+        lines
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    } else {
+        let omitted = lines.len() - HEAD_LINES - TAIL_LINES;
+        lines[..HEAD_LINES]
+            .iter()
+            .map(|line| (*line).to_string())
+            .chain(std::iter::once(tf(
+                locale,
+                "runtime.console_omitted",
+                &[("n", &omitted.to_string())],
+            )))
+            .chain(
+                lines[lines.len() - TAIL_LINES..]
+                    .iter()
+                    .map(|line| (*line).to_string()),
+            )
+            .collect::<Vec<_>>()
+    };
+    visible
+        .into_iter()
         .map(|line| format!("> {line}"))
         .collect::<Vec<_>>()
         .join("\n")
@@ -1230,7 +1284,7 @@ pub(super) fn run_in_runtime(
     if code.is_empty() || ctx.busy.get_untracked().is_some() {
         return;
     }
-    append_console(ctx.consoles, &path, &console_echo(&code));
+    append_console(ctx.consoles, &path, &console_echo(&code, locale));
     ctx.busy.set(Some(path.clone()));
     spawn_local(async move {
         let args = to_value(&serde_json::json!({

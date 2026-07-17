@@ -82,6 +82,46 @@ fn max_right_pane_width(sidebar_open: bool, sidebar_width: f64) -> f64 {
     available.clamp(RIGHT_PANE_MIN_WIDTH, RIGHT_PANE_MAX_WIDTH)
 }
 
+#[component]
+fn CenterRuntimeConsole(path: String, consoles: RwSignal<RuntimeConsoles>) -> impl IntoView {
+    let locale = use_locale();
+    let log_path = path.clone();
+    let clear_path = path;
+    let log = create_memo(move |_| consoles.get().get(&log_path).cloned());
+    let output_ref = create_node_ref::<html::Pre>();
+
+    // Follow appended output with ordinary positive scrollTop. The old
+    // column-reverse trick made WebKit's scrollbar direction and selection
+    // behavior backwards, especially once a whole script filled the console.
+    create_effect(move |_| {
+        let _ = log.get();
+        if let Some(output) = output_ref.get() {
+            request_animation_frame(move || output.set_scroll_top(output.scroll_height()));
+        }
+    });
+
+    move || {
+        log.get().map(|text| {
+            let clear_path = clear_path.clone();
+            view! {
+                <div class="center-file-console">
+                    <div class="center-file-console-head">
+                        <span>{move || t(locale.get(), "runtime.console")}</span>
+                        <div class="spacer"></div>
+                        <button type="button" class="center-file-btn"
+                            title=move || t(locale.get(), "runtime.console_clear")
+                            aria-label=move || t(locale.get(), "runtime.console_clear")
+                            on:click=move |_| consoles.update(|logs| {
+                                logs.remove(&clear_path);
+                            })>{compose_icon("close")}</button>
+                    </div>
+                    <pre node_ref=output_ref>{text}</pre>
+                </div>
+            }
+        })
+    }
+}
+
 #[derive(Default)]
 struct ProjectOpenGate {
     held: bool,
@@ -4991,7 +5031,13 @@ fn App() -> impl IntoView {
                     }
                 };
                 view! {
-                    <div class="center-file-preview" data-preview-kind=kind.clone()
+                    <div
+                        class=if run_language.is_some() {
+                            "center-file-preview center-file-runtime-preview"
+                        } else {
+                            "center-file-preview"
+                        }
+                        data-preview-kind=kind.clone()
                         data-file-path=path.clone()>
                         <div class="center-file-head">
                             <span>{path.clone()}</span>
@@ -5113,28 +5159,8 @@ fn App() -> impl IntoView {
                         }}
                         // Runtime console for this script. Only appears once
                         // something has run, so non-runtime files are unaffected.
-                        {run_language.map(|_| {
-                            let console_path = console_file.clone();
-                            let clear_path = console_file;
-                            let log = create_memo(move |_| center_console.get().get(&console_path).cloned());
-                            move || log.get().map(|text| {
-                                let clear_path = clear_path.clone();
-                                view! {
-                                    <div class="center-file-console">
-                                        <div class="center-file-console-head">
-                                            <span>{move || t(locale.get(), "runtime.console")}</span>
-                                            <div class="spacer"></div>
-                                            <button type="button" class="center-file-btn"
-                                                title=move || t(locale.get(), "runtime.console_clear")
-                                                aria-label=move || t(locale.get(), "runtime.console_clear")
-                                                on:click=move |_| center_console.update(|logs| {
-                                                    logs.remove(&clear_path);
-                                                })>{compose_icon("close")}</button>
-                                        </div>
-                                        <pre>{text}</pre>
-                                    </div>
-                                }
-                            })
+                        {run_language.map(|_| view! {
+                            <CenterRuntimeConsole path=console_file consoles=center_console />
                         })}
                     </div>
                 }
