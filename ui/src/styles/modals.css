@@ -225,6 +225,9 @@ textarea.host-input { min-height:64px; resize:vertical; }
 }
 /* Image/PDF pan inside their own zoom viewport, so the figure box must clip, not scroll. */
 .artifact-modal .am-figure.zoomable-preview { height: 52vh; overflow: hidden; }
+/* DOCX renders a tall document that scrolls inside its own .rp-docx surface. */
+.artifact-modal .am-figure.docx-preview { height: 66vh; max-height: 66vh; overflow: hidden; padding: 0; }
+.artifact-modal .am-figure.docx-preview .rp-docx { height: 100%; }
 .artifact-modal.html-preview .am-figure { overflow: auto; }
 .artifact-modal .am-figure > * { flex: 1 1 auto; min-width: 0; min-height: 0; }
 .artifact-modal .am-figure img,

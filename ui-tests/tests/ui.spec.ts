@@ -1806,6 +1806,7 @@ test("PDF artifacts render inside the app without a browser PDF plugin", async (
 
   const modal = page.locator(".artifact-modal");
   await expect(modal).toBeVisible();
+  // Single-page viewer: one page is rendered at a time, navigated with controls.
   await expect(modal.locator('.rp-pdf[data-page-count="2"][data-current-page="1"]')).toBeVisible();
   const renderedPage = modal.locator('.rp-pdf-page[data-page="1"][data-rendered="true"]');
   await expect(renderedPage).toBeVisible();
@@ -1820,7 +1821,7 @@ test("PDF artifacts render inside the app without a browser PDF plugin", async (
   await expect(modal.locator('embed[type="application/pdf"]')).toHaveCount(0);
 });
 
-test("PDF artifacts switch pages with toolbar buttons and Page Up or Page Down", async ({ page }) => {
+test("PDF artifacts switch pages with toolbar buttons, arrow keys, and Page Up/Down", async ({ page }) => {
   await enterApp(page);
   await composer(page).fill("open paper.pdf");
   await page.getByRole("button", { name: "Send" }).click();
@@ -1831,18 +1832,69 @@ test("PDF artifacts switch pages with toolbar buttons and Page Up or Page Down",
   await expect(modal.locator('.rp-pdf[data-current-page="1"]')).toBeVisible();
   await expect(modal.locator('.rp-pdf-page[data-page="1"][data-rendered="true"]')).toBeVisible();
 
+  // Toolbar button steps forward.
   await page.getByRole("button", { name: "Next page" }).click();
   await expect(modal.locator('.rp-pdf[data-current-page="2"]')).toBeVisible();
   await expect(modal.locator('.rp-pdf-page[data-page="2"][data-rendered="true"]')).toBeVisible();
   await expect(page.getByRole("button", { name: "Next page" })).toBeDisabled();
 
+  // Page Up steps back. Wait for the page to finish rendering (rendered="true")
+  // before the next key — stepPage is a no-op while a render is in flight.
   await page.keyboard.press("PageUp");
-  await expect(modal.locator('.rp-pdf[data-current-page="1"]')).toBeVisible();
   await expect(modal.locator('.rp-pdf-page[data-page="1"][data-rendered="true"]')).toBeVisible();
 
-  await page.keyboard.press("PageDown");
+  // Arrow keys also navigate: Right → next, Left → previous.
+  await page.keyboard.press("ArrowRight");
   await expect(modal.locator('.rp-pdf[data-current-page="2"]')).toBeVisible();
   await expect(modal.locator('.rp-pdf-page[data-page="2"][data-rendered="true"]')).toBeVisible();
+  await page.keyboard.press("ArrowLeft");
+  await expect(modal.locator('.rp-pdf[data-current-page="1"]')).toBeVisible();
+  await expect(modal.locator('.rp-pdf-page[data-page="1"][data-rendered="true"]')).toBeVisible();
+});
+
+test("DOCX artifacts render offline with headings, tables, and equations", async ({ page }) => {
+  await enterApp(page);
+  await composer(page).fill("open manuscript.docx");
+  await page.getByRole("button", { name: "Send" }).click();
+  await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.locator('.rp-tile[data-artifact-name="manuscript.docx"] .rp-tile-main').click();
+
+  // docx-preview renders a `.docx-wrapper` of `section.docx` pages, fully offline.
+  const docx = page.locator(".rp-docx");
+  await expect(docx.locator(".docx-wrapper section.docx").first()).toBeVisible();
+  await expect(docx).toContainText("Differential expression of FX-cell markers");
+  await expect(docx).toContainText("FOXA2"); // a table cell
+  // The OMML equations convert to MathML — this is the #274 formula concern.
+  await expect(docx.locator("math").first()).toBeAttached();
+  // The wrapping preview carries data-file-path so P2 selection/annotate works here too.
+  await expect(page.locator('.rp-file-preview[data-file-path*="manuscript.docx"]')).toBeVisible();
+});
+
+test("Markdown center preview can be edited in place and saved", async ({ page }) => {
+  await enterApp(page);
+  await composer(page).fill("open report.md");
+  await page.getByRole("button", { name: "Send" }).click();
+  await page.getByRole("button", { name: "Toggle panel" }).click();
+
+  // Right-click the file tile → "Open in center" opens the real workspace file.
+  await page.locator('.rp-tile[data-artifact-name="report.md"]').click({ button: "right" });
+  await page.getByRole("button", { name: "Open in center" }).click();
+  const preview = page.locator('.center-file-preview[data-file-path="report.md"]');
+  await expect(preview.locator("h1")).toHaveText("Draft manuscript");
+
+  // Enter edit mode: the raw Markdown loads into a textarea.
+  await preview.getByRole("button", { name: "Edit" }).click();
+  const editor = preview.locator(".center-file-editor");
+  await expect(editor).toHaveValue(/Original body paragraph/);
+
+  // Rewrite and save → write_file is invoked and the preview reloads the new text.
+  await editor.fill("# Revised manuscript\n\nRewritten body paragraph.\n");
+  await preview.getByRole("button", { name: "Save" }).click();
+  await expect.poll(() => lastInvokeArgs(page, "write_file"))
+    .toMatchObject({ path: "report.md", content: "# Revised manuscript\n\nRewritten body paragraph.\n" });
+  await expect(editor).toHaveCount(0);
+  await expect(preview.locator("h1")).toHaveText("Revised manuscript");
+  await expect(preview.getByRole("button", { name: "Edit" })).toBeVisible();
 });
 
 test("artifact modal switches between images with left and right arrows", async ({ page }) => {
@@ -2601,6 +2653,55 @@ test("bound Markdown resources use immutable versions and a scrollable center pr
   await expect.poll(() => preview.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
   await expect.poll(() => lastInvokeArgs(page, "read_artifact_version"))
     .toMatchObject({ versionId: "resource-version-markdown" });
+});
+
+// Programmatically select the rendered body of the center file preview and
+// raise the quote popup (Playwright has no direct "select text" gesture).
+async function selectCenterPreviewText(page: Page) {
+  await page.evaluate(() => {
+    const host = document.querySelector(".center-file-preview .md")
+      ?? document.querySelector(".center-file-preview");
+    if (!host) throw new Error("no center preview to select");
+    const range = document.createRange();
+    range.selectNodeContents(host);
+    const sel = window.getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(range);
+    window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+  });
+}
+
+test("selecting preview text quotes it into chat and saves a review annotation", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Search" }).click();
+  const search = commandPalette(page);
+  await search.fill("analysis-report");
+  await search.press("Enter");
+
+  const modal = page.locator(".artifact-modal");
+  await expect(modal).toBeVisible();
+  await modal.getByRole("button", { name: "Open in center" }).click();
+  const preview = page.locator(".center-file-preview");
+  await expect(preview.locator("h1")).toHaveText("Differential expression report");
+  await expect(preview).toHaveAttribute("data-file-path", "artifact:art-markdown");
+
+  // Selecting inside the preview raises the quote popup with all three actions.
+  await selectCenterPreviewText(page);
+  const popup = page.locator(".selection-popup");
+  await expect(popup).toBeVisible();
+  await expect(popup.getByRole("button", { name: "Add to chat" })).toBeVisible();
+  await expect(popup.getByRole("button", { name: "Add to review" })).toBeVisible();
+
+  // "Add to chat" attaches the selection as a composer quote chip (#274).
+  await popup.getByRole("button", { name: "Add to chat" }).click();
+  await expect(page.locator(".composer-reference-chips .quote")).toContainText("Differential expression report");
+
+  // "Add to review" appends the passage to the reviews/ sidecar the agent reads.
+  await selectCenterPreviewText(page);
+  await page.locator(".selection-popup").getByRole("button", { name: "Add to review" }).click();
+  await expect.poll(() => lastInvokeArgs(page, "append_review_note"))
+    .toMatchObject({ sourcePath: "artifact:art-markdown" });
+  await expect(page.locator(".topbar .hint")).toContainText("reviews/");
 });
 
 test("projects landing stays centered on wide windows", async ({ page }) => {

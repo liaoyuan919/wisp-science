@@ -286,6 +286,53 @@ async function pdfjs() {
   return pdfjsLib;
 }
 
+let docxLib;
+function docxPreview() {
+  // Self-contained ESM bundle (docx-preview + jszip, no bare imports) so .docx
+  // renders fully offline in the WebView. See ui/sync-vendor.ps1.
+  if (!docxLib) docxLib = import("/vendor/docx-preview.mjs");
+  return docxLib;
+}
+
+async function renderDocx(el, payload) {
+  cleanupPreview(el);
+  const renderToken = Symbol("docx-preview");
+  el.__wispPreviewToken = renderToken;
+  const loading = document.createElement("div");
+  loading.className = "rp-pdf-loading";
+  loading.textContent = payload.loading || "Loading…";
+  el.replaceChildren(loading);
+  try {
+    if (!payload.b64) throw new Error("DOCX data is empty");
+    const lib = await docxPreview();
+    if (!el.isConnected || el.__wispPreviewToken !== renderToken) return;
+    const container = document.createElement("div");
+    container.className = "rp-docx";
+    el.replaceChildren(container);
+    // renderAsync takes a Blob/ArrayBuffer; ignoreWidth/Height lets the page
+    // reflow to the preview column instead of a fixed A4 canvas width.
+    await lib.renderAsync(base64Bytes(payload.b64).buffer, container, null, {
+      className: "docx",
+      inWrapper: true,
+      ignoreWidth: false,
+      ignoreHeight: true,
+      breakPages: true,
+      experimental: true,
+      useMathMLPolyfill: true,
+    });
+    if (el.__wispPreviewToken !== renderToken) return;
+    el.__wispPreviewCleanup = () => { container.replaceChildren(); };
+  } catch (error) {
+    console.error("Failed to render DOCX preview", error);
+    if (el.isConnected && el.__wispPreviewToken === renderToken) {
+      const message = document.createElement("div");
+      message.className = "rp-error rp-pdf-error";
+      message.textContent = payload.error || "Unable to preview this document.";
+      el.replaceChildren(message);
+    }
+  }
+}
+
 function base64Bytes(value) {
   const binary = atob(value);
   const bytes = new Uint8Array(binary.length);
@@ -316,6 +363,37 @@ function cleanupPreview(el) {
 function pdfNavIcon(direction) {
   const path = direction < 0 ? "m15 18-6-6 6-6" : "m9 18 6-6-6-6";
   return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${path}"></path></svg>`;
+}
+
+/**
+ * Read the current text selection if it falls inside a file preview surface
+ * (anything tagged `data-file-path`). Returns a JSON string {text, path, x, y}
+ * positioned at the selection for a floating quote/annotate toolbar, or "" when
+ * there is no usable selection. Kept in JS because it walks the DOM + Selection
+ * API, which is far terser here than through web-sys.
+ */
+export function preview_selection() {
+  const sel = window.getSelection?.();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return "";
+  const text = sel.toString().trim();
+  if (!text) return "";
+  const range = sel.getRangeAt(0);
+  let node = range.commonAncestorContainer;
+  if (node && node.nodeType === 3) node = node.parentElement;
+  const container = node && node.closest ? node.closest("[data-file-path]") : null;
+  if (!container) return "";
+  const rect = range.getBoundingClientRect();
+  return JSON.stringify({
+    text,
+    path: container.getAttribute("data-file-path") || "",
+    x: Math.round(rect.left + rect.width / 2),
+    y: Math.round(rect.bottom),
+  });
+}
+
+/** Drop the active selection once its text has been quoted/annotated. */
+export function clear_selection() {
+  window.getSelection?.().removeAllRanges();
 }
 
 function eventTargetsEditable(target) {
@@ -493,6 +571,8 @@ async function renderPdf(el, payload) {
     prevButton.addEventListener("click", () => stepPage(-1));
     nextButton.addEventListener("click", () => stepPage(1));
 
+    // Page navigation by keyboard: Page Up/Down and the arrow keys step pages.
+    // (Zoom is the wheel gesture, handled by the ZoomableFilePreview wrapper.)
     const onKeyDown = (event) => {
       if (
         event.defaultPrevented ||
@@ -504,10 +584,10 @@ async function renderPdf(el, payload) {
       ) {
         return;
       }
-      if (event.key === "PageUp") {
+      if (event.key === "PageUp" || event.key === "ArrowUp" || event.key === "ArrowLeft") {
         event.preventDefault();
         stepPage(-1);
-      } else if (event.key === "PageDown") {
+      } else if (event.key === "PageDown" || event.key === "ArrowDown" || event.key === "ArrowRight") {
         event.preventDefault();
         stepPage(1);
       }
@@ -708,6 +788,10 @@ export async function mount_preview(kind, elId, payloadJson) {
     }
     case "pdf": {
       await renderPdf(el, p);
+      break;
+    }
+    case "docx": {
+      await renderDocx(el, p);
       break;
     }
     case "image": {

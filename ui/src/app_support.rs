@@ -5126,6 +5126,8 @@ pub(super) fn WorkspaceFilePreview(dom_id: String, path: String, kind: String) -
     match kind.as_str() {
         "csv" => view! { <CsvFilePreview path=path /> }.into_view(),
         "json" => view! { <JsonFilePreview path=path /> }.into_view(),
+        // Image + PDF share the zoom viewport: the wheel zooms, and PDF pages are
+        // stepped with the toolbar buttons / arrow keys / Page Up-Down.
         "image" | "pdf" => {
             view! { <ZoomableFilePreview dom_id=dom_id path=path kind=kind /> }.into_view()
         }
@@ -5304,7 +5306,7 @@ pub(super) fn FilePreview(dom_id: String, path: String, kind: String) -> impl In
                     return;
                 }
             };
-            if !matches!(kind.as_str(), "image" | "pdf") && fc.text.is_none() {
+            if !matches!(kind.as_str(), "image" | "pdf" | "docx") && fc.text.is_none() {
                 if let Some(el) = el {
                     el.set_class_name("rp-heavy rp-error");
                     el.set_text_content(Some(&t(loc, "preview.unsupported_file")));
@@ -5335,6 +5337,15 @@ pub(super) fn FilePreview(dom_id: String, path: String, kind: String) -> impl In
                 "image" => (
                     "image",
                     serde_json::json!({ "b64": fc.base64, "mime": fc.mime }).to_string(),
+                ),
+                "docx" => (
+                    "docx",
+                    serde_json::json!({
+                        "b64": fc.base64,
+                        "loading": t(loc, "loading"),
+                        "error": t(loc, "preview.docx_error"),
+                    })
+                    .to_string(),
                 ),
                 "html" => (
                     "html",
@@ -5384,7 +5395,9 @@ pub(super) fn artifact_preview(a: &Artifact, dom_id: String, locale: Locale) -> 
         }
         PreviewData::File { path, kind } => view! {
             <p class="rp-path hint">{path.clone()}</p>
-            <WorkspaceFilePreview dom_id=dom_id path=path.clone() kind=kind.clone() />
+            <div class="rp-file-preview" data-file-path=path.clone()>
+                <WorkspaceFilePreview dom_id=dom_id path=path.clone() kind=kind.clone() />
+            </div>
         }
         .into_view(),
     }
@@ -5448,6 +5461,12 @@ pub(super) fn RpCodeView(lang: String, body: String) -> impl IntoView {
 /// full-size, csv as a dataset table) rather than rendering inline in the pane.
 pub(super) fn opens_in_modal(kind: &str) -> bool {
     matches!(kind, "image" | "pdf" | "csv")
+}
+
+/// Preview kinds whose raw text can be edited in place (Markdown + plain text).
+/// Everything else (binary, rendered, or structured) stays read-only.
+pub(super) fn editable_center_kind(kind: &str) -> bool {
+    matches!(kind, "markdown" | "text")
 }
 
 /// Fire the native save dialog to download a workspace file (backend copies it).
@@ -5533,6 +5552,7 @@ pub(super) fn ArtifactModal(
     let click_session = session.clone();
     let is_html = kind == "html";
     let is_zoomable = matches!(kind.as_str(), "image" | "pdf");
+    let is_docx = kind == "docx";
     let can_star = kind == "image";
     view! {
         <div class="overlay" on:click=move |_| on_close.call(())>
@@ -5599,7 +5619,8 @@ pub(super) fn ArtifactModal(
                     <button class="icon-btn" title=move || t(locale.get(), "right.close")
                         on:click=move |_| on_close.call(())>{compose_icon("close")}</button>
                 </div>
-                <div class="am-figure" class:zoomable-preview=is_zoomable>
+                <div class="am-figure" class:zoomable-preview=is_zoomable
+                    class:docx-preview=is_docx data-file-path=path_head.clone()>
                     <WorkspaceFilePreview dom_id=dom_id path=path_head.clone() kind=kind.clone() />
                 </div>
                 <div class="am-tabs">
