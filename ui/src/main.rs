@@ -5397,7 +5397,7 @@ fn App() -> impl IntoView {
                                 }
                                 input.set(v);
                             }
-                            on:keydown=on_send
+                            on:keydown:undelegated=on_send
                             on:paste=on_paste
                             prop:placeholder=move || tf(
                                 locale.get(),

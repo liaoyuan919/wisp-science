@@ -2986,7 +2986,7 @@ test("project cards use semantic buttons for keyboard access", async ({ page }) 
   await expect(project.evaluate((el) => el.tagName)).resolves.toBe("BUTTON");
 });
 
-test("Escape closes settings on the projects landing and the right pane from the composer", async ({ page }) => {
+test("Escape closes settings and unwinds the composer picker before the right pane", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Settings" }).click();
   await expect(page.locator(".settings-page")).toBeVisible();
@@ -2996,7 +2996,11 @@ test("Escape closes settings on the projects landing and the right pane from the
   await enterApp(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
   await expect(page.locator(".rightpane")).toBeVisible();
-  await composer(page).focus();
+  await composer(page).fill("@");
+  await expect(page.locator(".mention-menu")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".mention-menu")).toHaveCount(0);
+  await expect(page.locator(".rightpane")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.locator(".rightpane")).toHaveCount(0);
 });
