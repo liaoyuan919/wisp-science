@@ -4,18 +4,16 @@ use super::{
 };
 use crate::bindings::{
     attach_cropped_region, crop_region_to_upload, invoke, invoke_checked, mount_preview,
-    open_external_url, schedule_highlight, upload_files, upload_input_files,
-    upload_pasted_images,
+    open_external_url, schedule_highlight, upload_files, upload_input_files, upload_pasted_images,
 };
 use crate::dto::*;
 use crate::i18n::{localize_backend, t, tf, use_locale, Locale};
 use crate::text::{
     code_lang, decode_href, dom_value, event_target_value, extract_href_from_tag, fasta_seq_count,
     fenced_blocks, file_kind, format_bytes, format_duration_ms, html_escape, ime_composing,
-    is_external_href,
-    is_separator, is_table_row, md_inline_to_html, md_to_html, next_artifact_id, normalize_path,
-    opens_in_system_browser, parent_path, parse_csv_line, parse_notebook, pretty_json,
-    provider_defaults, provider_value, split_row, tool_lang, unique_dom_id,
+    is_external_href, is_separator, is_table_row, md_inline_to_html, md_to_html, next_artifact_id,
+    normalize_path, opens_in_system_browser, parent_path, parse_csv_line, parse_notebook,
+    pretty_json, provider_defaults, provider_value, split_row, tool_lang, unique_dom_id,
     user_message_presentation, NbOutput, Notebook,
 };
 use leptos::{ev, window_event_listener, *};
@@ -228,7 +226,9 @@ impl ComposerQuote {
                 && remote_file_path(source).is_none()
                 && matches!(
                     file_kind(source),
-                    Some("code" | "text" | "json" | "markdown" | "csv" | "html" | "fasta" | "smiles")
+                    Some(
+                        "code" | "text" | "json" | "markdown" | "csv" | "html" | "fasta" | "smiles"
+                    )
                 )
         })
     }
@@ -1044,8 +1044,7 @@ pub(super) fn mention_compute_entries(
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
         .collect();
-    let matches =
-        |haystack: String| tokens.iter().all(|t| haystack.to_lowercase().contains(t));
+    let matches = |haystack: String| tokens.iter().all(|t| haystack.to_lowercase().contains(t));
     let mut items = Vec::new();
     for ctx in contexts {
         let label = context_display_label(ctx);
@@ -1057,7 +1056,10 @@ pub(super) fn mention_compute_entries(
         }
         for language in ["python", "r"] {
             if context_runtime_available(ctx, language)
-                && matches(format!("runtime {language} {} {} {label}", ctx.kind, ctx.id))
+                && matches(format!(
+                    "runtime {language} {} {} {label}",
+                    ctx.kind, ctx.id
+                ))
             {
                 items.push(ComposerPickerItem::Runtime {
                     context_id: ctx.id.clone(),
@@ -1305,9 +1307,9 @@ mod runtime_slot_tests {
         )];
         // Empty query lists the server plus its available runtime.
         let all = mention_compute_entries("", &contexts);
-        assert!(all
-            .iter()
-            .any(|item| matches!(item, ComposerPickerItem::Context { id, .. } if id == "ssh:test")));
+        assert!(all.iter().any(
+            |item| matches!(item, ComposerPickerItem::Context { id, .. } if id == "ssh:test")
+        ));
         assert!(all.iter().any(|item| matches!(
             item,
             ComposerPickerItem::Runtime { language, .. } if language == "r"
@@ -1517,10 +1519,7 @@ fn console_echo(code: &str, locale: Locale) -> String {
 
     let lines = code.lines().collect::<Vec<_>>();
     let visible = if lines.len() <= MAX_LINES {
-        lines
-            .into_iter()
-            .map(str::to_string)
-            .collect::<Vec<_>>()
+        lines.into_iter().map(str::to_string).collect::<Vec<_>>()
     } else {
         let omitted = lines.len() - HEAD_LINES - TAIL_LINES;
         lines[..HEAD_LINES]
@@ -2415,7 +2414,11 @@ pub(super) fn message_with_quotes(text: &str, quotes: &[ComposerQuote]) -> Strin
     editable_sources.dedup();
     if !editable_sources.is_empty() {
         out.push_str("\n\nAI source-edit instruction: If the user requests a change, read the selected workspace file first, modify it directly with the edit tool for a focused in-place change (use write only for a whole-file replacement), and verify the saved result. Do not only return a replacement code block. Target file");
-        out.push_str(if editable_sources.len() == 1 { ": `" } else { "s: `" });
+        out.push_str(if editable_sources.len() == 1 {
+            ": `"
+        } else {
+            "s: `"
+        });
         out.push_str(&editable_sources.join("`, `"));
         out.push('`');
     }
@@ -4475,7 +4478,8 @@ pub(super) fn file_change_refresh_keys(path: &str, project_root: Option<&str>) -
         let normalized_root = root.replace('\\', "/");
         let normalized_root = normalized_root.trim_end_matches('/');
         if let Some(relative) = normalized.strip_prefix(normalized_root).and_then(|tail| {
-            tail.strip_prefix('/').filter(|relative| !relative.is_empty())
+            tail.strip_prefix('/')
+                .filter(|relative| !relative.is_empty())
         }) {
             push(relative.to_string());
             push(relative.replace('/', "\\"));
@@ -4494,15 +4498,15 @@ mod file_change_refresh_keys_tests {
             file_change_refresh_keys("analysis.R", Some("/work/project")),
             ["analysis.R"]
         );
-        assert!(file_change_refresh_keys("./analysis.R", Some("/work/project"))
-            .contains(&"analysis.R".to_string()));
+        assert!(
+            file_change_refresh_keys("./analysis.R", Some("/work/project"))
+                .contains(&"analysis.R".to_string())
+        );
         let unix = file_change_refresh_keys("/work/project/src/analysis.R", Some("/work/project"));
         assert!(unix.contains(&"src/analysis.R".to_string()));
 
-        let windows = file_change_refresh_keys(
-            r"C:\work\project\src\analysis.R",
-            Some(r"C:\work\project"),
-        );
+        let windows =
+            file_change_refresh_keys(r"C:\work\project\src\analysis.R", Some(r"C:\work\project"));
         assert!(windows.contains(&"src/analysis.R".to_string()));
         assert!(windows.contains(&r"src\analysis.R".to_string()));
     }
@@ -5720,7 +5724,10 @@ mod artifact_scan_tests {
         ));
         assert!(matches!(
             file_proto("notes.md"),
-            Some(ProtoArtifact::File { kind: "markdown", .. })
+            Some(ProtoArtifact::File {
+                kind: "markdown",
+                ..
+            })
         ));
     }
 
@@ -6059,8 +6066,7 @@ async fn load_file_content(path: &str, loc: Locale) -> Result<FileContent, Strin
     let result = if let Some((context_id, remote_path)) = remote_file_path(path) {
         invoke_checked(
             "read_remote_file",
-            to_value(&serde_json::json!({ "contextId": context_id, "path": remote_path }))
-                .unwrap(),
+            to_value(&serde_json::json!({ "contextId": context_id, "path": remote_path })).unwrap(),
         )
         .await
     } else if let Some(version_id) = artifact_version_id_path(path) {
@@ -6070,7 +6076,11 @@ async fn load_file_content(path: &str, loc: Locale) -> Result<FileContent, Strin
         )
         .await
     } else if let Some(id) = artifact_id_path(path) {
-        invoke_checked("read_artifact", to_value(&serde_json::json!({ "id": id })).unwrap()).await
+        invoke_checked(
+            "read_artifact",
+            to_value(&serde_json::json!({ "id": id })).unwrap(),
+        )
+        .await
     } else {
         invoke_checked(
             "read_file",
@@ -6615,7 +6625,9 @@ pub(super) fn FilePreview(dom_id: String, path: String, kind: String) -> impl In
                 "html" => {
                     // A remote file's path would resolve as a local file:// base
                     // href; better no base at all than the wrong machine's.
-                    let base = remote_file_path(&path).is_none().then_some(fc.path.as_str());
+                    let base = remote_file_path(&path)
+                        .is_none()
+                        .then_some(fc.path.as_str());
                     (
                         "html",
                         serde_json::json!({ "text": fc.text, "path": base }).to_string(),

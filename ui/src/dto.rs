@@ -395,11 +395,22 @@ pub(crate) struct SessionSearchInfo {
 #[derive(Serialize, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum ComposerReferenceArg {
-    Artifact { id: String },
-    Session { id: String },
-    Skill { name: String },
-    Context { id: String },
-    Runtime { context_id: String, language: String },
+    Artifact {
+        id: String,
+    },
+    Session {
+        id: String,
+    },
+    Skill {
+        name: String,
+    },
+    Context {
+        id: String,
+    },
+    Runtime {
+        context_id: String,
+        language: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

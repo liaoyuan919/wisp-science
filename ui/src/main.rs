@@ -1648,9 +1648,7 @@ fn App() -> impl IntoView {
             }
             AgentEvent::Diff { .. } => {}
             AgentEvent::FileChanged { path, .. } => {
-                let root = project_info_cb
-                    .get_untracked()
-                    .map(|project| project.root);
+                let root = project_info_cb.get_untracked().map(|project| project.root);
                 center_file_revisions_cb.update(|revisions| {
                     for key in file_change_refresh_keys(&path, root.as_deref()) {
                         let revision = revisions.entry(key).or_default();
@@ -3717,10 +3715,7 @@ fn App() -> impl IntoView {
                             ctx.label.clone()
                         };
                         ssh_connectivity_modal.set(Some(SshConnectivityModal::from_gap(
-                            context_id,
-                            label,
-                            detail,
-                            true,
+                            context_id, label, detail, true,
                         )));
                         return;
                     }
