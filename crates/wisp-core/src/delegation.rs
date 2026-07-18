@@ -241,6 +241,14 @@ impl AgentSpec {
             if !contract.is_object() {
                 anyhow::bail!("{name} must be a JSON object");
             }
+            if let Some(kind) = contract.get("type").and_then(Value::as_str) {
+                if !matches!(
+                    kind,
+                    "object" | "array" | "string" | "number" | "integer" | "boolean" | "null"
+                ) {
+                    anyhow::bail!("{name} has unsupported JSON type: {kind}");
+                }
+            }
         }
         if self.context_policy.max_tokens == Some(0)
             || self.budget.max_tokens == Some(0)
@@ -257,11 +265,13 @@ impl AgentSpec {
         permission_ceiling: &PermissionSet,
         context_ceiling: &ContextPolicy,
         budget_ceiling: &AgentBudget,
+        timeout_ceiling: Option<u64>,
     ) -> Self {
         Self {
             permissions: self.permissions.intersect(permission_ceiling),
             context_policy: self.context_policy.restrict(context_ceiling),
             budget: self.budget.restrict(budget_ceiling),
+            timeout_secs: restrict_limit(self.timeout_secs, timeout_ceiling),
             ..self.clone()
         }
     }
@@ -300,7 +310,38 @@ impl AgentDelegationRequest {
         if self.step_id.trim().is_empty() {
             anyhow::bail!("step_id is required");
         }
-        self.spec.validate()
+        self.spec.validate()?;
+        if !matches_json_contract(&self.input, &self.spec.input_contract) {
+            anyhow::bail!("delegation input does not satisfy input_contract");
+        }
+        Ok(())
+    }
+}
+
+/// A request that has passed identity, contract, and resource validation.
+/// The private field prevents adapters from manufacturing one by struct
+/// literal; use `try_from` to obtain it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedAgentDelegationRequest {
+    inner: AgentDelegationRequest,
+}
+
+impl ValidatedAgentDelegationRequest {
+    pub fn as_request(&self) -> &AgentDelegationRequest {
+        &self.inner
+    }
+
+    pub fn into_request(self) -> AgentDelegationRequest {
+        self.inner
+    }
+}
+
+impl TryFrom<AgentDelegationRequest> for ValidatedAgentDelegationRequest {
+    type Error = anyhow::Error;
+
+    fn try_from(request: AgentDelegationRequest) -> Result<Self, Self::Error> {
+        request.validate()?;
+        Ok(Self { inner: request })
     }
 }
 
@@ -321,6 +362,20 @@ impl AgentDelegationResponse {
     }
 }
 
+fn matches_json_contract(value: &Value, contract: &Value) -> bool {
+    match contract.get("type").and_then(Value::as_str) {
+        None => true,
+        Some("object") => value.is_object(),
+        Some("array") => value.is_array(),
+        Some("string") => value.is_string(),
+        Some("number") => value.is_number(),
+        Some("integer") => value.as_i64().is_some() || value.as_u64().is_some(),
+        Some("boolean") => value.is_boolean(),
+        Some("null") => value.is_null(),
+        Some(_) => false,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DelegationStatus {
@@ -337,12 +392,18 @@ pub trait AgentDelegator: Send + Sync {
         &self,
         request: AgentDelegationRequest,
     ) -> anyhow::Result<AgentDelegationResponse> {
-        request.validate()?;
         let request_id = request.request_id.clone();
+        let request = ValidatedAgentDelegationRequest::try_from(request)?;
+        let output_contract = request.as_request().spec.output_contract.clone();
         let response = self.delegate_validated(request).await?;
         response.validate()?;
         if response.request_id != request_id {
             anyhow::bail!("delegation response request_id does not match the request");
+        }
+        if response.status == DelegationStatus::Succeeded
+            && !matches_json_contract(&response.output, &output_contract)
+        {
+            anyhow::bail!("delegation output does not satisfy output_contract");
         }
         Ok(response)
     }
@@ -351,7 +412,7 @@ pub trait AgentDelegator: Send + Sync {
     /// has validated their identity, contracts, and resource bounds.
     async fn delegate_validated(
         &self,
-        request: AgentDelegationRequest,
+        request: ValidatedAgentDelegationRequest,
     ) -> anyhow::Result<AgentDelegationResponse>;
 
     async fn status(&self, _request_id: &str) -> anyhow::Result<Option<AgentDelegationResponse>> {
@@ -372,7 +433,7 @@ pub struct UnconfiguredAgentDelegator;
 impl AgentDelegator for UnconfiguredAgentDelegator {
     async fn delegate_validated(
         &self,
-        _request: AgentDelegationRequest,
+        _request: ValidatedAgentDelegationRequest,
     ) -> anyhow::Result<AgentDelegationResponse> {
         anyhow::bail!("agent delegation backend is not configured")
     }
