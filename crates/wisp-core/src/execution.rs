@@ -236,10 +236,19 @@ fn run_request(
                     Ok(result) => result,
                     Err(_) => {
                         let _ = delegator.cancel(&request.request_id).await;
-                        Err(anyhow::anyhow!(
+                        let message = format!(
                             "delegated Agent timed out after {} seconds",
                             timeout.as_secs()
-                        ))
+                        );
+                        match delegator.status(&request.request_id).await {
+                            Ok(Some(mut response)) => {
+                                response.status = DelegationStatus::Failed;
+                                response.output = Value::Object(Map::new());
+                                response.error = Some(message);
+                                Ok(response)
+                            }
+                            _ => Err(anyhow::anyhow!(message)),
+                        }
                     }
                 }
             }
@@ -335,6 +344,40 @@ mod tests {
         fail: Option<String>,
     }
 
+    struct TimeoutDelegator;
+
+    #[async_trait]
+    impl AgentDelegator for TimeoutDelegator {
+        async fn delegate_validated(
+            &self,
+            _request: ValidatedAgentDelegationRequest,
+        ) -> anyhow::Result<AgentDelegationResponse> {
+            std::future::pending().await
+        }
+
+        async fn status(
+            &self,
+            request_id: &str,
+        ) -> anyhow::Result<Option<AgentDelegationResponse>> {
+            Ok(Some(AgentDelegationResponse {
+                request_id: request_id.into(),
+                status: DelegationStatus::Running,
+                output: serde_json::json!({}),
+                artifact_ids: vec![],
+                artifacts: vec![],
+                evidence: vec![],
+                usage: Default::default(),
+                agent_session_id: Some("session".into()),
+                child_frame_id: Some("frame".into()),
+                error: None,
+            }))
+        }
+
+        async fn cancel(&self, _request_id: &str) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+    }
+
     #[async_trait]
     impl AgentDelegator for RecordingDelegator {
         async fn delegate_validated(
@@ -421,5 +464,22 @@ mod tests {
             .await
             .iter()
             .any(|step| step == "reviewer"));
+    }
+
+    #[tokio::test]
+    async fn timeout_preserves_backend_session_provenance() {
+        let mut plan = parallel_plan();
+        plan.steps.truncate(1);
+        plan.steps[0].spec.dependencies.clear();
+        plan.steps[0].spec.timeout_secs = Some(1);
+        let result = DelegationExecutor::new(Arc::new(TimeoutDelegator))
+            .execute(plan)
+            .await
+            .unwrap();
+        let response = &result.steps[0].response;
+        assert_eq!(response.status, DelegationStatus::Failed);
+        assert!(response.error.as_deref().unwrap().contains("timed out"));
+        assert_eq!(response.agent_session_id.as_deref(), Some("session"));
+        assert_eq!(response.child_frame_id.as_deref(), Some("frame"));
     }
 }

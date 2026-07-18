@@ -400,7 +400,7 @@ fn builtin_templates() -> Vec<AgentTemplate> {
             "Execute and verify project-scoped code through Codex ACP.",
             AgentRole::Coder,
             AgentBackend::Acp,
-            &["read_file", "write_file", "shell", "wisp_run_in_context", "wisp_cancel_run"],
+            &["read_file", "write_file"],
             true,
             false,
             32_000,
@@ -412,7 +412,7 @@ fn builtin_templates() -> Vec<AgentTemplate> {
             "Interpret biological meaning with evidence and uncertainty labels.",
             AgentRole::Analyst,
             AgentBackend::Local,
-            &["read_file", "literature_search"],
+            &["read_file"],
             false,
             true,
             20_000,
@@ -424,7 +424,7 @@ fn builtin_templates() -> Vec<AgentTemplate> {
             "Design scientific figures and produce validated plotting artifacts.",
             AgentRole::Coder,
             AgentBackend::Acp,
-            &["read_file", "write_file", "shell"],
+            &["read_file", "write_file"],
             true,
             false,
             24_000,
@@ -499,6 +499,8 @@ mod tests {
 
     struct EchoDelegator;
 
+    struct OverBudgetDelegator;
+
     #[async_trait::async_trait]
     impl AgentDelegator for EchoDelegator {
         async fn delegate_validated(
@@ -515,6 +517,30 @@ mod tests {
                 usage: Default::default(),
                 agent_session_id: None,
                 child_frame_id: None,
+                error: None,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentDelegator for OverBudgetDelegator {
+        async fn delegate_validated(
+            &self,
+            request: ValidatedAgentDelegationRequest,
+        ) -> anyhow::Result<AgentDelegationResponse> {
+            Ok(AgentDelegationResponse {
+                request_id: request.as_request().request_id.clone(),
+                status: DelegationStatus::Succeeded,
+                output: json!({}),
+                artifact_ids: vec![],
+                artifacts: vec![],
+                evidence: vec![],
+                usage: crate::AgentUsage {
+                    input_tokens: 2,
+                    ..Default::default()
+                },
+                agent_session_id: Some("session".into()),
+                child_frame_id: Some("frame".into()),
                 error: None,
             })
         }
@@ -650,5 +676,50 @@ mod tests {
             input: json!({}),
         };
         assert!(EchoDelegator.delegate(request).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn delegation_boundary_fails_over_budget_results_without_losing_provenance() {
+        let template = AgentTemplateRegistry::builtins()
+            .get("reviewer")
+            .unwrap()
+            .clone();
+        let spec = template
+            .instantiate(AgentInstanceRequest {
+                agent_id: "review".into(),
+                name: "Reviewer".into(),
+                goal: "Review".into(),
+                context_summary: String::new(),
+                inputs: vec![],
+                acceptance_criteria: vec![],
+                dependencies: vec![],
+                model: None,
+                permissions: PermissionSet::default(),
+                context_policy: ContextPolicy::default(),
+                budget: AgentBudget {
+                    max_tokens: Some(1),
+                    max_tool_calls: Some(1),
+                    max_cost_microunits: Some(1),
+                },
+                timeout_secs: None,
+                requires_review: false,
+                session_policy: AgentSessionPolicy::New,
+                allow_delegation: false,
+            })
+            .unwrap();
+        let response = OverBudgetDelegator
+            .delegate(AgentDelegationRequest {
+                request_id: "request".into(),
+                workflow_id: "workflow".into(),
+                step_id: "review".into(),
+                spec,
+                input: json!({}),
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.status, DelegationStatus::Failed);
+        assert!(response.error.unwrap().contains("token budget"));
+        assert_eq!(response.agent_session_id.as_deref(), Some("session"));
+        assert_eq!(response.child_frame_id.as_deref(), Some("frame"));
     }
 }

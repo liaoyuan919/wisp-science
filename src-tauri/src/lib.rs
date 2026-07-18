@@ -6326,6 +6326,13 @@ pub fn run() {
             let approval_grants = Arc::new(StdMutex::new(tauri::async_runtime::block_on(
                 load_approval_grants(&store),
             )));
+            if let Ok((attempts, workflows)) = tauri::async_runtime::block_on(
+                store.recover_interrupted_agent_workflows(),
+            ) {
+                if workflows > 0 {
+                    tracing::warn!(target: "wisp", attempts, workflows, "recovered interrupted Agent workflows");
+                }
+            }
             let state = AppState {
                 app_data,
                 store,

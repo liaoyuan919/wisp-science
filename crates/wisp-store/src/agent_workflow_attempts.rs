@@ -336,6 +336,61 @@ impl Store {
         .await?;
         Ok(updated.rows_affected() == 1)
     }
+
+    pub async fn fail_agent_workflow_execution(
+        &self,
+        workflow_id: &str,
+        error: &str,
+    ) -> Result<(u64, bool)> {
+        let now = chrono::Utc::now().timestamp();
+        let mut tx = self.pool.begin().await?;
+        let attempts = sqlx::query(
+            "UPDATE agent_workflow_attempts SET status='failed',error=COALESCE(error,?),finished_at=COALESCE(finished_at,?),updated_at=? WHERE workflow_id=? AND status IN ('queued','running')",
+        )
+        .bind(error)
+        .bind(now)
+        .bind(now)
+        .bind(workflow_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        let workflow = sqlx::query(
+            "UPDATE agent_workflows SET status='failed',version=version+1,updated_at=? WHERE id=? AND status='running'",
+        )
+        .bind(now)
+        .bind(workflow_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
+        tx.commit().await?;
+        Ok((attempts, workflow))
+    }
+
+    pub async fn recover_interrupted_agent_workflows(&self) -> Result<(u64, u64)> {
+        let now = chrono::Utc::now().timestamp();
+        let reason =
+            "The application stopped before this Agent execution reached a terminal state.";
+        let mut tx = self.pool.begin().await?;
+        let attempts = sqlx::query(
+            "UPDATE agent_workflow_attempts SET status='failed',error=COALESCE(error,?),finished_at=COALESCE(finished_at,?),updated_at=? WHERE status IN ('queued','running') AND workflow_id IN (SELECT id FROM agent_workflows WHERE status='running')",
+        )
+        .bind(reason)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        let workflows = sqlx::query(
+            "UPDATE agent_workflows SET status='failed',version=version+1,updated_at=? WHERE status='running'",
+        )
+        .bind(now)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok((attempts, workflows))
+    }
 }
 
 fn validate_transition(

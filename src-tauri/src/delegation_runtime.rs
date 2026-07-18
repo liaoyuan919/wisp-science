@@ -1,20 +1,21 @@
-use crate::{acp, acp_bridge_launch, build_provider_config, load_settings, models, ActiveProject};
+use crate::{acp, build_provider_config, load_settings, models, ActiveProject};
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tauri::State;
 use tokio::sync::Mutex;
 use wisp_acp::{
-    acp::schema::v1::{ContentBlock, McpServer, McpServerStdio, SessionId, TextContent},
+    acp::schema::v1::{ContentBlock, SessionId, TextContent},
     AcpPermissionKind, AcpSessionEvent, AcpSessionHandle, AcpStopReason, AcpUpdateKind,
 };
 use wisp_core::{
-    AgentArtifact, AgentBackend, AgentDelegationRequest, AgentDelegationResponse, AgentDelegator,
-    AgentEvidence, AgentRole, AgentSessionPolicy, AgentUsage, DelegationExecutionObserver,
-    DelegationExecutionResult, DelegationExecutionStatus, DelegationExecutor, DelegationPlan,
-    DelegationStatus, PermissionSet, ValidatedAgentDelegationRequest,
+    AgentArtifact, AgentBackend, AgentBudget, AgentDelegationRequest, AgentDelegationResponse,
+    AgentDelegator, AgentEvidence, AgentRole, AgentSessionPolicy, AgentUsage,
+    DelegationExecutionObserver, DelegationExecutionResult, DelegationExecutionStatus,
+    DelegationExecutor, DelegationPlan, DelegationStatus, PermissionSet,
+    ValidatedAgentDelegationRequest,
 };
-use wisp_llm::Message;
+use wisp_llm::{Completion, Message, Provider, ToolSchema, Usage};
 use wisp_store::{
     AcpSessionBinding, AgentWorkflowAttempt, AgentWorkflowAttemptStatus, AgentWorkflowStatus, Store,
 };
@@ -43,23 +44,19 @@ pub(crate) async fn run_agent_workflow(
     if plan.id != workflow.id {
         return Err("Agent workflow plan identity does not match its persisted record".into());
     }
-    let delegator = Arc::new(TauriDelegator::new(
-        state.store.clone(),
-        state.app_data.clone(),
-        project,
-    ));
+    let delegator = Arc::new(TauriDelegator::new(state.store.clone(), project));
     let observer = Arc::new(StoreDelegationObserver::new(state.store.clone()));
-    let result = DelegationExecutor::new(delegator)
+    let result = DelegationExecutor::new(delegator.clone())
         .with_observer(observer)
         .execute(plan)
         .await;
     if result.is_err() {
+        delegator.cancel_all().await;
         let _ = state
             .store
-            .transition_agent_workflow_status(
+            .fail_agent_workflow_execution(
                 &workflow_id,
-                AgentWorkflowStatus::Running,
-                AgentWorkflowStatus::Failed,
+                "Agent workflow execution stopped after a runtime or persistence error.",
             )
             .await;
     }
@@ -72,18 +69,33 @@ pub(crate) struct TauriDelegator {
 }
 
 impl TauriDelegator {
-    pub(crate) fn new(store: Store, app_data: std::path::PathBuf, project: ActiveProject) -> Self {
+    pub(crate) fn new(store: Store, project: ActiveProject) -> Self {
         Self {
             local: LocalDelegator {
                 store: store.clone(),
                 project: project.clone(),
+                provenance: Arc::new(Mutex::new(HashMap::new())),
             },
             acp: AcpDelegator {
                 store,
-                app_data,
                 project,
                 active: Arc::new(Mutex::new(HashMap::new())),
+                provenance: Arc::new(Mutex::new(HashMap::new())),
             },
+        }
+    }
+
+    async fn cancel_all(&self) {
+        let request_ids = self
+            .acp
+            .active
+            .lock()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for request_id in request_ids {
+            let _ = self.acp.cancel(&request_id).await;
         }
     }
 }
@@ -104,11 +116,19 @@ impl AgentDelegator for TauriDelegator {
     async fn cancel(&self, request_id: &str) -> anyhow::Result<bool> {
         self.acp.cancel(request_id).await
     }
+
+    async fn status(&self, request_id: &str) -> anyhow::Result<Option<AgentDelegationResponse>> {
+        if let Some(response) = self.acp.status(request_id).await? {
+            return Ok(Some(response));
+        }
+        self.local.status(request_id).await
+    }
 }
 
 struct LocalDelegator {
     store: Store,
     project: ActiveProject,
+    provenance: Arc<Mutex<HashMap<String, String>>>,
 }
 
 #[async_trait]
@@ -127,7 +147,14 @@ impl AgentDelegator for LocalDelegator {
                 request.spec.model.as_deref().unwrap_or("active"),
             )
             .await?;
-        let prompt = delegation_prompt(&request);
+        self.provenance
+            .lock()
+            .await
+            .insert(request.request_id.clone(), child_frame_id.clone());
+        let mut prompt = delegation_prompt(&request);
+        if request.spec.role == AgentRole::Reviewer {
+            prompt.push_str(&reviewer_host_evidence(&self.project.root).await);
+        }
         self.store
             .append_message(&child_frame_id, 1, &Message::user(&prompt))
             .await?;
@@ -158,11 +185,18 @@ impl AgentDelegator for LocalDelegator {
         } else {
             format!("{} {RESULT_INSTRUCTIONS}", request.spec.prompt_template)
         };
-        let completion = llm
-            .complete(&[Message::system(system), Message::user(&prompt)], &[])
-            .await;
-        let completion = match completion {
-            Ok(completion) => completion,
+        let completion = run_local_agent(
+            llm.as_ref(),
+            &self.store,
+            &child_frame_id,
+            &self.project.root,
+            &request,
+            system,
+            prompt,
+        )
+        .await;
+        let (completion, usage) = match completion {
+            Ok(result) => result,
             Err(error) => {
                 return Ok(failed_backend_response(
                     &request.request_id,
@@ -171,12 +205,6 @@ impl AgentDelegator for LocalDelegator {
                 ))
             }
         };
-        let mut persisted = Message::assistant(&completion.content);
-        persisted.reasoning = completion.reasoning.clone();
-        persisted.model_name = Some(llm.model().to_string());
-        self.store
-            .append_message(&child_frame_id, 2, &persisted)
-            .await?;
         let output = match parse_result_object(&completion.content) {
             Ok(output) => output,
             Err(error) => {
@@ -203,15 +231,156 @@ impl AgentDelegator for LocalDelegator {
             artifacts: artifacts_from_output(&output),
             evidence: evidence_from_output(&output),
             output,
-            usage: AgentUsage {
-                input_tokens: completion.usage.input_tokens,
-                output_tokens: completion.usage.output_tokens,
-                ..Default::default()
-            },
+            usage,
             agent_session_id: None,
             child_frame_id: Some(child_frame_id),
             error: None,
         })
+    }
+
+    async fn status(&self, request_id: &str) -> anyhow::Result<Option<AgentDelegationResponse>> {
+        Ok(self
+            .provenance
+            .lock()
+            .await
+            .get(request_id)
+            .cloned()
+            .map(|child_frame_id| AgentDelegationResponse {
+                request_id: request_id.into(),
+                status: DelegationStatus::Running,
+                output: json!({}),
+                artifact_ids: vec![],
+                artifacts: vec![],
+                evidence: vec![],
+                usage: Default::default(),
+                agent_session_id: None,
+                child_frame_id: Some(child_frame_id),
+                error: None,
+            }))
+    }
+}
+
+async fn run_local_agent(
+    llm: &dyn Provider,
+    store: &Store,
+    child_frame_id: &str,
+    project_root: &std::path::Path,
+    request: &AgentDelegationRequest,
+    system: String,
+    prompt: String,
+) -> anyhow::Result<(Completion, AgentUsage)> {
+    let can_read = request
+        .spec
+        .permissions
+        .tools
+        .iter()
+        .any(|tool| tool == "read_file");
+    let tools = can_read
+        .then(|| {
+            vec![ToolSchema::new(
+                "read_file",
+                "Read one UTF-8 text file inside the active project. Paths outside the project are rejected.",
+                json!({
+                    "type":"object",
+                    "properties":{"path":{"type":"string"}},
+                    "required":["path"],
+                    "additionalProperties":false,
+                }),
+            )]
+        })
+        .unwrap_or_default();
+    let mut messages = vec![Message::system(system), Message::user(prompt)];
+    let mut next_seq = 2i64;
+    let mut usage = AgentUsage::default();
+    loop {
+        let mut completion = llm.complete(&messages, &tools).await?;
+        usage.input_tokens = usage
+            .input_tokens
+            .saturating_add(completion.usage.input_tokens);
+        usage.output_tokens = usage
+            .output_tokens
+            .saturating_add(completion.usage.output_tokens);
+        if let Some(reason) = runtime_budget_violation(&usage, &request.spec.budget) {
+            anyhow::bail!(reason);
+        }
+        let mut assistant = Message::assistant(&completion.content);
+        assistant.reasoning = completion.reasoning.clone();
+        assistant.tool_calls = completion.tool_calls.clone();
+        assistant.model_name = Some(llm.model().to_string());
+        store
+            .append_message(child_frame_id, next_seq, &assistant)
+            .await?;
+        next_seq += 1;
+        messages.push(assistant);
+        if completion.tool_calls.is_empty() {
+            completion.usage = Usage {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+            };
+            return Ok((completion, usage));
+        }
+        for call in completion.tool_calls {
+            usage.tool_calls = usage.tool_calls.saturating_add(1);
+            if let Some(reason) = runtime_budget_violation(&usage, &request.spec.budget) {
+                anyhow::bail!(reason);
+            }
+            let result = if call.function.name == "read_file" && can_read {
+                local_read_file(project_root, &request.spec.permissions, &call.args_value())
+            } else {
+                Err(format!("tool '{}' is not allowed", call.function.name))
+            };
+            let body = result.unwrap_or_else(|error| format!("Error: {error}"));
+            let tool = Message::tool(&call.id, &call.function.name, body);
+            store
+                .append_message(child_frame_id, next_seq, &tool)
+                .await?;
+            next_seq += 1;
+            messages.push(tool);
+        }
+    }
+}
+
+fn local_read_file(
+    project_root: &std::path::Path,
+    permissions: &PermissionSet,
+    args: &Value,
+) -> Result<String, String> {
+    if permissions.paths.is_empty() {
+        return Err("read_file has no granted path scope".into());
+    }
+    let path = args
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "read_file requires path".to_string())?;
+    let path = wisp_tools::safety::validate_file_path(project_root, path)?;
+    let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
+    if metadata.len() > 64 * 1024 {
+        return Err("read_file is limited to 64 KiB per file".into());
+    }
+    std::fs::read_to_string(path).map_err(|error| error.to_string())
+}
+
+async fn reviewer_host_evidence(project_root: &std::path::Path) -> String {
+    let output = tokio::process::Command::new("git")
+        .args(["diff", "--no-ext-diff", "--", "."])
+        .current_dir(project_root)
+        .output()
+        .await;
+    let diff = output
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| bounded_text(&String::from_utf8_lossy(&output.stdout), 60_000))
+        .unwrap_or_else(|| "Git diff was unavailable; use read_file on declared outputs.".into());
+    format!(
+        "\n\n<host_evidence trust=\"read_only\">\nThe host captured this workspace diff independently of the delegated Agents:\n{diff}\n</host_evidence>"
+    )
+}
+
+fn bounded_text(value: &str, limit: usize) -> String {
+    if value.len() <= limit {
+        value.into()
+    } else {
+        format!("{}…", &value[..value.floor_char_boundary(limit)])
     }
 }
 
@@ -223,9 +392,9 @@ struct ActiveAcpRequest {
 
 struct AcpDelegator {
     store: Store,
-    app_data: std::path::PathBuf,
     project: ActiveProject,
     active: Arc<Mutex<HashMap<String, ActiveAcpRequest>>>,
+    provenance: Arc<Mutex<HashMap<String, (String, String)>>>,
 }
 
 #[async_trait]
@@ -309,11 +478,10 @@ impl AgentDelegator for AcpDelegator {
             .await?;
 
         let handle = Arc::new(AcpSessionHandle::launch(acp::launch_profile(&profile)).await?);
-        let (command, args) = acp_bridge_launch(&self.app_data, &self.project, &child_frame_id)
-            .map_err(anyhow::Error::msg)?;
-        let bridge = vec![McpServer::Stdio(
-            McpServerStdio::new("wisp-science", command).args(args),
-        )];
+        // Delegated Codex sessions intentionally receive no Wisp MCP bridge.
+        // This keeps execution inside the ACP Agent's own project sandbox and
+        // prevents an untrusted child from reaching broader run/network tools.
+        let bridge = vec![];
         let session_id = if let Some((agent_session_id, _)) = &reusable {
             let id = SessionId::new(agent_session_id.clone());
             match handle
@@ -363,9 +531,14 @@ impl AgentDelegator for AcpDelegator {
                 session_id: session_id.clone(),
             },
         );
+        self.provenance.lock().await.insert(
+            request.request_id.clone(),
+            (session_id.to_string(), child_frame_id.clone()),
+        );
         let result = run_acp_request(
             &request,
             &self.store,
+            &self.project.root,
             &child_frame_id,
             handle.clone(),
             session_id.clone(),
@@ -399,11 +572,29 @@ impl AgentDelegator for AcpDelegator {
         });
         Ok(true)
     }
+
+    async fn status(&self, request_id: &str) -> anyhow::Result<Option<AgentDelegationResponse>> {
+        Ok(self.provenance.lock().await.get(request_id).cloned().map(
+            |(agent_session_id, child_frame_id)| AgentDelegationResponse {
+                request_id: request_id.into(),
+                status: DelegationStatus::Running,
+                output: json!({}),
+                artifact_ids: vec![],
+                artifacts: vec![],
+                evidence: vec![],
+                usage: Default::default(),
+                agent_session_id: Some(agent_session_id),
+                child_frame_id: Some(child_frame_id),
+                error: None,
+            },
+        ))
+    }
 }
 
 async fn run_acp_request(
     request: &AgentDelegationRequest,
     store: &Store,
+    project_root: &std::path::Path,
     child_frame_id: &str,
     handle: Arc<AcpSessionHandle>,
     session_id: SessionId,
@@ -418,6 +609,7 @@ async fn run_acp_request(
     let mut answer = String::new();
     let mut evidence = Vec::new();
     let mut usage = AgentUsage::default();
+    let mut tool_call_ids = std::collections::HashSet::new();
     let outcome = loop {
         tokio::select! {
             outcome = &mut prompt => break outcome?,
@@ -428,21 +620,45 @@ async fn run_acp_request(
                             answer.push_str(text);
                         }
                     } else if matches!(kind, AcpUpdateKind::ToolCall | AcpUpdateKind::ToolCallUpdate) {
-                        if kind == AcpUpdateKind::ToolCall {
-                            usage.tool_calls += 1;
+                        let call_id = payload
+                            .get("toolCallId")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        if kind == AcpUpdateKind::ToolCall && tool_call_ids.insert(call_id.clone()) {
+                            usage.tool_calls = usage.tool_calls.saturating_add(1);
                         }
                         evidence.push(AgentEvidence {
                             kind: "acp_tool".into(),
                             summary: bounded_json(&payload, 2_000),
-                            reference: payload.get("toolCallId").and_then(Value::as_str).map(str::to_string),
+                            reference: (!call_id.is_empty()).then_some(call_id),
                         });
                     } else if kind == AcpUpdateKind::Usage {
                         usage.input_tokens = json_u64(&payload, &["inputTokens", "input_tokens"]);
                         usage.output_tokens = json_u64(&payload, &["outputTokens", "output_tokens"]);
+                        usage.cost_microunits = json_u64(
+                            &payload,
+                            &["costMicrounits", "cost_microunits", "costMicroUsd"],
+                        );
+                    }
+                    if let Some(reason) = runtime_budget_violation(&usage, &request.spec.budget) {
+                        let _ = handle.cancel(session_id.clone());
+                        return Ok(failed_acp_response(
+                            &request.request_id,
+                            reason,
+                            &session_id,
+                            child_frame_id,
+                            evidence,
+                            usage,
+                        ));
                     }
                 }
                 Some(AcpSessionEvent::Permission(permission)) => {
-                    let allowed = permission_option(&permission, &request.spec.permissions);
+                    let allowed = permission_option(
+                        &permission,
+                        &request.spec.permissions,
+                        project_root,
+                    );
                     handle.respond_permission(permission.request_id, allowed)?;
                 }
                 Some(AcpSessionEvent::Exited { error }) => anyhow::bail!(error.unwrap_or_else(|| "ACP Agent exited".into())),
@@ -501,23 +717,29 @@ async fn run_acp_request(
         });
     }
     if outcome.stop_reason != AcpStopReason::EndTurn {
-        return Ok(failed_backend_response(
+        return Ok(failed_acp_response(
             &request.request_id,
             format!("ACP Agent stopped with {:?}", outcome.stop_reason),
-            Some(child_frame_id.into()),
+            &session_id,
+            child_frame_id,
+            evidence,
+            usage,
         ));
     }
     let output = match parse_result_object(&answer) {
         Ok(output) => output,
         Err(error) => {
-            return Ok(failed_backend_response(
+            return Ok(failed_acp_response(
                 &request.request_id,
                 error,
-                Some(child_frame_id.into()),
+                &session_id,
+                child_frame_id,
+                evidence,
+                usage,
             ))
         }
     };
-    let artifacts = store
+    let mut artifacts = store
         .list_artifacts(child_frame_id)
         .await?
         .into_iter()
@@ -528,6 +750,11 @@ async fn run_acp_request(
             path: Some(path),
         })
         .collect::<Vec<_>>();
+    for artifact in artifacts_from_output(&output) {
+        if !artifacts.iter().any(|item| item.id == artifact.id) {
+            artifacts.push(artifact);
+        }
+    }
     let artifact_ids = artifacts
         .iter()
         .map(|artifact| artifact.id.clone())
@@ -550,19 +777,32 @@ async fn run_acp_request(
 fn permission_option(
     request: &wisp_acp::AcpPermissionRequest,
     permissions: &PermissionSet,
+    project_root: &std::path::Path,
 ) -> Option<String> {
-    let tool = request.tool_call.to_string().to_lowercase();
-    let allowed_tool = permissions.tools.iter().any(|allowed| {
-        let allowed = allowed.to_lowercase();
-        tool.contains(&allowed)
-            || (allowed == "shell"
-                && ["shell", "bash", "execute", "terminal"]
-                    .iter()
-                    .any(|name| tool.contains(name)))
-            || (allowed == "read_file" && tool.contains("read"))
-            || (allowed == "write_file" && ["write", "edit"].iter().any(|name| tool.contains(name)))
-    });
-    let kind = if allowed_tool && permissions.write {
+    // Delegated ACP sessions expose only project-scoped file capabilities.
+    // Shell, process, MCP, and network permission requests are unknown
+    // identities here and therefore always select a reject option.
+    let identities = tool_identity_fields(&request.tool_call);
+    let is_read = identities
+        .iter()
+        .any(|value| matches_identity(value, &["read_file", "read"]));
+    let is_write = identities
+        .iter()
+        .any(|value| matches_identity(value, &["write_file", "write", "edit"]));
+    let allowed_identity = (is_read && permissions.tools.iter().any(|tool| tool == "read_file"))
+        || (is_write && permissions.tools.iter().any(|tool| tool == "write_file"));
+    let path_safe = if is_read || is_write {
+        let paths = tool_path_fields(&request.tool_call);
+        !permissions.paths.is_empty()
+            && !paths.is_empty()
+            && paths
+                .iter()
+                .all(|path| path_is_project_scoped(project_root, path))
+    } else {
+        true
+    };
+    let write_safe = !is_write || permissions.write;
+    let kind = if allowed_identity && path_safe && write_safe {
         AcpPermissionKind::AllowOnce
     } else {
         AcpPermissionKind::RejectOnce
@@ -580,6 +820,101 @@ fn permission_option(
             })
         })
         .map(|option| option.id.clone())
+}
+
+fn tool_identity_fields(value: &Value) -> Vec<String> {
+    let Some(object) = value.as_object() else {
+        return vec![];
+    };
+    ["name", "toolName", "tool_name", "title", "kind"]
+        .iter()
+        .filter_map(|key| object.get(*key).and_then(Value::as_str))
+        .map(|value| {
+            value
+                .to_lowercase()
+                .chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+                .collect::<String>()
+        })
+        .collect()
+}
+
+fn matches_identity(identity: &str, allowed: &[&str]) -> bool {
+    allowed.iter().any(|allowed| {
+        identity == *allowed
+            || identity.starts_with(&format!("{allowed}_"))
+            || identity.ends_with(&format!("_{allowed}"))
+    })
+}
+
+fn tool_path_fields(value: &Value) -> Vec<String> {
+    fn visit(value: &Value, key: Option<&str>, output: &mut Vec<String>) {
+        match value {
+            Value::Object(object) => {
+                for (key, value) in object {
+                    visit(value, Some(key), output);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    visit(value, key, output);
+                }
+            }
+            Value::String(value)
+                if key.is_some_and(|key| {
+                    let key = key.to_lowercase();
+                    key.contains("path")
+                        || key.contains("file")
+                        || key.contains("location")
+                        || key == "cwd"
+                }) =>
+            {
+                output.push(value.clone());
+            }
+            _ => {}
+        }
+    }
+    let mut output = Vec::new();
+    visit(value, None, &mut output);
+    output
+}
+
+fn path_is_project_scoped(project_root: &std::path::Path, raw: &str) -> bool {
+    let raw = raw.trim();
+    let relative = raw.strip_prefix("project://").unwrap_or(raw);
+    !relative.starts_with('~')
+        && wisp_tools::safety::validate_file_path(project_root, relative).is_ok()
+}
+
+fn runtime_budget_violation(usage: &AgentUsage, budget: &AgentBudget) -> Option<String> {
+    let total_tokens = usage.input_tokens.saturating_add(usage.output_tokens);
+    if budget
+        .max_tokens
+        .is_some_and(|limit| total_tokens > u64::from(limit))
+    {
+        return Some(format!(
+            "Agent exceeded its token budget ({total_tokens} tokens)"
+        ));
+    }
+    if budget
+        .max_tool_calls
+        .is_some_and(|limit| usage.tool_calls > u64::from(limit))
+    {
+        return Some(format!(
+            "Agent exceeded its tool-call budget ({} calls)",
+            usage.tool_calls
+        ));
+    }
+    if budget
+        .max_cost_microunits
+        .is_some_and(|limit| usage.cost_microunits > limit)
+    {
+        return Some(format!(
+            "Agent exceeded its cost budget ({} microunits)",
+            usage.cost_microunits
+        ));
+    }
+    None
 }
 
 fn is_codex_profile(profile: &acp::AcpAgentProfile) -> bool {
@@ -845,22 +1180,38 @@ fn artifacts_from_output(output: &Value) -> Vec<AgentArtifact> {
         .flatten()
         .filter_map(Value::as_object)
         .filter_map(|value| {
+            let path = value
+                .get("path")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let name = value
+                .get("name")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    path.as_deref().and_then(|path| {
+                        std::path::Path::new(path)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                    })
+                })
+                .unwrap_or_default()
+                .to_string();
+            let id = value
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_string)
+                .or_else(|| path.as_ref().map(|path| format!("declared:{path}")))
+                .or_else(|| (!name.is_empty()).then(|| format!("declared:{name}")))?;
             Some(AgentArtifact {
-                id: value.get("id")?.as_str()?.into(),
-                name: value
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .into(),
+                id,
+                name,
                 kind: value
                     .get("kind")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
+                    .unwrap_or("file")
                     .into(),
-                path: value
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
+                path,
             })
         })
         .collect()
@@ -888,6 +1239,28 @@ fn failed_backend_response(
         usage: Default::default(),
         agent_session_id: None,
         child_frame_id,
+        error: Some(error),
+    }
+}
+
+fn failed_acp_response(
+    request_id: &str,
+    error: String,
+    session_id: &SessionId,
+    child_frame_id: &str,
+    evidence: Vec<AgentEvidence>,
+    usage: AgentUsage,
+) -> AgentDelegationResponse {
+    AgentDelegationResponse {
+        request_id: request_id.into(),
+        status: DelegationStatus::Failed,
+        output: json!({}),
+        artifact_ids: vec![],
+        artifacts: vec![],
+        evidence,
+        usage,
+        agent_session_id: Some(session_id.to_string()),
+        child_frame_id: Some(child_frame_id.into()),
         error: Some(error),
     }
 }
@@ -949,11 +1322,36 @@ mod tests {
     }
 
     #[test]
+    fn local_read_tool_is_project_scoped() {
+        let root =
+            std::env::temp_dir().join(format!("wisp_delegation_read_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("evidence.txt"), "verified").unwrap();
+        let permissions = PermissionSet {
+            tools: vec!["read_file".into()],
+            paths: vec!["project://**".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            local_read_file(&root, &permissions, &json!({"path":"evidence.txt"})).unwrap(),
+            "verified"
+        );
+        assert!(local_read_file(&root, &permissions, &json!({"path":"../escape"})).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn acp_permission_choice_respects_tool_and_write_ceiling() {
+        let root =
+            std::env::temp_dir().join(format!("wisp_delegation_acp_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("results")).unwrap();
         let request = wisp_acp::AcpPermissionRequest {
             request_id: "p".into(),
             session_id: "s".into(),
-            tool_call: json!({"title":"execute shell"}),
+            tool_call: json!({
+                "name":"write_file",
+                "rawInput":{"path":root.join("results/out.txt")}
+            }),
             options: vec![
                 wisp_acp::AcpPermissionOption {
                     id: "allow".into(),
@@ -971,10 +1369,12 @@ mod tests {
             permission_option(
                 &request,
                 &PermissionSet {
-                    tools: vec!["shell".into()],
+                    tools: vec!["write_file".into()],
+                    paths: vec!["project://**".into()],
                     write: true,
                     ..Default::default()
-                }
+                },
+                &root,
             ),
             Some("allow".into())
         );
@@ -982,13 +1382,90 @@ mod tests {
             permission_option(
                 &request,
                 &PermissionSet {
-                    tools: vec!["shell".into()],
+                    tools: vec!["write_file".into()],
+                    paths: vec!["project://**".into()],
                     write: false,
                     ..Default::default()
-                }
+                },
+                &root,
             ),
             Some("reject".into())
         );
+        let outside = wisp_acp::AcpPermissionRequest {
+            tool_call: json!({"name":"write_file","rawInput":{"path":"/etc/passwd"}}),
+            ..request
+        };
+        assert_eq!(
+            permission_option(
+                &outside,
+                &PermissionSet {
+                    tools: vec!["write_file".into()],
+                    paths: vec!["project://**".into()],
+                    write: true,
+                    ..Default::default()
+                },
+                &root,
+            ),
+            Some("reject".into())
+        );
+        let spoofed = wisp_acp::AcpPermissionRequest {
+            tool_call: json!({
+                "name":"execute_shell",
+                "rawInput":{
+                    "command":"cat file",
+                    "description":"use write_file after execution"
+                }
+            }),
+            ..outside
+        };
+        assert_eq!(
+            permission_option(
+                &spoofed,
+                &PermissionSet {
+                    tools: vec!["write_file".into()],
+                    paths: vec!["project://**".into()],
+                    write: true,
+                    ..Default::default()
+                },
+                &root,
+            ),
+            Some("reject".into())
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_budget_checks_tokens_tools_and_cost() {
+        let budget = AgentBudget {
+            max_tokens: Some(10),
+            max_tool_calls: Some(2),
+            max_cost_microunits: Some(100),
+        };
+        assert!(runtime_budget_violation(
+            &AgentUsage {
+                input_tokens: 6,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            &budget
+        )
+        .is_some());
+        assert!(runtime_budget_violation(
+            &AgentUsage {
+                tool_calls: 3,
+                ..Default::default()
+            },
+            &budget
+        )
+        .is_some());
+        assert!(runtime_budget_violation(
+            &AgentUsage {
+                cost_microunits: 101,
+                ..Default::default()
+            },
+            &budget
+        )
+        .is_some());
     }
 
     struct SuccessfulDelegator;

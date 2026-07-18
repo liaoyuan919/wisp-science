@@ -319,6 +319,61 @@ async fn agent_workflow_attempts_persist_cas_lifecycle_and_usage() {
 }
 
 #[tokio::test]
+async fn interrupted_agent_workflows_recover_to_failed_terminal_state() {
+    let tmp = std::env::temp_dir().join(format!(
+        "wisp_agent_recovery_{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = Store::open(&tmp).await.unwrap();
+    store.create_project("p", "proj", "").await.unwrap();
+    let workflow = AgentWorkflow::new("wf", "p", "workspace", "Delegation").unwrap();
+    store.create_agent_workflow(&workflow).await.unwrap();
+    let step = AgentWorkflowStep::new("step", "wf", 0, "step", "coder", "acp", "prompt").unwrap();
+    store.create_agent_workflow_step(&step).await.unwrap();
+    assert!(store.approve_agent_workflow_plan("wf", 2).await.unwrap());
+    assert!(store
+        .transition_agent_workflow_status(
+            "wf",
+            AgentWorkflowStatus::Approved,
+            AgentWorkflowStatus::Running,
+        )
+        .await
+        .unwrap());
+    let attempt =
+        AgentWorkflowAttempt::queued("attempt", "wf", "step", 1, "request", "acp", r#"{}"#)
+            .unwrap();
+    store.create_agent_workflow_attempt(&attempt).await.unwrap();
+
+    assert_eq!(
+        store.recover_interrupted_agent_workflows().await.unwrap(),
+        (1, 1)
+    );
+    let recovered = store
+        .get_agent_workflow_attempt("attempt")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.status, AgentWorkflowAttemptStatus::Failed);
+    assert!(recovered.error.unwrap().contains("stopped"));
+    assert_eq!(
+        store
+            .get_agent_workflow("wf")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        AgentWorkflowStatus::Failed
+    );
+    assert_eq!(
+        store.recover_interrupted_agent_workflows().await.unwrap(),
+        (0, 0)
+    );
+
+    store.pool.close().await;
+    let _ = std::fs::remove_file(tmp);
+}
+
+#[tokio::test]
 async fn last_user_message_session_ignores_later_assistant_activity() {
     let tmp = std::env::temp_dir().join(format!(
         "wisp_store_last_user_session_{}.sqlite",

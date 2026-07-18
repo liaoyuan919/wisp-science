@@ -494,16 +494,23 @@ pub trait AgentDelegator: Send + Sync {
         let request_id = request.request_id.clone();
         let request = ValidatedAgentDelegationRequest::try_from(request)?;
         let output_contract = request.as_request().spec.output_contract.clone();
-        let response = self.delegate_validated(request).await?;
+        let budget = request.as_request().spec.budget.clone();
+        let mut response = self.delegate_validated(request).await?;
         response.validate()?;
         if response.request_id != request_id {
             anyhow::bail!("delegation response request_id does not match the request");
+        }
+        if let Some(reason) = budget_violation(&response.usage, &budget) {
+            response.status = DelegationStatus::Failed;
+            response.output = Value::Object(Default::default());
+            response.error = Some(reason);
         }
         if response.status == DelegationStatus::Succeeded
             && !matches_json_contract(&response.output, &output_contract)
         {
             anyhow::bail!("delegation output does not satisfy output_contract");
         }
+        response.validate()?;
         Ok(response)
     }
 
@@ -521,6 +528,37 @@ pub trait AgentDelegator: Send + Sync {
     async fn cancel(&self, _request_id: &str) -> anyhow::Result<bool> {
         anyhow::bail!("agent delegation cancellation is not supported by this backend")
     }
+}
+
+fn budget_violation(usage: &AgentUsage, budget: &AgentBudget) -> Option<String> {
+    let total_tokens = usage.input_tokens.saturating_add(usage.output_tokens);
+    if budget
+        .max_tokens
+        .is_some_and(|limit| total_tokens > u64::from(limit))
+    {
+        return Some(format!(
+            "Agent exceeded its token budget ({total_tokens} tokens)"
+        ));
+    }
+    if budget
+        .max_tool_calls
+        .is_some_and(|limit| usage.tool_calls > u64::from(limit))
+    {
+        return Some(format!(
+            "Agent exceeded its tool-call budget ({} calls)",
+            usage.tool_calls
+        ));
+    }
+    if budget
+        .max_cost_microunits
+        .is_some_and(|limit| usage.cost_microunits > limit)
+    {
+        return Some(format!(
+            "Agent exceeded its cost budget ({} microunits)",
+            usage.cost_microunits
+        ));
+    }
+    None
 }
 
 /// Explicit placeholder for runtimes that persist a workflow before a backend
