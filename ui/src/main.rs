@@ -3643,8 +3643,8 @@ fn App() -> impl IntoView {
         create_rw_signal::<HashMap<String, RuntimeObjectState>>(HashMap::new());
     let run_records = create_rw_signal::<Vec<RunRecord>>(vec![]);
     let show_add_host = create_rw_signal(false);
-    let config_aliases = create_rw_signal::<Vec<String>>(vec![]);
     let host_alias = create_rw_signal(String::new());
+    let host_hostname = create_rw_signal(String::new());
     let host_user = create_rw_signal(String::new());
     let host_port = create_rw_signal(String::new());
     let host_identity = create_rw_signal(String::new());
@@ -3659,6 +3659,7 @@ fn App() -> impl IntoView {
     let open_add_host_form = Callback::new(move |_: ()| {
         editing_host_alias.set(None);
         host_alias.set(String::new());
+        host_hostname.set(String::new());
         host_user.set(String::new());
         host_port.set(String::new());
         host_identity.set(String::new());
@@ -3667,12 +3668,6 @@ fn App() -> impl IntoView {
         host_password.set(String::new());
         host_has_password.set(false);
         show_add_host.set(true);
-        spawn_local(async move {
-            let value = invoke("list_ssh_config_aliases", JsValue::UNDEFINED).await;
-            if let Ok(aliases) = serde_wasm_bindgen::from_value::<Vec<String>>(value) {
-                config_aliases.set(aliases);
-            }
-        });
     });
     let edit_ssh_host = Callback::new(move |alias: String| {
         let existing = ssh_hosts
@@ -3680,6 +3675,12 @@ fn App() -> impl IntoView {
             .into_iter()
             .find(|host| host.alias == alias);
         host_alias.set(alias.clone());
+        host_hostname.set(
+            existing
+                .as_ref()
+                .and_then(|host| host.host_name.clone())
+                .unwrap_or_default(),
+        );
         host_user.set(
             existing
                 .as_ref()
@@ -3726,12 +3727,6 @@ fn App() -> impl IntoView {
         ssh_connectivity_busy.set(false);
         open_settings_fn(Some("environments".into()));
         show_add_host.set(true);
-        spawn_local(async move {
-            let value = invoke("list_ssh_config_aliases", JsValue::UNDEFINED).await;
-            if let Ok(aliases) = serde_wasm_bindgen::from_value::<Vec<String>>(value) {
-                config_aliases.set(aliases);
-            }
-        });
     });
 
     let apply_session_compute_resource =
@@ -8736,7 +8731,7 @@ fn App() -> impl IntoView {
 
 
         <AddHostOverlay
-            locale=locale show_add_host=show_add_host host_alias=host_alias config_aliases=config_aliases
+            locale=locale show_add_host=show_add_host host_alias=host_alias host_hostname=host_hostname
             host_notes=host_notes host_user=host_user host_port=host_port host_identity=host_identity
             host_auth_method=host_auth_method host_password=host_password host_has_password=host_has_password
             editing_host_alias=editing_host_alias

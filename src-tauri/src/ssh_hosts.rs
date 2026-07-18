@@ -36,6 +36,10 @@ impl SshAuthMethod {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SshHost {
     pub alias: String,
+    /// Real address (IP or domain) for manually created hosts. When absent,
+    /// the alias is the connection target and ~/.ssh/config resolves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,6 +63,8 @@ pub struct SshHost {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SshConnection {
     pub alias: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -115,6 +121,7 @@ impl SshConnection {
             optional_config_string(&config, "alias")?.unwrap_or_else(|| id_alias.to_string());
         let connection = Self {
             alias,
+            host_name: optional_config_string(&config, "host_name")?,
             user: optional_config_string(&config, "user")?,
             port: optional_config_port(&config)?,
             identity_file: optional_config_string(&config, "identity_file")?,
@@ -129,6 +136,11 @@ impl SshConnection {
     fn from_host(host: &SshHost) -> Result<Self, String> {
         let connection = Self {
             alias: host.alias.clone(),
+            host_name: host
+                .host_name
+                .as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             user: host.user.clone(),
             port: host.port,
             identity_file: host.identity_file.clone(),
@@ -140,9 +152,10 @@ impl SshConnection {
 
     pub fn target(&self) -> Result<String, String> {
         self.validate()?;
+        let host = self.host_name.as_deref().unwrap_or(&self.alias);
         Ok(match &self.user {
-            Some(user) => format!("{user}@{}", self.alias),
-            None => self.alias.clone(),
+            Some(user) => format!("{user}@{host}"),
+            None => host.to_string(),
         })
     }
 
@@ -252,6 +265,9 @@ impl SshConnection {
 
     fn validate(&self) -> Result<(), String> {
         validate_connection_name("SSH alias", &self.alias)?;
+        if let Some(host_name) = &self.host_name {
+            validate_connection_name("SSH host address", host_name)?;
+        }
         if let Some(user) = &self.user {
             validate_connection_name("SSH user", user)?;
         }
@@ -796,6 +812,12 @@ fn ssh_context_config_json(host: &SshHost) -> Result<String, String> {
         "alias".into(),
         serde_json::Value::String(host.alias.trim().into()),
     );
+    if let Some(host_name) = host.host_name.as_deref().filter(|s| !s.trim().is_empty()) {
+        cfg.insert(
+            "host_name".into(),
+            serde_json::Value::String(host_name.trim().into()),
+        );
+    }
     if let Some(user) = host.user.as_deref().filter(|s| !s.trim().is_empty()) {
         cfg.insert("user".into(), serde_json::Value::String(user.trim().into()));
     }
@@ -831,6 +853,11 @@ fn ssh_context_config_json(host: &SshHost) -> Result<String, String> {
 fn persistable_host(host: &SshHost) -> SshHost {
     SshHost {
         alias: host.alias.trim().into(),
+        host_name: host
+            .host_name
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
         user: host
             .user
             .as_ref()
@@ -1005,6 +1032,66 @@ pub async fn set_session_execution_context_enabled(
         .map_err(|error| error.to_string())
 }
 
+/// One-shot connectivity check for the host editor, using the form's current
+/// (possibly unsaved) values. Deliberately bypasses the ssh_guard gate (this
+/// is the user's diagnostic tool) and the master pool (a fresh connection is
+/// the point); a success clears any guard block for the alias.
+#[tauri::command]
+pub async fn test_ssh_connection(host: SshHost) -> Result<(), String> {
+    let connection = SshConnection::from_host(&host)?;
+    let envs = if connection.uses_password() {
+        match host
+            .password
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
+            Some(password) => build_password_askpass_env(password)?,
+            None => connection.password_auth_env()?,
+        }
+    } else {
+        connection.assert_ready_to_connect()?;
+        Vec::new()
+    };
+    let mut args = connection.ssh_args()?;
+    args.push("echo __WISP_SSH_OK__".into());
+    let mut cmd = tokio::process::Command::new("ssh");
+    cmd.args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    if !envs.is_empty() {
+        cmd.envs(envs.iter().cloned());
+    }
+    wisp_tools::process::hide_console_async(&mut cmd);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output()).await;
+    cleanup_password_auth_env(&envs);
+    let output = result
+        .map_err(|_| "SSH connection test timed out after 30s".to_string())?
+        .map_err(|e| format!("failed to run ssh: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if output.status.success() && stdout.contains("__WISP_SSH_OK__") {
+        crate::ssh_guard::record_success(&format!("ssh:{}", connection.alias));
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+        Err(if detail.is_empty() {
+            format!(
+                "ssh exited with status {}",
+                output.status.code().unwrap_or(-1)
+            )
+        } else {
+            detail
+        })
+    }
+}
+
 #[tauri::command]
 pub async fn add_ssh_host(
     state: State<'_, crate::AppState>,
@@ -1030,15 +1117,6 @@ pub async fn remove_ssh_host(
     Ok(hosts.into_iter().map(decorate_host).collect())
 }
 
-#[tauri::command]
-pub async fn list_ssh_config_aliases() -> Result<Vec<String>, String> {
-    let text = dirs::home_dir()
-        .map(|h| h.join(".ssh").join("config"))
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .unwrap_or_default();
-    Ok(parse_ssh_config_aliases(&text))
-}
-
 /// Merge every connectable `Host` alias from ~/.ssh/config into the registry,
 /// keeping hosts the user already configured (notes etc.) untouched (#56/#67).
 pub fn merge_config_aliases(mut hosts: Vec<SshHost>, aliases: Vec<String>) -> Vec<SshHost> {
@@ -1046,6 +1124,7 @@ pub fn merge_config_aliases(mut hosts: Vec<SshHost>, aliases: Vec<String>) -> Ve
         if !hosts.iter().any(|h| h.alias == alias) {
             hosts.push(SshHost {
                 alias,
+                host_name: None,
                 user: None,
                 port: None,
                 identity_file: None,
@@ -1059,11 +1138,19 @@ pub fn merge_config_aliases(mut hosts: Vec<SshHost>, aliases: Vec<String>) -> Ve
     hosts
 }
 
+fn list_ssh_config_aliases() -> Vec<String> {
+    let text = dirs::home_dir()
+        .map(|h| h.join(".ssh").join("config"))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    parse_ssh_config_aliases(&text)
+}
+
 #[tauri::command]
 pub async fn import_ssh_config_hosts(
     state: State<'_, crate::AppState>,
 ) -> Result<Vec<SshHost>, String> {
-    let aliases = list_ssh_config_aliases().await?;
+    let aliases = list_ssh_config_aliases();
     let hosts = merge_config_aliases(load(&state.store).await, aliases);
     save_and_sync_contexts(&state.store, &hosts).await?;
     Ok(hosts.into_iter().map(decorate_host).collect())
@@ -1076,6 +1163,7 @@ mod tests {
     fn host(alias: &str, notes: Option<&str>) -> SshHost {
         SshHost {
             alias: alias.into(),
+            host_name: None,
             user: None,
             port: None,
             identity_file: None,
@@ -1090,6 +1178,7 @@ mod tests {
     fn missing_identity_file_fails_before_connect() {
         let connection = SshConnection {
             alias: "gpu".into(),
+            host_name: None,
             user: None,
             port: None,
             identity_file: Some("/definitely/missing/wisp-test-key".into()),
@@ -1200,6 +1289,7 @@ Host -unsafe bad/name !negated
         let hosts = vec![
             SshHost {
                 alias: "gpu".into(),
+                host_name: None,
                 user: Some("alice".into()),
                 port: Some(2222),
                 identity_file: None,
@@ -1485,10 +1575,42 @@ Host -unsafe bad/name !negated
     }
 
     #[test]
+    fn host_name_overrides_alias_as_connection_target() {
+        let connection = SshConnection {
+            alias: "gpu-lab".into(),
+            host_name: Some("10.0.0.5".into()),
+            user: Some("alice".into()),
+            port: None,
+            identity_file: None,
+            auth_method: SshAuthMethod::Key,
+        };
+        assert_eq!(connection.target().unwrap(), "alice@10.0.0.5");
+        assert_eq!(
+            connection.ssh_args().unwrap().last().unwrap(),
+            "alice@10.0.0.5"
+        );
+        for host_name in ["", "-bad", "host name", "地址"] {
+            let connection = SshConnection {
+                alias: "gpu-lab".into(),
+                host_name: Some(host_name.into()),
+                user: None,
+                port: None,
+                identity_file: None,
+                auth_method: SshAuthMethod::Key,
+            };
+            assert!(
+                connection.target().is_err(),
+                "accepted host_name {host_name:?}"
+            );
+        }
+    }
+
+    #[test]
     fn ssh_connection_rejects_unsafe_names_and_identity_paths() {
         for alias in ["", "-proxy", "gpu box", "gpu/box", "güp"] {
             let connection = SshConnection {
                 alias: alias.into(),
+                host_name: None,
                 user: None,
                 port: None,
                 identity_file: None,
@@ -1499,6 +1621,7 @@ Host -unsafe bad/name !negated
         for user in ["", "-root", "user@host", "用户"] {
             let connection = SshConnection {
                 alias: "gpu-box".into(),
+                host_name: None,
                 user: Some(user.into()),
                 port: None,
                 identity_file: None,
@@ -1508,6 +1631,7 @@ Host -unsafe bad/name !negated
         }
         let connection = SshConnection {
             alias: "gpu-box".into(),
+            host_name: None,
             user: None,
             port: None,
             identity_file: Some("\n/tmp/key".into()),
@@ -1520,6 +1644,7 @@ Host -unsafe bad/name !negated
     fn password_mode_args_disable_batch_and_pubkey() {
         let connection = SshConnection {
             alias: "lab".into(),
+            host_name: None,
             user: Some("alice".into()),
             port: Some(22),
             identity_file: None,

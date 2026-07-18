@@ -963,6 +963,7 @@ mod tests {
     fn ssh_probe_labels_password_rejection() {
         let connection = crate::ssh_hosts::SshConnection {
             alias: "gpu-box".into(),
+            host_name: None,
             user: Some("alice".into()),
             port: Some(22),
             identity_file: None,

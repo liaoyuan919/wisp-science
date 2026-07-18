@@ -416,6 +416,10 @@ pub(crate) enum ComposerReferenceArg {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) struct SshHost {
     pub(crate) alias: String,
+    /// Real address (IP or domain) for manually created hosts; when absent
+    /// the alias itself is the target, resolved via ~/.ssh/config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) host_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) user: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

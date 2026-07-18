@@ -13,7 +13,7 @@ pub(super) fn AddHostOverlay(
     locale: RwSignal<Locale>,
     show_add_host: RwSignal<bool>,
     host_alias: RwSignal<String>,
-    config_aliases: RwSignal<Vec<String>>,
+    host_hostname: RwSignal<String>,
     host_notes: RwSignal<String>,
     host_user: RwSignal<String>,
     host_port: RwSignal<String>,
@@ -25,6 +25,24 @@ pub(super) fn AddHostOverlay(
     ssh_hosts: RwSignal<Vec<SshHost>>,
     execution_contexts: RwSignal<Vec<ExecutionContext>>,
 ) -> impl IntoView {
+    let build_host = move || {
+        let opt = |s: String| { let s = s.trim().to_string(); if s.is_empty() { None } else { Some(s) } };
+        let auth = host_auth_method.get();
+        let auth = if auth == "password" { "password" } else { "key" };
+        SshHost {
+            alias: host_alias.get().trim().to_string(),
+            host_name: opt(host_hostname.get()),
+            user: opt(host_user.get()),
+            port: host_port.get().trim().parse::<u16>().ok(),
+            identity_file: if auth == "key" { opt(host_identity.get()) } else { None },
+            notes: opt(host_notes.get()),
+            auth_method: Some(auth.into()),
+            has_password: false,
+            password: if auth == "password" { opt(host_password.get()) } else { None },
+        }
+    };
+    let testing = create_rw_signal(false);
+    let test_result = create_rw_signal::<Option<Result<(), String>>>(None);
     move || {
         show_add_host.get().then(|| view! {
     <div class="overlay">
@@ -34,21 +52,24 @@ pub(super) fn AddHostOverlay(
             } else {
                 t(locale.get(), "hosts.add")
             }}</h2>
-            <label class="host-label">{move || t(locale.get(), "hosts.from_config")}</label>
-            <select class="host-input" disabled=move || editing_host_alias.get().is_some()
-                on:change=move |ev| host_alias.set(dom_value(&ev))>
-                <option value="">{move || t(locale.get(), "hosts.pick")}</option>
-                {move || config_aliases.get().into_iter().map(|a| view! { <option value=a.clone()>{a}</option> }).collect_view()}
-            </select>
-            <label class="host-label">{move || t(locale.get(), "hosts.or_type")}</label>
+            <label class="host-label" for="add-host-alias">{move || t(locale.get(), "hosts.name")}</label>
             <input id="add-host-alias" class="host-input" autofocus=true
                 disabled=move || editing_host_alias.get().is_some()
+                placeholder=move || t(locale.get(), "hosts.name_ph")
                 prop:value=move || host_alias.get()
                 on:input=move |ev| host_alias.set(event_target_value(&ev)) />
+            <label class="host-label" for="host-hostname">{move || t(locale.get(), "hosts.hostname")}</label>
+            <input id="host-hostname" class="host-input"
+                placeholder=move || t(locale.get(), "hosts.hostname_ph")
+                prop:value=move || host_hostname.get()
+                on:input=move |ev| host_hostname.set(event_target_value(&ev)) />
             <label class="host-label" for="host-user">{move || t(locale.get(), "hosts.user")}</label>
             <input id="host-user" class="host-input" prop:value=move || host_user.get()
                 placeholder=move || t(locale.get(), "hosts.user_ph")
                 on:input=move |ev| host_user.set(event_target_value(&ev)) />
+            <label class="host-label" for="host-port">{move || t(locale.get(), "hosts.port")}</label>
+            <input id="host-port" class="host-input" placeholder="22" prop:value=move || host_port.get()
+                on:input=move |ev| host_port.set(event_target_value(&ev)) />
             <label class="host-label">{move || t(locale.get(), "hosts.auth_method")}</label>
             <select class="host-input" prop:value=move || host_auth_method.get()
                 on:change=move |ev| host_auth_method.set(dom_value(&ev))>
@@ -80,14 +101,31 @@ pub(super) fn AddHostOverlay(
             <textarea id="host-notes" class="host-input" prop:value=move || host_notes.get()
                 placeholder=move || t(locale.get(), "hosts.notes_ph")
                 on:input=move |ev| host_notes.set(event_target_value(&ev))></textarea>
-            <details class="host-advanced">
-                <summary>{move || t(locale.get(), "hosts.advanced")}</summary>
-                <label class="host-label" for="host-port">{move || t(locale.get(), "hosts.port")}</label>
-                <input id="host-port" class="host-input" prop:value=move || host_port.get() on:input=move |ev| host_port.set(event_target_value(&ev)) />
-            </details>
+            {move || test_result.get().map(|result| match result {
+                Ok(()) => view! { <p class="settings-status ok">{t(locale.get(), "hosts.test_ok")}</p> },
+                Err(error) => view! { <p class="settings-status fail">{localize_backend(locale.get(), &error)}</p> },
+            })}
             <div class="row">
+                <button type="button"
+                    disabled=move || testing.get() || host_alias.get().trim().is_empty()
+                    on:click=move |_| {
+                        let host = build_host();
+                        testing.set(true);
+                        test_result.set(None);
+                        let arg = to_value(&serde_json::json!({ "host": host })).unwrap();
+                        spawn_local(async move {
+                            let result = invoke_checked("test_ssh_connection", arg).await;
+                            test_result.set(Some(result.map(|_| ()).map_err(|error| js_error_text(error))));
+                            testing.set(false);
+                        });
+                    }>{move || if testing.get() {
+                        t(locale.get(), "hosts.testing")
+                    } else {
+                        t(locale.get(), "hosts.test")
+                    }}</button>
                 <button type="button" on:click=move |_| {
                     editing_host_alias.set(None);
+                    test_result.set(None);
                     show_add_host.set(false);
                 }>{move || t(locale.get(), "hosts.cancel")}</button>
                 <button type="button" class="primary" disabled=move || {
@@ -98,20 +136,7 @@ pub(super) fn AddHostOverlay(
                     alias_empty || password_missing
                 }
                     on:click=move |_| {
-                        let opt = |s: String| { let s = s.trim().to_string(); if s.is_empty() { None } else { Some(s) } };
-                        let auth = host_auth_method.get();
-                        let auth = if auth == "password" { "password" } else { "key" };
-                        let password = host_password.get();
-                        let host = SshHost {
-                            alias: host_alias.get().trim().to_string(),
-                            user: opt(host_user.get()),
-                            port: host_port.get().trim().parse::<u16>().ok(),
-                            identity_file: if auth == "key" { opt(host_identity.get()) } else { None },
-                            notes: opt(host_notes.get()),
-                            auth_method: Some(auth.into()),
-                            has_password: false,
-                            password: if auth == "password" { opt(password) } else { None },
-                        };
+                        let host = build_host();
                         let arg = to_value(&serde_json::json!({ "host": host })).unwrap();
                         spawn_local(async move {
                             match invoke_checked("add_ssh_host", arg).await {
@@ -126,11 +151,12 @@ pub(super) fn AddHostOverlay(
                                 }
                             }
                         });
-                        host_alias.set(String::new()); host_user.set(String::new()); host_port.set(String::new());
+                        host_alias.set(String::new()); host_hostname.set(String::new()); host_user.set(String::new()); host_port.set(String::new());
                         host_identity.set(String::new()); host_notes.set(String::new());
                         host_auth_method.set("key".into()); host_password.set(String::new());
                         host_has_password.set(false);
                         editing_host_alias.set(None);
+                        test_result.set(None);
                         show_add_host.set(false);
                     }>{move || if editing_host_alias.get().is_some() {
                         t(locale.get(), "hosts.update")

@@ -876,6 +876,7 @@ fn test_handle(run_id: &str, confirmed: bool) -> RemoteRunHandle {
     RemoteRunHandle::SshDirect {
         connection: crate::ssh_hosts::SshConnection {
             alias: "gpu".into(),
+            host_name: None,
             user: None,
             port: None,
             identity_file: None,
