@@ -47,6 +47,7 @@ mod settings_commands;
 mod skill_commands;
 mod specialist_tool;
 mod specialists;
+mod ssh_guard;
 mod ssh_hosts;
 mod terminal_sessions;
 mod workspace_manifest;
@@ -1626,6 +1627,12 @@ impl Output for TauriOutput {
         if let Some(tx) = &self.prov {
             let _ = tx.send(rec.clone());
         }
+    }
+    fn preflight_shell(&self, cmd: &str) -> Result<(), String> {
+        ssh_guard::preflight_shell(cmd)
+    }
+    fn note_shell_outcome(&self, cmd: &str, success: bool, detail: &str) {
+        ssh_guard::note_shell_outcome(cmd, success, detail);
     }
 }
 

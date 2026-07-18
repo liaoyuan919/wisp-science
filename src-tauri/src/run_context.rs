@@ -97,6 +97,46 @@ async fn read_tail<R: AsyncRead + Unpin>(mut reader: R) -> std::io::Result<Vec<u
     }
 }
 
+fn is_ssh_transport_program(program: &str) -> bool {
+    let name = std::path::Path::new(program)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "ssh" | "scp" | "sftp" | "ssh.exe" | "scp.exe" | "sftp.exe"
+    )
+}
+
+fn identity_file_from_args(args: &[String]) -> Option<&str> {
+    args.windows(2)
+        .find_map(|pair| (pair[0] == "-i").then_some(pair[1].as_str()))
+}
+
+fn record_ssh_runner_outcome(context_id: &str, result: &Result<RunCommandOutput, String>) {
+    match result {
+        Ok(output) if output.exit_code == 0 => {
+            crate::ssh_guard::record_success(context_id);
+        }
+        Ok(output) => {
+            let detail = if output.stderr.trim().is_empty() {
+                output.stdout.trim()
+            } else {
+                output.stderr.trim()
+            };
+            if crate::ssh_guard::is_connectivity_failure(detail) {
+                crate::ssh_guard::record_failure(context_id, detail);
+            }
+        }
+        Err(error) => {
+            if crate::ssh_guard::is_connectivity_failure(error) {
+                crate::ssh_guard::record_failure(context_id, error);
+            }
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl RunCommandRunner for ProcessRunRunner {
     async fn run(
@@ -104,6 +144,17 @@ impl RunCommandRunner for ProcessRunRunner {
         command: RunCommand,
         timeout: Duration,
     ) -> Result<RunCommandOutput, String> {
+        let ssh_transport =
+            is_ssh_transport_program(&command.program) || command.context_id.starts_with("ssh:");
+        if ssh_transport {
+            crate::ssh_guard::assert_allowed(&command.context_id)?;
+            if let Some(path) = identity_file_from_args(&command.args) {
+                if let Err(error) = crate::ssh_hosts::ensure_identity_path_accessible(path) {
+                    crate::ssh_guard::record_failure(&command.context_id, &error);
+                    return Err(error);
+                }
+            }
+        }
         let mut cmd = Command::new(&command.program);
         cmd.args(&command.args)
             .stdout(Stdio::piped())
@@ -160,8 +211,12 @@ impl RunCommandRunner for ProcessRunRunner {
                 .map_err(|e| format!("run_in_context stderr read failed: {e}"))?;
             Ok::<_, String>((status, stdout, stderr))
         };
-        let (status, stdout, stderr) = match tokio::time::timeout(timeout, operation).await {
-            Ok(Ok(output)) => output,
+        let result = match tokio::time::timeout(timeout, operation).await {
+            Ok(Ok((status, stdout, stderr))) => Ok(RunCommandOutput {
+                exit_code: status.code().unwrap_or(-1) as i64,
+                stdout: String::from_utf8_lossy(&stdout).to_string(),
+                stderr: String::from_utf8_lossy(&stderr).to_string(),
+            }),
             Ok(Err(error)) => {
                 stdout_task.abort();
                 stderr_task.abort();
@@ -169,7 +224,7 @@ impl RunCommandRunner for ProcessRunRunner {
                 let _ = child.wait().await;
                 let _ = stdout_task.await;
                 let _ = stderr_task.await;
-                return Err(error);
+                Err(error)
             }
             Err(_) => {
                 stdout_task.abort();
@@ -178,17 +233,16 @@ impl RunCommandRunner for ProcessRunRunner {
                 let _ = child.wait().await;
                 let _ = stdout_task.await;
                 let _ = stderr_task.await;
-                return Err(format!(
+                Err(format!(
                     "run_in_context timed out after {}s",
                     timeout.as_secs()
-                ));
+                ))
             }
         };
-        Ok(RunCommandOutput {
-            exit_code: status.code().unwrap_or(-1) as i64,
-            stdout: String::from_utf8_lossy(&stdout).to_string(),
-            stderr: String::from_utf8_lossy(&stderr).to_string(),
-        })
+        if ssh_transport {
+            record_ssh_runner_outcome(&command.context_id, &result);
+        }
+        result
     }
 }
 
@@ -309,7 +363,12 @@ impl RunManager {
         if remote_path.is_empty() || remote_path.contains(['\0', '\n', '\r']) {
             return Err("Invalid remote file path".into());
         }
+        crate::ssh_guard::assert_allowed(&context.id)?;
         let connection = crate::ssh_hosts::SshConnection::from_execution_context(context)?;
+        if let Err(error) = connection.assert_ready_to_connect() {
+            crate::ssh_guard::record_failure(&context.id, &error);
+            return Err(error);
+        }
         let mut args = connection.scp_option_args()?;
         args.push(format!("{}:{remote_path}", connection.target()?));
         args.push(destination.to_string_lossy().into_owned());

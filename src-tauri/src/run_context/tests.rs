@@ -825,12 +825,15 @@ fn ok_output(stdout: &str) -> Result<RunCommandOutput, String> {
 async fn ssh_download_uses_context_connection_options() {
     let runner = Arc::new(ScriptedRunRunner::new(vec![ok_output("")]));
     let manager = RunManager::with_runner(runner.clone());
+    let identity =
+        std::env::temp_dir().join(format!("wisp-run-download-key-{}", uuid::Uuid::new_v4()));
+    std::fs::write(&identity, b"test-key\n").unwrap();
     let mut context = wisp_store::ExecutionContext::new("ssh:CPU", "CPU").unwrap();
     context.config_json = serde_json::json!({
         "alias": "cpu.example",
         "user": "alice",
         "port": 2222,
-        "identity_file": "/keys/cpu"
+        "identity_file": identity.to_string_lossy(),
     })
     .to_string();
     let destination = std::env::temp_dir().join("results.tar.gz");
@@ -850,7 +853,7 @@ async fn ssh_download_uses_context_connection_options() {
     assert!(commands[0]
         .args
         .windows(2)
-        .any(|args| args == ["-i", "/keys/cpu"]));
+        .any(|args| { args[0] == "-i" && args[1] == identity.to_string_lossy() }));
     assert_eq!(
         &commands[0].args[commands[0].args.len() - 2..],
         [
@@ -892,8 +895,11 @@ fn permanent_remote_start_errors_require_user_intervention() {
     ] {
         assert!(permanent_remote_start_error(error), "{error}");
     }
-    assert!(!permanent_remote_start_error(
+    assert!(permanent_remote_start_error(
         "SSH launch failed: connection timed out"
+    ));
+    assert!(permanent_remote_start_error(
+        "SSH connectivity gate blocked for `ssh:gpu` after a previous failure"
     ));
 }
 

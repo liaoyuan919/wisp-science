@@ -392,6 +392,9 @@ fn run_bundled_ssh_probe(
     runner: &mut dyn ProbeRunner,
     specs: &[ProbeSpec],
 ) -> Result<HashMap<&'static str, String>, String> {
+    if let Ok(connection) = crate::ssh_hosts::SshConnection::from_execution_context(ctx) {
+        connection.assert_ready_to_connect()?;
+    }
     let script = bundled_probe_script(specs);
     let command = build_probe_command(ctx, &script)?;
     let output = runner.run(&command)?;
@@ -547,14 +550,24 @@ pub async fn probe_and_store_with_runner(
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Execution context not found: {context_id}"))?;
+    // User-driven probe is an intentional reconnect: clear any AI-loop cooldown.
+    if ctx.kind == wisp_store::ExecutionContextKind::Ssh {
+        crate::ssh_guard::clear(context_id);
+    }
     let now = chrono::Utc::now().timestamp();
     match probe_context_with_runner(&ctx, runner) {
         Ok(probe) => {
             ctx.capabilities_json = serde_json::to_string(&probe).map_err(|e| e.to_string())?;
             ctx.last_probe_status = Some("ok".into());
             ctx.last_probe_error = None;
+            if ctx.kind == wisp_store::ExecutionContextKind::Ssh {
+                crate::ssh_guard::record_success(context_id);
+            }
         }
         Err(e) => {
+            if ctx.kind == wisp_store::ExecutionContextKind::Ssh {
+                crate::ssh_guard::record_failure(context_id, &e);
+            }
             ctx.last_probe_status = Some("error".into());
             ctx.last_probe_error = Some(e);
         }

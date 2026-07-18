@@ -485,19 +485,39 @@ fn list_remote_dir_with_runner(
     path: Option<&str>,
     runner: &mut dyn RemoteRunner,
 ) -> Result<DirectoryListing, String> {
+    crate::ssh_guard::assert_allowed(&context.id)?;
+    if let Ok(connection) = crate::ssh_hosts::SshConnection::from_execution_context(context) {
+        if let Err(error) = connection.assert_ready_to_connect() {
+            crate::ssh_guard::record_failure(&context.id, &error);
+            return Err(error);
+        }
+    }
     let command = build_remote_directory_command(context, path)?;
-    let output = runner.run(&command)?;
+    let output = match runner.run(&command) {
+        Ok(output) => output,
+        Err(error) => {
+            if crate::ssh_guard::is_connectivity_failure(&error) {
+                crate::ssh_guard::record_failure(&context.id, &error);
+            }
+            return Err(error);
+        }
+    };
     if output.status != 0 {
         let detail = if output.stderr.is_empty() {
             "no error details returned".to_string()
         } else {
             output.stderr
         };
-        return Err(format!(
+        let error = format!(
             "Remote directory request failed (exit {}): {detail}",
             output.status
-        ));
+        );
+        if crate::ssh_guard::is_connectivity_failure(&error) {
+            crate::ssh_guard::record_failure(&context.id, &error);
+        }
+        return Err(error);
     }
+    crate::ssh_guard::record_success(&context.id);
     parse_remote_directory(&output.stdout)
 }
 
@@ -545,19 +565,39 @@ fn read_remote_file_with_runner(
     path: &str,
     runner: &mut dyn RemoteRunner,
 ) -> Result<FileContent, String> {
+    crate::ssh_guard::assert_allowed(&context.id)?;
+    if let Ok(connection) = crate::ssh_hosts::SshConnection::from_execution_context(context) {
+        if let Err(error) = connection.assert_ready_to_connect() {
+            crate::ssh_guard::record_failure(&context.id, &error);
+            return Err(error);
+        }
+    }
     let command = build_remote_file_command(context, path)?;
-    let output = runner.run(&command)?;
+    let output = match runner.run(&command) {
+        Ok(output) => output,
+        Err(error) => {
+            if crate::ssh_guard::is_connectivity_failure(&error) {
+                crate::ssh_guard::record_failure(&context.id, &error);
+            }
+            return Err(error);
+        }
+    };
     if output.status != 0 {
         let detail = if output.stderr.is_empty() {
             "no error details returned".to_string()
         } else {
             output.stderr
         };
-        return Err(format!(
+        let error = format!(
             "Remote file request failed (exit {}): {detail}",
             output.status
-        ));
+        );
+        if crate::ssh_guard::is_connectivity_failure(&error) {
+            crate::ssh_guard::record_failure(&context.id, &error);
+        }
+        return Err(error);
     }
+    crate::ssh_guard::record_success(&context.id);
     let bytes = protocol_payload(&output.stdout, REMOTE_FILE_PROTOCOL)?.to_vec();
     let mime = mime_for_path(Path::new(path));
     Ok(file_content_from_bytes(path.to_string(), mime, bytes))
@@ -778,13 +818,22 @@ mod tests {
         }
     }
 
-    fn ssh_context() -> wisp_store::ExecutionContext {
+    fn test_identity_file() -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "wisp-file-browser-test-key-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, b"test-key\n").unwrap();
+        path
+    }
+
+    fn ssh_context(identity_file: &std::path::Path) -> wisp_store::ExecutionContext {
         let mut context = wisp_store::ExecutionContext::new("ssh:gpu", "GPU").unwrap();
         context.config_json = serde_json::json!({
             "alias": "gpu.example",
             "user": "researcher",
             "port": 2222,
-            "identity_file": "/tmp/test-key"
+            "identity_file": identity_file.to_string_lossy(),
         })
         .to_string();
         context
@@ -792,15 +841,18 @@ mod tests {
 
     #[test]
     fn remote_directory_command_uses_context_connection_and_quotes_path() {
-        let command =
-            build_remote_directory_command(&ssh_context(), Some("/work/O'Brien; printf unsafe"))
-                .unwrap();
+        let identity = test_identity_file();
+        let command = build_remote_directory_command(
+            &ssh_context(&identity),
+            Some("/work/O'Brien; printf unsafe"),
+        )
+        .unwrap();
         assert_eq!(command.program, "ssh");
         assert!(command.args.windows(2).any(|args| args == ["-p", "2222"]));
         assert!(command
             .args
             .windows(2)
-            .any(|args| args == ["-i", "/tmp/test-key"]));
+            .any(|args| { args[0] == "-i" && args[1] == identity.to_string_lossy() }));
         assert!(command
             .args
             .iter()
@@ -821,13 +873,15 @@ mod tests {
 
     #[test]
     fn remote_directory_runner_parses_banner_and_sorts_directories_first() {
+        let identity = test_identity_file();
         let stdout = b"login banner\nWISP_REMOTE_DIR_V1\0/home/research\0f\012\0notes.txt\0d\00\0projects\0f\03\0a.csv\0".to_vec();
         let mut runner = FakeRemoteRunner::returning(RemoteOutput {
             status: 0,
             stdout,
             stderr: String::new(),
         });
-        let listing = list_remote_dir_with_runner(&ssh_context(), Some("~"), &mut runner).unwrap();
+        let listing =
+            list_remote_dir_with_runner(&ssh_context(&identity), Some("~"), &mut runner).unwrap();
         assert_eq!(listing.path, "/home/research");
         assert_eq!(
             listing.entries,
@@ -854,21 +908,24 @@ mod tests {
 
     #[test]
     fn remote_directory_runner_surfaces_ssh_failure() {
+        let identity = test_identity_file();
         let mut runner = FakeRemoteRunner::returning(RemoteOutput {
             status: 255,
             stdout: Vec::new(),
             stderr: "Permission denied".into(),
         });
-        let error =
-            list_remote_dir_with_runner(&ssh_context(), Some("~"), &mut runner).unwrap_err();
+        let error = list_remote_dir_with_runner(&ssh_context(&identity), Some("~"), &mut runner)
+            .unwrap_err();
         assert!(error.contains("exit 255"));
         assert!(error.contains("Permission denied"));
     }
 
     #[test]
     fn remote_file_command_quotes_path_and_guards_size() {
+        let identity = test_identity_file();
         let command =
-            build_remote_file_command(&ssh_context(), "/work/O'Brien results.html").unwrap();
+            build_remote_file_command(&ssh_context(&identity), "/work/O'Brien results.html")
+                .unwrap();
         assert_eq!(command.program, "ssh");
         let script = command.args.last().unwrap();
         assert!(script.contains("f='/work/O'\"'\"'Brien results.html'"));
@@ -879,6 +936,7 @@ mod tests {
 
     #[test]
     fn remote_file_runner_sniffs_text_after_banner() {
+        let identity = test_identity_file();
         let stdout = b"motd noise\nWISP_REMOTE_FILE_V1\0print('hi')\n".to_vec();
         let mut runner = FakeRemoteRunner::returning(RemoteOutput {
             status: 0,
@@ -886,7 +944,8 @@ mod tests {
             stderr: String::new(),
         });
         let content =
-            read_remote_file_with_runner(&ssh_context(), "~/analysis.py", &mut runner).unwrap();
+            read_remote_file_with_runner(&ssh_context(&identity), "~/analysis.py", &mut runner)
+                .unwrap();
         assert_eq!(content.mime, "text/x-python");
         assert_eq!(content.text.as_deref(), Some("print('hi')\n"));
         assert!(content.base64.is_none());
@@ -895,6 +954,7 @@ mod tests {
 
     #[test]
     fn remote_file_runner_returns_binary_as_base64() {
+        let identity = test_identity_file();
         let stdout = b"WISP_REMOTE_FILE_V1\0\x89PNG\0\x01".to_vec();
         let mut runner = FakeRemoteRunner::returning(RemoteOutput {
             status: 0,
@@ -902,7 +962,8 @@ mod tests {
             stderr: String::new(),
         });
         let content =
-            read_remote_file_with_runner(&ssh_context(), "/plots/figure.png", &mut runner).unwrap();
+            read_remote_file_with_runner(&ssh_context(&identity), "/plots/figure.png", &mut runner)
+                .unwrap();
         assert_eq!(content.mime, "image/png");
         assert!(content.text.is_none());
         assert_eq!(
@@ -917,13 +978,14 @@ mod tests {
 
     #[test]
     fn remote_file_runner_surfaces_size_limit_failure() {
+        let identity = test_identity_file();
         let mut runner = FakeRemoteRunner::returning(RemoteOutput {
             status: 67,
             stdout: Vec::new(),
             stderr: "Remote file exceeds 33554432 byte limit: /big.bam".into(),
         });
-        let error =
-            read_remote_file_with_runner(&ssh_context(), "/big.bam", &mut runner).unwrap_err();
+        let error = read_remote_file_with_runner(&ssh_context(&identity), "/big.bam", &mut runner)
+            .unwrap_err();
         assert!(error.contains("exit 67"));
         assert!(error.contains("byte limit"));
     }

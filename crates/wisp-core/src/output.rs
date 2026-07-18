@@ -54,6 +54,12 @@ pub trait Output: Send + Sync {
     /// Fired once per producing tool call that wrote ≥1 file, with the code,
     /// result text, and diffed inputs/outputs. Default: no-op (CLI ignores it).
     fn provenance(&self, _rec: &crate::provenance::ProvenanceRecord) {}
+    /// Optional shell preflight (e.g. block free-form SSH after a prior failure).
+    fn preflight_shell(&self, _cmd: &str) -> Result<(), String> {
+        Ok(())
+    }
+    /// Optional shell postflight so the host can open an SSH connectivity gate.
+    fn note_shell_outcome(&self, _cmd: &str, _success: bool, _detail: &str) {}
 }
 
 /// A silent output for tests / non-interactive runs that auto-approves.
@@ -109,6 +115,12 @@ impl<'a> wisp_tools::ToolEnv for ToolEnvAdapter<'a> {
     fn is_cancelled(&self) -> bool {
         self.cancel
             .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+    }
+    async fn preflight_shell(&self, cmd: &str) -> Result<(), String> {
+        self.out.preflight_shell(cmd)
+    }
+    fn note_shell_outcome(&self, cmd: &str, success: bool, detail: &str) {
+        self.out.note_shell_outcome(cmd, success, detail);
     }
     async fn emit(&self, event: wisp_tools::ToolEvent) {
         match event {

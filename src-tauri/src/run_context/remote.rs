@@ -715,10 +715,16 @@ pub(super) fn permanent_remote_start_error(error: &str) -> bool {
         "could not resolve host",
         "name or service not known",
         "no such identity",
+        "identity file is not accessible",
         "bad configuration option",
         "connection reset",
         "connection closed",
+        "connection timed out",
+        "connect timed out",
+        "no route to host",
+        "network is unreachable",
         "kex_exchange_identification",
+        "ssh connectivity gate blocked",
     ]
     .iter()
     .any(|message| error.contains(message))

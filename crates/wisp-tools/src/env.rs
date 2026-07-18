@@ -99,6 +99,14 @@ pub trait ToolEnv: Send + Sync {
     fn is_cancelled(&self) -> bool {
         false
     }
+    /// Optional pre-check before spawning a shell command (e.g. block free-form
+    /// SSH against a host the app already failed to reach). Default allows all.
+    async fn preflight_shell(&self, _cmd: &str) -> Result<(), String> {
+        Ok(())
+    }
+    /// Optional post-check after a shell command finishes so the host can open
+    /// a connectivity gate without spawning another SSH attempt.
+    fn note_shell_outcome(&self, _cmd: &str, _success: bool, _detail: &str) {}
 }
 
 #[derive(Debug, Clone)]

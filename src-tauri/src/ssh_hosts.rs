@@ -107,6 +107,16 @@ impl SshConnection {
         Ok(args)
     }
 
+    /// Fail before spawning when a configured identity file is missing.
+    /// Call this at connection entry points (not during pure arg construction).
+    pub fn assert_ready_to_connect(&self) -> Result<(), String> {
+        self.validate()?;
+        if let Some(identity_file) = &self.identity_file {
+            ensure_identity_file_accessible(identity_file)?;
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<(), String> {
         validate_connection_name("SSH alias", &self.alias)?;
         if let Some(user) = &self.user {
@@ -125,6 +135,43 @@ impl SshConnection {
         }
         Ok(())
     }
+}
+
+fn expand_user_path(path: &str) -> std::path::PathBuf {
+    if path == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home;
+        }
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    if let Some(rest) = path.strip_prefix("~\\") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    std::path::PathBuf::from(path)
+}
+
+fn ensure_identity_file_accessible(identity_file: &str) -> Result<(), String> {
+    ensure_identity_path_accessible(identity_file)
+}
+
+/// Public so runners can re-check `-i` paths without rebuilding the connection.
+pub fn ensure_identity_path_accessible(identity_file: &str) -> Result<(), String> {
+    let path = expand_user_path(identity_file);
+    if path.is_file() {
+        return Ok(());
+    }
+    Err(format!(
+        "SSH identity file is not accessible: {identity_file} (resolved {}). \
+         Fix the IdentityFile path in the SSH host settings before connecting. \
+         Do not retry with shell `ssh` or alternate `-i` keys.",
+        path.display()
+    ))
 }
 
 fn common_option_args() -> Vec<String> {
@@ -290,7 +337,15 @@ paths. For persistent interactive analysis, call `python` or `r` with the \
 matching `context_id`; omitting it selects `local`. Interpreter paths come from \
 the execution context's saved settings or probe result, not shell environment \
 changes. Use `set_runtime_interpreter` when the user provides a different \
-Python or R executable.\n\n",
+Python or R executable.\n\
+**SSH connectivity policy:** make at most one connection attempt to a remote host \
+(via `run_in_context`, `python`/`r` with `context_id`, or a single read-only probe). \
+If that attempt fails with timeout, connection refused, permission denied, missing \
+identity file, or any connectivity gate error: STOP immediately. Do not retry with \
+shell `ssh`, custom `-i` keys, `StrictHostKeyChecking=no`, alternate ports, or extra \
+runtime launches — repeated failures look like SSH brute force and can get the \
+user's IP banned. Report the failure once and ask the user to fix the connection \
+(unlock IP / fix key / re-probe) then retry manually.\n\n",
     );
     for ctx in contexts {
         let cfg: serde_json::Value = serde_json::from_str(&ctx.config_json).unwrap_or_default();
@@ -315,6 +370,16 @@ Python or R executable.\n\n",
                     .filter(|n| !n.trim().is_empty())
                 {
                     s.push_str(&format!(" — {notes}"));
+                }
+                if ctx.last_probe_status.as_deref() == Some("error") {
+                    let detail = ctx
+                        .last_probe_error
+                        .as_deref()
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or("probe failed");
+                    s.push_str(&format!(
+                        " — CONNECTIVITY: last probe failed ({detail}). Do not attempt SSH to this host until the user re-probes successfully"
+                    ));
                 }
             }
             wisp_store::ExecutionContextKind::Wsl => {
@@ -346,6 +411,14 @@ Python or R executable.\n\n",
             == Some("unprivileged")
         {
             s.push_str(" — privilege: unprivileged; do not use sudo or system package managers");
+        }
+        if let Some((_, reason)) = crate::ssh_guard::blocked_contexts()
+            .into_iter()
+            .find(|(id, _)| id == &ctx.id)
+        {
+            s.push_str(&format!(
+                " — CONNECTIVITY GATE OPEN: blocked after prior failure ({reason}). Do not attempt any SSH to this host"
+            ));
         }
         s.push('\n');
     }
@@ -656,6 +729,19 @@ mod tests {
     }
 
     #[test]
+    fn missing_identity_file_fails_before_connect() {
+        let connection = SshConnection {
+            alias: "gpu".into(),
+            user: None,
+            port: None,
+            identity_file: Some("/definitely/missing/wisp-test-key".into()),
+        };
+        let err = connection.assert_ready_to_connect().unwrap_err();
+        assert!(err.contains("identity file is not accessible"), "{err}");
+        assert!(err.contains("Do not retry"), "{err}");
+    }
+
+    #[test]
     fn upsert_adds_new_and_replaces_by_alias_in_place() {
         let list = vec![host("a", Some("first")), host("b", None)];
         let added = upsert_host(list, host("c", None));
@@ -876,7 +962,27 @@ Host -unsafe bad/name !negated
             s.contains("Remote paths are not local paths"),
             "remote path warning missing:\n{s}"
         );
+        assert!(
+            s.contains("SSH connectivity policy"),
+            "connectivity policy missing:\n{s}"
+        );
+        assert!(
+            s.contains("Do not retry with shell `ssh`"),
+            "no-retry guidance missing:\n{s}"
+        );
         assert!(s.contains("slurm; sbatch"), "notes missing:\n{s}");
+    }
+
+    #[test]
+    fn render_contexts_flags_failed_probe_connectivity() {
+        let mut ctx = wisp_store::ExecutionContext::new("ssh:down", "down").unwrap();
+        ctx.config_json = serde_json::json!({ "alias": "down" }).to_string();
+        ctx.last_probe_status = Some("error".into());
+        ctx.last_probe_error = Some("Connection timed out".into());
+        let s = render_contexts_section(&[ctx]).unwrap();
+        assert!(s.contains("CONNECTIVITY: last probe failed"), "{s}");
+        assert!(s.contains("Connection timed out"), "{s}");
+        assert!(s.contains("Do not attempt SSH"), "{s}");
     }
 
     #[test]

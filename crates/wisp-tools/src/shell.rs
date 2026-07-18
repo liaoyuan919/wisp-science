@@ -77,6 +77,9 @@ async fn run_shell(args: &serde_json::Value, env: &dyn ToolEnv, timeout: Duratio
         Ok(c) => c,
         Err(e) => return ToolResult::fail(e),
     };
+    if let Err(error) = env.preflight_shell(&cmd).await {
+        return ToolResult::fail(error);
+    }
     // In the "full" scope dangerous commands run without a prompt; otherwise
     // ("auto" and "ask") a dangerous command still asks.
     if !env.danger_auto_approve() {
@@ -128,10 +131,12 @@ async fn run_shell(args: &serde_json::Value, env: &dyn ToolEnv, timeout: Duratio
         tokio::select! {
             _ = &mut deadline => {
                 let _ = child.kill().await;
-                return ToolResult::fail(format!(
+                let detail = format!(
                     "exec {cmd} timed out after {}s",
                     timeout.as_secs_f64()
-                ));
+                );
+                env.note_shell_outcome(&cmd, false, &detail);
+                return ToolResult::fail(detail);
             }
             _ = &mut cancelled => {
                 let _ = child.kill().await;
@@ -189,14 +194,20 @@ async fn run_shell(args: &serde_json::Value, env: &dyn ToolEnv, timeout: Duratio
     let status = tokio::select! {
         res = child.wait() => match res {
             Ok(s) => s,
-            Err(e) => return ToolResult::fail(format!("shell error: {e}")),
+            Err(e) => {
+                let detail = format!("shell error: {e}");
+                env.note_shell_outcome(&cmd, false, &detail);
+                return ToolResult::fail(detail);
+            }
         },
         _ = &mut deadline => {
             let _ = child.kill().await;
-            return ToolResult::fail(format!(
+            let detail = format!(
                 "exec {cmd} timed out after {}s",
                 timeout.as_secs_f64()
-            ));
+            );
+            env.note_shell_outcome(&cmd, false, &detail);
+            return ToolResult::fail(detail);
         }
         _ = &mut cancelled => {
             let _ = child.kill().await;
@@ -234,16 +245,21 @@ async fn run_shell(args: &serde_json::Value, env: &dyn ToolEnv, timeout: Duratio
         body.push_str(&format!(
             "\n... output exceeded {MAX_OUTPUT_BYTES} bytes; process terminated"
         ));
+        env.note_shell_outcome(&cmd, false, &body);
         return ToolResult::fail(body);
     }
     if !status.success() {
-        return ToolResult::fail(format!("exit {}: {body}", status.code().unwrap_or(-1)));
+        let detail = format!("exit {}: {body}", status.code().unwrap_or(-1));
+        env.note_shell_outcome(&cmd, false, &detail);
+        return ToolResult::fail(detail);
     }
-    ToolResult::ok(if body.trim().is_empty() {
+    let content = if body.trim().is_empty() {
         "(empty)".to_string()
     } else {
         body
-    })
+    };
+    env.note_shell_outcome(&cmd, true, &content);
+    ToolResult::ok(content)
 }
 
 #[async_trait]

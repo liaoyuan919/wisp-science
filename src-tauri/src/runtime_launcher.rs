@@ -176,6 +176,15 @@ impl RuntimeLauncher for TauriRuntimeLauncher {
             .get_execution_context(&key.context_id)
             .await?
             .ok_or_else(|| anyhow!("Execution context not found: {}", key.context_id))?;
+        if context.kind == wisp_store::ExecutionContextKind::Ssh {
+            crate::ssh_guard::assert_allowed(&context.id).map_err(anyhow::Error::msg)?;
+            if let Ok(connection) = SshConnection::from_execution_context(&context) {
+                if let Err(error) = connection.assert_ready_to_connect() {
+                    crate::ssh_guard::record_failure(&context.id, &error);
+                    return Err(anyhow::Error::msg(error));
+                }
+            }
+        }
         let (interpreter, worker, language) = match key.language {
             RuntimeLanguage::Python => (
                 resolve_python_interpreter(&context, &self.app_data)?,
@@ -203,7 +212,14 @@ impl RuntimeLauncher for TauriRuntimeLauncher {
             Some(
                 ensure_remote_worker(&context, key.language, &source, self.runner.as_ref())
                     .await
-                    .map_err(anyhow::Error::msg)?,
+                    .map_err(|error| {
+                        if context.kind == wisp_store::ExecutionContextKind::Ssh
+                            && crate::ssh_guard::is_connectivity_failure(&error)
+                        {
+                            crate::ssh_guard::record_failure(&context.id, &error);
+                        }
+                        anyhow::Error::msg(error)
+                    })?,
             )
         };
         let command = build_attached_command(
@@ -222,14 +238,31 @@ impl RuntimeLauncher for TauriRuntimeLauncher {
         } else {
             &[]
         };
-        let client = KernelClient::spawn_command(
+        let client = match KernelClient::spawn_command(
             &command.program,
             &command.args,
             envs,
             command.cwd.as_deref(),
             language,
         )
-        .await?;
+        .await
+        {
+            Ok(client) => {
+                if context.kind == wisp_store::ExecutionContextKind::Ssh {
+                    crate::ssh_guard::record_success(&context.id);
+                }
+                client
+            }
+            Err(error) => {
+                if context.kind == wisp_store::ExecutionContextKind::Ssh {
+                    let detail = error.to_string();
+                    if crate::ssh_guard::is_connectivity_failure(&detail) {
+                        crate::ssh_guard::record_failure(&context.id, &detail);
+                    }
+                }
+                return Err(error);
+            }
+        };
         let ready = client.ready().clone();
         Ok(LaunchedRuntime::new(
             Box::new(client),
