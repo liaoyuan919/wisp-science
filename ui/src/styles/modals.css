@@ -248,9 +248,10 @@ textarea.host-input { min-height:64px; resize:vertical; }
 .artifact-modal.html-preview .am-figure .rp-html {
   flex: 0 0 1200px; width: 1200px; min-width: 1200px; max-width: none;
 }
-.artifact-modal .am-tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border-strong); flex: 0 0 auto; }
-.artifact-modal .am-tab { padding: 6px 10px; border: none; background: transparent; color: var(--text-faint); font: inherit; font-size: 12px; cursor: pointer; border-radius: 8px 8px 0 0; }
-.artifact-modal .am-tab.active { background: var(--bg-sunken); color: var(--text); }
+.artifact-modal .am-tabs { display: flex; gap: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--border-strong); flex: 0 0 auto; }
+.artifact-modal .am-tab { padding: 6px 10px; border: 1px solid transparent; background: transparent; color: var(--text-faint); font: inherit; font-size: 12px; font-weight: 520; cursor: pointer; border-radius: var(--radius-xs); }
+.artifact-modal .am-tab:hover:not(.active) { background: var(--surface-hover); color: var(--text); }
+.artifact-modal .am-tab.active { background: var(--bg-elev); border-color: var(--border-active); color: var(--text); box-shadow: var(--shadow-sm); }
 .artifact-modal .am-panel { max-height: 30vh; overflow: auto; flex: 0 0 auto; min-width: 0; }
 .artifact-modal .am-panel > .rp-code { max-height: none; overflow: visible; }
 .artifact-modal .am-log { font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap; margin: 0; }
