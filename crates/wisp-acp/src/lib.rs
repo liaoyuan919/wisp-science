@@ -1,7 +1,7 @@
 //! Process and protocol boundary for local ACP v1 agents.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     path::{Path, PathBuf},
     pin::pin,
     sync::{
@@ -41,6 +41,7 @@ pub struct AcpAgentProfile {
     pub label: String,
     pub command: PathBuf,
     pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
 }
 
 impl AcpAgentProfile {
@@ -55,7 +56,14 @@ impl AcpAgentProfile {
             label: label.into(),
             command: command.into(),
             args,
+            env: BTreeMap::new(),
         }
+    }
+
+    /// Adds one explicit environment override for the ACP child process.
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.insert(key.into(), value.into());
+        self
     }
 
     fn validate(&self) -> Result<(), AcpError> {
@@ -67,6 +75,9 @@ impl AcpAgentProfile {
         }
         if self.command.as_os_str().is_empty() {
             return Err(AcpError::InvalidProfile("agent command is empty"));
+        }
+        if self.env.keys().any(|key| key.is_empty()) {
+            return Err(AcpError::InvalidProfile("environment key is empty"));
         }
         Ok(())
     }
@@ -877,7 +888,7 @@ struct ProcessTransport {
 impl ConnectTo<Client> for ProcessTransport {
     async fn connect_to(self, client: impl ConnectTo<Agent>) -> agent_client_protocol::Result<()> {
         let mut command = async_process::Command::new(&self.profile.command);
-        command.args(&self.profile.args);
+        command.args(&self.profile.args).envs(&self.profile.env);
         #[cfg(windows)]
         {
             use async_process::windows::CommandExt as _;

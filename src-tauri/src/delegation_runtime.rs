@@ -1052,11 +1052,27 @@ fn is_codex_profile(profile: &acp::AcpAgentProfile) -> bool {
 
 fn controlled_codex_launch_profile(profile: &acp::AcpAgentProfile) -> wisp_acp::AcpAgentProfile {
     let mut launch = acp::launch_profile(profile);
-    // These overrides are appended so they win over a user's general Codex
-    // defaults for this controlled child only. Codex then executes tests and
-    // project commands in its OS-enforced workspace sandbox, with command
-    // network and web search disabled. `never` makes every attempted sandbox
-    // escalation fail instead of delegating a broader permission decision.
+    // The current @agentclientprotocol/codex-acp server ignores command-line
+    // config arguments and reads CODEX_CONFIG instead. Keep the arguments too
+    // for other codex-acp implementations that support the Codex CLI syntax.
+    // The Agent mode runs each turn in workspace-write with network disabled;
+    // requests beyond that sandbox still pass through Wisp's plan gate.
+    let controlled_config = serde_json::json!({
+        "approval_policy": "never",
+        "sandbox_mode": "workspace-write",
+        "sandbox_workspace_write": {
+            "network_access": false,
+        },
+        "web_search": "disabled",
+        "mcp_servers": {},
+    });
+    launch.env.insert(
+        "CODEX_CONFIG".into(),
+        serde_json::to_string(&controlled_config).expect("static Codex config serializes"),
+    );
+    launch
+        .env
+        .insert("INITIAL_AGENT_MODE".into(), "agent".into());
     for value in [
         r#"approval_policy="never""#,
         r#"sandbox_mode="workspace-write""#,
@@ -1460,6 +1476,22 @@ mod tests {
             args: vec!["-y".into(), "@agentclientprotocol/codex-acp".into()],
         }));
         let launch = controlled_codex_launch_profile(&direct);
+        let config: serde_json::Value = serde_json::from_str(
+            launch
+                .env
+                .get("CODEX_CONFIG")
+                .expect("controlled Codex config"),
+        )
+        .expect("valid controlled Codex config");
+        assert_eq!(
+            launch.env.get("INITIAL_AGENT_MODE").map(String::as_str),
+            Some("agent")
+        );
+        assert_eq!(config["approval_policy"], "never");
+        assert_eq!(config["sandbox_mode"], "workspace-write");
+        assert_eq!(config["sandbox_workspace_write"]["network_access"], false);
+        assert_eq!(config["web_search"], "disabled");
+        assert_eq!(config["mcp_servers"], serde_json::json!({}));
         let overrides = launch
             .args
             .chunks_exact(2)

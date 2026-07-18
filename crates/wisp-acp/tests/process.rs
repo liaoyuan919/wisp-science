@@ -57,11 +57,23 @@ fn main() -> ExitCode {
 }
 
 async fn run_tests() -> Result<(), String> {
+    test_environment_propagation().await?;
     test_full_lifecycle().await?;
     test_protocol_mismatch().await?;
     test_capability_omission().await?;
     test_child_exit().await?;
     test_stderr_bound_and_drop_cleanup().await?;
+    Ok(())
+}
+
+async fn test_environment_propagation() -> Result<(), String> {
+    let handle = AcpSessionHandle::launch(
+        profile("environment", vec![]).with_env("WISP_ACP_TEST_ENV", "controlled-child"),
+    )
+    .await
+    .map_err(stringify)?;
+    check(handle.info().protocol_version == 1, "child environment")?;
+    handle.shutdown(Duration::from_secs(1)).await;
     Ok(())
 }
 
@@ -367,6 +379,12 @@ fn fake_agent(args: &[String]) -> ExitCode {
                     std::thread::sleep(Duration::from_millis(20));
                 }
             });
+        }
+        "environment" => {
+            if std::env::var("WISP_ACP_TEST_ENV").as_deref() != Ok("controlled-child") {
+                eprintln!("controlled child environment was not propagated");
+                return ExitCode::FAILURE;
+            }
         }
         "full" | "mismatch" | "no-caps" => {}
         _ => return ExitCode::FAILURE,
