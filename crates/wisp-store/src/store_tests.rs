@@ -147,6 +147,12 @@ async fn agent_workflow_plan_edit_and_approval_are_versioned() {
     assert_eq!(approved.status, AgentWorkflowStatus::Approved);
     assert_eq!(approved.version, 3);
     assert!(approved.approved_at.is_some());
+    assert!(store.update_agent_workflow_step(&steps[0]).await.is_err());
+    assert!(store.delete_agent_workflow_step("code").await.is_err());
+    let mut reverted = approved;
+    reverted.status = AgentWorkflowStatus::Draft;
+    assert!(store.update_agent_workflow(&reverted).await.is_err());
+    assert!(store.delete_agent_workflow("wf").await.unwrap());
     store.pool.close().await;
     let _ = std::fs::remove_file(tmp);
 }

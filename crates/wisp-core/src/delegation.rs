@@ -391,6 +391,11 @@ impl TryFrom<AgentDelegationRequest> for ValidatedAgentDelegationRequest {
 
     fn try_from(request: AgentDelegationRequest) -> Result<Self, Self::Error> {
         request.validate()?;
+        let templates = crate::orchestration::AgentTemplateRegistry::builtins();
+        let template = templates
+            .get(&request.spec.template_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown controlled agent template"))?;
+        template.validate_spec(&request.spec)?;
         Ok(Self { inner: request })
     }
 }

@@ -114,6 +114,9 @@ impl AgentWorkflow {
             updated_at: now,
         };
         workflow.validate()?;
+        if workflow.status != AgentWorkflowStatus::Draft {
+            anyhow::bail!("new agent workflow plans must start as draft");
+        }
         Ok(workflow)
     }
 
@@ -359,6 +362,9 @@ impl super::Store {
         steps: &[AgentWorkflowStep],
     ) -> Result<()> {
         workflow.validate()?;
+        if workflow.status != AgentWorkflowStatus::Draft {
+            anyhow::bail!("new agent workflow plans must start as draft");
+        }
         validate_plan_steps(&workflow.id, steps)?;
         let mut tx = self.pool.begin().await?;
         sqlx::query(
@@ -467,6 +473,9 @@ impl super::Store {
 
     pub async fn create_agent_workflow(&self, workflow: &AgentWorkflow) -> Result<()> {
         workflow.validate()?;
+        if workflow.status != AgentWorkflowStatus::Draft {
+            anyhow::bail!("new agent workflows must start as draft");
+        }
         sqlx::query(
             "INSERT INTO agent_workflows(id,project_id,workspace_id,frame_id,name,description,goal,mode,status,max_parallel,requires_confirmation,plan_json,version,enabled,approved_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
@@ -520,6 +529,11 @@ impl super::Store {
             Some(current) => current,
             None => return Ok(false),
         };
+        if current.status != AgentWorkflowStatus::Draft
+            || workflow.status != AgentWorkflowStatus::Draft
+        {
+            anyhow::bail!("approved or running agent workflow plans are immutable");
+        }
         if workflow.version < current.version {
             anyhow::bail!(
                 "workflow version must not move backwards ({} < {})",
@@ -529,7 +543,7 @@ impl super::Store {
         }
         let version = workflow.version.max(current.version.saturating_add(1));
         let updated = sqlx::query(
-            "UPDATE agent_workflows SET project_id=?,workspace_id=?,frame_id=?,name=?,description=?,goal=?,mode=?,status=?,max_parallel=?,requires_confirmation=?,plan_json=?,version=?,enabled=?,approved_at=?,updated_at=? WHERE id=? AND version=?",
+            "UPDATE agent_workflows SET project_id=?,workspace_id=?,frame_id=?,name=?,description=?,goal=?,mode=?,status=?,max_parallel=?,requires_confirmation=?,plan_json=?,version=?,enabled=?,approved_at=?,updated_at=? WHERE id=? AND version=? AND status='draft'",
         )
         .bind(&workflow.project_id)
         .bind(&workflow.workspace_id)
@@ -554,11 +568,21 @@ impl super::Store {
     }
 
     pub async fn delete_agent_workflow(&self, id: &str) -> Result<bool> {
-        let deleted = sqlx::query("DELETE FROM agent_workflows WHERE id=?")
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE agent_workflows SET status='draft' WHERE id=?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
-        Ok(deleted.rows_affected() == 1)
+        sqlx::query("DELETE FROM agent_workflow_steps WHERE workflow_id=?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        let deleted_workflow = sqlx::query("DELETE FROM agent_workflows WHERE id=?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(deleted_workflow.rows_affected() == 1)
     }
 
     pub async fn create_agent_workflow_step(&self, step: &AgentWorkflowStep) -> Result<()> {

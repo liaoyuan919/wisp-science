@@ -11,3 +11,5 @@ ALTER TABLE agent_workflows ADD COLUMN plan_json TEXT NOT NULL DEFAULT '{}';
 ALTER TABLE agent_workflows ADD COLUMN approved_at INTEGER;
 ALTER TABLE agent_workflow_steps ADD COLUMN template_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE agent_workflow_steps ADD COLUMN spec_json TEXT NOT NULL DEFAULT '{}';
+-- Store::apply_agent_workflow_plans also installs INSERT/UPDATE/DELETE
+-- triggers that reject step mutations once the parent leaves draft status.

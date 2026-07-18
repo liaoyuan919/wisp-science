@@ -482,7 +482,7 @@ fn template(
         budget_ceiling: AgentBudget {
             max_tokens: Some(max_tokens),
             max_tool_calls: Some(64),
-            max_cost_microunits: None,
+            max_cost_microunits: Some(5_000_000),
         },
         timeout_ceiling_secs: Some(timeout_secs),
         allow_delegation: false,
@@ -492,6 +492,28 @@ fn template(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        AgentDelegationRequest, AgentDelegationResponse, AgentDelegator, DelegationStatus,
+        ValidatedAgentDelegationRequest,
+    };
+
+    struct EchoDelegator;
+
+    #[async_trait::async_trait]
+    impl AgentDelegator for EchoDelegator {
+        async fn delegate_validated(
+            &self,
+            request: ValidatedAgentDelegationRequest,
+        ) -> anyhow::Result<AgentDelegationResponse> {
+            Ok(AgentDelegationResponse {
+                request_id: request.as_request().request_id.clone(),
+                status: DelegationStatus::Succeeded,
+                output: json!({}),
+                artifact_ids: vec![],
+                error: None,
+            })
+        }
+    }
 
     #[test]
     fn template_caps_permissions_and_disables_nested_delegation() {
@@ -530,6 +552,7 @@ mod tests {
         assert!(!spec.permissions.write);
         assert!(!spec.allow_delegation);
         assert_eq!(spec.timeout_secs, reviewer.timeout_ceiling_secs);
+        assert_eq!(spec.budget.max_cost_microunits, Some(5_000_000));
         reviewer.validate_spec(&spec).unwrap();
     }
 
@@ -587,5 +610,40 @@ mod tests {
             .unwrap();
         plan.steps[0].spec.dependencies = vec!["reviewer".into()];
         assert!(plan.validate(&templates).is_err());
+    }
+
+    #[tokio::test]
+    async fn delegation_boundary_rejects_tampered_template_fields() {
+        let templates = AgentTemplateRegistry::builtins();
+        let mut spec = templates
+            .get("reviewer")
+            .unwrap()
+            .instantiate(AgentInstanceRequest {
+                agent_id: "review".into(),
+                name: "Reviewer".into(),
+                goal: "Review".into(),
+                context_summary: String::new(),
+                inputs: vec![],
+                acceptance_criteria: vec![],
+                dependencies: vec![],
+                model: None,
+                permissions: PermissionSet::default(),
+                context_policy: ContextPolicy::default(),
+                budget: AgentBudget::default(),
+                timeout_secs: None,
+                requires_review: false,
+                session_policy: AgentSessionPolicy::New,
+                allow_delegation: false,
+            })
+            .unwrap();
+        spec.permissions.write = true;
+        let request = AgentDelegationRequest {
+            request_id: "request".into(),
+            workflow_id: "workflow".into(),
+            step_id: "review".into(),
+            spec,
+            input: json!({}),
+        };
+        assert!(EchoDelegator.delegate(request).await.is_err());
     }
 }

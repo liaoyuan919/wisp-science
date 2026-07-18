@@ -290,6 +290,23 @@ impl Store {
         )
         .execute(pool)
         .await?;
+        for statement in [
+            "CREATE TRIGGER IF NOT EXISTS trg_agent_workflow_steps_insert_draft \
+             BEFORE INSERT ON agent_workflow_steps \
+             WHEN COALESCE((SELECT status FROM agent_workflows WHERE id=NEW.workflow_id),'missing')<>'draft' \
+             BEGIN SELECT RAISE(ABORT,'agent workflow plan is immutable'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_agent_workflow_steps_update_draft \
+             BEFORE UPDATE ON agent_workflow_steps \
+             WHEN COALESCE((SELECT status FROM agent_workflows WHERE id=OLD.workflow_id),'missing')<>'draft' \
+               OR COALESCE((SELECT status FROM agent_workflows WHERE id=NEW.workflow_id),'missing')<>'draft' \
+             BEGIN SELECT RAISE(ABORT,'agent workflow plan is immutable'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_agent_workflow_steps_delete_draft \
+             BEFORE DELETE ON agent_workflow_steps \
+             WHEN COALESCE((SELECT status FROM agent_workflows WHERE id=OLD.workflow_id),'missing')<>'draft' \
+             BEGIN SELECT RAISE(ABORT,'agent workflow plan is immutable'); END",
+        ] {
+            sqlx::query(statement).execute(pool).await?;
+        }
         Ok(())
     }
 

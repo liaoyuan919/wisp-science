@@ -39,7 +39,7 @@ async fn copy_project_children(tx: &mut Transaction<'_, Sqlite>, project_id: &st
         .all(|column| workflow_columns.contains(*column));
         let workflow_query = if has_plan_columns {
             "INSERT INTO agent_workflows(id,project_id,workspace_id,frame_id,name,description,goal,mode,status,max_parallel,requires_confirmation,plan_json,version,enabled,approved_at,created_at,updated_at) \
-             SELECT id,project_id,workspace_id,frame_id,name,description,goal,mode,status,max_parallel,requires_confirmation,plan_json,version,enabled,approved_at,created_at,updated_at \
+             SELECT id,project_id,workspace_id,frame_id,name,description,goal,mode,'draft',max_parallel,requires_confirmation,plan_json,version,enabled,approved_at,created_at,updated_at \
              FROM transfer.agent_workflows WHERE project_id=?"
         } else {
             "INSERT INTO agent_workflows(id,project_id,workspace_id,frame_id,name,description,goal,mode,status,max_parallel,requires_confirmation,plan_json,version,enabled,approved_at,created_at,updated_at) \
@@ -89,6 +89,15 @@ async fn copy_project_children(tx: &mut Transaction<'_, Sqlite>, project_id: &st
                 .bind(project_id)
                 .execute(&mut **tx)
                 .await?;
+        }
+        if has_plan_columns {
+            sqlx::query(
+                "UPDATE agent_workflows SET status=(SELECT source.status FROM transfer.agent_workflows source WHERE source.id=agent_workflows.id) \
+                 WHERE project_id=?",
+            )
+            .bind(project_id)
+            .execute(&mut **tx)
+            .await?;
         }
     }
 
@@ -188,6 +197,7 @@ pub(crate) async fn delete_project_children(
     project_id: &str,
 ) -> Result<()> {
     const QUERIES: &[&str] = &[
+        "UPDATE agent_workflows SET status='draft' WHERE project_id=?",
         "DELETE FROM artifact_dependencies WHERE artifact_version_id IN (SELECT av.id FROM artifact_versions av JOIN artifacts a ON a.id=av.artifact_id WHERE a.project_id=?)",
         "DELETE FROM agent_workflow_steps WHERE workflow_id IN (SELECT id FROM agent_workflows WHERE project_id=?)",
         "DELETE FROM agent_workflows WHERE project_id=?",
