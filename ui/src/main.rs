@@ -833,7 +833,7 @@ fn App() -> impl IntoView {
     let collapsed_art_groups = create_rw_signal::<HashSet<String>>(HashSet::new());
     let rp_grid = create_rw_signal(false); // false = detailed/list, true = tiled/grid; shared by Artifacts + Files
     let right_tab = create_rw_signal(RightTab::Artifacts);
-    let open_right_tabs = create_rw_signal(vec![RightTab::Artifacts, RightTab::Notebook]);
+    let open_right_tabs = create_rw_signal(DEFAULT_RIGHT_TABS.to_vec());
     let right_tab_add_menu_open = create_rw_signal(false);
     let file_source = create_rw_signal("local".to_string());
     let file_query = create_rw_signal(String::new());
@@ -4958,7 +4958,7 @@ fn App() -> impl IntoView {
                                 *open = false;
                             } else {
                                 if open_right_tabs.get_untracked().is_empty() {
-                                    open_right_tabs.set(vec![RightTab::Artifacts, RightTab::Notebook]);
+                                    open_right_tabs.set(DEFAULT_RIGHT_TABS.to_vec());
                                     right_tab.set(RightTab::Artifacts);
                                 }
                                 *open = true;
@@ -6742,7 +6742,6 @@ fn App() -> impl IntoView {
                         }
                         RightTab::File => {
                             let loc = locale.get();
-                            let source = file_source.get();
                             let ssh_contexts = execution_contexts
                                 .get()
                                 .into_iter()
@@ -6753,7 +6752,7 @@ fn App() -> impl IntoView {
                                     <label class="fb-source-label">
                                         <span>{t(loc, "files.source")}</span>
                                         <select class="fb-source" aria-label=t(loc, "files.source")
-                                            prop:value=source.clone()
+                                            prop:value=move || file_source.get()
                                             on:change=move |event| {
                                                 let next = dom_value(&event);
                                                 file_source.set(next.clone());
@@ -6783,7 +6782,9 @@ fn App() -> impl IntoView {
                                             }).collect_view()}
                                         </select>
                                     </label>
-                                    {if source == "local" {
+                                    {move || {
+                                        let source = file_source.get();
+                                        if source == "local" {
                                         let cwd = file_cwd.get();
                                         let parent = if cwd == "." { None } else { Some(parent_path(&cwd)) };
                                         view! {
@@ -7018,7 +7019,7 @@ fn App() -> impl IntoView {
                                             </div>
                                             <div class="hint fb-root">{t(loc, "files.remote_read_only")}</div>
                                         }.into_view()
-                                    }}
+                                    }}}
                                 </div>
                             }.into_view()
                         }

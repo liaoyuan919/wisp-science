@@ -4137,6 +4137,9 @@ pub(super) const ALL_RIGHT_TABS: [RightTab; 6] = [
     RightTab::SideChat,
 ];
 
+pub(super) const DEFAULT_RIGHT_TABS: [RightTab; 3] =
+    [RightTab::Artifacts, RightTab::File, RightTab::Hosts];
+
 pub(super) fn ensure_right_tab(
     tab: RightTab,
     show_right: RwSignal<bool>,
