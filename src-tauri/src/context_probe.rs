@@ -55,6 +55,27 @@ struct ProcessProbeRunner;
 
 impl ProbeRunner for ProcessProbeRunner {
     fn run(&mut self, command: &ProbeCommand) -> Result<ProbeCommandOutput, String> {
+        if let Some(payload) =
+            crate::ssh_master::eligible_payload(&command.program, &command.args, None)
+        {
+            let ssh_args = command.args[..command.args.len() - 1].to_vec();
+            let result = crate::ssh_master::run_blocking(
+                &command.context_id,
+                ssh_args,
+                &command.envs,
+                payload,
+                // Probes previously ran without any timeout; a hung command
+                // must not poison the shared master connection.
+                std::time::Duration::from_secs(120),
+            )
+            .map(|output| ProbeCommandOutput {
+                status: output.exit_code as i32,
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: output.stderr,
+            });
+            crate::ssh_hosts::cleanup_password_auth_env(&command.envs);
+            return result;
+        }
         let mut process = std::process::Command::new(&command.program);
         process.args(&command.args);
         if !command.envs.is_empty() {

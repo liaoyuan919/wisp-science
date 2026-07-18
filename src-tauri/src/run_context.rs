@@ -156,6 +156,29 @@ impl RunCommandRunner for ProcessRunRunner {
                     return Err(error);
                 }
             }
+            if let Some(payload) = crate::ssh_master::eligible_payload(
+                &command.program,
+                &command.args,
+                command.stdin.as_deref(),
+            ) {
+                let ssh_args = command.args[..command.args.len() - 1].to_vec();
+                let result = crate::ssh_master::run(
+                    &command.context_id,
+                    ssh_args,
+                    &command.envs,
+                    payload,
+                    timeout,
+                )
+                .await
+                .map(|output| RunCommandOutput {
+                    exit_code: output.exit_code,
+                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                    stderr: output.stderr,
+                });
+                crate::ssh_hosts::cleanup_password_auth_env(&command.envs);
+                record_ssh_runner_outcome(&command.context_id, &result);
+                return result;
+            }
         }
         let mut cmd = Command::new(&command.program);
         cmd.args(&command.args)

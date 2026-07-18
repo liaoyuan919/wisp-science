@@ -24,6 +24,7 @@ pub(super) struct DirectoryListing {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RemoteCommand {
+    context_id: String,
     program: String,
     args: Vec<String>,
     envs: Vec<(String, String)>,
@@ -44,6 +45,25 @@ struct ProcessRemoteRunner;
 
 impl RemoteRunner for ProcessRemoteRunner {
     fn run(&mut self, command: &RemoteCommand) -> Result<RemoteOutput, String> {
+        if let Some(payload) =
+            crate::ssh_master::eligible_payload(&command.program, &command.args, None)
+        {
+            let ssh_args = command.args[..command.args.len() - 1].to_vec();
+            let result = crate::ssh_master::run_blocking(
+                &command.context_id,
+                ssh_args,
+                &command.envs,
+                payload,
+                std::time::Duration::from_secs(120),
+            )
+            .map(|output| RemoteOutput {
+                status: output.exit_code as i32,
+                stdout: output.stdout,
+                stderr: output.stderr,
+            });
+            crate::ssh_hosts::cleanup_password_auth_env(&command.envs);
+            return result;
+        }
         let mut process = std::process::Command::new(&command.program);
         process.args(&command.args);
         if !command.envs.is_empty() {
@@ -427,6 +447,7 @@ fn build_remote_directory_command(
     let mut args = connection.ssh_args()?;
     args.push(remote_directory_script(path)?);
     Ok(RemoteCommand {
+        context_id: context.id.clone(),
         program: "ssh".into(),
         args,
         envs: crate::ssh_hosts::auth_envs_for_connection(&connection)?,
@@ -556,6 +577,7 @@ fn build_remote_file_command(
     let mut args = connection.ssh_args()?;
     args.push(remote_file_script(path)?);
     Ok(RemoteCommand {
+        context_id: context.id.clone(),
         program: "ssh".into(),
         args,
         envs: crate::ssh_hosts::auth_envs_for_connection(&connection)?,

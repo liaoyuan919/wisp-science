@@ -49,6 +49,7 @@ mod specialist_tool;
 mod specialists;
 mod ssh_guard;
 mod ssh_hosts;
+mod ssh_master;
 mod terminal_sessions;
 mod workspace_manifest;
 mod wsl_contexts;
