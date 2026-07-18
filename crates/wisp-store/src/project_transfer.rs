@@ -161,6 +161,32 @@ async fn copy_project_children(tx: &mut Transaction<'_, Sqlite>, project_id: &st
             .execute(&mut **tx)
             .await?;
     }
+    if attached_table_exists(tx, "agent_workflow_attempts").await? {
+        sqlx::query(
+            "INSERT INTO agent_workflow_attempts(id,workflow_id,step_id,attempt,request_id,backend,status,request_json,response_json,output_json,artifact_ids_json,evidence_json,error,agent_session_id,child_frame_id,input_tokens,output_tokens,tool_calls,cost_microunits,cancel_requested,started_at,finished_at,created_at,updated_at) \
+             SELECT a.id,a.workflow_id,a.step_id,a.attempt,a.request_id,a.backend,a.status,a.request_json,a.response_json,a.output_json,a.artifact_ids_json,a.evidence_json,a.error,a.agent_session_id,a.child_frame_id,a.input_tokens,a.output_tokens,a.tool_calls,a.cost_microunits,a.cancel_requested,a.started_at,a.finished_at,a.created_at,a.updated_at \
+             FROM transfer.agent_workflow_attempts a JOIN transfer.agent_workflows w ON w.id=a.workflow_id WHERE w.project_id=?",
+        )
+        .bind(project_id)
+        .execute(&mut **tx)
+        .await?;
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query(
+            "UPDATE agent_workflow_attempts SET status='failed',error=COALESCE(error,'Imported from another device; the Agent attempt was not resumed.'),finished_at=COALESCE(finished_at,?),updated_at=? WHERE workflow_id IN (SELECT id FROM agent_workflows WHERE project_id=?) AND status IN ('queued','running')",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(project_id)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            "UPDATE agent_workflows SET status='failed',updated_at=? WHERE project_id=? AND status='running'",
+        )
+        .bind(now)
+        .bind(project_id)
+        .execute(&mut **tx)
+        .await?;
+    }
     Ok(())
 }
 
@@ -199,6 +225,7 @@ pub(crate) async fn delete_project_children(
     const QUERIES: &[&str] = &[
         "UPDATE agent_workflows SET status='draft' WHERE project_id=?",
         "DELETE FROM artifact_dependencies WHERE artifact_version_id IN (SELECT av.id FROM artifact_versions av JOIN artifacts a ON a.id=av.artifact_id WHERE a.project_id=?)",
+        "DELETE FROM agent_workflow_attempts WHERE workflow_id IN (SELECT id FROM agent_workflows WHERE project_id=?)",
         "DELETE FROM agent_workflow_steps WHERE workflow_id IN (SELECT id FROM agent_workflows WHERE project_id=?)",
         "DELETE FROM agent_workflows WHERE project_id=?",
         "DELETE FROM message_resource_links WHERE frame_id IN (SELECT id FROM frames WHERE project_id=?)",
@@ -556,6 +583,7 @@ impl Store {
             ("folders", "*", "id"),
             ("agent_workflows", "*", "id"),
             ("agent_workflow_steps", "*", "id"),
+            ("agent_workflow_attempts", "*", "id"),
             ("frames", "*", "id"),
             ("messages", "*", "id"),
             ("session_reviews", "*", "id"),

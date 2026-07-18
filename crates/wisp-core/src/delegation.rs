@@ -346,7 +346,48 @@ pub struct AgentDelegationResponse {
     #[serde(default)]
     pub artifact_ids: Vec<String>,
     #[serde(default)]
+    pub artifacts: Vec<AgentArtifact>,
+    #[serde(default)]
+    pub evidence: Vec<AgentEvidence>,
+    #[serde(default)]
+    pub usage: AgentUsage,
+    #[serde(default)]
+    pub agent_session_id: Option<String>,
+    #[serde(default)]
+    pub child_frame_id: Option<String>,
+    #[serde(default)]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AgentArtifact {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AgentEvidence {
+    pub kind: String,
+    pub summary: String,
+    #[serde(default)]
+    pub reference: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AgentUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub tool_calls: u64,
+    #[serde(default)]
+    pub cost_microunits: u64,
 }
 
 impl AgentDelegationRequest {
@@ -405,10 +446,12 @@ impl AgentDelegationResponse {
         if self.request_id.trim().is_empty() {
             anyhow::bail!("request_id is required");
         }
-        if self.status == DelegationStatus::Failed
-            && self.error.as_deref().is_none_or(str::is_empty)
+        if matches!(
+            self.status,
+            DelegationStatus::Failed | DelegationStatus::Blocked
+        ) && self.error.as_deref().is_none_or(str::is_empty)
         {
-            anyhow::bail!("failed delegation responses require an error");
+            anyhow::bail!("failed or blocked delegation responses require an error");
         }
         if self.status == DelegationStatus::Succeeded && self.error.is_some() {
             anyhow::bail!("succeeded delegation responses cannot contain an error");
@@ -439,6 +482,7 @@ pub enum DelegationStatus {
     Succeeded,
     Failed,
     Cancelled,
+    Blocked,
 }
 
 #[async_trait]
@@ -638,6 +682,11 @@ mod tests {
             status: DelegationStatus::Failed,
             output: Value::Null,
             artifact_ids: vec![],
+            artifacts: vec![],
+            evidence: vec![],
+            usage: AgentUsage::default(),
+            agent_session_id: None,
+            child_frame_id: None,
             error: None,
         }
         .validate()

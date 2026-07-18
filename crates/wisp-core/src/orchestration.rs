@@ -510,6 +510,11 @@ mod tests {
                 status: DelegationStatus::Succeeded,
                 output: json!({}),
                 artifact_ids: vec![],
+                artifacts: vec![],
+                evidence: vec![],
+                usage: Default::default(),
+                agent_session_id: None,
+                child_frame_id: None,
                 error: None,
             })
         }

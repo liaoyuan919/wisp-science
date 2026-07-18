@@ -4,6 +4,7 @@
 //! live in the OS keyring (see [`secrets`]); everything else lives here.
 
 mod acp_sessions;
+mod agent_workflow_attempts;
 mod agent_workflows;
 mod artifacts;
 mod execution_contexts;
@@ -20,6 +21,7 @@ pub mod secrets;
 mod sessions;
 
 pub use acp_sessions::AcpSessionBinding;
+pub use agent_workflow_attempts::{AgentWorkflowAttempt, AgentWorkflowAttemptStatus};
 pub use agent_workflows::{AgentWorkflow, AgentWorkflowStatus, AgentWorkflowStep};
 pub use library::{LibraryItem, LibraryItemDetail, LibraryStore, NewLibraryItem};
 pub use models::*;
@@ -54,6 +56,9 @@ const AGENT_WORKFLOWS_MIGRATION: &str = "0014_agent_workflows";
 const AGENT_WORKFLOWS_MIGRATION_SQL: &str = include_str!("../migrations/0014_agent_workflows.sql");
 const AGENT_WORKFLOW_CONTRACTS_MIGRATION: &str = "0015_agent_workflow_contracts";
 const AGENT_WORKFLOW_PLANS_MIGRATION: &str = "0016_agent_workflow_plans";
+const AGENT_WORKFLOW_ATTEMPTS_MIGRATION: &str = "0017_agent_workflow_attempts";
+const AGENT_WORKFLOW_ATTEMPTS_MIGRATION_SQL: &str =
+    include_str!("../migrations/0017_agent_workflow_attempts.sql");
 
 #[derive(Clone)]
 pub struct Store {
@@ -201,6 +206,10 @@ impl Store {
         if !Self::migration_applied(pool, AGENT_WORKFLOW_PLANS_MIGRATION).await? {
             Self::apply_agent_workflow_plans(pool).await?;
             Self::record_migration(pool, AGENT_WORKFLOW_PLANS_MIGRATION).await?;
+        }
+        if !Self::migration_applied(pool, AGENT_WORKFLOW_ATTEMPTS_MIGRATION).await? {
+            Self::execute_sql_script(pool, AGENT_WORKFLOW_ATTEMPTS_MIGRATION_SQL).await?;
+            Self::record_migration(pool, AGENT_WORKFLOW_ATTEMPTS_MIGRATION).await?;
         }
         Ok(())
     }

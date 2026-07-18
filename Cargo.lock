@@ -6238,6 +6238,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "futures-util",
  "glob",
  "regex",
  "serde",

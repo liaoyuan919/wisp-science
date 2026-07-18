@@ -215,6 +215,110 @@ async fn legacy_step_mutations_invalidate_the_reviewed_plan_version() {
 }
 
 #[tokio::test]
+async fn agent_workflow_attempts_persist_cas_lifecycle_and_usage() {
+    let tmp = std::env::temp_dir().join(format!(
+        "wisp_agent_attempt_{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = Store::open(&tmp).await.unwrap();
+    store.create_project("p", "proj", "").await.unwrap();
+    let workflow = AgentWorkflow::new("wf", "p", "workspace", "Delegated analysis").unwrap();
+    store.create_agent_workflow(&workflow).await.unwrap();
+    let step = AgentWorkflowStep::new("code", "wf", 0, "code", "coder", "acp", "controlled prompt")
+        .unwrap();
+    store.create_agent_workflow_step(&step).await.unwrap();
+    assert!(store.approve_agent_workflow_plan("wf", 2).await.unwrap());
+    assert!(store
+        .transition_agent_workflow_status(
+            "wf",
+            AgentWorkflowStatus::Approved,
+            AgentWorkflowStatus::Running,
+        )
+        .await
+        .unwrap());
+    assert!(store
+        .transition_agent_workflow_status(
+            "wf",
+            AgentWorkflowStatus::Running,
+            AgentWorkflowStatus::Succeeded,
+        )
+        .await
+        .is_err());
+
+    let mut attempt = AgentWorkflowAttempt::queued(
+        "attempt-1",
+        "wf",
+        "code",
+        1,
+        "request-1",
+        "acp",
+        r#"{"input":"data.csv"}"#,
+    )
+    .unwrap();
+    store.create_agent_workflow_attempt(&attempt).await.unwrap();
+    assert_eq!(
+        store
+            .next_agent_workflow_attempt_number("code")
+            .await
+            .unwrap(),
+        2
+    );
+
+    attempt.status = AgentWorkflowAttemptStatus::Running;
+    attempt.started_at = Some(chrono::Utc::now().timestamp());
+    assert!(store
+        .update_agent_workflow_attempt(&attempt, AgentWorkflowAttemptStatus::Queued)
+        .await
+        .unwrap());
+    attempt.status = AgentWorkflowAttemptStatus::Succeeded;
+    attempt.response_json = Some(r#"{"status":"succeeded"}"#.into());
+    attempt.output_json = r#"{"summary":"completed"}"#.into();
+    attempt.artifact_ids_json = r#"["artifact-1"]"#.into();
+    attempt.evidence_json = r#"[{"kind":"test","summary":"passed"}]"#.into();
+    attempt.agent_session_id = Some("agent-session-1".into());
+    attempt.child_frame_id = Some("child-frame-1".into());
+    attempt.input_tokens = 100;
+    attempt.output_tokens = 50;
+    attempt.tool_calls = 3;
+    attempt.cost_microunits = 25;
+    attempt.finished_at = Some(chrono::Utc::now().timestamp());
+    assert!(store
+        .update_agent_workflow_attempt(&attempt, AgentWorkflowAttemptStatus::Running)
+        .await
+        .unwrap());
+    assert!(!store
+        .update_agent_workflow_attempt(&attempt, AgentWorkflowAttemptStatus::Running)
+        .await
+        .unwrap());
+    let persisted = store
+        .get_agent_workflow_attempt("attempt-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.status, AgentWorkflowAttemptStatus::Succeeded);
+    assert_eq!(persisted.output_json, attempt.output_json);
+    assert_eq!(persisted.artifact_ids_json, attempt.artifact_ids_json);
+    assert_eq!(persisted.agent_session_id, attempt.agent_session_id);
+    assert_eq!(persisted.tool_calls, 3);
+
+    assert!(store
+        .transition_agent_workflow_status(
+            "wf",
+            AgentWorkflowStatus::Running,
+            AgentWorkflowStatus::Succeeded,
+        )
+        .await
+        .unwrap());
+    assert_eq!(
+        store.list_agent_workflow_attempts("wf").await.unwrap(),
+        vec![persisted]
+    );
+
+    store.pool.close().await;
+    let _ = std::fs::remove_file(tmp);
+}
+
+#[tokio::test]
 async fn last_user_message_session_ignores_later_assistant_activity() {
     let tmp = std::env::temp_dir().join(format!(
         "wisp_store_last_user_session_{}.sqlite",
@@ -1084,6 +1188,7 @@ async fn store_open_records_migrations_and_seeds_local_context() {
             AGENT_WORKFLOWS_MIGRATION.to_string(),
             AGENT_WORKFLOW_CONTRACTS_MIGRATION.to_string(),
             AGENT_WORKFLOW_PLANS_MIGRATION.to_string(),
+            AGENT_WORKFLOW_ATTEMPTS_MIGRATION.to_string(),
         ]
     );
 
@@ -1161,6 +1266,41 @@ async fn agent_workflow_plan_migration_repairs_partial_application() {
         .await
         .unwrap()
         .contains(&AGENT_WORKFLOW_PLANS_MIGRATION.to_string()));
+    reopened.pool.close().await;
+    let _ = std::fs::remove_file(tmp);
+}
+
+#[tokio::test]
+async fn agent_workflow_attempt_migration_is_retry_safe() {
+    let tmp = std::env::temp_dir().join(format!(
+        "wisp_agent_attempt_migration_{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = Store::open(&tmp).await.unwrap();
+    sqlx::query("DROP TABLE agent_workflow_attempts")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM wisp_schema_migrations WHERE version=?")
+        .bind(AGENT_WORKFLOW_ATTEMPTS_MIGRATION)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    store.pool.close().await;
+
+    let reopened = Store::open(&tmp).await.unwrap();
+    let table_exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_workflow_attempts'",
+    )
+    .fetch_one(&reopened.pool)
+    .await
+    .unwrap();
+    assert_eq!(table_exists, 1);
+    assert!(reopened
+        .schema_migrations()
+        .await
+        .unwrap()
+        .contains(&AGENT_WORKFLOW_ATTEMPTS_MIGRATION.to_string()));
     reopened.pool.close().await;
     let _ = std::fs::remove_file(tmp);
 }

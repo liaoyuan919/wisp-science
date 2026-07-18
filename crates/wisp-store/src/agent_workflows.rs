@@ -488,6 +488,55 @@ impl super::Store {
         Ok(updated.rows_affected() == 1)
     }
 
+    pub async fn transition_agent_workflow_status(
+        &self,
+        id: &str,
+        from: AgentWorkflowStatus,
+        to: AgentWorkflowStatus,
+    ) -> Result<bool> {
+        let allowed = matches!(
+            (from, to),
+            (AgentWorkflowStatus::Approved, AgentWorkflowStatus::Running)
+                | (
+                    AgentWorkflowStatus::Running,
+                    AgentWorkflowStatus::Succeeded
+                        | AgentWorkflowStatus::Failed
+                        | AgentWorkflowStatus::Cancelled
+                )
+                | (
+                    AgentWorkflowStatus::Failed | AgentWorkflowStatus::Cancelled,
+                    AgentWorkflowStatus::Approved
+                )
+        );
+        if !allowed {
+            anyhow::bail!("invalid agent workflow transition: {from:?} -> {to:?}");
+        }
+        if to == AgentWorkflowStatus::Succeeded {
+            let incomplete: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM agent_workflow_steps s WHERE s.workflow_id=? AND NOT EXISTS (SELECT 1 FROM agent_workflow_attempts a WHERE a.step_id=s.id AND a.status='succeeded' AND a.attempt=(SELECT MAX(latest.attempt) FROM agent_workflow_attempts latest WHERE latest.step_id=s.id))",
+            )
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await?;
+            if incomplete != 0 {
+                anyhow::bail!("agent workflow cannot succeed before every step succeeds");
+            }
+        }
+        let now = chrono::Utc::now().timestamp();
+        let updated = sqlx::query(
+            "UPDATE agent_workflows SET status=?,version=version+1,approved_at=CASE WHEN ?='approved' THEN ? ELSE approved_at END,updated_at=? WHERE id=? AND status=?",
+        )
+        .bind(to.as_str())
+        .bind(to.as_str())
+        .bind(now)
+        .bind(now)
+        .bind(id)
+        .bind(from.as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(updated.rows_affected() == 1)
+    }
+
     pub async fn create_agent_workflow(&self, workflow: &AgentWorkflow) -> Result<()> {
         workflow.validate()?;
         if workflow.status != AgentWorkflowStatus::Draft {
@@ -587,6 +636,10 @@ impl super::Store {
     pub async fn delete_agent_workflow(&self, id: &str) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("UPDATE agent_workflows SET status='draft' WHERE id=?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM agent_workflow_attempts WHERE workflow_id=?")
             .bind(id)
             .execute(&mut *tx)
             .await?;

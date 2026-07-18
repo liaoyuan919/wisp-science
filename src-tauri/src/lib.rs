@@ -23,6 +23,7 @@ mod artifact_commands;
 mod channels;
 mod connector_commands;
 mod context_probe;
+mod delegation_runtime;
 mod desktop_lifecycle;
 mod file_browser;
 mod harvest;
@@ -6450,6 +6451,7 @@ pub fn run() {
             acp::set_acp_session_config,
             acp::set_acp_session_mode,
             test_reviewer_backend,
+            delegation_runtime::run_agent_workflow,
             review_session,
             side_chat,
             context_probe::probe_execution_context,
