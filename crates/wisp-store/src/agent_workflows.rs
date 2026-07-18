@@ -355,6 +355,23 @@ async fn insert_step(tx: &mut Transaction<'_, Sqlite>, step: &AgentWorkflowStep)
     Ok(())
 }
 
+async fn bump_draft_workflow_version(
+    tx: &mut Transaction<'_, Sqlite>,
+    workflow_id: &str,
+) -> Result<()> {
+    let updated = sqlx::query(
+        "UPDATE agent_workflows SET version=version+1,updated_at=? WHERE id=? AND status='draft'",
+    )
+    .bind(chrono::Utc::now().timestamp())
+    .bind(workflow_id)
+    .execute(&mut **tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        anyhow::bail!("agent workflow plan is missing or immutable");
+    }
+    Ok(())
+}
+
 impl super::Store {
     pub async fn create_agent_workflow_plan(
         &self,
@@ -587,6 +604,8 @@ impl super::Store {
 
     pub async fn create_agent_workflow_step(&self, step: &AgentWorkflowStep) -> Result<()> {
         step.validate()?;
+        let mut tx = self.pool.begin().await?;
+        bump_draft_workflow_version(&mut tx, &step.workflow_id).await?;
         sqlx::query(
             "INSERT INTO agent_workflow_steps(id,workflow_id,position,agent_id,template_id,role,backend,model,prompt_template,input_schema_json,output_schema_json,input_contract_json,output_contract_json,permissions_json,context_policy_json,budget_json,spec_json,timeout_secs,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
@@ -610,8 +629,9 @@ impl super::Store {
         .bind(step.timeout_secs)
         .bind(step.created_at)
         .bind(step.updated_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -638,6 +658,21 @@ impl super::Store {
 
     pub async fn update_agent_workflow_step(&self, step: &AgentWorkflowStep) -> Result<bool> {
         step.validate()?;
+        let mut tx = self.pool.begin().await?;
+        let current_workflow_id = sqlx::query_scalar::<_, String>(
+            "SELECT workflow_id FROM agent_workflow_steps WHERE id=?",
+        )
+        .bind(&step.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(current_workflow_id) = current_workflow_id else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        if current_workflow_id != step.workflow_id {
+            anyhow::bail!("workflow steps cannot be moved between plans");
+        }
+        bump_draft_workflow_version(&mut tx, &current_workflow_id).await?;
         let updated = sqlx::query("UPDATE agent_workflow_steps SET workflow_id=?,position=?,agent_id=?,template_id=?,role=?,backend=?,model=?,prompt_template=?,input_schema_json=?,output_schema_json=?,input_contract_json=?,output_contract_json=?,permissions_json=?,context_policy_json=?,budget_json=?,spec_json=?,timeout_secs=?,updated_at=? WHERE id=?")
             .bind(&step.workflow_id).bind(step.position).bind(&step.agent_id)
             .bind(&step.template_id).bind(&step.role).bind(&step.backend).bind(step.model.as_deref())
@@ -647,15 +682,29 @@ impl super::Store {
             .bind(&step.context_policy_json).bind(&step.budget_json).bind(&step.spec_json)
             .bind(step.timeout_secs).bind(chrono::Utc::now().timestamp())
             .bind(&step.id)
-            .execute(&self.pool).await?;
+            .execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(updated.rows_affected() == 1)
     }
 
     pub async fn delete_agent_workflow_step(&self, id: &str) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let workflow_id = sqlx::query_scalar::<_, String>(
+            "SELECT workflow_id FROM agent_workflow_steps WHERE id=?",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(workflow_id) = workflow_id else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        bump_draft_workflow_version(&mut tx, &workflow_id).await?;
         let deleted = sqlx::query("DELETE FROM agent_workflow_steps WHERE id=?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(deleted.rows_affected() == 1)
     }
 }

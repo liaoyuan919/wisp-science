@@ -158,6 +158,63 @@ async fn agent_workflow_plan_edit_and_approval_are_versioned() {
 }
 
 #[tokio::test]
+async fn legacy_step_mutations_invalidate_the_reviewed_plan_version() {
+    let tmp = std::env::temp_dir().join(format!(
+        "wisp_agent_plan_step_cas_{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = Store::open(&tmp).await.unwrap();
+    store.create_project("p", "proj", "").await.unwrap();
+
+    let workflow = AgentWorkflow::new("wf", "p", "workspace", "Delegated analysis").unwrap();
+    store.create_agent_workflow(&workflow).await.unwrap();
+    let mut step =
+        AgentWorkflowStep::new("code", "wf", 0, "code", "coder", "acp", "controlled prompt")
+            .unwrap();
+
+    store.create_agent_workflow_step(&step).await.unwrap();
+    assert!(!store.approve_agent_workflow_plan("wf", 1).await.unwrap());
+    assert_eq!(
+        store
+            .get_agent_workflow("wf")
+            .await
+            .unwrap()
+            .unwrap()
+            .version,
+        2
+    );
+
+    step.position = 1;
+    assert!(store.update_agent_workflow_step(&step).await.unwrap());
+    assert!(!store.approve_agent_workflow_plan("wf", 2).await.unwrap());
+    assert_eq!(
+        store
+            .get_agent_workflow("wf")
+            .await
+            .unwrap()
+            .unwrap()
+            .version,
+        3
+    );
+
+    assert!(store.delete_agent_workflow_step("code").await.unwrap());
+    assert!(!store.approve_agent_workflow_plan("wf", 3).await.unwrap());
+    assert_eq!(
+        store
+            .get_agent_workflow("wf")
+            .await
+            .unwrap()
+            .unwrap()
+            .version,
+        4
+    );
+    assert!(store.approve_agent_workflow_plan("wf", 4).await.unwrap());
+
+    store.pool.close().await;
+    let _ = std::fs::remove_file(tmp);
+}
+
+#[tokio::test]
 async fn last_user_message_session_ignores_later_assistant_activity() {
     let tmp = std::env::temp_dir().join(format!(
         "wisp_store_last_user_session_{}.sqlite",

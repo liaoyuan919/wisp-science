@@ -932,6 +932,11 @@ mod tests {
         )
         .unwrap();
         source.create_agent_workflow_step(&step).await.unwrap();
+        let workflow = source
+            .get_agent_workflow("workflow-1")
+            .await
+            .unwrap()
+            .unwrap();
         source
             .create_frame("frame-1", "project-1", "OPERON", "model")
             .await
