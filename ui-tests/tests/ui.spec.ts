@@ -1988,7 +1988,11 @@ test("clicking a figure opens the artifact modal with provenance", async ({ page
   await expect.poll(() => page.evaluate(() =>
     document.elementFromPoint(innerWidth - 4, innerHeight / 2)?.closest(".overlay") !== null,
   )).toBe(true);
-  const modalBoundsAt100 = await page.locator(".artifact-modal").evaluate((el) => {
+  const artifactModal = page.locator(".artifact-modal");
+  await artifactModal.evaluate(async (el) => {
+    await Promise.all(el.getAnimations().map((animation) => animation.finished));
+  });
+  const modalBoundsAt100 = await artifactModal.evaluate((el) => {
     const rect = el.getBoundingClientRect();
     return {
       width: Math.round(rect.width),
@@ -2005,7 +2009,7 @@ test("clicking a figure opens the artifact modal with provenance", async ({ page
     await page.getByRole("button", { name: "Zoom out" }).click();
   }
   await expect(page.getByRole("button", { name: "Reset zoom" })).toHaveText("25%");
-  const modalBoundsAt25 = await page.locator(".artifact-modal").evaluate((el) => {
+  const modalBoundsAt25 = await artifactModal.evaluate((el) => {
     const rect = el.getBoundingClientRect();
     return {
       width: Math.round(rect.width),
@@ -2025,10 +2029,10 @@ test("clicking a figure opens the artifact modal with provenance", async ({ page
   await expect(page.getByRole("button", { name: "Reset zoom" })).toHaveText("300%");
   await expect.poll(() => modalImage.evaluate((el) => el.getBoundingClientRect().width))
     .toBeGreaterThan(modalWidthAt100);
-  await expect.poll(() => page.locator(".artifact-modal").evaluate((el) =>
+  await expect.poll(() => artifactModal.evaluate((el) =>
     Math.round(el.getBoundingClientRect().width),
   )).toBeGreaterThan(0);
-  const modalBoundsAt300 = await page.locator(".artifact-modal").evaluate((el) => {
+  const modalBoundsAt300 = await artifactModal.evaluate((el) => {
     const rect = el.getBoundingClientRect();
     return {
       width: Math.round(rect.width),
@@ -3682,6 +3686,9 @@ test("desktop pet remains independent and reflects global agent state", async ({
 
 test("pet navigation opens the project and session that need the user", async ({ page }) => {
   await page.goto("/");
+  await expect.poll(() => page.evaluate(() =>
+    (window as any).__tauriListenerReady("pet-open-session"),
+  )).toBe(true);
   await page.evaluate(() => {
     (window as any).__tauriEmit("pet-open-session", {
       projectId: "other",

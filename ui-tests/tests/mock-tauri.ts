@@ -21,6 +21,12 @@ export function tauriMock(): void {
     }
   };
   (window as any).__tauriEmit = emit;
+  // Tests that exercise startup-time native events must wait until the WASM
+  // side has completed its async `listen()` registration. Exposing readiness
+  // avoids arbitrary sleeps and preserves the real event bus semantics: an
+  // event emitted before registration is not queued.
+  (window as any).__tauriListenerReady = (event: string) =>
+    typeof listeners[String(event)] === "function";
 
   const demos = [
     { id: "manifest_crispr_screen", title: "Design a genome-wide CRISPR knockout screen targeting all kinases" },
