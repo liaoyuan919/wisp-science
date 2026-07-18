@@ -5084,6 +5084,19 @@ fn App() -> impl IntoView {
                                                     if enable_after {
                                                         apply_session_compute_resource.call((context_id.clone(), true));
                                                         show_toast(&t(locale.get_untracked(), "ssh_check.enabled"));
+                                                    } else {
+                                                        show_toast(&t(locale.get_untracked(), "ssh_check.probed_ok"));
+                                                    }
+                                                    // If the file pane was blocked on this host, reload it.
+                                                    if file_source.get_untracked() == context_id {
+                                                        refresh_remote_dir(
+                                                            context_id.clone(),
+                                                            remote_file_cwd,
+                                                            remote_file_entries,
+                                                            remote_file_loading,
+                                                            remote_file_error,
+                                                            file_source,
+                                                        );
                                                     }
                                                     ssh_connectivity_modal.set(None);
                                                 } else {
@@ -7361,19 +7374,55 @@ fn App() -> impl IntoView {
                                                     view! { <div class="rp-empty rp-files-empty"><p>{t(loc, "loading")}</p></div> }.into_view()
                                                 } else if let Some(error) = remote_file_error.get() {
                                                     let retry_context = source.clone();
+                                                    let setup = is_ssh_setup_error(&error);
+                                                    let jump_context = ssh_setup_context_id(
+                                                        Some(source.as_str()),
+                                                        &error,
+                                                    );
                                                     view! {
                                                         <div class="rp-empty rp-files-empty fb-remote-error">
                                                             <p>{localize_backend(loc, &error)}</p>
-                                                            <button type="button" class="fb-retry" on:click=move |_| {
-                                                                refresh_remote_dir(
-                                                                    retry_context.clone(),
-                                                                    remote_file_cwd,
-                                                                    remote_file_entries,
-                                                                    remote_file_loading,
-                                                                    remote_file_error,
-                                                                    file_source,
-                                                                );
-                                                            }>{t(loc, "files.retry")}</button>
+                                                            <div class="fb-error-actions">
+                                                                {setup.then(|| {
+                                                                    let jump_id = jump_context.clone().unwrap_or_else(|| source.clone());
+                                                                    view! {
+                                                                        <button type="button" class="fb-retry primary"
+                                                                            data-testid="ssh-setup-jump"
+                                                                            on:click=move |_| {
+                                                                                let context_id = jump_id.clone();
+                                                                                let contexts = execution_contexts.get_untracked();
+                                                                                let ctx = contexts.into_iter().find(|c| c.id == context_id);
+                                                                                let label = ctx.as_ref().map(|c| {
+                                                                                    if c.label.trim().is_empty() { c.id.clone() } else { c.label.clone() }
+                                                                                }).unwrap_or_else(|| context_id.clone());
+                                                                                let detail = ctx.as_ref()
+                                                                                    .and_then(|c| ssh_connectivity_gap(c))
+                                                                                    .unwrap_or_else(|| "not probed yet".into());
+                                                                                // Land in Settings → Environments so the user can fix
+                                                                                // identity/host config, and open the probe dialog.
+                                                                                open_settings_fn(Some("environments".into()));
+                                                                                ssh_connectivity_modal.set(Some(SshConnectivityModal {
+                                                                                    context_id,
+                                                                                    label,
+                                                                                    detail,
+                                                                                    enable_after_probe: false,
+                                                                                }));
+                                                                            }>
+                                                                            {t(loc, "ssh_check.jump_probe")}
+                                                                        </button>
+                                                                    }.into_view()
+                                                                })}
+                                                                <button type="button" class="fb-retry" on:click=move |_| {
+                                                                    refresh_remote_dir(
+                                                                        retry_context.clone(),
+                                                                        remote_file_cwd,
+                                                                        remote_file_entries,
+                                                                        remote_file_loading,
+                                                                        remote_file_error,
+                                                                        file_source,
+                                                                    );
+                                                                }>{t(loc, "files.retry")}</button>
+                                                            </div>
                                                         </div>
                                                     }.into_view()
                                                 } else if remote_file_entries.get().is_empty() {

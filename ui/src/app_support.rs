@@ -400,6 +400,30 @@ pub(super) fn ssh_context_known_good(ctx: &ExecutionContext) -> bool {
     ssh_connectivity_gap(ctx).is_none()
 }
 
+/// Errors that need host configuration / Probe, not a blind retry.
+pub(super) fn is_ssh_setup_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("ssh connectivity is not confirmed")
+        || lower.contains("ssh connectivity gate blocked")
+        || lower.contains("identity file is not accessible")
+        || lower.contains("no successful probe")
+}
+
+/// Prefer the active remote source; fall back to ``ssh:alias`` embedded in the error.
+pub(super) fn ssh_setup_context_id(preferred: Option<&str>, error: &str) -> Option<String> {
+    if let Some(id) = preferred.filter(|id| id.starts_with("ssh:")) {
+        return Some(id.to_string());
+    }
+    // Messages use backticks: `ssh:host-alias`
+    let Some(start) = error.find("`ssh:") else {
+        return None;
+    };
+    let rest = &error[start + 1..];
+    let end = rest.find('`').unwrap_or(rest.len());
+    let id = &rest[..end];
+    id.starts_with("ssh:").then(|| id.to_string())
+}
+
 pub(super) fn now_ms() -> u64 {
     js_sys::Date::now() as u64
 }
@@ -952,8 +976,8 @@ fn context_runtime_available(ctx: &ExecutionContext, language: &str) -> bool {
 #[cfg(test)]
 mod runtime_slot_tests {
     use super::{
-        context_runtime_available, mention_compute_entries, ssh_connectivity_gap,
-        ComposerPickerItem,
+        context_runtime_available, is_ssh_setup_error, mention_compute_entries,
+        ssh_connectivity_gap, ssh_setup_context_id, ComposerPickerItem,
     };
     use crate::dto::ExecutionContext;
     use crate::i18n::Locale;
@@ -989,6 +1013,21 @@ mod runtime_slot_tests {
             Some("probe failed")
         );
         assert!(ssh_connectivity_gap(&context("ssh", "{}", Some("ok"))).is_none());
+    }
+
+    #[test]
+    fn ssh_setup_error_helpers_detect_and_parse_context() {
+        let err = "SSH connectivity is not confirmed for `ssh:insertsbio_public`: no successful probe yet.";
+        assert!(is_ssh_setup_error(err));
+        assert_eq!(
+            ssh_setup_context_id(None, err).as_deref(),
+            Some("ssh:insertsbio_public")
+        );
+        assert_eq!(
+            ssh_setup_context_id(Some("ssh:other"), err).as_deref(),
+            Some("ssh:other")
+        );
+        assert!(!is_ssh_setup_error("Remote directory empty"));
     }
 
     #[test]

@@ -39,7 +39,9 @@
 .rp-files-empty { margin: auto; padding: 24px 12px; color: var(--text-faint); font-size: 12.5px; }
 .rp-files-empty p { margin: 0; }
 .fb-remote-error { gap: 10px; }
+.fb-error-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 .fb-retry { padding: 6px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-input); color: var(--text); cursor: pointer; }
+.fb-retry.primary { background: var(--accent, #2563eb); border-color: transparent; color: #fff; }
 
 /* Tiled/grid mode: lay file rows out as centered cards with a large icon */
 .fb-list.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 8px; align-content: start; }
