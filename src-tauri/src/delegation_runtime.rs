@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 use wisp_acp::{
     acp::schema::v1::{ContentBlock, SessionId, TextContent},
     AcpPermissionKind, AcpSessionEvent, AcpSessionHandle, AcpStopReason, AcpUpdateKind,
+    AcpUsageUpdate,
 };
 use wisp_core::{
     AgentArtifact, AgentBackend, AgentBudget, AgentDelegationRequest, AgentDelegationResponse,
@@ -412,10 +413,15 @@ impl AgentDelegator for AcpDelegator {
         if requested_profile_id.is_some() && requested_profile.is_none() {
             anyhow::bail!("the selected ACP Agent profile does not exist");
         }
-        let profile = if request.spec.template_id == "code_execution" {
+        let profile = if matches!(
+            request.spec.template_id.as_str(),
+            "code_execution" | "visualization"
+        ) {
             match requested_profile {
                 Some(profile) if is_codex_profile(&profile) => profile,
-                Some(_) => anyhow::bail!("code execution requires a Codex ACP Agent profile"),
+                Some(_) => {
+                    anyhow::bail!("code-capable delegation requires a Codex ACP Agent profile")
+                }
                 None => profiles
                     .iter()
                     .find(|profile| is_codex_profile(profile))
@@ -477,7 +483,8 @@ impl AgentDelegator for AcpDelegator {
             .append_message(&child_frame_id, next_seq, &Message::user(&prompt_text))
             .await?;
 
-        let handle = Arc::new(AcpSessionHandle::launch(acp::launch_profile(&profile)).await?);
+        let handle =
+            Arc::new(AcpSessionHandle::launch(controlled_codex_launch_profile(&profile)).await?);
         // Delegated Codex sessions intentionally receive no Wisp MCP bridge.
         // This keeps execution inside the ACP Agent's own project sandbox and
         // prevents an untrusted child from reaching broader run/network tools.
@@ -608,13 +615,13 @@ async fn run_acp_request(
     tokio::pin!(prompt);
     let mut answer = String::new();
     let mut evidence = Vec::new();
-    let mut usage = AgentUsage::default();
+    let mut usage = AcpUsage::default();
     let mut tool_call_ids = std::collections::HashSet::new();
     let outcome = loop {
         tokio::select! {
             outcome = &mut prompt => break outcome?,
             event = handle.next_event() => match event {
-                Some(AcpSessionEvent::Update { kind, payload, .. }) => {
+                Some(AcpSessionEvent::Update { kind, payload, usage: usage_update, .. }) => {
                     if kind == AcpUpdateKind::AgentMessage {
                         if let Some(text) = acp_text(&payload) {
                             answer.push_str(text);
@@ -626,7 +633,7 @@ async fn run_acp_request(
                             .unwrap_or_default()
                             .to_string();
                         if kind == AcpUpdateKind::ToolCall && tool_call_ids.insert(call_id.clone()) {
-                            usage.tool_calls = usage.tool_calls.saturating_add(1);
+                            usage.value.tool_calls = usage.value.tool_calls.saturating_add(1);
                         }
                         evidence.push(AgentEvidence {
                             kind: "acp_tool".into(),
@@ -634,14 +641,23 @@ async fn run_acp_request(
                             reference: (!call_id.is_empty()).then_some(call_id),
                         });
                     } else if kind == AcpUpdateKind::Usage {
-                        usage.input_tokens = json_u64(&payload, &["inputTokens", "input_tokens"]);
-                        usage.output_tokens = json_u64(&payload, &["outputTokens", "output_tokens"]);
-                        usage.cost_microunits = json_u64(
-                            &payload,
-                            &["costMicrounits", "cost_microunits", "costMicroUsd"],
-                        );
+                        let result = usage_update
+                            .as_ref()
+                            .ok_or_else(|| "ACP usage event is missing its typed payload".to_string())
+                            .and_then(|update| usage.update(update));
+                        if let Err(error) = result {
+                            let _ = handle.cancel(session_id.clone());
+                            return Ok(failed_acp_response(
+                                &request.request_id,
+                                error,
+                                &session_id,
+                                child_frame_id,
+                                evidence,
+                                usage.value,
+                            ));
+                        }
                     }
-                    if let Some(reason) = runtime_budget_violation(&usage, &request.spec.budget) {
+                    if let Some(reason) = runtime_budget_violation(&usage.value, &request.spec.budget) {
                         let _ = handle.cancel(session_id.clone());
                         return Ok(failed_acp_response(
                             &request.request_id,
@@ -649,7 +665,7 @@ async fn run_acp_request(
                             &session_id,
                             child_frame_id,
                             evidence,
-                            usage,
+                            usage.value,
                         ));
                     }
                 }
@@ -673,11 +689,49 @@ async fn run_acp_request(
         else {
             break;
         };
-        if let AcpSessionEvent::Update { kind, payload, .. } = event {
+        if let AcpSessionEvent::Update {
+            kind,
+            payload,
+            usage: usage_update,
+            ..
+        } = event
+        {
             if kind == AcpUpdateKind::AgentMessage {
                 if let Some(text) = acp_text(&payload) {
                     answer.push_str(text);
                 }
+            } else if kind == AcpUpdateKind::Usage {
+                let result = usage_update
+                    .as_ref()
+                    .ok_or_else(|| "ACP usage event is missing its typed payload".to_string())
+                    .and_then(|update| usage.update(update));
+                if let Err(error) = result {
+                    return Ok(failed_acp_response(
+                        &request.request_id,
+                        error,
+                        &session_id,
+                        child_frame_id,
+                        evidence,
+                        usage.value,
+                    ));
+                }
+            } else if matches!(
+                kind,
+                AcpUpdateKind::ToolCall | AcpUpdateKind::ToolCallUpdate
+            ) {
+                let call_id = payload
+                    .get("toolCallId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                if kind == AcpUpdateKind::ToolCall && tool_call_ids.insert(call_id.clone()) {
+                    usage.value.tool_calls = usage.value.tool_calls.saturating_add(1);
+                }
+                evidence.push(AgentEvidence {
+                    kind: "acp_tool".into(),
+                    summary: bounded_json(&payload, 2_000),
+                    reference: (!call_id.is_empty()).then_some(call_id),
+                });
             }
         }
     }
@@ -710,7 +764,7 @@ async fn run_acp_request(
             artifact_ids: vec![],
             artifacts: vec![],
             evidence,
-            usage,
+            usage: usage.value,
             agent_session_id: Some(session_id.to_string()),
             child_frame_id: Some(child_frame_id.into()),
             error: None,
@@ -723,7 +777,27 @@ async fn run_acp_request(
             &session_id,
             child_frame_id,
             evidence,
-            usage,
+            usage.value,
+        ));
+    }
+    if let Some(reason) = runtime_budget_violation(&usage.value, &request.spec.budget) {
+        return Ok(failed_acp_response(
+            &request.request_id,
+            reason,
+            &session_id,
+            child_frame_id,
+            evidence,
+            usage.value,
+        ));
+    }
+    if let Some(reason) = usage.missing_budget_dimension(&request.spec.budget) {
+        return Ok(failed_acp_response(
+            &request.request_id,
+            reason,
+            &session_id,
+            child_frame_id,
+            evidence,
+            usage.value,
         ));
     }
     let output = match parse_result_object(&answer) {
@@ -735,7 +809,7 @@ async fn run_acp_request(
                 &session_id,
                 child_frame_id,
                 evidence,
-                usage,
+                usage.value,
             ))
         }
     };
@@ -767,7 +841,7 @@ async fn run_acp_request(
         artifact_ids,
         artifacts,
         evidence,
-        usage,
+        usage: usage.value,
         agent_session_id: Some(session_id.to_string()),
         child_frame_id: Some(child_frame_id.into()),
         error: None,
@@ -779,9 +853,10 @@ fn permission_option(
     permissions: &PermissionSet,
     project_root: &std::path::Path,
 ) -> Option<String> {
-    // Delegated ACP sessions expose only project-scoped file capabilities.
-    // Shell, process, MCP, and network permission requests are unknown
-    // identities here and therefore always select a reject option.
+    // In-sandbox Codex execution does not ask the ACP client for permission.
+    // This callback sees only attempted escalations plus explicit file prompts;
+    // shell, process, MCP, and network escalations are unknown identities here
+    // and therefore always select a reject option.
     let identities = tool_identity_fields(&request.tool_call);
     let is_read = identities
         .iter()
@@ -886,6 +961,56 @@ fn path_is_project_scoped(project_root: &std::path::Path, raw: &str) -> bool {
         && wisp_tools::safety::validate_file_path(project_root, relative).is_ok()
 }
 
+#[derive(Debug, Default)]
+struct AcpUsage {
+    value: AgentUsage,
+    tokens_reported: bool,
+    cost_reported: bool,
+}
+
+impl AcpUsage {
+    fn update(&mut self, update: &AcpUsageUpdate) -> Result<(), String> {
+        // ACP v1 reports current context usage, not an input/output split. Keep
+        // the maximum observed context usage in the existing aggregate token
+        // field so compaction cannot make a consumed budget appear smaller.
+        self.value.input_tokens = self.value.input_tokens.max(update.used);
+        self.tokens_reported = true;
+
+        if let Some(cost) = &update.cost {
+            let amount = cost.amount;
+            let currency = &cost.currency;
+            if !currency.eq_ignore_ascii_case("USD") {
+                return Err(format!(
+                    "ACP usage cost currency '{currency}' cannot be enforced as USD microunits"
+                ));
+            }
+            if !amount.is_finite() || amount < 0.0 || amount > u64::MAX as f64 / 1_000_000.0 {
+                return Err("ACP usage cost amount is outside the supported range".into());
+            }
+            self.value.cost_microunits = self
+                .value
+                .cost_microunits
+                .max((amount * 1_000_000.0).round() as u64);
+            self.cost_reported = true;
+        }
+        Ok(())
+    }
+
+    fn missing_budget_dimension(&self, budget: &AgentBudget) -> Option<String> {
+        if budget.max_tokens.is_some() && !self.tokens_reported {
+            return Some(
+                "ACP Agent did not report usage required to enforce its token budget".into(),
+            );
+        }
+        if budget.max_cost_microunits.is_some() && !self.cost_reported {
+            return Some(
+                "ACP Agent did not report cost required to enforce its cost budget".into(),
+            );
+        }
+        None
+    }
+}
+
 fn runtime_budget_violation(usage: &AgentUsage, budget: &AgentBudget) -> Option<String> {
     let total_tokens = usage.input_tokens.saturating_add(usage.output_tokens);
     if budget
@@ -923,6 +1048,26 @@ fn is_codex_profile(profile: &acp::AcpAgentProfile) -> bool {
             .args
             .iter()
             .any(|argument| argument.to_lowercase().contains("codex-acp"))
+}
+
+fn controlled_codex_launch_profile(profile: &acp::AcpAgentProfile) -> wisp_acp::AcpAgentProfile {
+    let mut launch = acp::launch_profile(profile);
+    // These overrides are appended so they win over a user's general Codex
+    // defaults for this controlled child only. Codex then executes tests and
+    // project commands in its OS-enforced workspace sandbox, with command
+    // network and web search disabled. `never` makes every attempted sandbox
+    // escalation fail instead of delegating a broader permission decision.
+    for value in [
+        r#"approval_policy="never""#,
+        r#"sandbox_mode="workspace-write""#,
+        "sandbox_workspace_write.network_access=false",
+        r#"web_search="disabled""#,
+        "mcp_servers={}",
+    ] {
+        launch.args.push("-c".into());
+        launch.args.push(value.into());
+    }
+    launch
 }
 
 pub(crate) struct StoreDelegationObserver {
@@ -1283,12 +1428,6 @@ fn bounded_json(value: &Value, limit: usize) -> String {
     }
 }
 
-fn json_u64(value: &Value, keys: &[&str]) -> u64 {
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(Value::as_u64))
-        .unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1307,18 +1446,89 @@ mod tests {
 
     #[test]
     fn codex_profile_detection_handles_binary_and_npx_forms() {
-        assert!(is_codex_profile(&acp::AcpAgentProfile {
+        let direct = acp::AcpAgentProfile {
             id: "direct".into(),
             label: "Codex".into(),
             command: "/usr/local/bin/codex-acp".into(),
             args: vec![],
-        }));
+        };
+        assert!(is_codex_profile(&direct));
         assert!(is_codex_profile(&acp::AcpAgentProfile {
             id: "npx".into(),
             label: "Codex".into(),
             command: "npx".into(),
             args: vec!["-y".into(), "@agentclientprotocol/codex-acp".into()],
         }));
+        let launch = controlled_codex_launch_profile(&direct);
+        let overrides = launch
+            .args
+            .chunks_exact(2)
+            .map(|pair| (pair[0].as_str(), pair[1].as_str()))
+            .collect::<Vec<_>>();
+        assert!(overrides.contains(&("-c", r#"sandbox_mode="workspace-write""#)));
+        assert!(overrides.contains(&("-c", "sandbox_workspace_write.network_access=false")));
+        assert!(overrides.contains(&("-c", r#"approval_policy="never""#)));
+        assert!(overrides.contains(&("-c", r#"web_search="disabled""#)));
+        assert!(overrides.contains(&("-c", "mcp_servers={}")));
+    }
+
+    #[test]
+    fn acp_usage_reads_standard_v1_shape_and_fails_closed_when_unmeasured() {
+        let mut usage = AcpUsage::default();
+        usage
+            .update(&AcpUsageUpdate {
+                used: 53_000,
+                size: 200_000,
+                cost: Some(wisp_acp::AcpUsageCost {
+                    amount: 0.045,
+                    currency: "USD".into(),
+                }),
+            })
+            .unwrap();
+        usage
+            .update(&AcpUsageUpdate {
+                used: 40_000,
+                size: 200_000,
+                cost: None,
+            })
+            .unwrap();
+        assert_eq!(usage.value.input_tokens, 53_000);
+        assert_eq!(usage.value.output_tokens, 0);
+        assert_eq!(usage.value.cost_microunits, 45_000);
+        assert!(usage
+            .missing_budget_dimension(&AgentBudget {
+                max_tokens: Some(60_000),
+                max_tool_calls: None,
+                max_cost_microunits: Some(50_000),
+            })
+            .is_none());
+
+        let tokens_only = AcpUsage {
+            value: AgentUsage {
+                input_tokens: 1,
+                ..Default::default()
+            },
+            tokens_reported: true,
+            cost_reported: false,
+        };
+        assert!(tokens_only
+            .missing_budget_dimension(&AgentBudget {
+                max_tokens: Some(2),
+                max_tool_calls: None,
+                max_cost_microunits: Some(1),
+            })
+            .unwrap()
+            .contains("cost"));
+        assert!(AcpUsage::default()
+            .update(&AcpUsageUpdate {
+                used: 1,
+                size: 2,
+                cost: Some(wisp_acp::AcpUsageCost {
+                    amount: 1.0,
+                    currency: "EUR".into(),
+                }),
+            })
+            .is_err());
     }
 
     #[test]

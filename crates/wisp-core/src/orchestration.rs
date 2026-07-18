@@ -400,7 +400,7 @@ fn builtin_templates() -> Vec<AgentTemplate> {
             "Execute and verify project-scoped code through Codex ACP.",
             AgentRole::Coder,
             AgentBackend::Acp,
-            &["read_file", "write_file"],
+            &["read_file", "write_file", "codex_project_exec"],
             true,
             false,
             32_000,
@@ -424,7 +424,7 @@ fn builtin_templates() -> Vec<AgentTemplate> {
             "Design scientific figures and produce validated plotting artifacts.",
             AgentRole::Coder,
             AgentBackend::Acp,
-            &["read_file", "write_file"],
+            &["read_file", "write_file", "codex_project_exec"],
             true,
             false,
             24_000,
@@ -482,7 +482,11 @@ fn template(
         budget_ceiling: AgentBudget {
             max_tokens: Some(max_tokens),
             max_tool_calls: Some(64),
-            max_cost_microunits: Some(5_000_000),
+            // The built-in providers do not all report a comparable monetary
+            // cost. Generated plans therefore leave cost uncapped instead of
+            // presenting an unenforceable default; an explicit cap is handled
+            // fail-closed by backends that receive one.
+            max_cost_microunits: None,
         },
         timeout_ceiling_secs: Some(timeout_secs),
         allow_delegation: false,
@@ -583,7 +587,7 @@ mod tests {
         assert!(!spec.permissions.write);
         assert!(!spec.allow_delegation);
         assert_eq!(spec.timeout_secs, reviewer.timeout_ceiling_secs);
-        assert_eq!(spec.budget.max_cost_microunits, Some(5_000_000));
+        assert_eq!(spec.budget.max_cost_microunits, None);
         reviewer.validate_spec(&spec).unwrap();
     }
 
@@ -602,7 +606,18 @@ mod tests {
             .unwrap();
         assert!(plan.requires_confirmation);
         assert_eq!(plan.max_parallel, 2);
-        assert!(plan.steps.iter().any(|step| step.id == "code_execution"));
+        let code = plan
+            .steps
+            .iter()
+            .find(|step| step.id == "code_execution")
+            .unwrap();
+        assert!(code
+            .spec
+            .permissions
+            .tools
+            .iter()
+            .any(|tool| tool == "codex_project_exec"));
+        assert!(!code.spec.permissions.network);
         let reviewer = plan.steps.last().unwrap();
         assert_eq!(reviewer.id, "reviewer");
         assert_eq!(reviewer.spec.dependencies.len(), plan.steps.len() - 1);

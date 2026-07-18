@@ -136,11 +136,25 @@ pub struct AcpPermissionRequest {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct AcpUsageCost {
+    pub amount: f64,
+    pub currency: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcpUsageUpdate {
+    pub used: u64,
+    pub size: u64,
+    pub cost: Option<AcpUsageCost>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum AcpSessionEvent {
     Update {
         session_id: String,
         kind: AcpUpdateKind,
         payload: serde_json::Value,
+        usage: Option<AcpUsageUpdate>,
     },
     Permission(AcpPermissionRequest),
     Exited {
@@ -472,6 +486,7 @@ async fn run_actor(
                         SessionNotification::parse_message(&message.method, &message.params)
                     {
                         let kind = update_kind(&notification.update);
+                        let usage = typed_usage_update(&notification.update);
                         let payload = serde_json::to_value(notification.update).unwrap_or_else(
                             |error| serde_json::json!({ "serializationError": error.to_string() }),
                         );
@@ -479,6 +494,7 @@ async fn run_actor(
                             session_id: notification.session_id.to_string(),
                             kind,
                             payload,
+                            usage,
                         });
                     }
                     // Ignore future update variants until Wisp learns how to display them.
@@ -794,6 +810,20 @@ fn update_kind(update: &SessionUpdate) -> AcpUpdateKind {
     }
 }
 
+fn typed_usage_update(update: &SessionUpdate) -> Option<AcpUsageUpdate> {
+    let SessionUpdate::UsageUpdate(update) = update else {
+        return None;
+    };
+    Some(AcpUsageUpdate {
+        used: update.used,
+        size: update.size,
+        cost: update.cost.as_ref().map(|cost| AcpUsageCost {
+            amount: cost.amount,
+            currency: cost.currency.clone(),
+        }),
+    })
+}
+
 fn stop_reason(reason: StopReason) -> AcpStopReason {
     match reason {
         StopReason::EndTurn => AcpStopReason::EndTurn,
@@ -947,6 +977,26 @@ mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{AgentCapabilities, InitializeResponse};
     use agent_client_protocol::Channel;
+
+    #[test]
+    fn standard_usage_update_is_exposed_as_typed_data() {
+        use agent_client_protocol::schema::v1::{Cost, UsageUpdate};
+
+        let update = SessionUpdate::UsageUpdate(
+            UsageUpdate::new(53_000, 200_000).cost(Cost::new(0.045, "USD")),
+        );
+        assert_eq!(
+            typed_usage_update(&update),
+            Some(AcpUsageUpdate {
+                used: 53_000,
+                size: 200_000,
+                cost: Some(AcpUsageCost {
+                    amount: 0.045,
+                    currency: "USD".into(),
+                }),
+            })
+        );
+    }
 
     #[tokio::test]
     async fn official_sdk_in_memory_v1_handshake() {
