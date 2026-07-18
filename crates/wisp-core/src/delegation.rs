@@ -338,8 +338,12 @@ pub trait AgentDelegator: Send + Sync {
         request: AgentDelegationRequest,
     ) -> anyhow::Result<AgentDelegationResponse> {
         request.validate()?;
+        let request_id = request.request_id.clone();
         let response = self.delegate_validated(request).await?;
         response.validate()?;
+        if response.request_id != request_id {
+            anyhow::bail!("delegation response request_id does not match the request");
+        }
         Ok(response)
     }
 
