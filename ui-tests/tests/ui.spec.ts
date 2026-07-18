@@ -3155,6 +3155,31 @@ test("R execution uses the language-specific approval label", async ({ page }) =
   await expect(page.locator(".approval-code code.language-r")).toContainText("summary(dataset)");
 });
 
+test("awaiting approval marks the session dot and requests a desktop notification (#327)", async ({ page }) => {
+  await page.goto("/?mockLongSession=1");
+  await page.locator(".proj-card-main").first().click();
+  await expect(newSessionButton(page)).toBeVisible();
+  await page.getByText("Long transcript", { exact: true }).click();
+  await composer(page).fill("NEEDCONFIRM");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByRole("button", { name: "Allow once" })).toBeVisible({ timeout: 10_000 });
+  // The waiting state shows on the sidebar session row.
+  await expect(page.locator(".side-item.ses.attention")).toHaveCount(1);
+  // The UI asked the backend for a desktop notification carrying the session
+  // title (the backend decides visibility from window focus + settings).
+  await expect.poll(async () => page.evaluate(() => {
+    const call = ((window as any).__skillInvokeLog ?? []).find((c: any) => c.cmd === "notify_user");
+    if (!call) return null;
+    return call.args instanceof Map ? Object.fromEntries(call.args) : (call.args ?? {});
+  })).toMatchObject({
+    title: "Waiting for your approval",
+    body: "Long transcript · shell",
+  });
+  // Responding clears the badge.
+  await page.getByRole("button", { name: "Allow once" }).click();
+  await expect(page.locator(".side-item.ses.attention")).toHaveCount(0);
+});
+
 test("settings permissions lists and revokes remembered approvals", async ({ page }) => {
   await enterApp(page);
   await openSettingsSection(page, "Permissions");

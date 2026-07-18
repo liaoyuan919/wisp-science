@@ -1328,6 +1328,29 @@ fn App() -> impl IntoView {
     let running_cb = running;
     let pending_cb = pending_turns;
     let approval_cb = approval_pending;
+    // Desktop notification for task status (#327). The backend drops it while
+    // any app window is focused or when disabled in settings, so callers just
+    // fire on every done/error/approval event.
+    let notify_desktop = move |frame_id: &str, kind: &str, detail: &str| {
+        let loc = locale.get_untracked();
+        let title = t(loc, &format!("notify.{kind}"));
+        let session = sessions
+            .get_untracked()
+            .iter()
+            .find(|s| s.id == frame_id)
+            .map(|s| s.title.clone())
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| t(loc, "sidebar.untitled"));
+        let body = if detail.is_empty() {
+            session
+        } else {
+            format!("{session} · {detail}")
+        };
+        spawn_local(async move {
+            let arg = to_value(&serde_json::json!({ "title": title, "body": body })).unwrap();
+            let _ = invoke("notify_user", arg).await;
+        });
+    };
     let pet_activity_cb = pet_activity;
     let status_cb = status;
     let locale_cb = locale;
@@ -1527,6 +1550,7 @@ fn App() -> impl IntoView {
                 stop_reason: _,
             } => {
                 flush_now();
+                notify_desktop(&frame_id, "done", "");
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |items| {
                     strip_approval_pending(items);
                 });
@@ -1542,6 +1566,7 @@ fn App() -> impl IntoView {
             }
             AgentEvent::Error { frame_id, message } => {
                 flush_now();
+                notify_desktop(&frame_id, "error", &message);
                 let model = active_model_label(&models_cb.get());
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
                     strip_approval_pending(v);
@@ -1706,6 +1731,7 @@ fn App() -> impl IntoView {
                     tool = "shell".into();
                 }
             }
+            notify_desktop(&fid, "attention", &tool);
             route_items(
                 confirm_active,
                 confirm_items,
@@ -1756,6 +1782,10 @@ fn App() -> impl IntoView {
             })
             .unwrap_or("ACP tool request")
             .to_string();
+        notify_desktop(&request.frame_id, "attention", &tool);
+        approval_pending.update(|s| {
+            s.insert(request.frame_id.clone());
+        });
         route_items(
             acp_permission_active,
             acp_permission_items,
@@ -1909,6 +1939,9 @@ fn App() -> impl IntoView {
         let Ok(resolved) = serde_wasm_bindgen::from_value::<AcpPermissionResolved>(payload) else {
             return;
         };
+        approval_pending.update(|s| {
+            s.remove(&resolved.frame_id);
+        });
         route_items(
             active_session,
             items,
@@ -5435,6 +5468,7 @@ fn App() -> impl IntoView {
             state=SidebarState {
                 locale, show_sidebar, sidebar_w, show_proj_menu, show_projects, demo_mode, project_info, proj_list,
                 sessions, folders, drag_session, drop_target, active_session, running,
+                attention: approval_pending,
                 rename_session_input, rename_session_target, collapsed_folders, folder_modal_input,
                 folder_modal, demos, session_history_cursor, session_history_loading,
             }
