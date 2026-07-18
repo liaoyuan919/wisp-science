@@ -14,7 +14,7 @@ pub use context::ContextManager;
 pub use delegation::{
     AgentBackend, AgentBudget, AgentDelegationRequest, AgentDelegationResponse, AgentDelegator,
     AgentRole, AgentSpec, ContextPolicy, DelegationStatus, PermissionSet,
-    UnconfiguredAgentDelegator,
+    UnconfiguredAgentDelegator, ValidatedAgentDelegationRequest,
 };
 pub use memory::MemoryManager;
 pub use output::{NullOutput, Output, StreamSinkAdapter, ToolEnvAdapter};
