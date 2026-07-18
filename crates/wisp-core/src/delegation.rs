@@ -241,7 +241,10 @@ impl AgentSpec {
             if !contract.is_object() {
                 anyhow::bail!("{name} must be a JSON object");
             }
-            if let Some(kind) = contract.get("type").and_then(Value::as_str) {
+            if let Some(type_value) = contract.get("type") {
+                let kind = type_value
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("{name}.type must be a string"))?;
                 if !matches!(
                     kind,
                     "object" | "array" | "string" | "number" | "integer" | "boolean" | "null"
@@ -577,5 +580,25 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn malformed_contract_type_is_rejected() {
+        let mut spec = AgentSpec {
+            agent_id: "a".into(),
+            role: AgentRole::Reviewer,
+            backend: AgentBackend::Local,
+            model: None,
+            prompt_template: "Review".into(),
+            input_contract: serde_json::json!({"type": ["object"]}),
+            output_contract: serde_json::json!({}),
+            permissions: PermissionSet::default(),
+            context_policy: ContextPolicy::default(),
+            budget: AgentBudget::default(),
+            timeout_secs: Some(1),
+        };
+        assert!(spec.validate().is_err());
+        spec.input_contract = serde_json::json!({"type":"object"});
+        assert!(spec.validate().is_ok());
     }
 }
