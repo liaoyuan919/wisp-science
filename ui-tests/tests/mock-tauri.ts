@@ -215,6 +215,34 @@ export function tauriMock(): void {
       attempts: [],
     };
   };
+  const agentWorkflowAttempt = (snapshot: any, status: string) => ({
+    id: "attempt-1",
+    workflow_id: snapshot.workflow.id,
+    step_id: snapshot.steps[0].id,
+    attempt: 1,
+    request_id: "request-1",
+    backend: "acp",
+    status,
+    request_json: "{}",
+    response_json: status === "running" ? null : "{}",
+    output_json: status === "succeeded"
+      ? JSON.stringify({ summary: "Analysis and tests completed." })
+      : "{}",
+    artifact_ids_json: "[]",
+    evidence_json: "[]",
+    error: null,
+    agent_session_id: "agent-session-1",
+    child_frame_id: "agent-child-1",
+    input_tokens: status === "succeeded" ? 1200 : 0,
+    output_tokens: status === "succeeded" ? 300 : 0,
+    tool_calls: status === "succeeded" ? 4 : 0,
+    cost_microunits: status === "succeeded" ? 25000 : 0,
+    cancel_requested: status === "cancelled",
+    started_at: 2,
+    finished_at: status === "running" ? null : 3,
+    created_at: 2,
+    updated_at: status === "running" ? 2 : 3,
+  });
   const acpBindings: Record<string, string> = {};
   const acpPermissionFrames: Record<string, string> = {};
   const acpLongResolvers: Record<string, (value: string) => void> = {};
@@ -727,6 +755,7 @@ export function tauriMock(): void {
             const snapshot = mockAgentWorkflows.find((item) => item.workflow.id === arg("workflowId"));
             if (!snapshot) throw new Error("Agent workflow does not exist");
             snapshot.workflow.status = "running";
+            snapshot.attempts = [agentWorkflowAttempt(snapshot, "running")];
             const cancellationDemo = snapshot.workflow.goal.includes("CANCEL DEMO");
             await new Promise((resolve) => setTimeout(resolve, cancellationDemo ? 1_500 : 60));
             if (snapshot.workflow.status === "cancelled") {
@@ -734,38 +763,16 @@ export function tauriMock(): void {
             }
             snapshot.workflow.status = "succeeded";
             snapshot.workflow.version += 2;
-            snapshot.attempts = [{
-              id: "attempt-1",
-              workflow_id: snapshot.workflow.id,
-              step_id: snapshot.steps[0].id,
-              attempt: 1,
-              request_id: "request-1",
-              backend: "acp",
-              status: "succeeded",
-              request_json: "{}",
-              response_json: "{}",
-              output_json: JSON.stringify({ summary: "Analysis and tests completed." }),
-              artifact_ids_json: "[]",
-              evidence_json: "[]",
-              error: null,
-              agent_session_id: "agent-session-1",
-              child_frame_id: "agent-child-1",
-              input_tokens: 1200,
-              output_tokens: 300,
-              tool_calls: 4,
-              cost_microunits: 25000,
-              cancel_requested: false,
-              started_at: 2,
-              finished_at: 3,
-              created_at: 2,
-              updated_at: 3,
-            }];
+            snapshot.attempts = [agentWorkflowAttempt(snapshot, "succeeded")];
             return { workflow_id: snapshot.workflow.id, status: "succeeded", steps: [] };
           }
           case "cancel_agent_workflow": {
             const snapshot = mockAgentWorkflows.find((item) => item.workflow.id === arg("workflowId"));
             if (!snapshot) throw new Error("Agent workflow does not exist");
             snapshot.workflow.status = "cancelled";
+            snapshot.attempts = snapshot.attempts.map((attempt: any) =>
+              attempt.status === "running" ? agentWorkflowAttempt(snapshot, "cancelled") : attempt
+            );
             return null;
           }
           case "retry_agent_workflow": {

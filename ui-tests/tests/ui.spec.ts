@@ -4104,11 +4104,16 @@ test("Agents panel cancels a running workflow and prepares it for retry", async 
   await panel.getByTestId("agent-create").click();
   const card = panel.locator(".agent-workflow-card").first();
   await card.getByTestId("agent-approve").click();
-  await card.getByTestId("agent-run").click();
+  const runButton = card.getByTestId("agent-run");
+  await runButton.click();
+  await expect(runButton).toBeDisabled();
+  await expect.poll(async () => (await invokeArgsList(page, "run_agent_workflow")).length).toBe(1);
 
   await expect(card).toContainText("running", { timeout: 2_000 });
+  await expect(card.getByRole("button", { name: "Take over" })).toHaveCount(0);
   await card.getByTestId("agent-cancel").click();
   await expect(card).toContainText("cancelled");
+  await expect(card.getByRole("button", { name: "Take over" })).toBeVisible();
   await card.getByTestId("agent-retry").click();
   await expect(card).toContainText("approved");
 });

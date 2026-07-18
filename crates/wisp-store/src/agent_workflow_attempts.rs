@@ -384,7 +384,7 @@ impl Store {
         let now = chrono::Utc::now().timestamp();
         let mut tx = self.pool.begin().await?;
         let attempts = sqlx::query(
-            "UPDATE agent_workflow_attempts SET status='failed',error=COALESCE(error,?),finished_at=COALESCE(finished_at,?),updated_at=? WHERE workflow_id=? AND status IN ('queued','running')",
+            "UPDATE agent_workflow_attempts SET status='failed',error=COALESCE(error,?),finished_at=COALESCE(finished_at,?),updated_at=? WHERE workflow_id=? AND status IN ('queued','running') AND workflow_id IN (SELECT id FROM agent_workflows WHERE status='running')",
         )
         .bind(error)
         .bind(now)

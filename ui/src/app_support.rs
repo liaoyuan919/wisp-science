@@ -4628,6 +4628,26 @@ fn invoke_agent_workflow_action(
     });
 }
 
+fn launch_agent_workflow(
+    workflow_id: String,
+    workflows: RwSignal<Vec<AgentWorkflowSnapshot>>,
+    launching: RwSignal<Vec<String>>,
+    error: RwSignal<Option<String>>,
+) {
+    if launching.with_untracked(|ids| ids.contains(&workflow_id)) {
+        return;
+    }
+    launching.update(|ids| ids.push(workflow_id.clone()));
+    spawn_local(async move {
+        let args = to_value(&serde_json::json!({ "workflowId": workflow_id.clone() })).unwrap();
+        match invoke_checked("run_agent_workflow", args).await {
+            Ok(_) => refresh_agent_workflows(workflows, error),
+            Err(invoke_error) => error.set(Some(js_error_text(invoke_error))),
+        }
+        launching.update(|ids| ids.retain(|id| id != &workflow_id));
+    });
+}
+
 fn agent_attempt_summary(attempt: &AgentWorkflowAttempt) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(&attempt.output_json)
         .ok()
@@ -4669,6 +4689,7 @@ pub(super) fn agent_workflows_panel(
     mode: RwSignal<String>,
     editing: RwSignal<Option<String>>,
     busy: RwSignal<bool>,
+    launching: RwSignal<Vec<String>>,
     error: RwSignal<Option<String>>,
     locale: RwSignal<Locale>,
     load_session: Callback<String>,
@@ -4772,6 +4793,7 @@ pub(super) fn agent_workflows_panel(
                         let edit_id = workflow_id.clone();
                         let approve_id = workflow_id.clone();
                         let run_id = workflow_id.clone();
+                        let run_busy_id = workflow_id.clone();
                         let cancel_id = workflow_id.clone();
                         let retry_id = workflow_id.clone();
                         let status_class = format!("agent-workflow-status {}", workflow.status);
@@ -4813,10 +4835,11 @@ pub(super) fn agent_workflows_panel(
                                     })}
                                     {(workflow.status == "approved").then(|| view! {
                                         <button type="button" class="agents-primary" data-testid="agent-run"
-                                            on:click=move |_| invoke_agent_workflow_action(
-                                                "run_agent_workflow",
-                                                to_value(&serde_json::json!({ "workflowId": run_id })).unwrap(),
+                                            disabled=move || launching.with(|ids| ids.contains(&run_busy_id))
+                                            on:click=move |_| launch_agent_workflow(
+                                                run_id.clone(),
                                                 workflows,
+                                                launching,
                                                 error,
                                             )>{t(locale.get(), "agents.run")}</button>
                                     })}
@@ -4848,7 +4871,12 @@ pub(super) fn agent_workflows_panel(
                                         let attempt_class = format!("agent-attempt-status {attempt_status}");
                                         let summary = attempt.as_ref().and_then(agent_attempt_summary);
                                         let error_message = attempt.as_ref().and_then(|item| item.error.clone());
-                                        let child_frame = attempt.as_ref().and_then(|item| item.child_frame_id.clone());
+                                        let child_frame = attempt.as_ref()
+                                            .filter(|item| matches!(
+                                                item.status.as_str(),
+                                                "succeeded" | "failed" | "cancelled" | "blocked"
+                                            ))
+                                            .and_then(|item| item.child_frame_id.clone());
                                         let usage = attempt.as_ref().map(|item| format!(
                                             "{} tokens · {} tools · {:.4}",
                                             item.input_tokens.saturating_add(item.output_tokens),

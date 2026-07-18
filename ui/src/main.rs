@@ -981,6 +981,7 @@ fn App() -> impl IntoView {
     let agent_workflow_mode = create_rw_signal("assisted".to_string());
     let agent_workflow_editing = create_rw_signal::<Option<String>>(None);
     let agent_workflow_busy = create_rw_signal(false);
+    let agent_workflow_launching = create_rw_signal::<Vec<String>>(vec![]);
     let agent_workflow_error = create_rw_signal::<Option<String>>(None);
     let file_source = create_rw_signal("local".to_string());
     let file_query = create_rw_signal(String::new());
@@ -7384,6 +7385,7 @@ fn App() -> impl IntoView {
                             agent_workflow_mode,
                             agent_workflow_editing,
                             agent_workflow_busy,
+                            agent_workflow_launching,
                             agent_workflow_error,
                             locale,
                             load_session.clone(),

@@ -1,7 +1,14 @@
 use crate::{acp, build_provider_config, load_settings, models, ActiveProject};
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tauri::State;
 use tokio::sync::Mutex;
 use wisp_acp::{
@@ -357,20 +364,35 @@ pub(crate) async fn run_agent_workflow(
     let delegator = Arc::new(TauriDelegator::new(state.store.clone(), project));
     let observer = Arc::new(StoreDelegationObserver::new(state.store.clone()));
     let result = DelegationExecutor::new(delegator.clone())
-        .with_observer(observer)
+        .with_observer(observer.clone())
         .execute(plan)
         .await;
     if result.is_err() {
         delegator.cancel_all().await;
-        let _ = state
-            .store
-            .fail_agent_workflow_execution(
-                &workflow_id,
-                "Agent workflow execution stopped after a runtime or persistence error.",
-            )
-            .await;
+        let _ = fail_owned_agent_workflow_execution(
+            &state.store,
+            &observer,
+            &workflow_id,
+            "Agent workflow execution stopped after a runtime or persistence error.",
+        )
+        .await;
     }
     result.map_err(|error| error.to_string())
+}
+
+async fn fail_owned_agent_workflow_execution(
+    store: &Store,
+    observer: &StoreDelegationObserver,
+    workflow_id: &str,
+    error: &str,
+) -> anyhow::Result<bool> {
+    if !observer.execution_claimed() {
+        return Ok(false);
+    }
+    let (_, workflow_failed) = store
+        .fail_agent_workflow_execution(workflow_id, error)
+        .await?;
+    Ok(workflow_failed)
 }
 
 pub(crate) struct TauriDelegator {
@@ -1467,6 +1489,7 @@ fn controlled_codex_launch_profile(profile: &acp::AcpAgentProfile) -> wisp_acp::
 pub(crate) struct StoreDelegationObserver {
     store: Store,
     attempt_ids: Mutex<HashMap<String, String>>,
+    execution_claimed: AtomicBool,
 }
 
 impl StoreDelegationObserver {
@@ -1474,7 +1497,12 @@ impl StoreDelegationObserver {
         Self {
             store,
             attempt_ids: Mutex::new(HashMap::new()),
+            execution_claimed: AtomicBool::new(false),
         }
+    }
+
+    fn execution_claimed(&self) -> bool {
+        self.execution_claimed.load(Ordering::Acquire)
     }
 
     async fn create_started_attempt(
@@ -1527,6 +1555,7 @@ impl DelegationExecutionObserver for StoreDelegationObserver {
         {
             anyhow::bail!("Agent workflow is not approved or is already running");
         }
+        self.execution_claimed.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -2325,6 +2354,96 @@ mod tests {
             .iter()
             .all(|attempt| attempt.status == AgentWorkflowAttemptStatus::Succeeded));
         assert!(attempts.iter().all(|attempt| attempt.input_tokens == 10));
+
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn duplicate_start_cannot_fail_the_observer_that_claimed_execution() {
+        let path = std::env::temp_dir().join(format!(
+            "wisp_delegation_claim_{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Store::open(&path).await.unwrap();
+        store.create_project("p", "Project", "").await.unwrap();
+        let plan = DelegationPlanner
+            .suggest(
+                "interpret biology gene evidence",
+                DelegationMode::Automatic,
+                "context",
+                &[],
+                &[],
+                &AgentTemplateRegistry::builtins(),
+            )
+            .unwrap();
+        let mut workflow = AgentWorkflow::new(&plan.id, "p", "workspace", "Delegation").unwrap();
+        workflow.plan_json = serde_json::to_string(&plan).unwrap();
+        let steps = plan
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(position, planned)| {
+                let mut step = AgentWorkflowStep::new(
+                    &planned.id,
+                    &plan.id,
+                    position as i64,
+                    &planned.spec.agent_id,
+                    planned.spec.role.as_str(),
+                    planned.spec.backend.as_str(),
+                    &planned.spec.prompt_template,
+                )
+                .unwrap();
+                step.template_id = planned.spec.template_id.clone();
+                step.spec_json = serde_json::to_string(&planned.spec).unwrap();
+                step
+            })
+            .collect::<Vec<_>>();
+        store
+            .create_agent_workflow_plan(&workflow, &steps)
+            .await
+            .unwrap();
+        assert!(store
+            .approve_agent_workflow_plan(&plan.id, 1)
+            .await
+            .unwrap());
+
+        let first = StoreDelegationObserver::new(store.clone());
+        let second = StoreDelegationObserver::new(store.clone());
+        let (first_start, second_start) = tokio::join!(
+            first.workflow_started(&plan),
+            second.workflow_started(&plan)
+        );
+        assert_ne!(first_start.is_ok(), second_start.is_ok());
+        let (owner, contender) = if first_start.is_ok() {
+            (&first, &second)
+        } else {
+            (&second, &first)
+        };
+        assert!(owner.execution_claimed());
+        assert!(!contender.execution_claimed());
+        assert!(!fail_owned_agent_workflow_execution(
+            &store,
+            contender,
+            &plan.id,
+            "duplicate start",
+        )
+        .await
+        .unwrap());
+        assert_eq!(
+            store
+                .get_agent_workflow(&plan.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            AgentWorkflowStatus::Running
+        );
+        assert!(
+            fail_owned_agent_workflow_execution(&store, owner, &plan.id, "owner stopped",)
+                .await
+                .unwrap()
+        );
 
         drop(store);
         let _ = std::fs::remove_file(path);
