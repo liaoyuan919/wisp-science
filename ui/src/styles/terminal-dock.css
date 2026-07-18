@@ -90,7 +90,7 @@
   gap: 8px;
   padding: 5px 10px 5px 7px;
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--text-muted);
   font-size: 12px;
@@ -100,14 +100,14 @@
 .terminal-dock-tab:hover { background: var(--surface-hover); color: var(--text); }
 
 .terminal-dock-tab.active {
-  border-color: var(--border);
-  background: var(--bg-app);
+  border-color: var(--border-active);
+  background: var(--bg-elev);
   color: var(--text);
   box-shadow: var(--shadow-sm);
 }
 
 .terminal-dock-tab .gi { width: 14px; height: 14px; color: var(--text-muted); }
-.terminal-dock-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 560; }
+.terminal-dock-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 520; }
 .terminal-dock-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); font: 10px/1.2 var(--font-mono); }
 .terminal-dock-spacer { flex: 1; }
 

@@ -59,6 +59,9 @@
 
   --radius: 16px;
   --radius-sm: 10px;
+  --radius-xs: 8px; /* tabs, chips */
+  /* Shared active-tab accent: faint clay tint, resolves per-theme at use site. */
+  --border-active: color-mix(in srgb, var(--clay) 24%, var(--border));
   --shadow: 0 16px 32px -12px var(--shadow-color);
   --shadow-sm: 0 1px 2px rgba(20, 20, 19, 0.06), 0 0 0 1px rgba(20, 20, 19, 0.04);
   --motion-ease-standard: cubic-bezier(0.2, 0.72, 0.2, 1);
