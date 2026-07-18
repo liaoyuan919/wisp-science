@@ -24,30 +24,68 @@ pub struct ProjectTransferStats {
 /// bindings are deliberately not project data and are not copied.
 async fn copy_project_children(tx: &mut Transaction<'_, Sqlite>, project_id: &str) -> Result<()> {
     if attached_table_exists(tx, "agent_workflows").await? {
-        sqlx::query(
-            "INSERT INTO agent_workflows(id,project_id,workspace_id,name,description,version,enabled,created_at,updated_at) \
-             SELECT id,project_id,workspace_id,name,description,version,enabled,created_at,updated_at \
-             FROM transfer.agent_workflows WHERE project_id=?",
-        )
-        .bind(project_id)
-        .execute(&mut **tx)
-        .await?;
+        let workflow_columns = attached_table_columns(tx, "agent_workflows").await?;
+        let has_plan_columns = [
+            "frame_id",
+            "goal",
+            "mode",
+            "status",
+            "max_parallel",
+            "requires_confirmation",
+            "plan_json",
+            "approved_at",
+        ]
+        .iter()
+        .all(|column| workflow_columns.contains(*column));
+        let workflow_query = if has_plan_columns {
+            "INSERT INTO agent_workflows(id,project_id,workspace_id,frame_id,name,description,goal,mode,status,max_parallel,requires_confirmation,plan_json,version,enabled,approved_at,created_at,updated_at) \
+             SELECT id,project_id,workspace_id,frame_id,name,description,goal,mode,status,max_parallel,requires_confirmation,plan_json,version,enabled,approved_at,created_at,updated_at \
+             FROM transfer.agent_workflows WHERE project_id=?"
+        } else {
+            "INSERT INTO agent_workflows(id,project_id,workspace_id,frame_id,name,description,goal,mode,status,max_parallel,requires_confirmation,plan_json,version,enabled,approved_at,created_at,updated_at) \
+             SELECT id,project_id,workspace_id,NULL,name,description,name,'assisted','draft',2,1,'{}',version,enabled,NULL,created_at,updated_at \
+             FROM transfer.agent_workflows WHERE project_id=?"
+        };
+        sqlx::query(workflow_query)
+            .bind(project_id)
+            .execute(&mut **tx)
+            .await?;
 
         if attached_table_exists(tx, "agent_workflow_steps").await? {
             let columns = attached_table_columns(tx, "agent_workflow_steps").await?;
-            let query = if ["input_contract_json", "output_contract_json", "budget_json"]
+            let has_contracts = ["input_contract_json", "output_contract_json", "budget_json"]
                 .iter()
-                .all(|column| columns.contains(*column))
-            {
-                "INSERT INTO agent_workflow_steps(id,workflow_id,position,agent_id,role,backend,model,prompt_template,input_schema_json,output_schema_json,input_contract_json,output_contract_json,permissions_json,context_policy_json,budget_json,timeout_secs,created_at,updated_at) \
-                 SELECT s.id,s.workflow_id,s.position,s.agent_id,s.role,s.backend,s.model,s.prompt_template,s.input_schema_json,s.output_schema_json,s.input_contract_json,s.output_contract_json,s.permissions_json,s.context_policy_json,s.budget_json,s.timeout_secs,s.created_at,s.updated_at \
-                 FROM transfer.agent_workflow_steps s JOIN transfer.agent_workflows w ON w.id=s.workflow_id WHERE w.project_id=?"
+                .all(|column| columns.contains(*column));
+            let has_plan = ["template_id", "spec_json"]
+                .iter()
+                .all(|column| columns.contains(*column));
+            let template_expr = if has_plan {
+                "s.template_id"
             } else {
-                "INSERT INTO agent_workflow_steps(id,workflow_id,position,agent_id,role,backend,model,prompt_template,input_schema_json,output_schema_json,permissions_json,context_policy_json,timeout_secs,created_at,updated_at) \
-                 SELECT s.id,s.workflow_id,s.position,s.agent_id,s.role,s.backend,s.model,s.prompt_template,s.input_schema_json,s.output_schema_json,s.permissions_json,s.context_policy_json,s.timeout_secs,s.created_at,s.updated_at \
-                 FROM transfer.agent_workflow_steps s JOIN transfer.agent_workflows w ON w.id=s.workflow_id WHERE w.project_id=?"
+                "s.agent_id"
             };
-            sqlx::query(query)
+            let spec_expr = if has_plan { "s.spec_json" } else { "'{}'" };
+            let input_contract_expr = if has_contracts {
+                "s.input_contract_json"
+            } else {
+                "'{}'"
+            };
+            let output_contract_expr = if has_contracts {
+                "s.output_contract_json"
+            } else {
+                "'{}'"
+            };
+            let budget_expr = if has_contracts {
+                "s.budget_json"
+            } else {
+                "'{}'"
+            };
+            let query = format!(
+                "INSERT INTO agent_workflow_steps(id,workflow_id,position,agent_id,template_id,role,backend,model,prompt_template,input_schema_json,output_schema_json,input_contract_json,output_contract_json,permissions_json,context_policy_json,budget_json,spec_json,timeout_secs,created_at,updated_at) \
+                 SELECT s.id,s.workflow_id,s.position,s.agent_id,{template_expr},s.role,s.backend,s.model,s.prompt_template,s.input_schema_json,s.output_schema_json,{input_contract_expr},{output_contract_expr},s.permissions_json,s.context_policy_json,{budget_expr},{spec_expr},s.timeout_secs,s.created_at,s.updated_at \
+                 FROM transfer.agent_workflow_steps s JOIN transfer.agent_workflows w ON w.id=s.workflow_id WHERE w.project_id=?"
+            );
+            sqlx::query(&query)
                 .bind(project_id)
                 .execute(&mut **tx)
                 .await?;

@@ -106,6 +106,52 @@ async fn agent_workflow_and_steps_roundtrip() {
 }
 
 #[tokio::test]
+async fn agent_workflow_plan_edit_and_approval_are_versioned() {
+    let tmp = std::env::temp_dir().join(format!("wisp_agent_plan_{}.sqlite", uuid::Uuid::new_v4()));
+    let store = Store::open(&tmp).await.unwrap();
+    store.create_project("p", "proj", "").await.unwrap();
+    store.create_frame("f", "p", "OPERON", "m").await.unwrap();
+
+    let mut workflow = AgentWorkflow::new("wf", "p", "workspace", "Delegated analysis").unwrap();
+    workflow.frame_id = Some("f".into());
+    workflow.goal = "Analyze and review the dataset".into();
+    workflow.plan_json = r#"{"mode":"assisted","max_parallel":2}"#.into();
+    let mut step =
+        AgentWorkflowStep::new("code", "wf", 0, "code", "coder", "acp", "controlled prompt")
+            .unwrap();
+    step.template_id = "code_execution".into();
+    step.spec_json = r#"{"template_id":"code_execution"}"#.into();
+    store
+        .create_agent_workflow_plan(&workflow, &[step.clone()])
+        .await
+        .unwrap();
+
+    workflow.name = "Edited delegated analysis".into();
+    workflow.plan_json = r#"{"mode":"assisted","max_parallel":1}"#.into();
+    workflow.max_parallel = 1;
+    assert!(store
+        .replace_agent_workflow_plan(&workflow, &[step], 1)
+        .await
+        .unwrap());
+    assert!(!store
+        .replace_agent_workflow_plan(&workflow, &[], 1)
+        .await
+        .unwrap());
+    let (edited, steps) = store.get_agent_workflow_plan("wf").await.unwrap().unwrap();
+    assert_eq!(edited.version, 2);
+    assert_eq!(edited.max_parallel, 1);
+    assert_eq!(steps.len(), 1);
+    assert!(store.approve_agent_workflow_plan("wf", 2).await.unwrap());
+    assert!(!store.approve_agent_workflow_plan("wf", 2).await.unwrap());
+    let approved = store.get_agent_workflow("wf").await.unwrap().unwrap();
+    assert_eq!(approved.status, AgentWorkflowStatus::Approved);
+    assert_eq!(approved.version, 3);
+    assert!(approved.approved_at.is_some());
+    store.pool.close().await;
+    let _ = std::fs::remove_file(tmp);
+}
+
+#[tokio::test]
 async fn last_user_message_session_ignores_later_assistant_activity() {
     let tmp = std::env::temp_dir().join(format!(
         "wisp_store_last_user_session_{}.sqlite",
@@ -974,6 +1020,7 @@ async fn store_open_records_migrations_and_seeds_local_context() {
             SESSION_EXECUTION_CONTEXTS_MIGRATION.to_string(),
             AGENT_WORKFLOWS_MIGRATION.to_string(),
             AGENT_WORKFLOW_CONTRACTS_MIGRATION.to_string(),
+            AGENT_WORKFLOW_PLANS_MIGRATION.to_string(),
         ]
     );
 
@@ -1014,6 +1061,43 @@ async fn agent_workflow_contract_migration_repairs_partial_application() {
         .await
         .unwrap()
         .contains(&AGENT_WORKFLOW_CONTRACTS_MIGRATION.to_string()));
+    reopened.pool.close().await;
+    let _ = std::fs::remove_file(tmp);
+}
+
+#[tokio::test]
+async fn agent_workflow_plan_migration_repairs_partial_application() {
+    let tmp = std::env::temp_dir().join(format!(
+        "wisp_agent_plan_partial_migration_{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = Store::open(&tmp).await.unwrap();
+    sqlx::query("ALTER TABLE agent_workflow_steps DROP COLUMN spec_json")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM wisp_schema_migrations WHERE version=?")
+        .bind(AGENT_WORKFLOW_PLANS_MIGRATION)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    store.pool.close().await;
+
+    let reopened = Store::open(&tmp).await.unwrap();
+    let columns = sqlx::query("PRAGMA table_info(agent_workflow_steps)")
+        .fetch_all(&reopened.pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.try_get::<String, _>("name").unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(columns.contains("template_id"));
+    assert!(columns.contains("spec_json"));
+    assert!(reopened
+        .schema_migrations()
+        .await
+        .unwrap()
+        .contains(&AGENT_WORKFLOW_PLANS_MIGRATION.to_string()));
     reopened.pool.close().await;
     let _ = std::fs::remove_file(tmp);
 }

@@ -16,6 +16,7 @@ tracing = { workspace = true }
 regex = { workspace = true }
 glob = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
 wisp-llm = { workspace = true }
 wisp-tools = { workspace = true }
 wisp-skills = { workspace = true }

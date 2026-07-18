@@ -20,7 +20,7 @@ pub mod secrets;
 mod sessions;
 
 pub use acp_sessions::AcpSessionBinding;
-pub use agent_workflows::{AgentWorkflow, AgentWorkflowStep};
+pub use agent_workflows::{AgentWorkflow, AgentWorkflowStatus, AgentWorkflowStep};
 pub use library::{LibraryItem, LibraryItemDetail, LibraryStore, NewLibraryItem};
 pub use models::*;
 pub use project_sync::ProjectSyncState;
@@ -53,6 +53,7 @@ const SESSION_EXECUTION_CONTEXTS_MIGRATION: &str = "0013_session_execution_conte
 const AGENT_WORKFLOWS_MIGRATION: &str = "0014_agent_workflows";
 const AGENT_WORKFLOWS_MIGRATION_SQL: &str = include_str!("../migrations/0014_agent_workflows.sql");
 const AGENT_WORKFLOW_CONTRACTS_MIGRATION: &str = "0015_agent_workflow_contracts";
+const AGENT_WORKFLOW_PLANS_MIGRATION: &str = "0016_agent_workflow_plans";
 
 #[derive(Clone)]
 pub struct Store {
@@ -197,6 +198,10 @@ impl Store {
             Self::apply_agent_workflow_contracts(pool).await?;
             Self::record_migration(pool, AGENT_WORKFLOW_CONTRACTS_MIGRATION).await?;
         }
+        if !Self::migration_applied(pool, AGENT_WORKFLOW_PLANS_MIGRATION).await? {
+            Self::apply_agent_workflow_plans(pool).await?;
+            Self::record_migration(pool, AGENT_WORKFLOW_PLANS_MIGRATION).await?;
+        }
         Ok(())
     }
 
@@ -236,6 +241,75 @@ impl Store {
             }
             let query =
                 format!("ALTER TABLE agent_workflow_steps ADD COLUMN {column} {definition}");
+            match sqlx::query(&query).execute(pool).await {
+                Ok(_) => {}
+                Err(error) if error.to_string().contains("duplicate column name") => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
+    async fn apply_agent_workflow_plans(pool: &SqlitePool) -> Result<()> {
+        Self::add_columns_if_missing(
+            pool,
+            "agent_workflows",
+            &[
+                ("frame_id", "TEXT"),
+                ("goal", "TEXT NOT NULL DEFAULT ''"),
+                ("mode", "TEXT NOT NULL DEFAULT 'assisted'"),
+                ("status", "TEXT NOT NULL DEFAULT 'draft'"),
+                ("max_parallel", "INTEGER NOT NULL DEFAULT 2"),
+                ("requires_confirmation", "INTEGER NOT NULL DEFAULT 1"),
+                ("plan_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("approved_at", "INTEGER"),
+            ],
+        )
+        .await?;
+        Self::add_columns_if_missing(
+            pool,
+            "agent_workflow_steps",
+            &[
+                ("template_id", "TEXT NOT NULL DEFAULT ''"),
+                ("spec_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ],
+        )
+        .await?;
+        sqlx::query("UPDATE agent_workflows SET goal=name WHERE goal='' OR goal IS NULL")
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            "UPDATE agent_workflow_steps SET template_id=agent_id \
+             WHERE template_id='' OR template_id IS NULL",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS ix_agent_workflows_frame_status \
+             ON agent_workflows(frame_id,status,updated_at DESC)",
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn add_columns_if_missing(
+        pool: &SqlitePool,
+        table: &str,
+        definitions: &[(&str, &str)],
+    ) -> Result<()> {
+        let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+            .fetch_all(pool)
+            .await?;
+        let columns = rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("name"))
+            .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
+        for (column, definition) in definitions {
+            if columns.contains(*column) {
+                continue;
+            }
+            let query = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
             match sqlx::query(&query).execute(pool).await {
                 Ok(_) => {}
                 Err(error) if error.to_string().contains("duplicate column name") => {}

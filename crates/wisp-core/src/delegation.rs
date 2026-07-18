@@ -110,6 +110,8 @@ pub struct PermissionSet {
     pub paths: Vec<String>,
     #[serde(default)]
     pub network: bool,
+    #[serde(default)]
+    pub write: bool,
 }
 
 impl PermissionSet {
@@ -130,7 +132,14 @@ impl PermissionSet {
                 .cloned()
                 .collect(),
             network: self.network && granted.network,
+            write: self.write && granted.write,
         }
+    }
+}
+
+impl PermissionSet {
+    pub fn is_subset_of(&self, ceiling: &Self) -> bool {
+        self.intersect(ceiling) == *self
     }
 }
 
@@ -183,7 +192,7 @@ impl AgentBudget {
     }
 }
 
-fn restrict_limit<T: Ord + Copy>(requested: Option<T>, ceiling: Option<T>) -> Option<T> {
+pub(crate) fn restrict_limit<T: Ord + Copy>(requested: Option<T>, ceiling: Option<T>) -> Option<T> {
     match (requested, ceiling) {
         (Some(requested), Some(ceiling)) => Some(requested.min(ceiling)),
         (requested, None) => requested,
@@ -195,9 +204,32 @@ fn empty_json_object() -> Value {
     serde_json::json!({})
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSessionPolicy {
+    #[default]
+    New,
+    ReuseIfAvailable,
+    RequireExisting,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSpec {
+    #[serde(default)]
+    pub template_id: String,
     pub agent_id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub goal: String,
+    #[serde(default)]
+    pub context_summary: String,
+    #[serde(default)]
+    pub inputs: Vec<String>,
+    #[serde(default)]
+    pub acceptance_criteria: Vec<String>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
     pub role: AgentRole,
     pub backend: AgentBackend,
     #[serde(default)]
@@ -215,12 +247,27 @@ pub struct AgentSpec {
     pub budget: AgentBudget,
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub requires_review: bool,
+    #[serde(default)]
+    pub session_policy: AgentSessionPolicy,
+    #[serde(default)]
+    pub allow_delegation: bool,
 }
 
 impl AgentSpec {
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.agent_id.trim().is_empty() {
             anyhow::bail!("agent_id is required");
+        }
+        if self.template_id.trim().is_empty() {
+            anyhow::bail!("template_id is required");
+        }
+        if self.name.trim().is_empty() {
+            anyhow::bail!("agent name is required");
+        }
+        if self.goal.trim().is_empty() {
+            anyhow::bail!("agent goal is required");
         }
         if self.role.as_str().trim().is_empty() {
             anyhow::bail!("role is required");
@@ -446,11 +493,35 @@ impl AgentDelegator for UnconfiguredAgentDelegator {
 mod tests {
     use super::*;
 
+    fn test_spec(agent_id: &str) -> AgentSpec {
+        AgentSpec {
+            template_id: "test_template".into(),
+            agent_id: agent_id.into(),
+            name: "Test Agent".into(),
+            goal: "Complete the test task".into(),
+            context_summary: String::new(),
+            inputs: vec![],
+            acceptance_criteria: vec![],
+            dependencies: vec![],
+            role: AgentRole::Reviewer,
+            backend: AgentBackend::Local,
+            model: None,
+            prompt_template: "Review".into(),
+            input_contract: serde_json::json!({}),
+            output_contract: serde_json::json!({}),
+            permissions: PermissionSet::default(),
+            context_policy: ContextPolicy::default(),
+            budget: AgentBudget::default(),
+            timeout_secs: Some(1),
+            requires_review: false,
+            session_policy: AgentSessionPolicy::New,
+            allow_delegation: false,
+        }
+    }
+
     #[test]
     fn agent_spec_has_stable_json_shape() {
         let spec = AgentSpec {
-            agent_id: "reviewer".into(),
-            role: AgentRole::Reviewer,
             backend: AgentBackend::Acp,
             model: Some("reasoning-model".into()),
             prompt_template: "Review {{input}}".into(),
@@ -460,6 +531,7 @@ mod tests {
                 tools: vec!["read_file".into()],
                 paths: vec!["src/**".into()],
                 network: false,
+                write: false,
             },
             context_policy: ContextPolicy {
                 include_history: true,
@@ -471,6 +543,7 @@ mod tests {
                 ..AgentBudget::default()
             },
             timeout_secs: Some(60),
+            ..test_spec("reviewer")
         };
         spec.validate().unwrap();
         let value = serde_json::to_value(&spec).unwrap();
@@ -482,17 +555,9 @@ mod tests {
     #[test]
     fn zero_timeout_is_rejected() {
         let spec = AgentSpec {
-            agent_id: "a".into(),
             role: AgentRole::Custom("specialist".into()),
-            backend: AgentBackend::Local,
-            model: None,
-            prompt_template: "x".into(),
-            input_contract: serde_json::json!({}),
-            output_contract: serde_json::json!({}),
-            permissions: PermissionSet::default(),
-            context_policy: ContextPolicy::default(),
-            budget: AgentBudget::default(),
             timeout_secs: Some(0),
+            ..test_spec("a")
         };
         assert!(spec.validate().is_err());
     }
@@ -503,11 +568,13 @@ mod tests {
             tools: vec!["read".into(), "write".into()],
             paths: vec!["src/**".into(), "tmp/**".into()],
             network: true,
+            write: true,
         };
         let granted = PermissionSet {
             tools: vec!["read".into()],
             paths: vec!["src/**".into()],
             network: false,
+            write: false,
         };
         assert_eq!(requested.intersect(&granted).tools, vec!["read"]);
         assert!(!requested.intersect(&granted).network);
@@ -556,17 +623,7 @@ mod tests {
             workflow_id: "wf".into(),
             step_id: "step".into(),
             spec: AgentSpec {
-                agent_id: "specialist".into(),
-                role: AgentRole::Reviewer,
-                backend: AgentBackend::Local,
-                model: None,
-                prompt_template: "Review".into(),
-                input_contract: serde_json::json!({}),
-                output_contract: serde_json::json!({}),
-                permissions: PermissionSet::default(),
-                context_policy: ContextPolicy::default(),
-                budget: AgentBudget::default(),
-                timeout_secs: Some(1),
+                ..test_spec("specialist")
             },
             input: serde_json::json!({"diff":"..."}),
         };
@@ -585,17 +642,8 @@ mod tests {
     #[test]
     fn malformed_contract_type_is_rejected() {
         let mut spec = AgentSpec {
-            agent_id: "a".into(),
-            role: AgentRole::Reviewer,
-            backend: AgentBackend::Local,
-            model: None,
-            prompt_template: "Review".into(),
             input_contract: serde_json::json!({"type": ["object"]}),
-            output_contract: serde_json::json!({}),
-            permissions: PermissionSet::default(),
-            context_policy: ContextPolicy::default(),
-            budget: AgentBudget::default(),
-            timeout_secs: Some(1),
+            ..test_spec("a")
         };
         assert!(spec.validate().is_err());
         spec.input_contract = serde_json::json!({"type":"object"});

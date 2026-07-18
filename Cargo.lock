@@ -6245,6 +6245,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
  "wisp-llm",
  "wisp-skills",
  "wisp-tools",
