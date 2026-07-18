@@ -279,7 +279,7 @@ impl Store {
     }
 
     async fn record_migration(pool: &SqlitePool, version: &str) -> Result<()> {
-        sqlx::query("INSERT INTO wisp_schema_migrations(version,applied_at) VALUES(?,?)")
+        sqlx::query("INSERT OR IGNORE INTO wisp_schema_migrations(version,applied_at) VALUES(?,?)")
             .bind(version)
             .bind(chrono::Utc::now().timestamp())
             .execute(pool)
