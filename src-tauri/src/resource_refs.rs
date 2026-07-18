@@ -189,6 +189,34 @@ fn strip_markdown_wrapper(reference: &str) -> &str {
     trimmed
 }
 
+/// Codex file-link examples use `/abs/path/...` as a display placeholder. On
+/// Windows an ACP agent can accidentally preserve that prefix in a real link,
+/// producing `/abs/path/D:/project/file` instead of `D:/project/file`. Keep the
+/// compatibility rule deliberately narrow: only strip the exact placeholder
+/// (or the WebView's single leading slash) when what follows is a drive path.
+#[cfg(any(windows, test))]
+fn normalize_windows_webview_reference(reference: &str) -> &str {
+    fn is_drive_path(value: &str) -> bool {
+        let bytes = value.as_bytes();
+        bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\')
+    }
+
+    if let Some(candidate) = reference.strip_prefix("/abs/path/") {
+        if is_drive_path(candidate) {
+            return candidate;
+        }
+    }
+    if let Some(candidate) = reference.strip_prefix('/') {
+        if is_drive_path(candidate) {
+            return candidate;
+        }
+    }
+    reference
+}
+
 fn reference_path(reference: &str) -> Result<PathBuf, String> {
     let reference = strip_markdown_wrapper(reference);
     if reference.to_ascii_lowercase().starts_with("file:") {
@@ -200,19 +228,7 @@ fn reference_path(reference: &str) -> Result<PathBuf, String> {
     }
     let decoded = percent_decode(reference);
     #[cfg(windows)]
-    let decoded = {
-        let bytes = decoded.as_bytes();
-        if bytes.len() >= 4
-            && bytes[0] == b'/'
-            && bytes[1].is_ascii_alphabetic()
-            && bytes[2] == b':'
-            && matches!(bytes[3], b'/' | b'\\')
-        {
-            decoded[1..].to_string()
-        } else {
-            decoded
-        }
-    };
+    let decoded = normalize_windows_webview_reference(&decoded).to_string();
     Ok(PathBuf::from(decoded))
 }
 
@@ -225,7 +241,12 @@ fn kind_and_mime(path: &Path, requested_kind: &str) -> Option<(String, String)> 
         "webp" => ("image", "image/webp"),
         "svg" => ("image", "image/svg+xml"),
         "pdf" => ("pdf", "application/pdf"),
+        "docx" => (
+            "docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ),
         "md" | "markdown" => ("markdown", "text/markdown"),
+        "bib" => ("text", "text/x-bibtex"),
         "csv" => ("csv", "text/csv"),
         "tsv" => ("csv", "text/tab-separated-values"),
         "json" => ("json", "application/json"),
@@ -472,13 +493,45 @@ mod tests {
     }
 
     #[test]
-    fn notebooks_bind_as_previewable_artifacts() {
+    fn document_resources_bind_as_previewable_artifacts() {
         assert_eq!(
             kind_and_mime(Path::new("analysis.ipynb"), "file"),
             Some((
                 "notebook".to_string(),
                 "application/x-ipynb+json".to_string()
             ))
+        );
+        assert_eq!(
+            kind_and_mime(Path::new("manuscript.docx"), "file"),
+            Some((
+                "docx".to_string(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    .to_string()
+            ))
+        );
+        assert_eq!(
+            kind_and_mime(Path::new("references.bib"), "file"),
+            Some(("text".to_string(), "text/x-bibtex".to_string()))
+        );
+    }
+
+    #[test]
+    fn normalizes_codex_windows_placeholder_without_rewriting_posix_paths() {
+        assert_eq!(
+            normalize_windows_webview_reference("/abs/path/D:/ZZM/paper/report.md"),
+            "D:/ZZM/paper/report.md"
+        );
+        assert_eq!(
+            normalize_windows_webview_reference("/D:/ZZM/paper/report.md"),
+            "D:/ZZM/paper/report.md"
+        );
+        assert_eq!(
+            normalize_windows_webview_reference("/abs/path/reports/report.md"),
+            "/abs/path/reports/report.md"
+        );
+        assert_eq!(
+            normalize_windows_webview_reference("reports/report.md"),
+            "reports/report.md"
         );
     }
 
@@ -498,6 +551,10 @@ mod tests {
     fn normalizes_webview_windows_drive_paths() {
         assert_eq!(
             reference_path("/D:/ZZM/03.%20figures/table.png").unwrap(),
+            PathBuf::from(r"D:\ZZM\03. figures\table.png")
+        );
+        assert_eq!(
+            reference_path("/abs/path/D:/ZZM/03.%20figures/table.png").unwrap(),
             PathBuf::from(r"D:\ZZM\03. figures\table.png")
         );
     }
@@ -579,5 +636,34 @@ mod tests {
         .await;
         assert_eq!(missing[0].status, "unresolved");
         assert!(missing[0].error.is_some());
+
+        std::fs::write(root.join("manuscript.docx"), b"PK\x03\x04docx-fixture").unwrap();
+        std::fs::write(
+            root.join("references.bib"),
+            b"@article{wisp, title={Wisp Science}}\n",
+        )
+        .unwrap();
+        let documents = bind_new_message_resources(
+            &store,
+            &root,
+            "project",
+            "frame",
+            6,
+            "[manuscript](manuscript.docx) [references](references.bib)",
+        )
+        .await;
+        assert_eq!(documents.len(), 2);
+        assert_eq!(documents[0].status, "ready");
+        assert_eq!(documents[0].resource_kind, "docx");
+        assert_eq!(documents[1].status, "ready");
+        assert_eq!(documents[1].resource_kind, "text");
+        for document in documents {
+            let version = store
+                .get_artifact_version(document.artifact_version_id.as_deref().unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(root.join(version.storage_path).is_file());
+        }
     }
 }

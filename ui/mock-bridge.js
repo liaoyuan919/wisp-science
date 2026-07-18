@@ -94,6 +94,8 @@
     ncbi_api_key: false,
     ncbi_email: false,
   };
+  let mockCustomCredentials = [];
+  let nextCustomCredential = 1;
   // frame_id -> enabled execution context ids, mirroring session_execution_contexts.
   const sessionContexts = {};
   const mockChannels = {
@@ -195,6 +197,8 @@
             return mockModels;
           case "credential_status":
             return Object.entries(mockCredentials);
+          case "list_custom_credentials":
+            return mockCustomCredentials.map((credential) => ({ ...credential }));
           case "channels_status":
             return { ...mockChannels };
           case "set_feishu_channel":
@@ -328,9 +332,31 @@
           case "set_api_key":
           case "new_session":
             return `s-${Math.random().toString(36).slice(2)}`;
-          case "set_credential":
-            mockCredentials[String(args?.id ?? "")] = String(args?.value ?? "").trim().length > 0;
+          case "set_credential": {
+            const id = String(argValue(args, "id") ?? "");
+            mockCredentials[id] = String(argValue(args, "value") ?? "").trim().length > 0;
+            mockCustomCredentials = mockCustomCredentials.map((credential) =>
+              credential.id === id ? { ...credential, present: mockCredentials[id] } : credential,
+            );
             return null;
+          }
+          case "add_custom_credential": {
+            const credential = {
+              id: `custom-${nextCustomCredential++}`,
+              name: String(argValue(args, "name") ?? "").trim(),
+              envVar: String(argValue(args, "envVar") ?? "").trim(),
+              present: String(argValue(args, "value") ?? "").trim().length > 0,
+            };
+            mockCustomCredentials.push(credential);
+            mockCredentials[credential.id] = credential.present;
+            return { ...credential };
+          }
+          case "remove_custom_credential": {
+            const id = String(argValue(args, "id") ?? "");
+            mockCustomCredentials = mockCustomCredentials.filter((credential) => credential.id !== id);
+            delete mockCredentials[id];
+            return null;
+          }
           case "delete_session": {
             const id = args?.id;
             const i = sessions.findIndex((s) => s.id === id);

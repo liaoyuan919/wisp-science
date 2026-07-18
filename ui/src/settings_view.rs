@@ -112,6 +112,7 @@ pub(super) struct SettingsViewState {
     pub(super) skills_msg: RwSignal<Option<(bool, String)>>,
     pub(super) cred_status: RwSignal<HashMap<String, bool>>,
     pub(super) cred_inputs: RwSignal<HashMap<String, String>>,
+    pub(super) custom_credentials: RwSignal<Vec<CustomCredentialStatus>>,
     pub(super) cred_msg: RwSignal<Option<(bool, String)>>,
     pub(super) approval_grants: RwSignal<Vec<ApprovalGrantRow>>,
     pub(super) conns_view: RwSignal<Option<ConnView>>,
@@ -196,6 +197,7 @@ pub(super) fn SettingsView(
         skills_msg,
         cred_status,
         cred_inputs,
+        custom_credentials,
         cred_msg,
         approval_grants,
         conns_view,
@@ -217,6 +219,10 @@ pub(super) fn SettingsView(
     let join_busy = create_rw_signal(false);
     let join_error = create_rw_signal(None::<String>);
     let oauth_authorizing = create_rw_signal(false);
+    let custom_cred_name = create_rw_signal(String::new());
+    let custom_cred_env = create_rw_signal(String::new());
+    let custom_cred_value = create_rw_signal(String::new());
+    let custom_cred_busy = create_rw_signal(false);
     create_effect(move |_| {
         if joining.get() {
             focus_element_soon("sync-device-code");
@@ -1861,6 +1867,157 @@ pub(super) fn SettingsView(
                             </div>
                             <p class="settings-note">{move || t(locale.get(), g.hint_key)}</p>
                         }).collect_view()}
+                        <div class="conn-group-label">{move || t(locale.get(), "cred.custom.name")}</div>
+                        <p class="settings-note">{move || t(locale.get(), "cred.custom.hint")}</p>
+                        <For
+                            each=move || custom_credentials.get()
+                            key=|credential| credential.id.clone()
+                            let:credential
+                        >
+                            {
+                                let id = credential.id.clone();
+                                let status_id = id.clone();
+                                let clear_id = id.clone();
+                                let input_id = id.clone();
+                                let edit_id = id.clone();
+                                let remove_id = id.clone();
+                                let initial_present = credential.present;
+                                view! {
+                                    <div class="custom-credential-card" data-custom-credential=credential.env_var.clone()>
+                                        <div class="custom-credential-head">
+                                            <div class="custom-credential-meta">
+                                                <strong>{credential.name.clone()}</strong>
+                                                <code>{credential.env_var.clone()}</code>
+                                                <span>{move || if cred_status.get().get(&status_id).copied().unwrap_or(initial_present) {
+                                                    t(locale.get(), "cred.stored")
+                                                } else {
+                                                    t(locale.get(), "cred.not_stored")
+                                                }}</span>
+                                            </div>
+                                            <div class="custom-credential-actions">
+                                                {move || cred_status.get().get(&clear_id).copied().unwrap_or(initial_present).then(|| {
+                                                    let id = clear_id.clone();
+                                                    view! {
+                                                        <button type="button" class="linklike" on:click=move |_| {
+                                                            let id = id.clone();
+                                                            spawn_local(async move {
+                                                                let arg = to_value(&serde_json::json!({ "id": id.clone(), "value": "" })).unwrap();
+                                                                match invoke_checked("set_credential", arg).await {
+                                                                    Ok(_) => {
+                                                                        cred_inputs.update(|values| { values.remove(&id); });
+                                                                        cred_status.update(|status| { status.insert(id, false); });
+                                                                        cred_msg.set(Some((true, t(locale.get(), "cred.cleared").into())));
+                                                                    }
+                                                                    Err(error) => cred_msg.set(Some((false,
+                                                                        localize_backend(locale.get(), &js_error_text(error))))),
+                                                                }
+                                                            });
+                                                        }>{move || t(locale.get(), "cred.clear")}</button>
+                                                    }
+                                                })}
+                                                <button type="button" class="linklike danger" on:click=move |_| {
+                                                    let id = remove_id.clone();
+                                                    spawn_local(async move {
+                                                        let arg = to_value(&serde_json::json!({ "id": id.clone() })).unwrap();
+                                                        match invoke_checked("remove_custom_credential", arg).await {
+                                                            Ok(_) => {
+                                                                custom_credentials.update(|items| items.retain(|item| item.id != id));
+                                                                cred_inputs.update(|values| { values.remove(&id); });
+                                                                cred_status.update(|status| { status.remove(&id); });
+                                                                cred_msg.set(Some((true, t(locale.get(), "cred.custom.removed").into())));
+                                                            }
+                                                            Err(error) => cred_msg.set(Some((false,
+                                                                localize_backend(locale.get(), &js_error_text(error))))),
+                                                        }
+                                                    });
+                                                }>{move || t(locale.get(), "specialists.remove")}</button>
+                                            </div>
+                                        </div>
+                                        <input type="password"
+                                            placeholder=move || if cred_status.get().get(&input_id).copied().unwrap_or(initial_present) {
+                                                t(locale.get(), "settings.stored_key").to_string()
+                                            } else {
+                                                t(locale.get(), "cred.custom.value_placeholder").to_string()
+                                            }
+                                            prop:value=move || cred_inputs.get().get(&id).cloned().unwrap_or_default()
+                                            on:input=move |event| {
+                                                let value = event_target_input(&event).value();
+                                                cred_inputs.update(|values| { values.insert(edit_id.clone(), value); });
+                                            } />
+                                    </div>
+                                }
+                            }
+                        </For>
+                        <div class="settings-sync-block custom-credential-add">
+                            <h3>{move || t(locale.get(), "cred.custom.add")}</h3>
+                            <div class="settings-form-grid">
+                                <label>
+                                    <span>{move || t(locale.get(), "cred.custom.service_name")}</span>
+                                    <input type="text"
+                                        placeholder=move || t(locale.get(), "cred.custom.service_placeholder")
+                                        prop:value=move || custom_cred_name.get()
+                                        on:input=move |event| custom_cred_name.set(event_target_input(&event).value()) />
+                                </label>
+                                <label>
+                                    <span>{move || t(locale.get(), "cred.custom.env_var")}</span>
+                                    <input type="text" class="mono"
+                                        placeholder="METASO_API_KEY"
+                                        prop:value=move || custom_cred_env.get()
+                                        on:input=move |event| custom_cred_env.set(event_target_input(&event).value()) />
+                                </label>
+                                <label class="span-2">
+                                    <span>{move || t(locale.get(), "cred.custom.value")}</span>
+                                    <input type="password"
+                                        placeholder=move || t(locale.get(), "cred.custom.value_placeholder")
+                                        prop:value=move || custom_cred_value.get()
+                                        on:input=move |event| custom_cred_value.set(event_target_input(&event).value()) />
+                                </label>
+                            </div>
+                            <p class="settings-field-hint">{move || t(locale.get(), "cred.custom.env_hint")}</p>
+                            <div class="row">
+                                <button type="button" class="settings-add-btn"
+                                    disabled=move || custom_cred_busy.get()
+                                        || custom_cred_name.get().trim().is_empty()
+                                        || custom_cred_env.get().trim().is_empty()
+                                        || custom_cred_value.get().trim().is_empty()
+                                    on:click=move |_| {
+                                        if custom_cred_busy.get_untracked() { return; }
+                                        let name = custom_cred_name.get_untracked();
+                                        let env_var = custom_cred_env.get_untracked();
+                                        let value = custom_cred_value.get_untracked();
+                                        custom_cred_busy.set(true);
+                                        spawn_local(async move {
+                                            let arg = to_value(&serde_json::json!({
+                                                "name": name,
+                                                "envVar": env_var,
+                                                "value": value,
+                                            })).unwrap();
+                                            match invoke_checked("add_custom_credential", arg).await {
+                                                Ok(value) => match serde_wasm_bindgen::from_value::<CustomCredentialStatus>(value) {
+                                                    Ok(credential) => {
+                                                        cred_status.update(|status| {
+                                                            status.insert(credential.id.clone(), credential.present);
+                                                        });
+                                                        custom_credentials.update(|items| items.push(credential));
+                                                        custom_cred_name.set(String::new());
+                                                        custom_cred_env.set(String::new());
+                                                        custom_cred_value.set(String::new());
+                                                        cred_msg.set(Some((true, t(locale.get(), "cred.custom.added").into())));
+                                                    }
+                                                    Err(error) => cred_msg.set(Some((false, error.to_string()))),
+                                                },
+                                                Err(error) => cred_msg.set(Some((false,
+                                                    localize_backend(locale.get(), &js_error_text(error))))),
+                                            }
+                                            custom_cred_busy.set(false);
+                                        });
+                                    }>{move || if custom_cred_busy.get() {
+                                        t(locale.get(), "cred.custom.adding")
+                                    } else {
+                                        t(locale.get(), "cred.custom.add")
+                                    }}</button>
+                            </div>
+                        </div>
                         {move || cred_msg.get().map(|(ok, text)| view! {
                             <div class="settings-status" class:ok=move || ok class:fail=move || !ok>{text}</div>
                         })}

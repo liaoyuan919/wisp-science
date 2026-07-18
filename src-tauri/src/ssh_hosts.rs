@@ -1,7 +1,37 @@
 //! SSH host registry, validated connection snapshots, and tauri commands.
+//!
+//! Passwords are never stored in SQLite: they live in the OS keyring under
+//! `ssh_password:{alias}` and are injected into OpenSSH via SSH_ASKPASS for
+//! non-interactive managed tools (probe/run/runtime/files).
 
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use tauri::State;
+use wisp_store::secrets::Secret;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SshAuthMethod {
+    #[default]
+    Key,
+    Password,
+}
+
+impl SshAuthMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Key => "key",
+            Self::Password => "password",
+        }
+    }
+
+    pub fn parse(value: Option<&str>) -> Self {
+        match value.map(str::trim).unwrap_or_default() {
+            "password" => Self::Password,
+            _ => Self::Key,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SshHost {
@@ -14,6 +44,16 @@ pub struct SshHost {
     pub identity_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// `key` (default) or `password`. Persisted in settings JSON only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_method: Option<String>,
+    /// Computed on read from the keyring; never part of the persisted JSON.
+    #[serde(default, skip_serializing)]
+    pub has_password: bool,
+    /// Write-only: accepted from the UI to set/update the keyring secret.
+    /// Never returned by list APIs.
+    #[serde(default, skip_serializing)]
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +65,36 @@ pub struct SshConnection {
     pub port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_file: Option<String>,
+    #[serde(default)]
+    pub auth_method: SshAuthMethod,
+}
+
+fn password_secret_name(alias: &str) -> String {
+    format!("ssh_password:{alias}")
+}
+
+fn password_get(alias: &str) -> Option<String> {
+    Secret::get(&password_secret_name(alias))
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
+fn password_set(alias: &str, password: &str) -> Result<(), String> {
+    Secret::set(&password_secret_name(alias), password).map_err(|e| e.to_string())
+}
+
+fn password_delete(alias: &str) -> Result<(), String> {
+    match Secret::delete(&password_secret_name(alias)) {
+        Ok(()) => Ok(()),
+        // Missing is fine when clearing.
+        Err(_) => Ok(()),
+    }
+}
+
+fn decorate_host(mut host: SshHost) -> SshHost {
+    host.has_password = password_get(&host.alias).is_some();
+    host.password = None;
+    host
 }
 
 impl SshConnection {
@@ -48,6 +118,9 @@ impl SshConnection {
             user: optional_config_string(&config, "user")?,
             port: optional_config_port(&config)?,
             identity_file: optional_config_string(&config, "identity_file")?,
+            auth_method: SshAuthMethod::parse(
+                optional_config_string(&config, "auth_method")?.as_deref(),
+            ),
         };
         connection.validate()?;
         Ok(connection)
@@ -59,6 +132,7 @@ impl SshConnection {
             user: host.user.clone(),
             port: host.port,
             identity_file: host.identity_file.clone(),
+            auth_method: SshAuthMethod::parse(host.auth_method.as_deref()),
         };
         connection.validate()?;
         Ok(connection)
@@ -72,13 +146,23 @@ impl SshConnection {
         })
     }
 
+    pub fn uses_password(&self) -> bool {
+        self.auth_method == SshAuthMethod::Password
+    }
+
     pub fn ssh_args(&self) -> Result<Vec<String>, String> {
-        let mut args = common_option_args();
+        let mut args = if self.uses_password() {
+            password_option_args()
+        } else {
+            common_option_args()
+        };
         args.push("-T".into());
         if let Some(port) = self.port {
             args.extend(["-p".into(), port.to_string()]);
         }
-        push_batch_identity_args(&mut args, self.identity_file.as_deref());
+        if !self.uses_password() {
+            push_batch_identity_args(&mut args, self.identity_file.as_deref());
+        }
         args.push(self.target()?);
         Ok(args)
     }
@@ -86,35 +170,84 @@ impl SshConnection {
     /// Arguments for a user-driven interactive terminal. Unlike probes and
     /// Runs, this deliberately leaves BatchMode disabled so OpenSSH can show
     /// host-key, password, and keyboard-interactive prompts in the PTY.
+    /// When password auth is configured, askpass env still supplies the stored
+    /// password so the user is not forced to retype it.
     pub fn interactive_ssh_args(&self) -> Result<Vec<String>, String> {
         self.validate()?;
         let mut args = vec!["-tt".into()];
+        if self.uses_password() {
+            args.extend([
+                "-o".into(),
+                "PreferredAuthentications=password,keyboard-interactive".into(),
+                "-o".into(),
+                "PubkeyAuthentication=no".into(),
+                "-o".into(),
+                "NumberOfPasswordPrompts=1".into(),
+            ]);
+        }
         if let Some(port) = self.port {
             args.extend(["-p".into(), port.to_string()]);
         }
-        push_interactive_identity_args(&mut args, self.identity_file.as_deref());
+        if !self.uses_password() {
+            push_interactive_identity_args(&mut args, self.identity_file.as_deref());
+        }
         args.push(self.target()?);
         Ok(args)
     }
 
     pub fn scp_option_args(&self) -> Result<Vec<String>, String> {
         self.validate()?;
-        let mut args = common_option_args();
+        let mut args = if self.uses_password() {
+            password_option_args()
+        } else {
+            common_option_args()
+        };
         if let Some(port) = self.port {
             args.extend(["-P".into(), port.to_string()]);
         }
-        push_batch_identity_args(&mut args, self.identity_file.as_deref());
+        if !self.uses_password() {
+            push_batch_identity_args(&mut args, self.identity_file.as_deref());
+        }
         Ok(args)
     }
 
-    /// Fail before spawning when a configured identity file is missing.
-    /// Call this at connection entry points (not during pure arg construction).
+    /// Fail before spawning when a configured identity file is missing, or
+    /// when password auth is selected but no password is stored.
     pub fn assert_ready_to_connect(&self) -> Result<(), String> {
         self.validate()?;
-        if let Some(identity_file) = &self.identity_file {
-            ensure_identity_file_accessible(identity_file)?;
+        match self.auth_method {
+            SshAuthMethod::Password => {
+                if password_get(&self.alias).is_none() {
+                    return Err(format!(
+                        "SSH password is not set for `{}`. Open host settings, choose password \
+                         authentication, and save a password (stored in the OS keyring). \
+                         Do not put passwords in shell commands.",
+                        self.alias
+                    ));
+                }
+            }
+            SshAuthMethod::Key => {
+                if let Some(identity_file) = &self.identity_file {
+                    ensure_identity_file_accessible(identity_file)?;
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Build env vars that force OpenSSH to read a one-shot password via ASKPASS.
+    /// Caller must run `cleanup_password_auth_env` after the process exits.
+    pub fn password_auth_env(&self) -> Result<Vec<(String, String)>, String> {
+        if !self.uses_password() {
+            return Ok(Vec::new());
+        }
+        let password = password_get(&self.alias).ok_or_else(|| {
+            format!(
+                "SSH password is not set for `{}`. Save it in host settings first.",
+                self.alias
+            )
+        })?;
+        build_password_askpass_env(&password)
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -133,8 +266,115 @@ impl SshConnection {
                 return Err("SSH identity file must not contain control characters".into());
             }
         }
+        if self.auth_method == SshAuthMethod::Password && self.user.is_none() {
+            // user can come from ~/.ssh/config for the alias; warn only in UI.
+        }
         Ok(())
     }
+}
+
+const PASSFILE_ENV: &str = "WISP_SSH_PASSFILE";
+const ASKPASS_ENV_MARKER: &str = "WISP_SSH_ASKPASS_SCRIPT";
+
+fn password_option_args() -> Vec<String> {
+    vec![
+        // Not BatchMode: password auth requires prompts, supplied by ASKPASS.
+        "-o".into(),
+        "BatchMode=no".into(),
+        "-o".into(),
+        "ConnectTimeout=10".into(),
+        "-o".into(),
+        "PreferredAuthentications=password,keyboard-interactive".into(),
+        "-o".into(),
+        "PubkeyAuthentication=no".into(),
+        "-o".into(),
+        "NumberOfPasswordPrompts=1".into(),
+        "-o".into(),
+        "StrictHostKeyChecking=accept-new".into(),
+    ]
+}
+
+fn build_password_askpass_env(password: &str) -> Result<Vec<(String, String)>, String> {
+    let dir = std::env::temp_dir().join(format!("wisp-ssh-askpass-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create askpass dir: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let pass_path = dir.join("pass");
+    let askpass_path = dir.join(if cfg!(windows) {
+        "askpass.cmd"
+    } else {
+        "askpass.sh"
+    });
+    std::fs::write(&pass_path, password.as_bytes()).map_err(|e| format!("write passfile: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&pass_path, std::fs::Permissions::from_mode(0o600));
+    }
+    let script = if cfg!(windows) {
+        format!(
+            "@echo off\r\ntype \"{}\"\r\n",
+            pass_path.to_string_lossy().replace('"', "")
+        )
+    } else {
+        format!(
+            "#!/bin/sh\nexec cat {}\n",
+            shell_single_quote_path(&pass_path)
+        )
+    };
+    std::fs::write(&askpass_path, script).map_err(|e| format!("write askpass: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&askpass_path, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(vec![
+        (
+            "SSH_ASKPASS".into(),
+            askpass_path.to_string_lossy().into_owned(),
+        ),
+        ("SSH_ASKPASS_REQUIRE".into(), "force".into()),
+        // Older OpenSSH only enables ASKPASS when DISPLAY is set.
+        ("DISPLAY".into(), "wisp-ssh-askpass".into()),
+        (
+            PASSFILE_ENV.into(),
+            pass_path.to_string_lossy().into_owned(),
+        ),
+        (
+            ASKPASS_ENV_MARKER.into(),
+            askpass_path.to_string_lossy().into_owned(),
+        ),
+    ])
+}
+
+fn shell_single_quote_path(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"))
+}
+
+/// Remove one-shot passfile/askpass created for a managed SSH process.
+pub fn cleanup_password_auth_env(envs: &[(String, String)]) {
+    let mut paths = Vec::new();
+    for (key, value) in envs {
+        if key == PASSFILE_ENV || key == ASKPASS_ENV_MARKER || key == "SSH_ASKPASS" {
+            paths.push(PathBuf::from(value));
+        }
+    }
+    for path in &paths {
+        let _ = std::fs::remove_file(path);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+}
+
+/// Attach password ASKPASS env for a connection when needed.
+pub fn auth_envs_for_connection(
+    connection: &SshConnection,
+) -> Result<Vec<(String, String)>, String> {
+    connection.password_auth_env()
 }
 
 fn expand_user_path(path: &str) -> std::path::PathBuf {
@@ -199,9 +439,9 @@ pub fn require_managed_ssh_ready(ctx: &wisp_store::ExecutionContext) -> Result<(
                 .unwrap_or("probe failed");
             Err(format!(
                 "{SSH_NOT_CONFIRMED_MARKER} for `{}`: last probe failed ({detail}). \
-                 Check the SSH server (network, firewall/IP unlock, key path), then run Probe \
+                 Check the SSH server (network, firewall/IP unlock, key or password settings), then run Probe \
                  on this environment. Free-form shell `ssh` is disabled; agent access uses only \
-                 the configured host settings (alias/user/port/identity).",
+                 the configured host settings.",
                 ctx.id
             ))
         }
@@ -562,15 +802,22 @@ fn ssh_context_config_json(host: &SshHost) -> Result<String, String> {
     if let Some(port) = host.port {
         cfg.insert("port".into(), serde_json::Value::from(port));
     }
-    if let Some(identity_file) = host
-        .identity_file
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-    {
-        cfg.insert(
-            "identity_file".into(),
-            serde_json::Value::String(identity_file.trim().into()),
-        );
+    let auth = SshAuthMethod::parse(host.auth_method.as_deref());
+    cfg.insert(
+        "auth_method".into(),
+        serde_json::Value::String(auth.as_str().into()),
+    );
+    if auth == SshAuthMethod::Key {
+        if let Some(identity_file) = host
+            .identity_file
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            cfg.insert(
+                "identity_file".into(),
+                serde_json::Value::String(identity_file.trim().into()),
+            );
+        }
     }
     if let Some(notes) = host.notes.as_deref().filter(|s| !s.trim().is_empty()) {
         cfg.insert(
@@ -579,6 +826,65 @@ fn ssh_context_config_json(host: &SshHost) -> Result<String, String> {
         );
     }
     serde_json::to_string(&serde_json::Value::Object(cfg)).map_err(|e| e.to_string())
+}
+
+fn persistable_host(host: &SshHost) -> SshHost {
+    SshHost {
+        alias: host.alias.trim().into(),
+        user: host
+            .user
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        port: host.port,
+        identity_file: if SshAuthMethod::parse(host.auth_method.as_deref()) == SshAuthMethod::Key {
+            host.identity_file
+                .as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        },
+        notes: host
+            .notes
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        auth_method: Some(
+            SshAuthMethod::parse(host.auth_method.as_deref())
+                .as_str()
+                .into(),
+        ),
+        has_password: false,
+        password: None,
+    }
+}
+
+fn apply_host_password(host: &SshHost) -> Result<(), String> {
+    let alias = host.alias.trim();
+    let auth = SshAuthMethod::parse(host.auth_method.as_deref());
+    match auth {
+        SshAuthMethod::Password => {
+            if let Some(password) = host.password.as_deref() {
+                let password = password.trim();
+                if password.is_empty() {
+                    // Empty means "leave existing password unchanged" when already set.
+                    if password_get(alias).is_none() {
+                        return Err("Password authentication requires a non-empty password".into());
+                    }
+                } else {
+                    password_set(alias, password)?;
+                }
+            } else if password_get(alias).is_none() {
+                return Err("Password authentication requires a password".into());
+            }
+        }
+        SshAuthMethod::Key => {
+            // Switching back to key auth clears any stored password.
+            password_delete(alias)?;
+        }
+    }
+    Ok(())
 }
 
 async fn upsert_context_for_host(store: &wisp_store::Store, host: &SshHost) -> Result<(), String> {
@@ -661,7 +967,11 @@ pub async fn stored_compute_section(store: &wisp_store::Store, frame_id: &str) -
 
 #[tauri::command]
 pub async fn list_ssh_hosts(state: State<'_, crate::AppState>) -> Result<Vec<SshHost>, String> {
-    Ok(load(&state.store).await)
+    Ok(load(&state.store)
+        .await
+        .into_iter()
+        .map(decorate_host)
+        .collect())
 }
 
 #[tauri::command]
@@ -701,9 +1011,11 @@ pub async fn add_ssh_host(
     host: SshHost,
 ) -> Result<Vec<SshHost>, String> {
     SshConnection::from_host(&host)?;
+    apply_host_password(&host)?;
+    let host = persistable_host(&host);
     let hosts = upsert_host(load(&state.store).await, host);
     save_and_sync_contexts(&state.store, &hosts).await?;
-    Ok(hosts)
+    Ok(hosts.into_iter().map(decorate_host).collect())
 }
 
 #[tauri::command]
@@ -714,7 +1026,8 @@ pub async fn remove_ssh_host(
     let hosts = remove_host(load(&state.store).await, &alias);
     save(&state.store, &hosts).await?;
     remove_context_for_alias(&state.store, &alias).await?;
-    Ok(hosts)
+    let _ = password_delete(&alias);
+    Ok(hosts.into_iter().map(decorate_host).collect())
 }
 
 #[tauri::command]
@@ -737,6 +1050,9 @@ pub fn merge_config_aliases(mut hosts: Vec<SshHost>, aliases: Vec<String>) -> Ve
                 port: None,
                 identity_file: None,
                 notes: None,
+                auth_method: None,
+                has_password: false,
+                password: None,
             });
         }
     }
@@ -750,7 +1066,7 @@ pub async fn import_ssh_config_hosts(
     let aliases = list_ssh_config_aliases().await?;
     let hosts = merge_config_aliases(load(&state.store).await, aliases);
     save_and_sync_contexts(&state.store, &hosts).await?;
-    Ok(hosts)
+    Ok(hosts.into_iter().map(decorate_host).collect())
 }
 
 #[cfg(test)]
@@ -764,6 +1080,9 @@ mod tests {
             port: None,
             identity_file: None,
             notes: notes.map(Into::into),
+            auth_method: None,
+            has_password: false,
+            password: None,
         }
     }
 
@@ -774,6 +1093,7 @@ mod tests {
             user: None,
             port: None,
             identity_file: Some("/definitely/missing/wisp-test-key".into()),
+            auth_method: SshAuthMethod::Key,
         };
         let err = connection.assert_ready_to_connect().unwrap_err();
         assert!(err.contains("identity file is not accessible"), "{err}");
@@ -884,6 +1204,9 @@ Host -unsafe bad/name !negated
                 port: Some(2222),
                 identity_file: None,
                 notes: Some("slurm; sbatch".into()),
+                auth_method: None,
+                has_password: false,
+                password: None,
             },
             host("plain", None),
         ];
@@ -1169,6 +1492,7 @@ Host -unsafe bad/name !negated
                 user: None,
                 port: None,
                 identity_file: None,
+                auth_method: SshAuthMethod::Key,
             };
             assert!(connection.ssh_args().is_err(), "accepted alias {alias:?}");
         }
@@ -1178,6 +1502,7 @@ Host -unsafe bad/name !negated
                 user: Some(user.into()),
                 port: None,
                 identity_file: None,
+                auth_method: SshAuthMethod::Key,
             };
             assert!(connection.target().is_err(), "accepted user {user:?}");
         }
@@ -1186,8 +1511,27 @@ Host -unsafe bad/name !negated
             user: None,
             port: None,
             identity_file: Some("\n/tmp/key".into()),
+            auth_method: SshAuthMethod::Key,
         };
         assert!(connection.scp_option_args().is_err());
+    }
+
+    #[test]
+    fn password_mode_args_disable_batch_and_pubkey() {
+        let connection = SshConnection {
+            alias: "lab".into(),
+            user: Some("alice".into()),
+            port: Some(22),
+            identity_file: None,
+            auth_method: SshAuthMethod::Password,
+        };
+        let args = connection.ssh_args().unwrap();
+        assert!(args.windows(2).any(|w| w == ["-o", "BatchMode=no"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["-o", "PubkeyAuthentication=no"]));
+        assert!(!args.iter().any(|a| a == "-i"));
+        assert!(connection.assert_ready_to_connect().is_err());
     }
 
     #[test]

@@ -10,6 +10,15 @@
 use crate::i18n::Locale;
 use serde::{Deserialize, Serialize};
 
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CustomCredentialStatus {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) env_var: String,
+    pub(crate) present: bool,
+}
+
 #[derive(Deserialize, Clone, Debug, Hash, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MessageResource {
@@ -404,6 +413,15 @@ pub(crate) struct SshHost {
     pub(crate) identity_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) notes: Option<String>,
+    /// `key` (default) or `password`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) auth_method: Option<String>,
+    /// Whether a password is stored in the OS keyring (never the password itself).
+    #[serde(default)]
+    pub(crate) has_password: bool,
+    /// Write-only password from the form; never returned by list APIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) password: Option<String>,
 }
 
 #[derive(Clone)]

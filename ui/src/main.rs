@@ -620,6 +620,7 @@ fn App() -> impl IntoView {
     // in-progress edit per id; one shared status message.
     let cred_status = create_rw_signal(std::collections::HashMap::<String, bool>::new());
     let cred_inputs = create_rw_signal(std::collections::HashMap::<String, String>::new());
+    let custom_credentials = create_rw_signal(Vec::<CustomCredentialStatus>::new());
     let cred_msg = create_rw_signal(None::<(bool, String)>);
     // Gate the settings sub-form panes on whether a form is open — NOT on its
     // contents. A closure that reads the whole form signal re-runs on every
@@ -2655,6 +2656,12 @@ fn App() -> impl IntoView {
             if let Ok(pairs) = serde_wasm_bindgen::from_value::<Vec<(String, bool)>>(v) {
                 cred_status.set(pairs.into_iter().collect());
             }
+            let v = invoke("list_custom_credentials", JsValue::UNDEFINED).await;
+            if let Ok(credentials) =
+                serde_wasm_bindgen::from_value::<Vec<CustomCredentialStatus>>(v)
+            {
+                custom_credentials.set(credentials);
+            }
         });
     };
 
@@ -3643,6 +3650,9 @@ fn App() -> impl IntoView {
     let host_port = create_rw_signal(String::new());
     let host_identity = create_rw_signal(String::new());
     let host_notes = create_rw_signal(String::new());
+    let host_auth_method = create_rw_signal(String::from("key"));
+    let host_password = create_rw_signal(String::new());
+    let host_has_password = create_rw_signal(false);
     let ssh_connectivity_modal = create_rw_signal::<Option<SshConnectivityModal>>(None);
     let ssh_connectivity_busy = create_rw_signal(false);
 
@@ -3706,22 +3716,22 @@ fn App() -> impl IntoView {
                         } else {
                             ctx.label.clone()
                         };
-                        ssh_connectivity_modal.set(Some(SshConnectivityModal {
+                        ssh_connectivity_modal.set(Some(SshConnectivityModal::from_gap(
                             context_id,
                             label,
                             detail,
-                            enable_after_probe: true,
-                        }));
+                            true,
+                        )));
                         return;
                     }
                 } else if context_id.starts_with("ssh:") {
                     // Context row may not be loaded yet — still require an explicit probe.
-                    ssh_connectivity_modal.set(Some(SshConnectivityModal {
-                        context_id: context_id.clone(),
-                        label: context_id.clone(),
-                        detail: "not probed yet".into(),
-                        enable_after_probe: true,
-                    }));
+                    ssh_connectivity_modal.set(Some(SshConnectivityModal::need_confirm(
+                        context_id.clone(),
+                        context_id.clone(),
+                        "not probed yet".into(),
+                        true,
+                    )));
                     return;
                 }
             }
@@ -5040,18 +5050,195 @@ fn App() -> impl IntoView {
         {move || ssh_connectivity_modal.get().map(|modal| {
             let host = modal.label.clone();
             let detail = modal.detail.clone();
-            let body = tf(locale.get(), "ssh_check.body", &[("host", &host)]);
-            let detail_line = tf(locale.get(), "ssh_check.detail", &[("detail", &detail)]);
             let context_id = modal.context_id.clone();
             let enable_after = modal.enable_after_probe;
+            let failed = modal.phase == SshCheckPhase::Failed;
+            let fail_kind = classify_ssh_failure(&detail);
+            let loc = locale.get();
+            let title = if failed {
+                t(loc, "ssh_check.fail_title")
+            } else {
+                t(loc, "ssh_check.title")
+            };
+            let body = if failed {
+                tf(loc, "ssh_check.fail_body", &[("host", &host)])
+            } else {
+                tf(loc, "ssh_check.body", &[("host", &host)])
+            };
+            let detail_line = tf(loc, "ssh_check.detail", &[("detail", &detail)]);
+            let cause_keys = ssh_fail_cause_keys(fail_kind);
+            let host_for_probe = host.clone();
+            let run_probe = Rc::new({
+                let context_id = context_id.clone();
+                move || {
+                    let context_id = context_id.clone();
+                    let host_for_probe = host_for_probe.clone();
+                    ssh_connectivity_busy.set(true);
+                    spawn_local(async move {
+                        let arg =
+                            to_value(&serde_json::json!({ "contextId": context_id.clone() }))
+                                .unwrap();
+                        match invoke_checked("probe_execution_context", arg).await {
+                            Ok(value) => {
+                                show_probe_stopped_toast(&value, locale);
+                                refresh_execution_contexts(execution_contexts);
+                                let Ok(updated) =
+                                    serde_wasm_bindgen::from_value::<ExecutionContext>(value)
+                                else {
+                                    ssh_connectivity_busy.set(false);
+                                    return;
+                                };
+                                if ssh_context_known_good(&updated) {
+                                    if enable_after {
+                                        apply_session_compute_resource
+                                            .call((context_id.clone(), true));
+                                        show_toast(&t(
+                                            locale.get_untracked(),
+                                            "ssh_check.enabled",
+                                        ));
+                                    } else {
+                                        show_toast(&t(
+                                            locale.get_untracked(),
+                                            "ssh_check.probed_ok",
+                                        ));
+                                    }
+                                    if file_source.get_untracked() == context_id {
+                                        refresh_remote_dir(
+                                            context_id.clone(),
+                                            remote_file_cwd,
+                                            remote_file_entries,
+                                            remote_file_loading,
+                                            remote_file_error,
+                                            file_source,
+                                        );
+                                    }
+                                    ssh_connectivity_modal.set(None);
+                                } else {
+                                    // Stop probing loop: switch to diagnosis + fix.
+                                    let detail = ssh_connectivity_gap(&updated)
+                                        .unwrap_or_else(|| "probe failed".into());
+                                    let label = if updated.label.trim().is_empty() {
+                                        updated.id.clone()
+                                    } else {
+                                        updated.label.clone()
+                                    };
+                                    ssh_connectivity_modal.set(Some(SshConnectivityModal::failed(
+                                        context_id.clone(),
+                                        label,
+                                        detail,
+                                        enable_after,
+                                    )));
+                                    show_warning_toast(&t(
+                                        locale.get_untracked(),
+                                        "ssh_check.still_failed",
+                                    ));
+                                }
+                            }
+                            Err(error) => {
+                                let message = localize_backend(
+                                    locale.get_untracked(),
+                                    &js_error_text(error),
+                                );
+                                show_toast(&message);
+                                ssh_connectivity_modal.set(Some(SshConnectivityModal::failed(
+                                    context_id.clone(),
+                                    host_for_probe,
+                                    message,
+                                    enable_after,
+                                )));
+                            }
+                        }
+                        ssh_connectivity_busy.set(false);
+                    });
+                }
+            });
+            let open_edit_host = Rc::new({
+                let context_id = context_id.clone();
+                move || {
+                    let alias = context_id
+                        .strip_prefix("ssh:")
+                        .unwrap_or(context_id.as_str())
+                        .to_string();
+                    let hosts = ssh_hosts.get_untracked();
+                    let existing = hosts.into_iter().find(|h| h.alias == alias);
+                    host_alias.set(alias);
+                    host_user.set(
+                        existing
+                            .as_ref()
+                            .and_then(|h| h.user.clone())
+                            .unwrap_or_default(),
+                    );
+                    host_port.set(
+                        existing
+                            .as_ref()
+                            .and_then(|h| h.port)
+                            .map(|p| p.to_string())
+                            .unwrap_or_default(),
+                    );
+                    host_identity.set(
+                        existing
+                            .as_ref()
+                            .and_then(|h| h.identity_file.clone())
+                            .unwrap_or_default(),
+                    );
+                    host_notes.set(
+                        existing
+                            .as_ref()
+                            .and_then(|h| h.notes.clone())
+                            .unwrap_or_default(),
+                    );
+                    let auth = existing
+                        .as_ref()
+                        .and_then(|h| h.auth_method.clone())
+                        .unwrap_or_else(|| "key".into());
+                    host_auth_method.set(if auth == "password" {
+                        "password".into()
+                    } else {
+                        "key".into()
+                    });
+                    host_password.set(String::new());
+                    host_has_password.set(
+                        existing.as_ref().map(|h| h.has_password).unwrap_or(false),
+                    );
+                    spawn_local(async move {
+                        let value = invoke("list_ssh_config_aliases", JsValue::UNDEFINED).await;
+                        if let Ok(aliases) =
+                            serde_wasm_bindgen::from_value::<Vec<String>>(value)
+                        {
+                            config_aliases.set(aliases);
+                        }
+                    });
+                    ssh_connectivity_modal.set(None);
+                    ssh_connectivity_busy.set(false);
+                    open_settings_fn(Some("environments".into()));
+                    show_add_host.set(true);
+                }
+            });
             view! {
                 <div class="overlay" data-testid="ssh-connectivity-modal">
-                    <div class="modal confirm-modal update-check-modal">
-                        <h2>{move || t(locale.get(), "ssh_check.title")}</h2>
-                        <div class="hint">{body}</div>
-                        <div class="hint">{detail_line}</div>
-                        <div class="hint">{move || t(locale.get(), "ssh_check.hint")}</div>
-                        <div class="row">
+                    <div class="modal confirm-modal update-check-modal ssh-check-modal"
+                        class:ssh-check-failed=failed>
+                        <h2>{title}</h2>
+                        <div class="hint ssh-check-scroll">
+                            <p>{body}</p>
+                            <p class="ssh-check-error">{detail_line}</p>
+                            {failed.then(|| view! {
+                                <div class="ssh-check-causes" data-testid="ssh-check-causes">
+                                    <div class="ssh-check-causes-title">
+                                        {t(loc, "ssh_check.causes_title")}
+                                    </div>
+                                    <ul>
+                                        {cause_keys.iter().map(|key| view! {
+                                            <li>{t(loc, key)}</li>
+                                        }).collect_view()}
+                                    </ul>
+                                </div>
+                            })}
+                            {(!failed).then(|| view! {
+                                <p>{t(loc, "ssh_check.hint")}</p>
+                            })}
+                        </div>
+                        <div class="row ssh-check-actions">
                             <button
                                 type="button"
                                 prop:disabled=move || ssh_connectivity_busy.get()
@@ -5060,79 +5247,63 @@ fn App() -> impl IntoView {
                                     ssh_connectivity_busy.set(false);
                                 }
                             >
-                                {move || t(locale.get(), "ssh_check.cancel")}
+                                {t(loc, "ssh_check.cancel")}
                             </button>
-                            <button
-                                type="button"
-                                class="primary"
-                                data-testid="ssh-connectivity-probe"
-                                prop:disabled=move || ssh_connectivity_busy.get()
-                                on:click=move |_| {
-                                    let context_id = context_id.clone();
-                                    ssh_connectivity_busy.set(true);
-                                    spawn_local(async move {
-                                        let arg = to_value(&serde_json::json!({ "contextId": context_id.clone() })).unwrap();
-                                        match invoke_checked("probe_execution_context", arg).await {
-                                            Ok(value) => {
-                                                show_probe_stopped_toast(&value, locale);
-                                                refresh_execution_contexts(execution_contexts);
-                                                let Ok(updated) = serde_wasm_bindgen::from_value::<ExecutionContext>(value) else {
-                                                    ssh_connectivity_busy.set(false);
-                                                    return;
-                                                };
-                                                if ssh_context_known_good(&updated) {
-                                                    if enable_after {
-                                                        apply_session_compute_resource.call((context_id.clone(), true));
-                                                        show_toast(&t(locale.get_untracked(), "ssh_check.enabled"));
-                                                    } else {
-                                                        show_toast(&t(locale.get_untracked(), "ssh_check.probed_ok"));
-                                                    }
-                                                    // If the file pane was blocked on this host, reload it.
-                                                    if file_source.get_untracked() == context_id {
-                                                        refresh_remote_dir(
-                                                            context_id.clone(),
-                                                            remote_file_cwd,
-                                                            remote_file_entries,
-                                                            remote_file_loading,
-                                                            remote_file_error,
-                                                            file_source,
-                                                        );
-                                                    }
-                                                    ssh_connectivity_modal.set(None);
-                                                } else {
-                                                    let detail = ssh_connectivity_gap(&updated)
-                                                        .unwrap_or_else(|| "probe failed".into());
-                                                    ssh_connectivity_modal.set(Some(SshConnectivityModal {
-                                                        context_id: context_id.clone(),
-                                                        label: if updated.label.trim().is_empty() {
-                                                            updated.id.clone()
-                                                        } else {
-                                                            updated.label.clone()
-                                                        },
-                                                        detail,
-                                                        enable_after_probe: enable_after,
-                                                    }));
-                                                    show_warning_toast(&t(locale.get_untracked(), "ssh_check.still_failed"));
-                                                }
-                                            }
-                                            Err(error) => {
-                                                let message = localize_backend(
-                                                    locale.get_untracked(),
-                                                    &js_error_text(error),
-                                                );
-                                                show_toast(&message);
-                                            }
+                            {if failed {
+                                let edit = open_edit_host.clone();
+                                let reprobe = run_probe.clone();
+                                view! {
+                                    <button
+                                        type="button"
+                                        data-testid="ssh-connectivity-settings"
+                                        prop:disabled=move || ssh_connectivity_busy.get()
+                                        on:click=move |_| {
+                                            ssh_connectivity_modal.set(None);
+                                            open_settings_fn(Some("environments".into()));
                                         }
-                                        ssh_connectivity_busy.set(false);
-                                    });
-                                }
-                            >
-                                {move || if ssh_connectivity_busy.get() {
-                                    t(locale.get(), "ssh_check.probing")
-                                } else {
-                                    t(locale.get(), "ssh_check.probe")
-                                }}
-                            </button>
+                                    >
+                                        {t(loc, "ssh_check.jump")}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class="primary"
+                                        data-testid="ssh-connectivity-fix-host"
+                                        prop:disabled=move || ssh_connectivity_busy.get()
+                                        on:click=move |_| edit()
+                                    >
+                                        {t(loc, "ssh_check.fix_host")}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        data-testid="ssh-connectivity-reprobe"
+                                        prop:disabled=move || ssh_connectivity_busy.get()
+                                        on:click=move |_| reprobe()
+                                    >
+                                        {move || if ssh_connectivity_busy.get() {
+                                            t(locale.get(), "ssh_check.probing")
+                                        } else {
+                                            t(locale.get(), "ssh_check.reprobe_after_fix")
+                                        }}
+                                    </button>
+                                }.into_view()
+                            } else {
+                                let probe = run_probe.clone();
+                                view! {
+                                    <button
+                                        type="button"
+                                        class="primary"
+                                        data-testid="ssh-connectivity-probe"
+                                        prop:disabled=move || ssh_connectivity_busy.get()
+                                        on:click=move |_| probe()
+                                    >
+                                        {move || if ssh_connectivity_busy.get() {
+                                            t(locale.get(), "ssh_check.probing")
+                                        } else {
+                                            t(locale.get(), "ssh_check.probe")
+                                        }}
+                                    </button>
+                                }.into_view()
+                            }}
                         </div>
                     </div>
                 </div>
@@ -7401,12 +7572,14 @@ fn App() -> impl IntoView {
                                                                                 // Land in Settings → Environments so the user can fix
                                                                                 // identity/host config, and open the probe dialog.
                                                                                 open_settings_fn(Some("environments".into()));
-                                                                                ssh_connectivity_modal.set(Some(SshConnectivityModal {
-                                                                                    context_id,
-                                                                                    label,
-                                                                                    detail,
-                                                                                    enable_after_probe: false,
-                                                                                }));
+                                                                                ssh_connectivity_modal.set(Some(
+                                                                                    SshConnectivityModal::from_gap(
+                                                                                        context_id,
+                                                                                        label,
+                                                                                        detail,
+                                                                                        false,
+                                                                                    ),
+                                                                                ));
                                                                             }>
                                                                             {t(loc, "ssh_check.jump_probe")}
                                                                         </button>
@@ -8374,10 +8547,11 @@ fn App() -> impl IntoView {
                 settings_busy, model_form_open, model_form_key, models, model_form_msg, show_acp_agents,
                 acp_agents, active_acp_agent_id, acp_form, acp_form_msg, acp_infos, specialists,
                 specialist_form_open, memory_view, memory_editor, memory_msg, skills_list,
-                skill_filter_tag, skills_search, skills_msg, cred_status, cred_inputs, cred_msg,
-                approval_grants, conns_view, conn_form_open, conn_form_kind, conn_test_msg,
-                custom_conn_tools, custom_conn_tools_loading, custom_conn_tool_errors, pet_status,
-                ssh_hosts, execution_contexts, runtime_interpreter_form,
+                skill_filter_tag, skills_search, skills_msg, cred_status, cred_inputs,
+                custom_credentials, cred_msg, approval_grants, conns_view, conn_form_open,
+                conn_form_kind, conn_test_msg, custom_conn_tools, custom_conn_tools_loading,
+                custom_conn_tool_errors, pet_status, ssh_hosts, execution_contexts,
+                runtime_interpreter_form,
             }
             open_project=switch_project
             go_settings_section=Callback::new(move |section: String| go_settings_section(&section))
@@ -8468,6 +8642,7 @@ fn App() -> impl IntoView {
         <AddHostOverlay
             locale=locale show_add_host=show_add_host host_alias=host_alias config_aliases=config_aliases
             host_notes=host_notes host_user=host_user host_port=host_port host_identity=host_identity
+            host_auth_method=host_auth_method host_password=host_password host_has_password=host_has_password
             ssh_hosts=ssh_hosts execution_contexts=execution_contexts
         />
         <ContextDetailsOverlay

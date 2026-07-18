@@ -225,29 +225,50 @@ impl RuntimeLauncher for TauriRuntimeLauncher {
             project_root,
         )
         .map_err(anyhow::Error::msg)?;
-        let envs = if context.kind == wisp_store::ExecutionContextKind::Local
+        let mut envs = if context.kind == wisp_store::ExecutionContextKind::Local
             && key.language == RuntimeLanguage::Python
         {
-            self.envs.as_slice()
+            self.envs.clone()
         } else {
-            &[]
+            Vec::new()
         };
+        if context.kind == wisp_store::ExecutionContextKind::Local
+            && key.language == RuntimeLanguage::Python
+        {
+            for (name, value) in crate::models::service_env() {
+                if let Some((_, current)) = envs.iter_mut().find(|(current, _)| current == &name) {
+                    *current = value;
+                } else {
+                    envs.push((name, value));
+                }
+            }
+        }
+        let ssh_auth_envs = if context.kind == wisp_store::ExecutionContextKind::Ssh {
+            let connection = SshConnection::from_execution_context(&context)
+                .map_err(|e| anyhow::Error::msg(e))?;
+            crate::ssh_hosts::auth_envs_for_connection(&connection).map_err(anyhow::Error::msg)?
+        } else {
+            Vec::new()
+        };
+        envs.extend(ssh_auth_envs.iter().cloned());
         let client = match KernelClient::spawn_command(
             &command.program,
             &command.args,
-            envs,
+            envs.as_slice(),
             command.cwd.as_deref(),
             language,
         )
         .await
         {
             Ok(client) => {
+                crate::ssh_hosts::cleanup_password_auth_env(&ssh_auth_envs);
                 if context.kind == wisp_store::ExecutionContextKind::Ssh {
                     crate::ssh_guard::record_success(&context.id);
                 }
                 client
             }
             Err(error) => {
+                crate::ssh_hosts::cleanup_password_auth_env(&ssh_auth_envs);
                 if context.kind == wisp_store::ExecutionContextKind::Ssh {
                     let detail = error.to_string();
                     if crate::ssh_guard::is_connectivity_failure(&detail) {
@@ -478,9 +499,11 @@ fn remote_command(
             script: label.into(),
             cwd: None,
             stdin,
+            envs: Vec::new(),
         }),
         wisp_store::ExecutionContextKind::Ssh => {
-            let mut args = SshConnection::from_execution_context(context)?.ssh_args()?;
+            let connection = SshConnection::from_execution_context(context)?;
+            let mut args = connection.ssh_args()?;
             args.push(format!("sh -lc {}", shell_single_quote(&script)));
             Ok(RunCommand {
                 context_id: context.id.clone(),
@@ -489,6 +512,7 @@ fn remote_command(
                 script: label.into(),
                 cwd: None,
                 stdin,
+                envs: crate::ssh_hosts::auth_envs_for_connection(&connection)?,
             })
         }
         wisp_store::ExecutionContextKind::Local => {

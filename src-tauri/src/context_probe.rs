@@ -37,6 +37,7 @@ pub struct ProbeCommand {
     pub program: String,
     pub args: Vec<String>,
     pub script: String,
+    pub envs: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,10 +57,14 @@ impl ProbeRunner for ProcessProbeRunner {
     fn run(&mut self, command: &ProbeCommand) -> Result<ProbeCommandOutput, String> {
         let mut process = std::process::Command::new(&command.program);
         process.args(&command.args);
+        if !command.envs.is_empty() {
+            process.envs(command.envs.iter().cloned());
+        }
         wisp_tools::process::hide_console(&mut process);
         let output = process
             .output()
             .map_err(|e| format!("failed to run {}: {e}", command.program))?;
+        crate::ssh_hosts::cleanup_password_auth_env(&command.envs);
         Ok(ProbeCommandOutput {
             status: output.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
@@ -84,6 +89,7 @@ pub fn build_probe_command(
                 program: "ssh".into(),
                 args,
                 script: script.into(),
+                envs: crate::ssh_hosts::auth_envs_for_connection(&connection)?,
             })
         }
         wisp_store::ExecutionContextKind::Wsl => {
@@ -103,6 +109,7 @@ pub fn build_probe_command(
                     script.into(),
                 ],
                 script: script.into(),
+                envs: Vec::new(),
             })
         }
     }
@@ -115,6 +122,7 @@ fn local_command(context_id: &str, script: &str) -> ProbeCommand {
         program: "powershell".into(),
         args: vec!["-NoProfile".into(), "-Command".into(), script.into()],
         script: script.into(),
+        envs: Vec::new(),
     }
 }
 
@@ -125,6 +133,7 @@ fn local_command(context_id: &str, script: &str) -> ProbeCommand {
         program: "sh".into(),
         args: vec!["-lc".into(), script.into()],
         script: script.into(),
+        envs: Vec::new(),
     }
 }
 

@@ -26,6 +26,7 @@ pub struct TerminalLaunchSpec {
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub display_cwd: String,
+    pub envs: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -260,14 +261,19 @@ fn spawn_session(
     command.args(&spec.args);
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
+    for (key, value) in &spec.envs {
+        command.env(key, value);
+    }
     if let Some(cwd) = &spec.cwd {
         command.cwd(cwd);
     }
 
-    let child = pair
-        .slave
-        .spawn_command(command)
-        .map_err(|error| format!("failed to start {} terminal: {error}", context.id))?;
+    let child = pair.slave.spawn_command(command).map_err(|error| {
+        crate::ssh_hosts::cleanup_password_auth_env(&spec.envs);
+        format!("failed to start {} terminal: {error}", context.id)
+    })?;
+    // Password askpass is only needed while OpenSSH authenticates.
+    crate::ssh_hosts::cleanup_password_auth_env(&spec.envs);
     drop(pair.slave);
 
     let reader = pair
@@ -349,6 +355,7 @@ pub fn build_terminal_launch_spec(
                 args: vec!["-d".into(), distro.into(), "--cd".into(), project.clone()],
                 cwd: None,
                 display_cwd: project,
+                envs: Vec::new(),
             })
         }
         wisp_store::ExecutionContextKind::Ssh => {
@@ -358,6 +365,7 @@ pub fn build_terminal_launch_spec(
                 args: connection.interactive_ssh_args()?,
                 cwd: None,
                 display_cwd: "~".into(),
+                envs: crate::ssh_hosts::auth_envs_for_connection(&connection)?,
             })
         }
     }
@@ -370,6 +378,7 @@ fn local_launch_spec(project_root: &Path) -> TerminalLaunchSpec {
         args: vec!["-NoLogo".into()],
         cwd: Some(project_root.to_path_buf()),
         display_cwd: project_root.to_string_lossy().into_owned(),
+        envs: Vec::new(),
     }
 }
 
@@ -380,6 +389,7 @@ fn local_launch_spec(project_root: &Path) -> TerminalLaunchSpec {
         args: vec!["-l".into()],
         cwd: Some(project_root.to_path_buf()),
         display_cwd: project_root.to_string_lossy().into_owned(),
+        envs: Vec::new(),
     }
 }
 

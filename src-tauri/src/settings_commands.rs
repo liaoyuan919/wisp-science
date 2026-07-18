@@ -269,8 +269,47 @@ pub(super) async fn set_api_key(state: State<'_, AppState>, key: String) -> Resu
 }
 
 #[tauri::command]
-pub(super) async fn credential_status() -> Result<Vec<(String, bool)>, String> {
+pub(super) async fn credential_status(
+    state: State<'_, AppState>,
+) -> Result<Vec<(String, bool)>, String> {
+    models::load_custom_credentials(&state.store).await?;
     Ok(models::credential_status())
+}
+
+#[tauri::command]
+pub(super) async fn list_custom_credentials(
+    state: State<'_, AppState>,
+) -> Result<Vec<models::CustomCredentialStatus>, String> {
+    models::custom_credential_status(&state.store).await
+}
+
+#[tauri::command]
+pub(super) async fn add_custom_credential(
+    state: State<'_, AppState>,
+    name: String,
+    env_var: String,
+    value: String,
+) -> Result<models::CustomCredentialStatus, String> {
+    let credential = models::add_custom_credential(&state.store, &name, &env_var, &value).await?;
+    tracing::info!(
+        target: "wisp",
+        id = %credential.id,
+        env_var = %credential.env_var,
+        "added custom credential"
+    );
+    clear_idle_agents(&state).await;
+    Ok(credential)
+}
+
+#[tauri::command]
+pub(super) async fn remove_custom_credential(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    models::remove_custom_credential(&state.store, &id).await?;
+    tracing::info!(target: "wisp", id = %id, "removed custom credential");
+    clear_idle_agents(&state).await;
+    Ok(())
 }
 
 fn agent_infini_binary() -> Option<PathBuf> {

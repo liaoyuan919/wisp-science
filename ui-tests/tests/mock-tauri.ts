@@ -172,6 +172,13 @@ export function tauriMock(): void {
     ncbi_api_key: false,
     ncbi_email: false,
   };
+  let mockCustomCredentials: Array<{
+    id: string;
+    name: string;
+    envVar: string;
+    present: boolean;
+  }> = [];
+  let nextCustomCredential = 1;
   const mockChannels = {
     feishu_enabled: false,
     feishu_bound: false,
@@ -425,21 +432,47 @@ export function tauriMock(): void {
               return {
                 items: [{
                   role: "assistant",
-                  text: "[Open bound report](D:/ZZM/03.%20figures/report.md')",
+                  text: "[Open bound report](D:/ZZM/03.%20figures/report.md')\n\n[Open bound manuscript](/abs/path/D:/ZZM/paper/manuscript.docx)\n\n[Open bound references](references.bib)",
                   tool_name: null,
                   ok: null,
-                  resources: [{
-                    id: "resource-link-markdown",
-                    ordinal: 0,
-                    originalReference: "D:/ZZM/03.%20figures/report.md'",
-                    artifactId: "resource-artifact-markdown",
-                    artifactVersionId: "resource-version-markdown",
-                    displayName: "report.md",
-                    kind: "markdown",
-                    mimeType: "text/markdown",
-                    status: "ready",
-                    error: null,
-                  }],
+                  resources: [
+                    {
+                      id: "resource-link-markdown",
+                      ordinal: 0,
+                      originalReference: "D:/ZZM/03.%20figures/report.md'",
+                      artifactId: "resource-artifact-markdown",
+                      artifactVersionId: "resource-version-markdown",
+                      displayName: "report.md",
+                      kind: "markdown",
+                      mimeType: "text/markdown",
+                      status: "ready",
+                      error: null,
+                    },
+                    {
+                      id: "resource-link-docx",
+                      ordinal: 1,
+                      originalReference: "/abs/path/D:/ZZM/paper/manuscript.docx",
+                      artifactId: "resource-artifact-docx",
+                      artifactVersionId: "resource-version-docx",
+                      displayName: "manuscript.docx",
+                      kind: "docx",
+                      mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                      status: "ready",
+                      error: null,
+                    },
+                    {
+                      id: "resource-link-bib",
+                      ordinal: 2,
+                      originalReference: "references.bib",
+                      artifactId: "resource-artifact-bib",
+                      artifactVersionId: "resource-version-bib",
+                      displayName: "references.bib",
+                      kind: "text",
+                      mimeType: "text/x-bibtex",
+                      status: "ready",
+                      error: null,
+                    },
+                  ],
                 }],
                 next_before_seq: null,
                 user_offset: 0,
@@ -651,6 +684,8 @@ export function tauriMock(): void {
             return null;
           case "credential_status":
             return Object.entries(mockCredentials);
+          case "list_custom_credentials":
+            return mockCustomCredentials.map((credential) => ({ ...credential }));
           case "channels_status":
             return { ...mockChannels };
           case "set_feishu_channel":
@@ -1015,6 +1050,28 @@ export function tauriMock(): void {
           case "set_credential": {
             const id = String(arg("id") ?? "");
             mockCredentials[id] = String(arg("value") ?? "").trim().length > 0;
+            mockCustomCredentials = mockCustomCredentials.map((credential) =>
+              credential.id === id
+                ? { ...credential, present: mockCredentials[id] }
+                : credential,
+            );
+            return null;
+          }
+          case "add_custom_credential": {
+            const credential = {
+              id: `custom-${nextCustomCredential++}`,
+              name: String(arg("name") ?? "").trim(),
+              envVar: String(arg("envVar") ?? "").trim(),
+              present: String(arg("value") ?? "").trim().length > 0,
+            };
+            mockCustomCredentials.push(credential);
+            mockCredentials[credential.id] = credential.present;
+            return { ...credential };
+          }
+          case "remove_custom_credential": {
+            const id = String(arg("id") ?? "");
+            mockCustomCredentials = mockCustomCredentials.filter((credential) => credential.id !== id);
+            delete mockCredentials[id];
             return null;
           }
           case "set_skill_tags": {
@@ -1207,6 +1264,22 @@ export function tauriMock(): void {
                 path: "artifact-version:resource-version-markdown",
                 mime: "text/markdown",
                 text: `# Bound report\n\n${Array.from({ length: 120 }, (_, index) => `Scrollable row ${index + 1}`).join("\n\n")}`,
+                base64: null,
+              };
+            }
+            if (arg("versionId") === "resource-version-docx") {
+              return {
+                path: "artifact-version:resource-version-docx",
+                mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                text: null,
+                base64: docxBase64,
+              };
+            }
+            if (arg("versionId") === "resource-version-bib") {
+              return {
+                path: "artifact-version:resource-version-bib",
+                mime: "text/x-bibtex",
+                text: "@article{wisp,\n  title = {Wisp Science}\n}",
                 base64: null,
               };
             }

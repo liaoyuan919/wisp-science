@@ -6244,6 +6244,8 @@ pub fn run() {
             std::fs::create_dir_all(&app_data).expect("create app data dir");
             let db_path = app_data.join("wisp.sqlite");
             let store = tauri::async_runtime::block_on(Store::open(&db_path)).expect("open store");
+            tauri::async_runtime::block_on(models::load_custom_credentials(&store))
+                .expect("load custom credentials");
             let library = tauri::async_runtime::block_on(LibraryStore::open(
                 &app_data.join("library.sqlite"),
             ))
@@ -6257,7 +6259,7 @@ pub fn run() {
                     app_data.clone(),
                     kernel_worker_path(),
                     r_kernel_worker_path(),
-                    models::service_env(),
+                    vec![],
                 ),
             ));
             #[cfg(target_os = "macos")]
@@ -6527,6 +6529,9 @@ pub fn run() {
             settings_commands::set_api_key,
             settings_commands::credential_status,
             settings_commands::set_credential,
+            settings_commands::list_custom_credentials,
+            settings_commands::add_custom_credential,
+            settings_commands::remove_custom_credential,
             pet_commands::get_pet,
             pet_commands::get_pet_runtime_status,
             pet_commands::open_pet_session,

@@ -26,6 +26,7 @@ pub(super) struct DirectoryListing {
 struct RemoteCommand {
     program: String,
     args: Vec<String>,
+    envs: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,10 +46,14 @@ impl RemoteRunner for ProcessRemoteRunner {
     fn run(&mut self, command: &RemoteCommand) -> Result<RemoteOutput, String> {
         let mut process = std::process::Command::new(&command.program);
         process.args(&command.args);
+        if !command.envs.is_empty() {
+            process.envs(command.envs.iter().cloned());
+        }
         wisp_tools::process::hide_console(&mut process);
         let output = process
             .output()
             .map_err(|e| format!("failed to run {}: {e}", command.program))?;
+        crate::ssh_hosts::cleanup_password_auth_env(&command.envs);
         Ok(RemoteOutput {
             status: output.status.code().unwrap_or(-1),
             stdout: output.stdout,
@@ -424,6 +429,7 @@ fn build_remote_directory_command(
     Ok(RemoteCommand {
         program: "ssh".into(),
         args,
+        envs: crate::ssh_hosts::auth_envs_for_connection(&connection)?,
     })
 }
 
@@ -552,6 +558,7 @@ fn build_remote_file_command(
     Ok(RemoteCommand {
         program: "ssh".into(),
         args,
+        envs: crate::ssh_hosts::auth_envs_for_connection(&connection)?,
     })
 }
 

@@ -19,6 +19,7 @@ async fn process_runner_keeps_only_bounded_output_tails() {
         script: String::new(),
         cwd: None,
         stdin: None,
+        envs: Vec::new(),
     };
 
     let output = ProcessRunRunner
@@ -43,6 +44,7 @@ async fn process_runner_timeout_cleans_up_inherited_pipes() {
         script: String::new(),
         cwd: None,
         stdin: None,
+        envs: Vec::new(),
     };
 
     let result = tokio::time::timeout(
@@ -877,6 +879,7 @@ fn test_handle(run_id: &str, confirmed: bool) -> RemoteRunHandle {
             user: None,
             port: None,
             identity_file: None,
+            auth_method: crate::ssh_hosts::SshAuthMethod::Key,
         },
         workdir: format!(".wisp-science/runs/{run_id}"),
         token: "test-token".into(),

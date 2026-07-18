@@ -951,6 +951,7 @@ pub(crate) fn file_kind(path: &str) -> Option<&'static str> {
         // renders + highlights fenced blocks, so they need nothing of their own.
         "md" | "rmd" | "qmd" | "markdown" => "markdown",
         "docx" => "docx",
+        "bib" => "text",
         "html" | "htm" => "html",
         "nwk" | "newick" | "treefile" | "tre" => "text",
         "ipynb" => "notebook",
@@ -1165,6 +1166,12 @@ mod md_catalog_tests {
     #[test]
     fn detects_json_files_for_preview() {
         assert_eq!(file_kind("report.json"), Some("json"));
+    }
+
+    #[test]
+    fn detects_manuscripts_and_bibliographies_for_preview() {
+        assert_eq!(file_kind("manuscript.docx"), Some("docx"));
+        assert_eq!(file_kind("references.bib"), Some("text"));
     }
 
     #[test]

@@ -198,6 +198,23 @@ body:has(.settings-page) .projects-screen { display: none; }
 }
 .settings-pane-list .settings-list + .conn-group-label { margin-top: 20px; }
 .cred-field-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.custom-credential-card {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+}
+.custom-credential-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.custom-credential-meta { display: flex; align-items: baseline; flex-wrap: wrap; gap: 7px 10px; min-width: 0; }
+.custom-credential-meta strong { font-size: 13.5px; }
+.custom-credential-meta code { color: var(--text-muted); font-size: 11.5px; overflow-wrap: anywhere; }
+.custom-credential-meta span { color: var(--text-faint); font-size: 11px; }
+.custom-credential-actions { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+.custom-credential-actions .danger { color: var(--err); }
+.custom-credential-add { margin-top: 14px; }
 .linklike {
   background: none; border: none; padding: 0; cursor: pointer;
   color: var(--text-faint); font-size: 11px; text-decoration: underline;

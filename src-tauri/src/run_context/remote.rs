@@ -67,6 +67,7 @@ pub(super) fn ssh_script_command(
         script: label.into(),
         cwd: None,
         stdin: Some(payload),
+        envs: crate::ssh_hosts::auth_envs_for_connection(connection)?,
     })
 }
 
@@ -305,6 +306,7 @@ pub(super) async fn stage_remote_inputs(
                     script: format!("stage {} input file(s)", input_paths.len()),
                     cwd: remote.harvest_root.clone(),
                     stdin: None,
+                    envs: crate::ssh_hosts::auth_envs_for_connection(connection)?,
                 },
                 Duration::from_secs(300),
             )

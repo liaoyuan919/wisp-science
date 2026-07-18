@@ -56,6 +56,8 @@ pub struct RunCommand {
     pub script: String,
     pub cwd: Option<PathBuf>,
     pub stdin: Option<String>,
+    /// Extra process environment (e.g. SSH_ASKPASS for password auth).
+    pub envs: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,6 +162,9 @@ impl RunCommandRunner for ProcessRunRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if !command.envs.is_empty() {
+            cmd.envs(command.envs.iter().cloned());
+        }
         if command.stdin.is_some() {
             cmd.stdin(Stdio::piped());
         }
@@ -239,6 +244,7 @@ impl RunCommandRunner for ProcessRunRunner {
                 ))
             }
         };
+        crate::ssh_hosts::cleanup_password_auth_env(&command.envs);
         if ssh_transport {
             record_ssh_runner_outcome(&command.context_id, &result);
         }
@@ -378,6 +384,7 @@ impl RunManager {
                     script: format!("download {remote_path}"),
                     cwd: destination.parent().map(std::path::Path::to_path_buf),
                     stdin: None,
+                    envs: crate::ssh_hosts::auth_envs_for_connection(&connection)?,
                 },
                 Duration::from_secs(4 * 60 * 60),
             )
@@ -686,6 +693,7 @@ pub fn build_run_command(
                 script: script.into(),
                 cwd: None,
                 stdin: None,
+                envs: Vec::new(),
             }
         }
         wisp_store::ExecutionContextKind::Wsl => {
@@ -707,6 +715,7 @@ pub fn build_run_command(
                 script: script.into(),
                 cwd: None,
                 stdin: None,
+                envs: Vec::new(),
             }
         }
     }
@@ -726,6 +735,7 @@ fn local_command(context_id: &str, script: &str, cwd: Option<PathBuf>) -> RunCom
         script: script.into(),
         cwd,
         stdin: None,
+        envs: Vec::new(),
     }
 }
 
@@ -738,6 +748,7 @@ fn local_command(context_id: &str, script: &str, cwd: Option<PathBuf>) -> RunCom
         script: script.into(),
         cwd,
         stdin: None,
+        envs: Vec::new(),
     }
 }
 

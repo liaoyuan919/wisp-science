@@ -369,6 +369,15 @@ pub(super) enum UpdateCheckModal {
     },
 }
 
+/// First open vs after a failed probe (failed phase must not keep probing).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SshCheckPhase {
+    /// Never probed (or status unknown): one intentional probe is allowed.
+    NeedConfirm,
+    /// Probe already failed: show diagnosis and fix actions, not re-probe as primary.
+    Failed,
+}
+
 /// Modal asking the user to confirm SSH reachability before the agent can use a host.
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct SshConnectivityModal {
@@ -377,6 +386,133 @@ pub(super) struct SshConnectivityModal {
     pub(super) detail: String,
     /// When true, a successful probe enables this context for the current session.
     pub(super) enable_after_probe: bool,
+    pub(super) phase: SshCheckPhase,
+}
+
+impl SshConnectivityModal {
+    pub(super) fn need_confirm(
+        context_id: String,
+        label: String,
+        detail: String,
+        enable_after_probe: bool,
+    ) -> Self {
+        Self {
+            context_id,
+            label,
+            detail,
+            enable_after_probe,
+            phase: SshCheckPhase::NeedConfirm,
+        }
+    }
+
+    pub(super) fn failed(
+        context_id: String,
+        label: String,
+        detail: String,
+        enable_after_probe: bool,
+    ) -> Self {
+        Self {
+            context_id,
+            label,
+            detail,
+            enable_after_probe,
+            phase: SshCheckPhase::Failed,
+        }
+    }
+
+    /// Prefer Failed when we already know the last probe error.
+    pub(super) fn from_gap(
+        context_id: String,
+        label: String,
+        detail: String,
+        enable_after_probe: bool,
+    ) -> Self {
+        let phase = if detail == "not probed yet" {
+            SshCheckPhase::NeedConfirm
+        } else {
+            SshCheckPhase::Failed
+        };
+        Self {
+            context_id,
+            label,
+            detail,
+            enable_after_probe,
+            phase,
+        }
+    }
+}
+
+/// Classified SSH failure for diagnosis copy and fix guidance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SshFailKind {
+    Auth,
+    IdentityMissing,
+    Timeout,
+    Resolve,
+    HostKey,
+    Other,
+}
+
+pub(super) fn classify_ssh_failure(detail: &str) -> SshFailKind {
+    let lower = detail.to_ascii_lowercase();
+    if lower.contains("identity file")
+        || lower.contains("not accessible")
+        || lower.contains("no such identity")
+    {
+        SshFailKind::IdentityMissing
+    } else if lower.contains("permission denied")
+        || lower.contains("publickey")
+        || lower.contains("too many authentication failures")
+        || lower.contains("authentication failed")
+    {
+        SshFailKind::Auth
+    } else if lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("connection refused")
+        || lower.contains("no route to host")
+        || lower.contains("network is unreachable")
+    {
+        SshFailKind::Timeout
+    } else if lower.contains("could not resolve")
+        || lower.contains("name or service not known")
+        || lower.contains("nodename nor servname")
+    {
+        SshFailKind::Resolve
+    } else if lower.contains("host key verification failed")
+        || lower.contains("remote host identification has changed")
+    {
+        SshFailKind::HostKey
+    } else {
+        SshFailKind::Other
+    }
+}
+
+/// i18n keys for bullet causes under the failed-diagnosis phase.
+pub(super) fn ssh_fail_cause_keys(kind: SshFailKind) -> &'static [&'static str] {
+    match kind {
+        SshFailKind::Auth => &[
+            "ssh_check.cause.auth.1",
+            "ssh_check.cause.auth.2",
+            "ssh_check.cause.auth.3",
+            "ssh_check.cause.auth.4",
+        ],
+        SshFailKind::IdentityMissing => &[
+            "ssh_check.cause.identity.1",
+            "ssh_check.cause.identity.2",
+        ],
+        SshFailKind::Timeout => &[
+            "ssh_check.cause.timeout.1",
+            "ssh_check.cause.timeout.2",
+            "ssh_check.cause.timeout.3",
+        ],
+        SshFailKind::Resolve => &["ssh_check.cause.resolve.1", "ssh_check.cause.resolve.2"],
+        SshFailKind::HostKey => &["ssh_check.cause.hostkey.1", "ssh_check.cause.hostkey.2"],
+        SshFailKind::Other => &[
+            "ssh_check.cause.other.1",
+            "ssh_check.cause.other.2",
+            "ssh_check.cause.other.3",
+        ],
+    }
 }
 
 /// Returns a human detail when SSH connectivity is not known-good.
@@ -976,8 +1112,9 @@ fn context_runtime_available(ctx: &ExecutionContext, language: &str) -> bool {
 #[cfg(test)]
 mod runtime_slot_tests {
     use super::{
-        context_runtime_available, is_ssh_setup_error, mention_compute_entries,
-        ssh_connectivity_gap, ssh_setup_context_id, ComposerPickerItem,
+        classify_ssh_failure, context_runtime_available, is_ssh_setup_error,
+        mention_compute_entries, ssh_connectivity_gap, ssh_fail_cause_keys, ssh_setup_context_id,
+        ComposerPickerItem, SshFailKind,
     };
     use crate::dto::ExecutionContext;
     use crate::i18n::Locale;
@@ -1028,6 +1165,22 @@ mod runtime_slot_tests {
             Some("ssh:other")
         );
         assert!(!is_ssh_setup_error("Remote directory empty"));
+    }
+
+    #[test]
+    fn classify_ssh_failure_maps_permission_denied_to_auth() {
+        let detail =
+            "SSH probe failed with exit 255: user@host: Permission denied (publickey,password).";
+        assert_eq!(classify_ssh_failure(detail), SshFailKind::Auth);
+        assert!(ssh_fail_cause_keys(SshFailKind::Auth).len() >= 3);
+        assert_eq!(
+            classify_ssh_failure("Connection timed out"),
+            SshFailKind::Timeout
+        );
+        assert_eq!(
+            classify_ssh_failure("identity file is not accessible"),
+            SshFailKind::IdentityMissing
+        );
     }
 
     #[test]

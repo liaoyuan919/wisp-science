@@ -40,6 +40,8 @@ const PROFILES_KEY: &str = "model_profiles";
 const ACTIVE_KEY: &str = "active_model_id";
 const VISION_KEY: &str = "vision_model_id";
 const LEGACY_KEY_SECRET: &str = "api_key";
+const CUSTOM_CREDENTIALS_KEY: &str = "custom_credentials";
+const CUSTOM_CREDENTIAL_SECRET_PREFIX: &str = "custom_credential:";
 
 fn secret_name(id: &str) -> String {
     format!("model_key:{id}")
@@ -106,6 +108,25 @@ struct Credential {
     env: &'static str,
 }
 
+/// User-defined credential metadata. The value is deliberately absent: only
+/// this non-secret name/environment mapping is persisted in SQLite, while the
+/// value stays in the OS keyring under an id-derived entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CustomCredential {
+    pub id: String,
+    pub name: String,
+    pub env_var: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomCredentialStatus {
+    pub id: String,
+    pub name: String,
+    pub env_var: String,
+    pub present: bool,
+}
+
 const CREDENTIALS: &[Credential] = &[
     Credential {
         id: "openalex_api_key",
@@ -138,25 +159,197 @@ fn credential(id: &str) -> Option<&'static Credential> {
     CREDENTIALS.iter().find(|c| c.id == id)
 }
 
+fn custom_credentials_cache() -> &'static Mutex<Vec<CustomCredential>> {
+    static CACHE: OnceLock<Mutex<Vec<CustomCredential>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn custom_secret_name(id: &str) -> String {
+    format!("{CUSTOM_CREDENTIAL_SECRET_PREFIX}{id}")
+}
+
+fn valid_env_var(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some('_' | 'A'..='Z' | 'a'..='z'))
+        && chars.all(|ch| matches!(ch, '_' | 'A'..='Z' | 'a'..='z' | '0'..='9'))
+}
+
+fn validate_custom_credential(name: &str, env_var: &str, value: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Credential name is required.".into());
+    }
+    if name.len() > 80 {
+        return Err("Credential name must be 80 characters or fewer.".into());
+    }
+    if env_var.is_empty() {
+        return Err("Environment variable is required.".into());
+    }
+    if env_var.len() > 128 || !valid_env_var(env_var) {
+        return Err(
+            "Environment variable must start with a letter or underscore and contain only letters, numbers, and underscores."
+                .into(),
+        );
+    }
+    if value.is_empty() {
+        return Err("Credential value is required.".into());
+    }
+    Ok(())
+}
+
+fn sanitized_custom_credentials(raw: &str) -> Vec<CustomCredential> {
+    let mut ids = std::collections::HashSet::new();
+    let mut env_vars = std::collections::HashSet::new();
+    serde_json::from_str::<Vec<CustomCredential>>(raw)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|credential| {
+            let env_key = credential.env_var.to_ascii_uppercase();
+            uuid::Uuid::parse_str(&credential.id).is_ok()
+                && !credential.name.trim().is_empty()
+                && valid_env_var(&credential.env_var)
+                && ids.insert(credential.id.clone())
+                && env_vars.insert(env_key)
+        })
+        .collect()
+}
+
+/// Load user-defined credential metadata from SQLite into the synchronous
+/// process cache used by runtime/MCP launch paths.
+pub async fn load_custom_credentials(
+    store: &wisp_store::Store,
+) -> Result<Vec<CustomCredential>, String> {
+    let raw = store
+        .get_setting(CUSTOM_CREDENTIALS_KEY)
+        .await
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    let credentials = sanitized_custom_credentials(&raw);
+    *custom_credentials_cache().lock().unwrap() = credentials.clone();
+    Ok(credentials)
+}
+
+async fn save_custom_credentials(
+    store: &wisp_store::Store,
+    credentials: &[CustomCredential],
+) -> Result<(), String> {
+    let raw = serde_json::to_string(credentials).map_err(|error| error.to_string())?;
+    store
+        .set_setting(CUSTOM_CREDENTIALS_KEY, &raw)
+        .await
+        .map_err(|error| error.to_string())?;
+    *custom_credentials_cache().lock().unwrap() = credentials.to_vec();
+    Ok(())
+}
+
+pub async fn custom_credential_status(
+    store: &wisp_store::Store,
+) -> Result<Vec<CustomCredentialStatus>, String> {
+    Ok(load_custom_credentials(store)
+        .await?
+        .into_iter()
+        .map(|credential| CustomCredentialStatus {
+            present: !secret_get(&custom_secret_name(&credential.id)).is_empty(),
+            id: credential.id,
+            name: credential.name,
+            env_var: credential.env_var,
+        })
+        .collect())
+}
+
+pub async fn add_custom_credential(
+    store: &wisp_store::Store,
+    name: &str,
+    env_var: &str,
+    value: &str,
+) -> Result<CustomCredentialStatus, String> {
+    let name = name.trim();
+    let env_var = env_var.trim();
+    let value = value.trim();
+    validate_custom_credential(name, env_var, value)?;
+
+    let mut credentials = load_custom_credentials(store).await?;
+    if CREDENTIALS
+        .iter()
+        .any(|credential| credential.env.eq_ignore_ascii_case(env_var))
+        || credentials
+            .iter()
+            .any(|credential| credential.env_var.eq_ignore_ascii_case(env_var))
+    {
+        return Err(format!(
+            "A credential already uses environment variable {env_var}."
+        ));
+    }
+
+    let credential = CustomCredential {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: name.to_string(),
+        env_var: env_var.to_string(),
+    };
+    let secret_name = custom_secret_name(&credential.id);
+    secret_set(&secret_name, value)?;
+    credentials.push(credential.clone());
+    if let Err(error) = save_custom_credentials(store, &credentials).await {
+        let _ = secret_del(&secret_name);
+        return Err(error);
+    }
+    Ok(CustomCredentialStatus {
+        id: credential.id,
+        name: credential.name,
+        env_var: credential.env_var,
+        present: true,
+    })
+}
+
+pub async fn remove_custom_credential(store: &wisp_store::Store, id: &str) -> Result<(), String> {
+    let mut credentials = load_custom_credentials(store).await?;
+    let index = credentials
+        .iter()
+        .position(|credential| credential.id == id)
+        .ok_or_else(|| format!("unknown custom credential: {id}"))?;
+    let secret_name = custom_secret_name(id);
+    if !secret_get(&secret_name).is_empty() {
+        secret_del(&secret_name)?;
+    }
+    credentials.remove(index);
+    save_custom_credentials(store, &credentials).await
+}
+
 /// `(id, present)` for every known credential, for the Settings UI.
 pub fn credential_status() -> Vec<(String, bool)> {
-    CREDENTIALS
+    let mut status = CREDENTIALS
         .iter()
         .map(|c| (c.id.to_string(), !secret_get(c.secret).is_empty()))
-        .collect()
+        .collect::<Vec<_>>();
+    status.extend(custom_credentials_cache().lock().unwrap().iter().map(|c| {
+        (
+            c.id.clone(),
+            !secret_get(&custom_secret_name(&c.id)).is_empty(),
+        )
+    }));
+    status
 }
 
 /// Store (or clear, when `value` is blank) a credential by id. Returns an
 /// error for an unknown id.
 pub fn store_credential(id: &str, value: &str) -> Result<(), String> {
-    let cred = credential(id).ok_or_else(|| format!("unknown credential: {id}"))?;
+    let secret = credential(id)
+        .map(|credential| credential.secret.to_string())
+        .or_else(|| {
+            custom_credentials_cache()
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|credential| credential.id == id)
+                .map(|credential| custom_secret_name(&credential.id))
+        })
+        .ok_or_else(|| format!("unknown credential: {id}"))?;
     let value = value.trim();
     if value.is_empty() {
         // Clearing a never-stored key is fine — cache records "absent".
-        let _ = secret_del(cred.secret);
+        let _ = secret_del(&secret);
         Ok(())
     } else {
-        secret_set(cred.secret, value)
+        secret_set(&secret, value)
     }
 }
 
@@ -164,13 +357,24 @@ pub fn store_credential(id: &str, value: &str) -> Result<(), String> {
 /// bundled bio-tools MCP server), so skills and literature tools can
 /// authenticate to external APIs. Only set credentials are included.
 pub fn service_env() -> Vec<(String, String)> {
-    CREDENTIALS
+    let mut env = CREDENTIALS
         .iter()
         .filter_map(|c| {
             let v = secret_get(c.secret);
             (!v.is_empty()).then(|| (c.env.to_string(), v))
         })
-        .collect()
+        .collect::<Vec<_>>();
+    env.extend(
+        custom_credentials_cache()
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|credential| {
+                let value = secret_get(&custom_secret_name(&credential.id));
+                (!value.is_empty()).then(|| (credential.env_var.clone(), value))
+            }),
+    );
+    env
 }
 
 async fn load_raw(store: &wisp_store::Store) -> Vec<ModelProfile> {
@@ -733,6 +937,66 @@ mod tests {
         assert!(!service_env().iter().any(|(k, _)| k == "NCBI_EMAIL"));
 
         assert!(store_credential("nonexistent", "x").is_err());
+    }
+
+    #[tokio::test]
+    async fn custom_credentials_keep_values_out_of_sqlite_and_join_service_env() {
+        let tmp = std::env::temp_dir().join(format!(
+            "wisp_custom_credentials_{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = wisp_store::Store::open(&tmp).await.unwrap();
+        let suffix = uuid::Uuid::new_v4()
+            .simple()
+            .to_string()
+            .to_ascii_uppercase();
+        let env_var = format!("WISP_CUSTOM_TEST_{suffix}");
+        let secret = format!("custom-secret-{suffix}");
+
+        assert!(
+            add_custom_credential(&store, "MetaSo", "BAD-NAME", "secret")
+                .await
+                .unwrap_err()
+                .contains("Environment variable")
+        );
+        assert!(
+            add_custom_credential(&store, "Duplicate", "OPENALEX_API_KEY", "secret")
+                .await
+                .unwrap_err()
+                .contains("already uses")
+        );
+
+        let saved = add_custom_credential(&store, "MetaSo", &env_var, &secret)
+            .await
+            .unwrap();
+        assert!(saved.present);
+        assert_eq!(saved.env_var, env_var);
+        assert!(custom_credential_status(&store)
+            .await
+            .unwrap()
+            .iter()
+            .any(|credential| credential.id == saved.id && credential.present));
+        assert!(service_env()
+            .iter()
+            .any(|(name, value)| name == &env_var && value == &secret));
+
+        let raw = store
+            .get_setting(CUSTOM_CREDENTIALS_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(raw.contains("MetaSo"));
+        assert!(raw.contains(&env_var));
+        assert!(!raw.contains(&secret));
+
+        store_credential(&saved.id, "replacement").unwrap();
+        assert!(service_env()
+            .iter()
+            .any(|(name, value)| name == &env_var && value == "replacement"));
+        remove_custom_credential(&store, &saved.id).await.unwrap();
+        assert!(custom_credential_status(&store).await.unwrap().is_empty());
+        assert!(!service_env().iter().any(|(name, _)| name == &env_var));
+        let _ = std::fs::remove_file(tmp);
     }
 
     #[tokio::test]

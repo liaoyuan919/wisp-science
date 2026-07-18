@@ -2820,6 +2820,40 @@ test("credentials settings include SCIMaster and save its key", async ({ page })
   await expect(field).toContainText("Configured");
 });
 
+test("credentials settings add, replace, clear, and remove a custom credential", async ({ page }) => {
+  await enterApp(page);
+  await openSettingsSection(page, "Credentials");
+
+  await page.getByLabel("Service name").fill("MetaSo");
+  await page.getByLabel("Environment variable").fill("METASO_API_KEY");
+  await page.getByLabel("Credential value").fill("meta-secret");
+  await page.getByRole("button", { name: "Add credential", exact: true }).click();
+
+  await expect.poll(() => lastInvokeArgs(page, "add_custom_credential")).toMatchObject({
+    name: "MetaSo",
+    envVar: "METASO_API_KEY",
+    value: "meta-secret",
+  });
+  const card = page.locator('[data-custom-credential="METASO_API_KEY"]');
+  await expect(card).toContainText("MetaSo");
+  await expect(card).toContainText("Configured");
+  await expect(card).not.toContainText("meta-secret");
+
+  await card.locator('input[type="password"]').fill("replacement-secret");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect.poll(() => lastInvokeArgs(page, "set_credential")).toMatchObject({
+    id: "custom-1",
+    value: "replacement-secret",
+  });
+
+  await card.getByRole("button", { name: "Clear", exact: true }).click();
+  await expect(card).toContainText("Not configured");
+  await card.getByRole("button", { name: "Remove", exact: true }).click();
+  await expect(card).toHaveCount(0);
+  await expect.poll(() => lastInvokeArgs(page, "remove_custom_credential"))
+    .toMatchObject({ id: "custom-1" });
+});
+
 test("skill manager filters by tag and batch disables visible skills", async ({ page }) => {
   await enterApp(page);
   await page.getByRole("button", { name: "Add to message" }).click();
@@ -3262,6 +3296,38 @@ test("bound Markdown resources use immutable versions and a scrollable center pr
   await expect.poll(() => preview.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
   await expect.poll(() => lastInvokeArgs(page, "read_artifact_version"))
     .toMatchObject({ versionId: "resource-version-markdown" });
+});
+
+test("bound DOCX resources open their immutable preview", async ({ page }) => {
+  await page.goto("/?mockResourceSession=1");
+  await page.getByRole("button", { name: "Search" }).click();
+  const search = commandPalette(page);
+  await search.fill("Enumerate");
+  await search.press("Enter");
+
+  await page.getByRole("link", { name: "Open bound manuscript" }).click();
+  await expect(page.locator('.center-tab[data-center-path="artifact-version:resource-version-docx"]'))
+    .toContainText("manuscript.docx");
+  await expect(page.locator(".center-file-preview .rp-docx"))
+    .toContainText("Differential expression of FX-cell markers");
+  await expect.poll(() => lastInvokeArgs(page, "read_artifact_version"))
+    .toMatchObject({ versionId: "resource-version-docx" });
+});
+
+test("bound BibTeX resources open their immutable text preview", async ({ page }) => {
+  await page.goto("/?mockResourceSession=1");
+  await page.getByRole("button", { name: "Search" }).click();
+  const search = commandPalette(page);
+  await search.fill("Enumerate");
+  await search.press("Enter");
+
+  await page.getByRole("link", { name: "Open bound references" }).click();
+  await expect(page.locator('.center-tab[data-center-path="artifact-version:resource-version-bib"]'))
+    .toContainText("references.bib");
+  await expect(page.locator(".center-file-preview"))
+    .toContainText("@article{wisp");
+  await expect.poll(() => lastInvokeArgs(page, "read_artifact_version"))
+    .toMatchObject({ versionId: "resource-version-bib" });
 });
 
 // Programmatically select the rendered body of the center file preview and

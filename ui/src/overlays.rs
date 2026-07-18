@@ -1,7 +1,7 @@
 use crate::app_support::{
     compose_icon, js_error_text, refresh_execution_contexts, refresh_runtimes, show_toast,
 };
-use crate::bindings::{invoke, invoke_checked, open_external_url};
+use crate::bindings::{invoke_checked, open_external_url};
 use crate::dto::*;
 use crate::i18n::{localize_backend, t, tf, Locale};
 use crate::text::{dom_value, event_target_value, provider_value};
@@ -18,6 +18,9 @@ pub(super) fn AddHostOverlay(
     host_user: RwSignal<String>,
     host_port: RwSignal<String>,
     host_identity: RwSignal<String>,
+    host_auth_method: RwSignal<String>,
+    host_password: RwSignal<String>,
+    host_has_password: RwSignal<bool>,
     ssh_hosts: RwSignal<Vec<SshHost>>,
     execution_contexts: RwSignal<Vec<ExecutionContext>>,
 ) -> impl IntoView {
@@ -33,41 +36,88 @@ pub(super) fn AddHostOverlay(
             </select>
             <label class="host-label">{move || t(locale.get(), "hosts.or_type")}</label>
             <input id="add-host-alias" class="host-input" autofocus=true prop:value=move || host_alias.get() on:input=move |ev| host_alias.set(event_target_value(&ev)) />
+            <label class="host-label">{move || t(locale.get(), "hosts.user")}</label>
+            <input class="host-input" prop:value=move || host_user.get()
+                placeholder=move || t(locale.get(), "hosts.user_ph")
+                on:input=move |ev| host_user.set(event_target_value(&ev)) />
+            <label class="host-label">{move || t(locale.get(), "hosts.auth_method")}</label>
+            <select class="host-input" prop:value=move || host_auth_method.get()
+                on:change=move |ev| host_auth_method.set(dom_value(&ev))>
+                <option value="key">{move || t(locale.get(), "hosts.auth_key")}</option>
+                <option value="password">{move || t(locale.get(), "hosts.auth_password")}</option>
+            </select>
+            {move || if host_auth_method.get() == "password" {
+                view! {
+                    <label class="host-label">{t(locale.get(), "hosts.password")}</label>
+                    <input class="host-input" type="password" autocomplete="new-password"
+                        prop:value=move || host_password.get()
+                        placeholder=move || if host_has_password.get() {
+                            t(locale.get(), "hosts.password_keep").to_string()
+                        } else {
+                            t(locale.get(), "hosts.password_ph").to_string()
+                        }
+                        on:input=move |ev| host_password.set(event_target_value(&ev)) />
+                    <p class="hint">{t(locale.get(), "hosts.password_hint")}</p>
+                }.into_view()
+            } else {
+                view! {
+                    <label class="host-label">{t(locale.get(), "hosts.identity")}</label>
+                    <input class="host-input" prop:value=move || host_identity.get()
+                        placeholder=move || t(locale.get(), "hosts.identity_ph")
+                        on:input=move |ev| host_identity.set(event_target_value(&ev)) />
+                }.into_view()
+            }}
             <label class="host-label">{move || t(locale.get(), "hosts.notes")}</label>
             <textarea class="host-input" prop:value=move || host_notes.get()
                 placeholder=move || t(locale.get(), "hosts.notes_ph")
                 on:input=move |ev| host_notes.set(event_target_value(&ev))></textarea>
             <details class="host-advanced">
                 <summary>{move || t(locale.get(), "hosts.advanced")}</summary>
-                <label class="host-label">{move || t(locale.get(), "hosts.user")}</label>
-                <input class="host-input" prop:value=move || host_user.get() on:input=move |ev| host_user.set(event_target_value(&ev)) />
                 <label class="host-label">{move || t(locale.get(), "hosts.port")}</label>
                 <input class="host-input" prop:value=move || host_port.get() on:input=move |ev| host_port.set(event_target_value(&ev)) />
-                <label class="host-label">{move || t(locale.get(), "hosts.identity")}</label>
-                <input class="host-input" prop:value=move || host_identity.get() on:input=move |ev| host_identity.set(event_target_value(&ev)) />
             </details>
             <div class="row">
                 <button type="button" on:click=move |_| show_add_host.set(false)>{move || t(locale.get(), "hosts.cancel")}</button>
-                <button type="button" class="primary" disabled=move || host_alias.get().trim().is_empty()
+                <button type="button" class="primary" disabled=move || {
+                    let alias_empty = host_alias.get().trim().is_empty();
+                    let password_missing = host_auth_method.get() == "password"
+                        && host_password.get().trim().is_empty()
+                        && !host_has_password.get();
+                    alias_empty || password_missing
+                }
                     on:click=move |_| {
                         let opt = |s: String| { let s = s.trim().to_string(); if s.is_empty() { None } else { Some(s) } };
+                        let auth = host_auth_method.get();
+                        let auth = if auth == "password" { "password" } else { "key" };
+                        let password = host_password.get();
                         let host = SshHost {
                             alias: host_alias.get().trim().to_string(),
                             user: opt(host_user.get()),
                             port: host_port.get().trim().parse::<u16>().ok(),
-                            identity_file: opt(host_identity.get()),
+                            identity_file: if auth == "key" { opt(host_identity.get()) } else { None },
                             notes: opt(host_notes.get()),
+                            auth_method: Some(auth.into()),
+                            has_password: false,
+                            password: if auth == "password" { opt(password) } else { None },
                         };
                         let arg = to_value(&serde_json::json!({ "host": host })).unwrap();
                         spawn_local(async move {
-                            let v = invoke("add_ssh_host", arg).await;
-                            if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<SshHost>>(v) {
-                                ssh_hosts.set(list);
-                                refresh_execution_contexts(execution_contexts);
+                            match invoke_checked("add_ssh_host", arg).await {
+                                Ok(v) => {
+                                    if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<SshHost>>(v) {
+                                        ssh_hosts.set(list);
+                                        refresh_execution_contexts(execution_contexts);
+                                    }
+                                }
+                                Err(error) => {
+                                    show_toast(&localize_backend(locale.get_untracked(), &js_error_text(error)));
+                                }
                             }
                         });
                         host_alias.set(String::new()); host_user.set(String::new()); host_port.set(String::new());
                         host_identity.set(String::new()); host_notes.set(String::new());
+                        host_auth_method.set("key".into()); host_password.set(String::new());
+                        host_has_password.set(false);
                         show_add_host.set(false);
                     }>{move || t(locale.get(), "hosts.save")}</button>
             </div>
