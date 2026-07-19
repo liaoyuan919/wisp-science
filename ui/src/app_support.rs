@@ -6963,6 +6963,44 @@ pub(super) fn FilePreview(dom_id: String, path: String, kind: String) -> impl In
         spawn_local(async move {
             let doc = web_sys::window().and_then(|w| w.document());
             let el = doc.as_ref().and_then(|d| d.get_element_by_id(&dom_id));
+            // PDF and OOXML previews fetch raw bytes inside api.js. Keeping the
+            // Tauri Response on the JS side avoids Rust bytes -> Base64 -> WASM
+            // string -> decoded ArrayBuffer copies in the WebView.
+            if matches!(kind.as_str(), "pdf" | "docx" | "xlsx" | "pptx") {
+                let payload = match kind.as_str() {
+                    "pdf" => serde_json::json!({
+                        "path": path,
+                        "maxBytes": 32 * 1024 * 1024,
+                        "loading": t(loc, "loading"),
+                        "error": t(loc, "preview.pdf_error"),
+                        "pageLabel": t(loc, "preview.pdf_page"),
+                        "prevPage": t(loc, "preview.pdf_prev_page"),
+                        "nextPage": t(loc, "preview.pdf_next_page"),
+                    }),
+                    "docx" => serde_json::json!({
+                        "path": path,
+                        "maxBytes": 32 * 1024 * 1024,
+                        "loading": t(loc, "loading"),
+                        "error": t(loc, "preview.docx_error"),
+                    }),
+                    "xlsx" => serde_json::json!({
+                        "path": path,
+                        "maxBytes": 32 * 1024 * 1024,
+                        "loading": t(loc, "loading"),
+                        "error": t(loc, "preview.xlsx_error"),
+                        "formulaLabel": t(loc, "preview.xlsx_formula"),
+                        "truncated": t(loc, "preview.xlsx_truncated"),
+                    }),
+                    _ => serde_json::json!({
+                        "path": path,
+                        "maxBytes": 32 * 1024 * 1024,
+                        "loading": t(loc, "loading"),
+                        "error": t(loc, "preview.pptx_error"),
+                    }),
+                };
+                let _ = mount_preview(&kind, &dom_id, &payload.to_string()).await;
+                return;
+            }
             // `load_file_content` reads up to the backend's 32 MB ceiling so a large
             // produced figure or PDF still renders (the default 8 MB cap silently
             // rejected them, #35), and surfaces the real backend error (size limit /
@@ -6977,7 +7015,7 @@ pub(super) fn FilePreview(dom_id: String, path: String, kind: String) -> impl In
                     return;
                 }
             };
-            if !matches!(kind.as_str(), "image" | "pdf" | "docx") && fc.text.is_none() {
+            if kind != "image" && fc.text.is_none() {
                 if let Some(el) = el {
                     el.set_class_name("rp-heavy rp-error");
                     el.set_text_content(Some(&t(loc, "preview.unsupported_file")));
@@ -6993,30 +7031,9 @@ pub(super) fn FilePreview(dom_id: String, path: String, kind: String) -> impl In
                 return;
             }
             let (mount_kind, payload) = match kind.as_str() {
-                "pdf" => (
-                    "pdf",
-                    serde_json::json!({
-                        "b64": fc.base64,
-                        "loading": t(loc, "loading"),
-                        "error": t(loc, "preview.pdf_error"),
-                        "pageLabel": t(loc, "preview.pdf_page"),
-                        "prevPage": t(loc, "preview.pdf_prev_page"),
-                        "nextPage": t(loc, "preview.pdf_next_page"),
-                    })
-                    .to_string(),
-                ),
                 "image" => (
                     "image",
                     serde_json::json!({ "b64": fc.base64, "mime": fc.mime }).to_string(),
-                ),
-                "docx" => (
-                    "docx",
-                    serde_json::json!({
-                        "b64": fc.base64,
-                        "loading": t(loc, "loading"),
-                        "error": t(loc, "preview.docx_error"),
-                    })
-                    .to_string(),
                 ),
                 "html" => {
                     // A remote file's path would resolve as a local file:// base
@@ -7236,6 +7253,7 @@ pub(super) fn ArtifactModal(
     let is_html = kind == "html";
     let is_zoomable = matches!(kind.as_str(), "image" | "pdf");
     let is_docx = kind == "docx";
+    let is_office = matches!(kind.as_str(), "xlsx" | "pptx");
     let can_star = kind == "image";
     view! {
         <div class="overlay" on:click=move |_| on_close.call(())>
@@ -7303,7 +7321,8 @@ pub(super) fn ArtifactModal(
                         on:click=move |_| on_close.call(())>{compose_icon("close")}</button>
                 </div>
                 <div class="am-figure" class:zoomable-preview=is_zoomable
-                    class:docx-preview=is_docx data-file-path=path_head.clone()>
+                    class:docx-preview=is_docx class:office-preview=is_office
+                    data-file-path=path_head.clone()>
                     <WorkspaceFilePreview dom_id=dom_id path=path_head.clone() kind=kind.clone() />
                 </div>
                 <div class="am-tabs">

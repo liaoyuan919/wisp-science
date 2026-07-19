@@ -1,13 +1,19 @@
 use super::AppState;
 use base64::Engine;
 use serde::Serialize;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
-use tauri::{State, WebviewWindow};
+use tauri::{ipc::Response, State, WebviewWindow};
 
 const REMOTE_DIR_PROTOCOL: &[u8] = b"WISP_REMOTE_DIR_V1\0";
 const REMOTE_FILE_PROTOCOL: &[u8] = b"WISP_REMOTE_FILE_V1\0";
 /// Same ceiling as local previews: `read_file` caps at 32 MB.
 const REMOTE_FILE_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const DEFAULT_FILE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const OOXML_MAX_ENTRIES: usize = 4096;
+const OOXML_MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+const OOXML_MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+const OOXML_MAX_COMPRESSION_RATIO: u64 = 100;
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub(super) struct DirEntry {
@@ -113,6 +119,8 @@ pub(super) fn mime_for_path(path: &Path) -> &'static str {
         Some("svg") => "image/svg+xml",
         Some("pdf") => "application/pdf",
         Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         Some("bib") => "text/x-bibtex",
         Some("csv") => "text/csv",
         Some("tsv") => "text/tab-separated-values",
@@ -128,6 +136,138 @@ pub(super) fn mime_for_path(path: &Path) -> &'static str {
         Some("sdf" | "mol") => "chemical/x-mdl-molfile",
         _ => "application/octet-stream",
     }
+}
+
+fn preview_byte_cap(max_bytes: Option<u64>) -> u64 {
+    max_bytes
+        .unwrap_or(DEFAULT_FILE_MAX_BYTES)
+        .min(REMOTE_FILE_MAX_BYTES)
+}
+
+fn is_ooxml_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("docx" | "xlsx" | "pptx")
+    )
+}
+
+fn validate_external_relationships(xml: &str) -> Result<(), String> {
+    let relationship = regex::Regex::new(r"(?is)<Relationship\b[^>]*>")
+        .map_err(|error| format!("could not compile relationship validator: {error}"))?;
+    let external = regex::Regex::new(r#"(?i)\bTargetMode\s*=\s*["']External["']"#)
+        .map_err(|error| format!("could not compile relationship validator: {error}"))?;
+    let relationship_type = regex::Regex::new(r#"(?i)\bType\s*=\s*["']([^"']+)["']"#)
+        .map_err(|error| format!("could not compile relationship validator: {error}"))?;
+    let target = regex::Regex::new(r#"(?i)\bTarget\s*=\s*["']([^"']+)["']"#)
+        .map_err(|error| format!("could not compile relationship validator: {error}"))?;
+
+    for tag in relationship.find_iter(xml).map(|matched| matched.as_str()) {
+        if !external.is_match(tag) {
+            continue;
+        }
+        let kind = relationship_type
+            .captures(tag)
+            .and_then(|captures| captures.get(1))
+            .map(|value| value.as_str().to_ascii_lowercase());
+        if !kind
+            .as_deref()
+            .is_some_and(|kind| kind.ends_with("/hyperlink"))
+        {
+            return Err("OOXML archive contains an external media relationship".into());
+        }
+        let destination = target
+            .captures(tag)
+            .and_then(|captures| captures.get(1))
+            .map(|value| value.as_str())
+            .ok_or_else(|| "OOXML external hyperlink is missing its target".to_string())?;
+        let scheme = destination
+            .split_once(':')
+            .map(|(scheme, _)| scheme.to_ascii_lowercase());
+        if !matches!(scheme.as_deref(), Some("http" | "https" | "mailto")) {
+            return Err("OOXML archive contains an unsafe external hyperlink".into());
+        }
+    }
+    Ok(())
+}
+
+/// Reject OOXML archives that can expand beyond the preview budget before a
+/// browser parser sees them. This examines only the central directory, so the
+/// check is cheap and does not materialize any ZIP entry.
+pub(super) fn validate_ooxml_archive(bytes: &[u8]) -> Result<(), String> {
+    let cursor = Cursor::new(bytes);
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|error| format!("invalid OOXML archive: {error}"))?;
+    if archive.len() > OOXML_MAX_ENTRIES {
+        return Err(format!(
+            "OOXML archive contains more than {OOXML_MAX_ENTRIES} entries"
+        ));
+    }
+
+    let mut total_uncompressed = 0u64;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("invalid OOXML ZIP entry: {error}"))?;
+        let name = entry.name().to_string();
+        if entry.enclosed_name().is_none() {
+            return Err(format!("OOXML archive contains an unsafe path: {name}"));
+        }
+        let normalized_name = name.replace('\\', "/").to_ascii_lowercase();
+        if normalized_name.starts_with('/')
+            || normalized_name
+                .split('/')
+                .any(|component| component == "..")
+            || normalized_name
+                .split('/')
+                .next()
+                .is_some_and(|component| component.ends_with(':'))
+        {
+            return Err(format!("OOXML archive contains an unsafe path: {name}"));
+        }
+        if normalized_name.ends_with("vbaproject.bin")
+            || normalized_name.contains("/activex/")
+            || normalized_name.contains("/embeddings/")
+        {
+            return Err(format!(
+                "OOXML archive contains unsupported active content: {name}"
+            ));
+        }
+
+        let uncompressed = entry.size();
+        let compressed = entry.compressed_size();
+        if uncompressed > OOXML_MAX_ENTRY_BYTES {
+            return Err(format!(
+                "OOXML ZIP entry exceeds {OOXML_MAX_ENTRY_BYTES} byte limit: {name}"
+            ));
+        }
+        total_uncompressed = total_uncompressed
+            .checked_add(uncompressed)
+            .ok_or_else(|| "OOXML archive expanded size overflowed".to_string())?;
+        if total_uncompressed > OOXML_MAX_TOTAL_BYTES {
+            return Err(format!(
+                "OOXML archive exceeds {OOXML_MAX_TOTAL_BYTES} expanded byte limit"
+            ));
+        }
+        if uncompressed > 0
+            && (compressed == 0
+                || uncompressed > compressed.saturating_mul(OOXML_MAX_COMPRESSION_RATIO))
+        {
+            return Err(format!(
+                "OOXML ZIP entry exceeds {OOXML_MAX_COMPRESSION_RATIO}:1 compression ratio: {name}"
+            ));
+        }
+        if normalized_name.ends_with(".rels") && uncompressed > 0 {
+            let mut xml = String::new();
+            entry
+                .read_to_string(&mut xml)
+                .map_err(|error| format!("could not inspect OOXML relationships: {error}"))?;
+            validate_external_relationships(&xml)?;
+        }
+    }
+    Ok(())
 }
 
 fn is_text_mime(mime: &str) -> bool {
@@ -546,9 +686,8 @@ fn list_remote_dir_with_runner(
 /// POSIX-sh script that size-checks then streams one remote file. The marker
 /// separates the payload from login banners; the size guard runs remotely so a
 /// runaway file never crosses the wire just to be rejected here.
-fn remote_file_script(path: &str) -> Result<String, String> {
+fn remote_file_script(path: &str, cap: u64) -> Result<String, String> {
     let path = remote_path_expression(Some(path))?;
-    let cap = REMOTE_FILE_MAX_BYTES;
     Ok(format!(
         r#"LC_ALL=C
 f={path}
@@ -572,10 +711,11 @@ cat "$f""#
 fn build_remote_file_command(
     context: &wisp_store::ExecutionContext,
     path: &str,
+    cap: u64,
 ) -> Result<RemoteCommand, String> {
     let connection = crate::ssh_hosts::SshConnection::from_execution_context(context)?;
     let mut args = connection.ssh_args()?;
-    args.push(remote_file_script(path)?);
+    args.push(remote_file_script(path, cap)?);
     Ok(RemoteCommand {
         context_id: context.id.clone(),
         program: "ssh".into(),
@@ -584,13 +724,15 @@ fn build_remote_file_command(
     })
 }
 
-fn read_remote_file_with_runner(
+fn read_remote_file_bytes_with_runner(
     context: &wisp_store::ExecutionContext,
     path: &str,
+    max_bytes: Option<u64>,
     runner: &mut dyn RemoteRunner,
-) -> Result<FileContent, String> {
+) -> Result<Vec<u8>, String> {
     crate::ssh_hosts::require_managed_ssh_ready(context)?;
-    let command = build_remote_file_command(context, path)?;
+    let cap = preview_byte_cap(max_bytes);
+    let command = build_remote_file_command(context, path, cap)?;
     let output = match runner.run(&command) {
         Ok(output) => output,
         Err(error) => {
@@ -617,6 +759,22 @@ fn read_remote_file_with_runner(
     }
     crate::ssh_guard::record_success(&context.id);
     let bytes = protocol_payload(&output.stdout, REMOTE_FILE_PROTOCOL)?.to_vec();
+    if bytes.len() as u64 > cap {
+        return Err(format!("remote file exceeds {cap} byte limit"));
+    }
+    if is_ooxml_path(Path::new(path)) {
+        validate_ooxml_archive(&bytes)?;
+    }
+    Ok(bytes)
+}
+
+fn read_remote_file_with_runner(
+    context: &wisp_store::ExecutionContext,
+    path: &str,
+    runner: &mut dyn RemoteRunner,
+) -> Result<FileContent, String> {
+    let bytes =
+        read_remote_file_bytes_with_runner(context, path, Some(REMOTE_FILE_MAX_BYTES), runner)?;
     let mime = mime_for_path(Path::new(path));
     Ok(file_content_from_bytes(path.to_string(), mime, bytes))
 }
@@ -639,6 +797,28 @@ pub(super) async fn read_remote_file(
     })
     .await
     .map_err(|e| format!("Remote file task failed: {e}"))?
+}
+
+#[tauri::command]
+pub(super) async fn read_remote_file_bytes(
+    state: State<'_, AppState>,
+    context_id: String,
+    path: String,
+    max_bytes: Option<u64>,
+) -> Result<Response, String> {
+    let context = state
+        .store
+        .get_execution_context(&context_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Execution context not found: {context_id}"))?;
+    let bytes = tokio::task::spawn_blocking(move || {
+        let mut runner = ProcessRemoteRunner;
+        read_remote_file_bytes_with_runner(&context, &path, max_bytes, &mut runner)
+    })
+    .await
+    .map_err(|e| format!("Remote file task failed: {e}"))??;
+    Ok(Response::new(bytes))
 }
 
 #[tauri::command]
@@ -668,7 +848,7 @@ pub(super) fn read_file_at(
 ) -> Result<FileContent, String> {
     let real = wisp_tools::safety::validate_file_path(root, &path)?;
     let mime = mime_for_path(&real);
-    let cap = max_bytes.unwrap_or(8 * 1024 * 1024).min(32 * 1024 * 1024);
+    let cap = preview_byte_cap(max_bytes);
     // Size check before the read: the old order slurped a file of any size
     // into memory just to reject it.
     let len = std::fs::metadata(&real).map_err(|e| format!("{e}"))?.len();
@@ -681,6 +861,24 @@ pub(super) fn read_file_at(
         mime,
         bytes,
     ))
+}
+
+pub(super) fn read_file_bytes_at(
+    root: &Path,
+    path: &str,
+    max_bytes: Option<u64>,
+) -> Result<Vec<u8>, String> {
+    let real = wisp_tools::safety::validate_file_path(root, path)?;
+    let cap = preview_byte_cap(max_bytes);
+    let len = std::fs::metadata(&real).map_err(|e| format!("{e}"))?.len();
+    if len > cap {
+        return Err(format!("file exceeds {cap} byte limit"));
+    }
+    let bytes = std::fs::read(&real).map_err(|e| format!("{e}"))?;
+    if is_ooxml_path(&real) {
+        validate_ooxml_archive(&bytes)?;
+    }
+    Ok(bytes)
 }
 
 /// The shared text-vs-binary decision for previews, local or remote: named text
@@ -715,6 +913,17 @@ pub(super) fn read_file(
     max_bytes: Option<u64>,
 ) -> Result<FileContent, String> {
     read_file_at(&state.active(window.label()).root, path, max_bytes)
+}
+
+#[tauri::command]
+pub(super) fn read_file_bytes(
+    state: State<'_, AppState>,
+    window: WebviewWindow,
+    path: String,
+    max_bytes: Option<u64>,
+) -> Result<Response, String> {
+    let bytes = read_file_bytes_at(&state.active(window.label()).root, &path, max_bytes)?;
+    Ok(Response::new(bytes))
 }
 
 /// Derive the `reviews/<stem>.md` sidecar path for a previewed source file and
@@ -814,6 +1023,7 @@ pub(super) fn append_review_note(
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use std::io::Write;
 
     struct FakeRemoteRunner {
         output: Option<Result<RemoteOutput, String>>,
@@ -862,6 +1072,18 @@ mod tests {
     fn bibliography_files_are_read_as_text() {
         assert_eq!(mime_for_path(Path::new("references.bib")), "text/x-bibtex");
         assert!(is_text_mime(mime_for_path(Path::new("references.bib"))));
+    }
+
+    #[test]
+    fn office_files_have_specific_mime_types() {
+        assert_eq!(
+            mime_for_path(Path::new("results.xlsx")),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
+        assert_eq!(
+            mime_for_path(Path::new("talk.pptx")),
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        );
     }
 
     #[test]
@@ -948,15 +1170,101 @@ mod tests {
     #[test]
     fn remote_file_command_quotes_path_and_guards_size() {
         let identity = test_identity_file();
-        let command =
-            build_remote_file_command(&ssh_context(&identity), "/work/O'Brien results.html")
-                .unwrap();
+        let command = build_remote_file_command(
+            &ssh_context(&identity),
+            "/work/O'Brien results.html",
+            REMOTE_FILE_MAX_BYTES,
+        )
+        .unwrap();
         assert_eq!(command.program, "ssh");
         let script = command.args.last().unwrap();
         assert!(script.contains("f='/work/O'\"'\"'Brien results.html'"));
         assert!(script.contains("WISP_REMOTE_FILE_V1\\000"));
         assert!(script.contains(&format!("-gt {REMOTE_FILE_MAX_BYTES}")));
         assert!(script.contains("cat \"$f\""));
+    }
+
+    fn test_ooxml(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut output = Cursor::new(Vec::new());
+        {
+            let mut archive = zip::ZipWriter::new(&mut output);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for (name, contents) in entries {
+                archive.start_file(*name, options).unwrap();
+                archive.write_all(contents).unwrap();
+            }
+            archive.finish().unwrap();
+        }
+        output.into_inner()
+    }
+
+    #[test]
+    fn ooxml_validation_accepts_bounded_archives() {
+        let bytes = test_ooxml(&[
+            ("[Content_Types].xml", b"<Types/>"),
+            ("xl/workbook.xml", b"<workbook/>"),
+        ]);
+        validate_ooxml_archive(&bytes).unwrap();
+    }
+
+    #[test]
+    fn ooxml_validation_rejects_unsafe_paths_and_active_content() {
+        let traversal = test_ooxml(&[("../outside.xml", b"unsafe")]);
+        assert!(validate_ooxml_archive(&traversal)
+            .unwrap_err()
+            .contains("unsafe path"));
+
+        let macro_archive = test_ooxml(&[("xl/vbaProject.bin", b"macro")]);
+        assert!(validate_ooxml_archive(&macro_archive)
+            .unwrap_err()
+            .contains("active content"));
+    }
+
+    #[test]
+    fn ooxml_validation_blocks_external_media_and_unsafe_links() {
+        let external_image = test_ooxml(&[(
+            "word/_rels/document.xml.rels",
+            br#"<Relationships><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="https://example.invalid/pixel.png" TargetMode="External"/></Relationships>"#,
+        )]);
+        assert!(validate_ooxml_archive(&external_image)
+            .unwrap_err()
+            .contains("external media"));
+
+        let script_link = test_ooxml(&[(
+            "word/_rels/document.xml.rels",
+            br#"<Relationships><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="javascript:alert(1)" TargetMode="External"/></Relationships>"#,
+        )]);
+        assert!(validate_ooxml_archive(&script_link)
+            .unwrap_err()
+            .contains("unsafe external hyperlink"));
+
+        let safe_link = test_ooxml(&[(
+            "word/_rels/document.xml.rels",
+            br#"<Relationships><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.org/paper" TargetMode="External"/></Relationships>"#,
+        )]);
+        validate_ooxml_archive(&safe_link).unwrap();
+    }
+
+    #[test]
+    fn raw_file_reader_preserves_binary_bytes_and_validates_ooxml() {
+        let base = std::env::temp_dir().join(format!(
+            "wisp_raw_preview_test_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let bytes = test_ooxml(&[("[Content_Types].xml", b"<Types/>")]);
+        std::fs::write(base.join("results.xlsx"), &bytes).unwrap();
+        assert_eq!(
+            read_file_bytes_at(&base, "results.xlsx", None).unwrap(),
+            bytes
+        );
+        std::fs::write(base.join("broken.pptx"), b"not a zip").unwrap();
+        assert!(read_file_bytes_at(&base, "broken.pptx", None)
+            .unwrap_err()
+            .contains("invalid OOXML archive"));
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

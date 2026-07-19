@@ -295,8 +295,8 @@ function linkCss(href) {
 let katexMod;
 async function katex() {
   if (!katexMod) {
-    katexMod = (await import("/vendor/katex-Dn761jRB.js")).k;
-    linkCss("/vendor/katex-DwwF5kvc.css");
+    katexMod = (await import("/vendor-runtime/katex-Dn761jRB.js")).k;
+    linkCss("/vendor-runtime/katex-DwwF5kvc.css");
   }
   return katexMod;
 }
@@ -304,7 +304,7 @@ async function katex() {
 let rdkitInit;
 async function rdkit() {
   if (!rdkitInit) {
-    const mod = await import("/vendor/RDKit_minimal-B7RkdM0_.js");
+    const mod = await import("/vendor-runtime/RDKit_minimal-B7RkdM0_.js");
     rdkitInit = mod.R.default();
   }
   return rdkitInit;
@@ -313,7 +313,7 @@ async function rdkit() {
 let mol3dLib;
 async function loadMol3d() {
   if (!mol3dLib) {
-    const mod = await import("/vendor/3Dmol-DfD4xImO.js");
+    const mod = await import("/vendor-runtime/3Dmol-DfD4xImO.js");
     mol3dLib = mod._.default;
   }
   return mol3dLib;
@@ -322,7 +322,7 @@ async function loadMol3d() {
 let msaLoaded;
 async function ensureMsa() {
   if (!msaLoaded) {
-    await import("/vendor/nightingale-msa-5.6.0.js");
+    await import("/vendor-runtime/nightingale-msa-5.6.0.js");
     msaLoaded = true;
   }
 }
@@ -330,10 +330,10 @@ async function ensureMsa() {
 let pdfjsLib;
 async function pdfjs() {
   if (!pdfjsLib) {
-    pdfjsLib = import("/vendor/pdf.min.mjs").then((mod) => {
+    pdfjsLib = import("/vendor-runtime/pdf.min.mjs").then((mod) => {
       // WebView2 does not ship a browser PDF plugin, so PDFs are rendered to
       // canvas with the worker bundled alongside the application.
-      mod.GlobalWorkerOptions.workerSrc = "/vendor/pdf.worker.min.mjs";
+      mod.GlobalWorkerOptions.workerSrc = "/vendor-runtime/pdf.worker.min.mjs";
       return mod;
     });
   }
@@ -344,8 +344,49 @@ let docxLib;
 function docxPreview() {
   // Self-contained ESM bundle (docx-preview + jszip, no bare imports) so .docx
   // renders fully offline in the WebView. See ui/sync-vendor.ps1.
-  if (!docxLib) docxLib = import("/vendor/docx-preview.mjs");
+  if (!docxLib) docxLib = import("/vendor-runtime/docx-preview.mjs");
   return docxLib;
+}
+
+function normalizeRawBytes(value) {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  if (Array.isArray(value)) return Uint8Array.from(value);
+  throw new Error("Binary preview command returned an unsupported payload");
+}
+
+async function previewBytes(payload) {
+  if (payload.bytes) return normalizeRawBytes(payload.bytes);
+  if (payload.b64) return base64Bytes(payload.b64);
+  const path = String(payload.path || "");
+  if (!path) throw new Error("Preview path is empty");
+  const maxBytes = Math.min(Number(payload.maxBytes) || 32 * 1024 * 1024, 32 * 1024 * 1024);
+
+  let command = "read_file_bytes";
+  let args = { path, maxBytes };
+  if (path.startsWith("artifact-version:")) {
+    command = "read_artifact_version_bytes";
+    args = { versionId: path.slice("artifact-version:".length), maxBytes };
+  } else if (path.startsWith("artifact:")) {
+    command = "read_artifact_bytes";
+    args = { id: path.slice("artifact:".length), maxBytes };
+  } else if (path.startsWith("remote:ssh:")) {
+    const withoutPrefix = path.slice("remote:ssh:".length);
+    const separator = withoutPrefix.indexOf(":");
+    if (separator <= 0 || separator === withoutPrefix.length - 1) {
+      throw new Error("Remote preview path is invalid");
+    }
+    command = "read_remote_file_bytes";
+    args = {
+      contextId: `ssh:${withoutPrefix.slice(0, separator)}`,
+      path: withoutPrefix.slice(separator + 1),
+      maxBytes,
+    };
+  }
+  return normalizeRawBytes(await invoke_strict(command, args));
 }
 
 async function renderDocx(el, payload) {
@@ -357,7 +398,7 @@ async function renderDocx(el, payload) {
   loading.textContent = payload.loading || "Loading…";
   el.replaceChildren(loading);
   try {
-    if (!payload.b64) throw new Error("DOCX data is empty");
+    const bytes = await previewBytes(payload);
     const lib = await docxPreview();
     if (!el.isConnected || el.__wispPreviewToken !== renderToken) return;
     const container = document.createElement("div");
@@ -368,7 +409,7 @@ async function renderDocx(el, payload) {
     // docx-preview's fuller feature set (incl. its OMML→MathML math rendering).
     // OMML support covers standard Word math; WPS's OMML dialect is only
     // partially handled upstream, so some WPS formulas can still garble (#274).
-    await lib.renderAsync(base64Bytes(payload.b64).buffer, container, null, {
+    await lib.renderAsync(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), container, null, {
       className: "docx",
       inWrapper: true,
       ignoreWidth: false,
@@ -384,6 +425,292 @@ async function renderDocx(el, payload) {
       const message = document.createElement("div");
       message.className = "rp-error rp-pdf-error";
       message.textContent = payload.error || "Unable to preview this document.";
+      el.replaceChildren(message);
+    }
+  }
+}
+
+function parseWorkbookInWorker(bytes, signal, timeoutMs = 15_000) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker("/vendor-runtime/xlsx-worker.js");
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      worker.terminate();
+      callback(value);
+    };
+    const onAbort = () => finish(reject, new DOMException("Aborted", "AbortError"));
+    const timer = setTimeout(
+      () => finish(reject, new Error("Workbook parsing timed out")),
+      timeoutMs,
+    );
+    worker.onerror = (event) => finish(reject, new Error(event.message || "Workbook worker failed"));
+    worker.onmessage = ({ data }) => {
+      if (data?.ok) finish(resolve, data.workbook);
+      else finish(reject, new Error(data?.error || "Unable to parse workbook"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    worker.postMessage(copy, [copy]);
+  });
+}
+
+function spreadsheetColumnName(index) {
+  let value = index + 1;
+  let name = "";
+  while (value > 0) {
+    value -= 1;
+    name = String.fromCharCode(65 + (value % 26)) + name;
+    value = Math.floor(value / 26);
+  }
+  return name;
+}
+
+function safeSpreadsheetLink(value) {
+  try {
+    const url = new URL(value);
+    return ["http:", "https:", "mailto:"].includes(url.protocol) ? url.href : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function mountWorkbookSheet(root, sheet, payload) {
+  const ROW_HEIGHT = 28;
+  const COL_WIDTH = 140;
+  const ROW_HEADER_WIDTH = 52;
+  const COL_HEADER_HEIGHT = 28;
+  const formula = root.querySelector(".rp-xlsx-formula-value");
+  const viewport = root.querySelector(".rp-xlsx-grid");
+  const content = document.createElement("div");
+  content.className = "rp-xlsx-content";
+  content.style.width = `${ROW_HEADER_WIDTH + sheet.cols * COL_WIDTH}px`;
+  content.style.height = `${COL_HEADER_HEIGHT + sheet.rows * ROW_HEIGHT}px`;
+  viewport.replaceChildren(content);
+
+  const cellMap = new Map(sheet.cells.map((cell) => [`${cell.row}:${cell.col}`, cell]));
+  let frame = 0;
+  const render = () => {
+    frame = 0;
+    const rowStart = Math.max(0, Math.floor((viewport.scrollTop - COL_HEADER_HEIGHT) / ROW_HEIGHT) - 1);
+    const rowEnd = Math.min(sheet.rows, Math.ceil((viewport.scrollTop + viewport.clientHeight) / ROW_HEIGHT) + 2);
+    const colStart = Math.max(0, Math.floor((viewport.scrollLeft - ROW_HEADER_WIDTH) / COL_WIDTH) - 1);
+    const colEnd = Math.min(sheet.cols, Math.ceil((viewport.scrollLeft + viewport.clientWidth) / COL_WIDTH) + 2);
+    const visibleMerges = sheet.merges.filter((merge) => (
+      merge.endRow >= rowStart && merge.startRow < rowEnd
+      && merge.endCol >= colStart && merge.startCol < colEnd
+    ));
+    const covered = new Set();
+    const anchors = new Map();
+    for (const merge of visibleMerges) {
+      anchors.set(`${merge.startRow}:${merge.startCol}`, merge);
+      for (let row = Math.max(rowStart, merge.startRow); row <= Math.min(rowEnd - 1, merge.endRow); row += 1) {
+        for (let col = Math.max(colStart, merge.startCol); col <= Math.min(colEnd - 1, merge.endCol); col += 1) {
+          if (row !== merge.startRow || col !== merge.startCol) covered.add(`${row}:${col}`);
+        }
+      }
+    }
+
+    const fragment = document.createDocumentFragment();
+    for (let row = rowStart; row < rowEnd; row += 1) {
+      const header = document.createElement("div");
+      header.className = "rp-xlsx-row-head";
+      header.textContent = String(row + 1);
+      header.style.transform = `translate(${viewport.scrollLeft}px, ${COL_HEADER_HEIGHT + row * ROW_HEIGHT}px)`;
+      fragment.appendChild(header);
+      for (let col = colStart; col < colEnd; col += 1) {
+        const key = `${row}:${col}`;
+        if (covered.has(key)) continue;
+        const cell = cellMap.get(key);
+        const node = document.createElement("div");
+        node.className = "rp-xlsx-cell";
+        node.style.transform = `translate(${ROW_HEADER_WIDTH + col * COL_WIDTH}px, ${COL_HEADER_HEIGHT + row * ROW_HEIGHT}px)`;
+        const merge = anchors.get(key);
+        if (merge) {
+          node.style.width = `${(merge.endCol - merge.startCol + 1) * COL_WIDTH}px`;
+          node.style.height = `${(merge.endRow - merge.startRow + 1) * ROW_HEIGHT}px`;
+          node.classList.add("merged");
+        }
+        const href = cell?.hyperlink && safeSpreadsheetLink(cell.hyperlink);
+        if (href) {
+          const link = document.createElement("a");
+          link.href = href;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          link.textContent = cell.text;
+          node.appendChild(link);
+        } else {
+          node.textContent = cell?.text || "";
+        }
+        node.title = cell?.text || "";
+        node.addEventListener("click", () => {
+          content.querySelector(".rp-xlsx-cell.selected")?.classList.remove("selected");
+          node.classList.add("selected");
+          formula.textContent = cell?.formula ? `=${cell.formula}` : (cell?.text || "");
+        });
+        fragment.appendChild(node);
+      }
+    }
+    for (let col = colStart; col < colEnd; col += 1) {
+      const header = document.createElement("div");
+      header.className = "rp-xlsx-col-head";
+      header.textContent = spreadsheetColumnName(col);
+      header.style.transform = `translate(${ROW_HEADER_WIDTH + col * COL_WIDTH}px, ${viewport.scrollTop}px)`;
+      fragment.appendChild(header);
+    }
+    const corner = document.createElement("div");
+    corner.className = "rp-xlsx-corner";
+    corner.style.transform = `translate(${viewport.scrollLeft}px, ${viewport.scrollTop}px)`;
+    fragment.appendChild(corner);
+    content.replaceChildren(fragment);
+  };
+  const onScroll = () => {
+    if (!frame) frame = requestAnimationFrame(render);
+  };
+  viewport.addEventListener("scroll", onScroll, { passive: true });
+  render();
+  return () => {
+    viewport.removeEventListener("scroll", onScroll);
+    if (frame) cancelAnimationFrame(frame);
+  };
+}
+
+async function renderXlsx(el, payload) {
+  cleanupPreview(el);
+  const renderToken = Symbol("xlsx-preview");
+  const abortController = new AbortController();
+  el.__wispPreviewToken = renderToken;
+  el.__wispPreviewCleanup = () => abortController.abort();
+  const loading = document.createElement("div");
+  loading.className = "rp-pdf-loading";
+  loading.textContent = payload.loading || "Loading…";
+  el.replaceChildren(loading);
+  try {
+    const bytes = await previewBytes(payload);
+    const workbook = await parseWorkbookInWorker(bytes, abortController.signal);
+    if (!el.isConnected || el.__wispPreviewToken !== renderToken) return;
+    if (!workbook.sheets.length) throw new Error("Workbook contains no worksheets");
+
+    const root = document.createElement("div");
+    root.className = "rp-xlsx";
+    const tabs = document.createElement("div");
+    tabs.className = "rp-xlsx-tabs";
+    const formulaBar = document.createElement("div");
+    formulaBar.className = "rp-xlsx-formula";
+    const formulaLabel = document.createElement("span");
+    formulaLabel.textContent = payload.formulaLabel || "Formula";
+    const formulaValue = document.createElement("code");
+    formulaValue.className = "rp-xlsx-formula-value";
+    formulaBar.append(formulaLabel, formulaValue);
+    const grid = document.createElement("div");
+    grid.className = "rp-xlsx-grid";
+    root.append(tabs, formulaBar, grid);
+    if (workbook.truncated) {
+      const warning = document.createElement("div");
+      warning.className = "rp-xlsx-warning";
+      warning.textContent = payload.truncated || "Large workbook: only a bounded preview is shown.";
+      root.prepend(warning);
+    }
+    el.replaceChildren(root);
+
+    let cleanupSheet = () => {};
+    const showSheet = (index) => {
+      cleanupSheet();
+      tabs.querySelector(".active")?.classList.remove("active");
+      tabs.children[index]?.classList.add("active");
+      formulaBar.querySelector("code").textContent = "";
+      cleanupSheet = mountWorkbookSheet(root, workbook.sheets[index], payload);
+    };
+    workbook.sheets.forEach((sheet, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = sheet.name;
+      button.title = `${sheet.name} · ${sheet.originalRows.toLocaleString()} × ${sheet.originalCols.toLocaleString()}`;
+      button.addEventListener("click", () => showSheet(index));
+      tabs.appendChild(button);
+    });
+    showSheet(0);
+    el.__wispPreviewCleanup = () => {
+      abortController.abort();
+      cleanupSheet();
+      root.replaceChildren();
+    };
+  } catch (error) {
+    if (abortController.signal.aborted) return;
+    console.error("Failed to render XLSX preview", error);
+    if (el.isConnected && el.__wispPreviewToken === renderToken) {
+      const message = document.createElement("div");
+      message.className = "rp-error rp-pdf-error";
+      message.textContent = payload.error || "Unable to preview this workbook.";
+      el.replaceChildren(message);
+    }
+  }
+}
+
+let pptxLib;
+function pptxPreview() {
+  if (!pptxLib) pptxLib = import("/vendor-runtime/pptx-preview.mjs");
+  return pptxLib;
+}
+
+async function renderPptx(el, payload) {
+  cleanupPreview(el);
+  const renderToken = Symbol("pptx-preview");
+  const abortController = new AbortController();
+  el.__wispPreviewToken = renderToken;
+  el.__wispPreviewCleanup = () => abortController.abort();
+  const loading = document.createElement("div");
+  loading.className = "rp-pdf-loading";
+  loading.textContent = payload.loading || "Loading…";
+  el.replaceChildren(loading);
+  let viewer;
+  try {
+    const [bytes, lib] = await Promise.all([previewBytes(payload), pptxPreview()]);
+    if (!el.isConnected || el.__wispPreviewToken !== renderToken) return;
+    const container = document.createElement("div");
+    container.className = "rp-pptx";
+    el.replaceChildren(container);
+    viewer = await lib.PptxViewer.open(bytes, container, {
+      zipLimits: lib.RECOMMENDED_ZIP_LIMITS,
+      lazySlides: true,
+      lazyMedia: true,
+      scrollContainer: container,
+      listOptions: {
+        windowed: true,
+        initialSlides: 4,
+        batchSize: 4,
+        overscanViewport: 1.5,
+        showSlideLabels: true,
+      },
+      signal: abortController.signal,
+      pdfjs: {
+        moduleUrl: "/vendor-runtime/pdf.min.mjs",
+        workerUrl: "/vendor-runtime/pdf.worker.min.mjs",
+      },
+    });
+    if (!el.isConnected || el.__wispPreviewToken !== renderToken) {
+      viewer.destroy();
+      return;
+    }
+    el.__wispPreviewCleanup = () => {
+      abortController.abort();
+      viewer?.destroy();
+    };
+  } catch (error) {
+    if (abortController.signal.aborted) return;
+    console.error("Failed to render PPTX preview", error);
+    viewer?.destroy();
+    if (el.isConnected && el.__wispPreviewToken === renderToken) {
+      const message = document.createElement("div");
+      message.className = "rp-error rp-pdf-error";
+      message.textContent = payload.error || "Unable to preview this presentation.";
       el.replaceChildren(message);
     }
   }
@@ -490,13 +817,16 @@ async function renderPdf(el, payload) {
   // is being upscaled/downscaled by the browser and needs a re-render.
   let renderedFitWidth = null;
   try {
+    const bytes = payload.path || payload.b64 || payload.bytes
+      ? await previewBytes(payload)
+      : null;
     const lib = await pdfjs();
-    const source = payload.b64 ? { data: base64Bytes(payload.b64) } : payload.url ? { url: payload.url } : null;
+    const source = bytes ? { data: bytes } : payload.url ? { url: payload.url } : null;
     if (!source) throw new Error("PDF data is empty");
     // PDF.js 5.x decodes JPEG2000 (JPXDecode) figures and ICC colors via WASM
     // fetched from wasmUrl; without it the images silently drop while text still
-    // renders. The decoders ship in ui/vendor next to the worker.
-    source.wasmUrl = "/vendor/";
+    // renders. The decoders ship in ui/vendor-runtime next to the worker.
+    source.wasmUrl = "/vendor-runtime/";
 
     task = lib.getDocument(source);
     pdf = await task.promise;
@@ -1018,6 +1348,14 @@ export async function mount_preview(kind, elId, payloadJson) {
     }
     case "docx": {
       await renderDocx(el, p);
+      break;
+    }
+    case "xlsx": {
+      await renderXlsx(el, p);
+      break;
+    }
+    case "pptx": {
+      await renderPptx(el, p);
       break;
     }
     case "image": {

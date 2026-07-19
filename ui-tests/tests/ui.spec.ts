@@ -1,5 +1,12 @@
 import { test, expect, type Page } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { tauriMock, parallelMock } from "./mock-tauri";
+
+const officeFixtures = {
+  xlsxBase64: readFileSync(resolve(__dirname, "../fixtures/office-preview.xlsx")).toString("base64"),
+  pptxBase64: readFileSync(resolve(__dirname, "../fixtures/office-preview.pptx")).toString("base64"),
+};
 
 function providerSelect(page: Page) {
   return page.getByTestId("settings-provider");
@@ -120,7 +127,7 @@ async function resolveMockUpdateCheck(page: Page) {
 
 test.beforeEach(async ({ page }) => {
   // Install the Tauri bridge mock before the page's wasm runs.
-  await page.addInitScript(tauriMock);
+  await page.addInitScript(tauriMock, officeFixtures);
 });
 
 test("Example project shows bundled demos as read-only transcripts", async ({ page }) => {
@@ -151,7 +158,9 @@ test("switching HTTP models confirms cache invalidation", async ({ page }) => {
   await enterApp(page);
 
   await page.locator(".model-picker-btn").click();
-  await page.getByRole("button", { name: /opus-4\.8/ }).click();
+  const opusOption = page.getByRole("button", { name: /opus-4\.8/ });
+  await expect(opusOption).toBeVisible();
+  await opusOption.evaluate((element: HTMLElement) => element.click());
   const modal = page.getByTestId("model-switch-confirm");
   await expect(modal).toContainText("invalidates this conversation's model cache");
   await expect(modal).toContainText("opus-4.8");
@@ -162,7 +171,8 @@ test("switching HTTP models confirms cache invalidation", async ({ page }) => {
   await expect(page.locator(".model-picker-label")).toHaveText("deepseek-v4-pro");
 
   await page.locator(".model-picker-btn").click();
-  await page.getByRole("button", { name: /opus-4\.8/ }).click();
+  await expect(opusOption).toBeVisible();
+  await opusOption.evaluate((element: HTMLElement) => element.click());
   await page.getByTestId("model-switch-confirm")
     .getByRole("button", { name: "Yes, switch" }).click();
   await expect.poll(() => lastInvokeArgs(page, "set_active_model")).toMatchObject({ id: "opus" });
@@ -2254,6 +2264,8 @@ test("PDF artifacts render inside the app without a browser PDF plugin", async (
   await expect(modal).toBeVisible();
   // Single-page viewer: one page is rendered at a time, navigated with controls.
   await expect(modal.locator('.rp-pdf[data-page-count="2"][data-current-page="1"]')).toBeVisible();
+  await expect.poll(() => lastInvokeArgs(page, "read_file_bytes"))
+    .toMatchObject({ path: "paper.pdf", maxBytes: 32 * 1024 * 1024 });
   const renderedPage = modal.locator('.rp-pdf-page[data-page="1"][data-rendered="true"]');
   await expect(renderedPage).toBeVisible();
   await expect(modal.locator(".rp-pdf-page")).toHaveCount(1);
@@ -2413,11 +2425,18 @@ test("DOCX artifacts render offline with headings, tables, and equations", async
   await composer(page).fill("open manuscript.docx");
   await page.getByRole("button", { name: "Send" }).click();
   await page.getByRole("button", { name: "Toggle panel" }).click();
-  await page.locator('.rp-tile[data-artifact-name="manuscript.docx"] .rp-tile-main').click();
+  // This test targets rendering, not pointer behavior. Invoke the visible
+  // tile directly because the artifact panel replaces its DOM while the turn
+  // streams, which can otherwise detach Playwright's click target mid-action.
+  const manuscriptTile = page.locator('.rp-tile[data-artifact-name="manuscript.docx"] .rp-tile-main');
+  await expect(manuscriptTile).toBeVisible();
+  await manuscriptTile.evaluate((element: HTMLElement) => element.click());
 
   // docx-preview renders a `.docx-wrapper` of `section.docx` pages, fully offline.
   const docx = page.locator(".rp-docx");
   await expect(docx.locator(".docx-wrapper section.docx").first()).toBeVisible();
+  await expect.poll(() => lastInvokeArgs(page, "read_file_bytes"))
+    .toMatchObject({ path: "manuscript.docx", maxBytes: 32 * 1024 * 1024 });
   await expect(docx).toContainText("Differential expression of FX-cell markers");
   await expect(docx).toContainText("FOXA2"); // a table cell
   // The OMML equations convert to MathML — this is the #274 formula concern.
@@ -2452,6 +2471,39 @@ test("DOCX opened from the Files browser scrolls inside the modal (#274)", async
   await expect.poll(() => docx.evaluate((el) => el.scrollHeight - el.clientHeight)).toBeGreaterThan(100);
   await docx.evaluate((el) => { el.scrollTop = 800; });
   await expect.poll(() => docx.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+});
+
+test("XLSX files render in a virtualized read-only workbook", async ({ page }) => {
+  await enterApp(page);
+  await page.getByRole("button", { name: "Files" }).click();
+  await page.locator('.fb-row[data-workspace-path="office-preview.xlsx"]').click();
+
+  const workbook = page.locator(".artifact-modal .rp-xlsx");
+  await expect(workbook).toBeVisible();
+  await expect(workbook.locator(".rp-xlsx-tabs button.active")).toHaveText("Results");
+  await expect(workbook).toContainText("FOXA2");
+  await expect(workbook).toContainText("Merged result");
+  const formulaCell = workbook.locator(".rp-xlsx-cell", { hasText: "84" });
+  await formulaCell.click();
+  await expect(workbook.locator(".rp-xlsx-formula-value")).toHaveText("=B2*2");
+  await expect.poll(() => lastInvokeArgs(page, "read_file_bytes"))
+    .toMatchObject({ path: "office-preview.xlsx", maxBytes: 32 * 1024 * 1024 });
+  // Virtualization keeps the DOM bounded to the viewport, even though the
+  // content surface represents the worksheet dimensions.
+  await expect.poll(() => workbook.locator(".rp-xlsx-cell").count()).toBeLessThan(100);
+});
+
+test("PPTX files render lazily inside the app", async ({ page }) => {
+  await enterApp(page);
+  await page.getByRole("button", { name: "Files" }).click();
+  await page.locator('.fb-row[data-workspace-path="office-preview.pptx"]').click();
+
+  const presentation = page.locator(".artifact-modal .rp-pptx");
+  await expect(presentation).toBeVisible();
+  await expect(presentation.locator('[data-slide-index="0"]')).toBeVisible();
+  await expect(presentation).toContainText("Wisp PPTX preview");
+  await expect.poll(() => lastInvokeArgs(page, "read_file_bytes"))
+    .toMatchObject({ path: "office-preview.pptx", maxBytes: 32 * 1024 * 1024 });
 });
 
 test("center previews are read-only and send selected code or text to the AI conversation", async ({ page }) => {
@@ -3444,7 +3496,7 @@ test("bound DOCX resources open their immutable preview", async ({ page }) => {
     .toContainText("manuscript.docx");
   await expect(page.locator(".center-file-preview .rp-docx"))
     .toContainText("Differential expression of FX-cell markers");
-  await expect.poll(() => lastInvokeArgs(page, "read_artifact_version"))
+  await expect.poll(() => lastInvokeArgs(page, "read_artifact_version_bytes"))
     .toMatchObject({ versionId: "resource-version-docx" });
 });
 

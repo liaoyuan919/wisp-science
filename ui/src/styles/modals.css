@@ -257,6 +257,9 @@ textarea.host-input { min-height:64px; resize:vertical; }
 .artifact-modal .am-figure.docx-preview { height: 66vh; max-height: 66vh; overflow: hidden; padding: 0; flex-direction: column; }
 .artifact-modal .am-figure.docx-preview > .rp-heavy { display: flex; flex: 1 1 auto; min-height: 0; flex-direction: column; }
 .artifact-modal .am-figure.docx-preview .rp-docx { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.artifact-modal .am-figure.office-preview { height: 66vh; max-height: 66vh; overflow: hidden; padding: 0; flex-direction: column; }
+.artifact-modal .am-figure.office-preview > .rp-heavy { display: flex; flex: 1 1 auto; min-height: 0; flex-direction: column; }
+.artifact-modal .am-figure.office-preview :is(.rp-xlsx, .rp-pptx) { flex: 1 1 auto; min-height: 0; }
 .artifact-modal.html-preview .am-figure { overflow: auto; }
 .artifact-modal .am-figure > * { flex: 1 1 auto; min-width: 0; min-height: 0; }
 .artifact-modal .am-figure img,

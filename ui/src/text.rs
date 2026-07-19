@@ -951,6 +951,8 @@ pub(crate) fn file_kind(path: &str) -> Option<&'static str> {
         // renders + highlights fenced blocks, so they need nothing of their own.
         "md" | "rmd" | "qmd" | "markdown" => "markdown",
         "docx" => "docx",
+        "xlsx" => "xlsx",
+        "pptx" => "pptx",
         "bib" => "text",
         "html" | "htm" => "html",
         "nwk" | "newick" | "treefile" | "tre" => "text",
@@ -1171,6 +1173,8 @@ mod md_catalog_tests {
     #[test]
     fn detects_manuscripts_and_bibliographies_for_preview() {
         assert_eq!(file_kind("manuscript.docx"), Some("docx"));
+        assert_eq!(file_kind("results.xlsx"), Some("xlsx"));
+        assert_eq!(file_kind("talk.pptx"), Some("pptx"));
         assert_eq!(file_kind("references.bib"), Some("text"));
     }
 

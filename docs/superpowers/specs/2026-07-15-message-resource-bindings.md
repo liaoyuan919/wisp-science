@@ -47,7 +47,7 @@ move rather than being guessed against the destination machine.
 
 ## Supported previews
 
-The resource binder snapshots PNG, JPEG, GIF, WebP, SVG, PDF, DOCX, Markdown,
-BibTeX, CSV, TSV, JSON, HTML, text, and log files up to 32 MiB. Unsupported,
+The resource binder snapshots PNG, JPEG, GIF, WebP, SVG, PDF, DOCX, XLSX, PPTX,
+Markdown, BibTeX, CSV, TSV, JSON, HTML, text, and log files up to 32 MiB. Unsupported,
 missing, oversized, or out-of-project resources remain explicit unresolved
 bindings.

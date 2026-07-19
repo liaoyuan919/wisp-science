@@ -1,5 +1,5 @@
-import { Terminal } from "/vendor/xterm.mjs";
-import { FitAddon } from "/vendor/xterm-addon-fit.mjs";
+import { Terminal } from "/vendor-runtime/xterm.mjs";
+import { FitAddon } from "/vendor-runtime/xterm-addon-fit.mjs";
 
 const controllers = new Map();
 

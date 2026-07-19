@@ -64,12 +64,14 @@
 /* These kinds own their internal scrolling, so the outer box must not also
    scroll — two scroll containers means the sticky head and the inner toolbars
    fight over the same overflow. */
-.center-file-preview:is([data-preview-kind="structure"], [data-preview-kind="fasta"], [data-preview-kind="docx"], [data-preview-kind="pdf"], [data-preview-kind="image"]) { display: flex; flex-direction: column; overflow: hidden; }
-.center-file-preview:is([data-preview-kind="structure"], [data-preview-kind="fasta"], [data-preview-kind="docx"]) > .rp-heavy { display: flex; flex: 1 1 auto; min-height: 0; flex-direction: column; }
+.center-file-preview:is([data-preview-kind="structure"], [data-preview-kind="fasta"], [data-preview-kind="docx"], [data-preview-kind="xlsx"], [data-preview-kind="pptx"], [data-preview-kind="pdf"], [data-preview-kind="image"]) { display: flex; flex-direction: column; overflow: hidden; }
+.center-file-preview:is([data-preview-kind="structure"], [data-preview-kind="fasta"], [data-preview-kind="docx"], [data-preview-kind="xlsx"], [data-preview-kind="pptx"]) > .rp-heavy { display: flex; flex: 1 1 auto; min-height: 0; flex-direction: column; }
 .center-file-preview[data-preview-kind="structure"] .rp-3dmol { flex: 1 1 auto; min-height: 0; height: auto; }
 .center-file-preview[data-preview-kind="fasta"] .rp-fasta-wrap { flex: 1 1 auto; min-height: 0; max-height: none; }
 .center-file-preview[data-preview-kind="docx"] { padding: 0; }
 .center-file-preview[data-preview-kind="docx"] .rp-docx { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.center-file-preview:is([data-preview-kind="xlsx"], [data-preview-kind="pptx"]) { padding: 0; }
+.center-file-preview:is([data-preview-kind="xlsx"], [data-preview-kind="pptx"]) :is(.rp-xlsx, .rp-pptx) { flex: 1 1 auto; min-height: 0; }
 /* .rp-pdf's sunken card is right-pane chrome, where it frames a thumbnail. In
    the center it wraps the whole document instead, so the page reads as a card
    inside a card. Drop the card and let the scroll viewport be the desk. */
