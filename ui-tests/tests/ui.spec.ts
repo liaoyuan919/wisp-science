@@ -154,6 +154,31 @@ test("send streams a mocked assistant reply", async ({ page, context }) => {
   await expect(page.locator(".copy-toast")).toHaveText("Copied");
 });
 
+test("general settings can use Ctrl+Enter to send and Enter for newline", async ({ page }) => {
+  await enterApp(page);
+  await openSettingsSection(page, "General");
+  const shortcut = page.getByTestId("send-shortcut");
+  await expect(shortcut).toHaveValue("enter");
+  await shortcut.selectOption("modifier_enter");
+  await page.locator(".settings-footer").getByRole("button", { name: "Save" }).click();
+
+  await page.reload();
+  await page.locator(".proj-card-main").first().click();
+  await expect(page.locator(".composer-hint")).toContainText("Ctrl+Enter to send · Enter for newline");
+
+  const input = composer(page);
+  await input.fill("first line");
+  await input.press("Enter");
+  await input.pressSequentially("second line");
+  await expect(input).toHaveValue("first line\nsecond line");
+  await expect.poll(() => lastInvokeArgs(page, "send_message")).toBeNull();
+
+  await input.press("Control+Enter");
+  await expect.poll(() => lastInvokeArgs(page, "send_message")).toMatchObject({
+    message: "first line\nsecond line",
+  });
+});
+
 test("switching HTTP models confirms cache invalidation", async ({ page }) => {
   await enterApp(page);
 
@@ -577,6 +602,27 @@ test("Cmd+K opens search and the composer shows the macOS shortcut", async ({ pa
   await expect(composer(page)).toHaveAttribute("placeholder", /Cmd\+K/);
   await page.keyboard.press("Meta+k");
   await expect(commandPalette(page)).toBeVisible();
+});
+
+test("Cmd+Enter sends when the modifier shortcut is selected on macOS", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "userAgent", {
+      configurable: true,
+      value: "wisp-science/Tauri",
+    });
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      value: "MacIntel",
+    });
+    localStorage.setItem("wisp-send-with-modifier", "1");
+  });
+  await enterApp(page);
+  await expect(page.locator(".composer-hint")).toContainText("Cmd+Enter to send · Enter for newline");
+  await composer(page).fill("mac shortcut");
+  await composer(page).press("Meta+Enter");
+  await expect.poll(() => lastInvokeArgs(page, "send_message")).toMatchObject({
+    message: "mac shortcut",
+  });
 });
 
 test("Ctrl+P command palette runs commands and switches themes", async ({ page }) => {

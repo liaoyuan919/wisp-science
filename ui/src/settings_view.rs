@@ -5,7 +5,7 @@ use crate::app_support::{
     reviewer_missing_acp_profile_id, set_reviewer_backend, settings_section_label,
     settings_subpage_label, skill_matches_filter, CRED_GROUPS,
 };
-use crate::bindings::{invoke, invoke_checked, is_windows};
+use crate::bindings::{invoke, invoke_checked, is_mac, is_windows};
 use crate::dto::*;
 use crate::i18n::{localize_backend, set_document_lang, t, tf, Locale};
 use crate::text::{
@@ -91,6 +91,7 @@ pub(super) struct SettingsViewState {
     pub(super) ui_font_size: RwSignal<u16>,
     pub(super) code_font_size: RwSignal<u16>,
     pub(super) selection_popup_enabled: RwSignal<bool>,
+    pub(super) send_with_modifier: RwSignal<bool>,
     pub(super) show_settings: RwSignal<bool>,
     pub(super) settings_section: RwSignal<String>,
     pub(super) open_conn_key: RwSignal<Option<String>>,
@@ -179,6 +180,7 @@ pub(super) fn SettingsView(
         ui_font_size,
         code_font_size,
         selection_popup_enabled,
+        send_with_modifier,
         show_settings,
         settings_section,
         open_conn_key,
@@ -431,6 +433,18 @@ pub(super) fn SettingsView(
                                 })
                                 prop:value=move || settings.get().max_iter.to_string() />
                             <span class="settings-field-hint">{move || t(locale.get(), "settings.max_iter_hint")}</span>
+                        </label>
+                        <label class="span-2">{move || t(locale.get(), "settings.send_shortcut")}
+                            <select data-testid="send-shortcut"
+                                prop:value=move || if send_with_modifier.get() { "modifier_enter" } else { "enter" }
+                                on:change=move |ev| send_with_modifier.set(dom_value(&ev) == "modifier_enter")>
+                                <option value="enter">{move || t(locale.get(), "settings.send_shortcut.enter")}</option>
+                                <option value="modifier_enter">{move || tf(
+                                    locale.get(),
+                                    "settings.send_shortcut.modifier_enter",
+                                    &[("modifier", if is_mac() { "Cmd" } else { "Ctrl" })],
+                                )}</option>
+                            </select>
                         </label>
                         <div class="span-2 appearance-config-row">
                             <div>
