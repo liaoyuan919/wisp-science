@@ -984,6 +984,13 @@ fn App() -> impl IntoView {
     let right_tab = create_rw_signal(RightTab::Artifacts);
     let open_right_tabs = create_rw_signal(DEFAULT_RIGHT_TABS.to_vec());
     let right_tab_add_menu_open = create_rw_signal(false);
+    let agent_workflows = create_rw_signal::<Vec<AgentWorkflowSnapshot>>(vec![]);
+    let agent_workflow_goal = create_rw_signal(String::new());
+    let agent_workflow_mode = create_rw_signal("assisted".to_string());
+    let agent_workflow_editing = create_rw_signal::<Option<String>>(None);
+    let agent_workflow_busy = create_rw_signal(false);
+    let agent_workflow_launching = create_rw_signal::<Vec<String>>(vec![]);
+    let agent_workflow_error = create_rw_signal::<Option<String>>(None);
     let file_source = create_rw_signal("local".to_string());
     let file_query = create_rw_signal(String::new());
     let file_cwd = create_rw_signal(".".to_string());
@@ -3246,6 +3253,7 @@ fn App() -> impl IntoView {
             }
         });
     });
+    let refresh_agent_sessions = Callback::new(move |_: ()| refresh_session_history());
 
     let load_earlier_messages = Callback::new(move |_: ()| {
         let Some(id) = active_session.get_untracked() else {
@@ -3665,6 +3673,24 @@ fn App() -> impl IntoView {
     let compute_search = create_rw_signal(String::new());
     let specialist_menu_open = create_rw_signal(false);
     let auto_review_enabled = create_rw_signal(false);
+    let delegation_enabled = create_rw_signal(false);
+    let delegation_setting_busy = create_rw_signal(false);
+    create_effect(move |_| {
+        delegation_enabled.set(false);
+        delegation_setting_busy.set(false);
+        let Some(session_id) = active_session.get() else {
+            return;
+        };
+        spawn_local(async move {
+            let args = to_value(&serde_json::json!({ "sessionId": session_id.clone() })).unwrap();
+            let Ok(value) = invoke_checked("get_session_delegation_enabled", args).await else {
+                return;
+            };
+            if active_session.get_untracked().as_deref() == Some(session_id.as_str()) {
+                delegation_enabled.set(value.as_bool().unwrap_or(false));
+            }
+        });
+    });
     spawn_local(async move {
         let value = invoke("get_auto_review_enabled", JsValue::UNDEFINED).await;
         if let Some(enabled) = value.as_bool() {
@@ -3912,6 +3938,22 @@ fn App() -> impl IntoView {
         let refresh = Closure::wrap(Box::new(move || {
             if show_right.get_untracked() && right_tab.get_untracked() == RightTab::Hosts {
                 refresh_runtimes(runtime_infos);
+            }
+        }) as Box<dyn FnMut()>);
+        let _ = web_sys::window().and_then(|window| {
+            window
+                .set_interval_with_callback_and_timeout_and_arguments_0(
+                    refresh.as_ref().unchecked_ref(),
+                    1_000,
+                )
+                .ok()
+        });
+        refresh.forget();
+    }
+    {
+        let refresh = Closure::wrap(Box::new(move || {
+            if show_right.get_untracked() && right_tab.get_untracked() == RightTab::Agents {
+                refresh_agent_workflows(agent_workflows, agent_workflow_error);
             }
         }) as Box<dyn FnMut()>);
         let _ = web_sys::window().and_then(|window| {
@@ -6698,6 +6740,53 @@ fn App() -> impl IntoView {
                                 <div class="compose-menu agent-menu" role="menu"
                                     aria-label=move || t(locale.get(), "composer.agent_options")>
                                     <label class="agent-menu-row">
+                                        <span>{move || t(locale.get(), "composer.delegation")}</span>
+                                        <span class="toggle agent-menu-toggle">
+                                            <input type="checkbox" prop:checked=move || delegation_enabled.get()
+                                                disabled=move || delegation_setting_busy.get()
+                                                on:change=move |ev| {
+                                                    let enabled = event_target_checked(&ev);
+                                                    delegation_enabled.set(enabled);
+                                                    delegation_setting_busy.set(true);
+                                                    spawn_local(async move {
+                                                        let (session_id, created_session) = match active_session.get_untracked() {
+                                                            Some(session_id) => (session_id, false),
+                                                            None if enabled => {
+                                                                let Some(session_id) = invoke("new_session", JsValue::UNDEFINED).await.as_string() else {
+                                                                    delegation_enabled.set(false);
+                                                                    delegation_setting_busy.set(false);
+                                                                    return;
+                                                                };
+                                                                (session_id, true)
+                                                            }
+                                                            None => {
+                                                                delegation_enabled.set(false);
+                                                                delegation_setting_busy.set(false);
+                                                                return;
+                                                            }
+                                                        };
+                                                        let args = to_value(&serde_json::json!({
+                                                            "sessionId": session_id.clone(),
+                                                            "enabled": enabled,
+                                                        })).unwrap();
+                                                        let saved = invoke_checked("set_session_delegation_enabled", args).await
+                                                            .ok()
+                                                            .and_then(|value| value.as_bool());
+                                                        if created_session {
+                                                            active_session.set(Some(session_id.clone()));
+                                                            items.set(vec![]);
+                                                            refresh_session_history();
+                                                        }
+                                                        if active_session.get_untracked().as_deref() == Some(session_id.as_str()) {
+                                                            delegation_enabled.set(saved.unwrap_or(!enabled));
+                                                            delegation_setting_busy.set(false);
+                                                        }
+                                                    });
+                                                } />
+                                            <span class="toggle-track" aria-hidden="true"></span>
+                                        </span>
+                                    </label>
+                                    <label class="agent-menu-row">
                                         <span>{move || t(locale.get(), "composer.auto_review")}</span>
                                         <span class="toggle agent-menu-toggle">
                                             <input type="checkbox" prop:checked=move || auto_review_enabled.get()
@@ -7122,6 +7211,7 @@ fn App() -> impl IntoView {
                         open_right_tabs.get().into_iter().map(|tab| {
                             let label = match tab {
                                 RightTab::Artifacts => tab_count(loc, "right.artifacts", art_n),
+                                RightTab::Agents => t(loc, "right.agents").into(),
                                 RightTab::Notebook => tab_count(loc, "right.notebook", notebook_n),
                                 RightTab::Highlights => tab_count(loc, "right.highlights", highlight_n),
                                 RightTab::Provenance => tab_count(loc, "right.provenance", prov_n),
@@ -7150,6 +7240,10 @@ fn App() -> impl IntoView {
                                                     refresh_runtimes(runtime_infos);
                                                     refresh_runs(run_records, locale);
                                                 }
+                                                RightTab::Agents => refresh_agent_workflows(
+                                                    agent_workflows,
+                                                    agent_workflow_error,
+                                                ),
                                                 _ => {}
                                             }
                                         }>{label}</button>
@@ -7181,6 +7275,7 @@ fn App() -> impl IntoView {
                                     ALL_RIGHT_TABS.iter().copied().map(|tab| {
                                         let label = match tab {
                                             RightTab::Artifacts => tab_count(loc, "right.artifacts", art_n),
+                                            RightTab::Agents => t(loc, "right.agents").into(),
                                             RightTab::Notebook => tab_count(loc, "right.notebook", notebook_n),
                                             RightTab::Highlights => tab_count(loc, "right.highlights", highlight_n),
                                             RightTab::Provenance => tab_count(loc, "right.provenance", prov_n),
@@ -7209,6 +7304,10 @@ fn App() -> impl IntoView {
                                                             refresh_runtimes(runtime_infos);
                                                             refresh_runs(run_records, locale);
                                                         }
+                                                        RightTab::Agents => refresh_agent_workflows(
+                                                            agent_workflows,
+                                                            agent_workflow_error,
+                                                        ),
                                                         _ => {}
                                                     }
                                                 }>
@@ -7429,6 +7528,19 @@ fn App() -> impl IntoView {
                                 }.into_view()
                             }
                         }
+                        RightTab::Agents => agent_workflows_panel(
+                            agent_workflows,
+                            agent_workflow_goal,
+                            agent_workflow_mode,
+                            agent_workflow_editing,
+                            agent_workflow_busy,
+                            agent_workflow_launching,
+                            agent_workflow_error,
+                            delegation_enabled,
+                            locale,
+                            load_session.clone(),
+                            refresh_agent_sessions.clone(),
+                        ).into_view(),
                         RightTab::Notebook => {
                             view! {
                                 <NotebookView cells=notebook_cells.get() locale=locale.get()

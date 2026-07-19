@@ -4,6 +4,8 @@
 //! live in the OS keyring (see [`secrets`]); everything else lives here.
 
 mod acp_sessions;
+mod agent_workflow_attempts;
+mod agent_workflows;
 mod artifacts;
 mod execution_contexts;
 mod library;
@@ -19,6 +21,8 @@ pub mod secrets;
 mod sessions;
 
 pub use acp_sessions::AcpSessionBinding;
+pub use agent_workflow_attempts::{AgentWorkflowAttempt, AgentWorkflowAttemptStatus};
+pub use agent_workflows::{AgentWorkflow, AgentWorkflowStatus, AgentWorkflowStep};
 pub use library::{LibraryItem, LibraryItemDetail, LibraryStore, NewLibraryItem};
 pub use models::*;
 pub use project_sync::ProjectSyncState;
@@ -27,7 +31,7 @@ pub use sessions::SessionTranscriptPage;
 
 use anyhow::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 use std::path::Path;
 use std::str::FromStr;
 #[cfg(test)]
@@ -48,6 +52,13 @@ const PROJECT_SYNC_STATE_MIGRATION: &str = "0010_project_sync_state";
 const SESSION_HISTORY_INDEX_MIGRATION: &str = "0011_session_history_index";
 const MESSAGE_RESOURCE_LINKS_MIGRATION: &str = "0012_message_resource_links";
 const SESSION_EXECUTION_CONTEXTS_MIGRATION: &str = "0013_session_execution_contexts";
+const AGENT_WORKFLOWS_MIGRATION: &str = "0014_agent_workflows";
+const AGENT_WORKFLOWS_MIGRATION_SQL: &str = include_str!("../migrations/0014_agent_workflows.sql");
+const AGENT_WORKFLOW_CONTRACTS_MIGRATION: &str = "0015_agent_workflow_contracts";
+const AGENT_WORKFLOW_PLANS_MIGRATION: &str = "0016_agent_workflow_plans";
+const AGENT_WORKFLOW_ATTEMPTS_MIGRATION: &str = "0017_agent_workflow_attempts";
+const AGENT_WORKFLOW_ATTEMPTS_MIGRATION_SQL: &str =
+    include_str!("../migrations/0017_agent_workflow_attempts.sql");
 
 #[derive(Clone)]
 pub struct Store {
@@ -184,6 +195,22 @@ impl Store {
             Self::apply_session_execution_contexts(pool).await?;
             Self::record_migration(pool, SESSION_EXECUTION_CONTEXTS_MIGRATION).await?;
         }
+        if !Self::migration_applied(pool, AGENT_WORKFLOWS_MIGRATION).await? {
+            Self::execute_sql_script(pool, AGENT_WORKFLOWS_MIGRATION_SQL).await?;
+            Self::record_migration(pool, AGENT_WORKFLOWS_MIGRATION).await?;
+        }
+        if !Self::migration_applied(pool, AGENT_WORKFLOW_CONTRACTS_MIGRATION).await? {
+            Self::apply_agent_workflow_contracts(pool).await?;
+            Self::record_migration(pool, AGENT_WORKFLOW_CONTRACTS_MIGRATION).await?;
+        }
+        if !Self::migration_applied(pool, AGENT_WORKFLOW_PLANS_MIGRATION).await? {
+            Self::apply_agent_workflow_plans(pool).await?;
+            Self::record_migration(pool, AGENT_WORKFLOW_PLANS_MIGRATION).await?;
+        }
+        if !Self::migration_applied(pool, AGENT_WORKFLOW_ATTEMPTS_MIGRATION).await? {
+            Self::execute_sql_script(pool, AGENT_WORKFLOW_ATTEMPTS_MIGRATION_SQL).await?;
+            Self::record_migration(pool, AGENT_WORKFLOW_ATTEMPTS_MIGRATION).await?;
+        }
         Ok(())
     }
 
@@ -202,6 +229,119 @@ impl Store {
         )
         .execute(pool)
         .await?;
+        Ok(())
+    }
+
+    async fn apply_agent_workflow_contracts(pool: &SqlitePool) -> Result<()> {
+        let rows = sqlx::query("PRAGMA table_info(agent_workflow_steps)")
+            .fetch_all(pool)
+            .await?;
+        let columns = rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("name"))
+            .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
+        for (column, definition) in [
+            ("input_contract_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("output_contract_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("budget_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ] {
+            if columns.contains(column) {
+                continue;
+            }
+            let query =
+                format!("ALTER TABLE agent_workflow_steps ADD COLUMN {column} {definition}");
+            match sqlx::query(&query).execute(pool).await {
+                Ok(_) => {}
+                Err(error) if error.to_string().contains("duplicate column name") => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
+    async fn apply_agent_workflow_plans(pool: &SqlitePool) -> Result<()> {
+        Self::add_columns_if_missing(
+            pool,
+            "agent_workflows",
+            &[
+                ("frame_id", "TEXT"),
+                ("goal", "TEXT NOT NULL DEFAULT ''"),
+                ("mode", "TEXT NOT NULL DEFAULT 'assisted'"),
+                ("status", "TEXT NOT NULL DEFAULT 'draft'"),
+                ("max_parallel", "INTEGER NOT NULL DEFAULT 2"),
+                ("requires_confirmation", "INTEGER NOT NULL DEFAULT 1"),
+                ("plan_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("approved_at", "INTEGER"),
+            ],
+        )
+        .await?;
+        Self::add_columns_if_missing(
+            pool,
+            "agent_workflow_steps",
+            &[
+                ("template_id", "TEXT NOT NULL DEFAULT ''"),
+                ("spec_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ],
+        )
+        .await?;
+        sqlx::query("UPDATE agent_workflows SET goal=name WHERE goal='' OR goal IS NULL")
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            "UPDATE agent_workflow_steps SET template_id=agent_id \
+             WHERE template_id='' OR template_id IS NULL",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS ix_agent_workflows_frame_status \
+             ON agent_workflows(frame_id,status,updated_at DESC)",
+        )
+        .execute(pool)
+        .await?;
+        for statement in [
+            "CREATE TRIGGER IF NOT EXISTS trg_agent_workflow_steps_insert_draft \
+             BEFORE INSERT ON agent_workflow_steps \
+             WHEN COALESCE((SELECT status FROM agent_workflows WHERE id=NEW.workflow_id),'missing')<>'draft' \
+             BEGIN SELECT RAISE(ABORT,'agent workflow plan is immutable'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_agent_workflow_steps_update_draft \
+             BEFORE UPDATE ON agent_workflow_steps \
+             WHEN COALESCE((SELECT status FROM agent_workflows WHERE id=OLD.workflow_id),'missing')<>'draft' \
+               OR COALESCE((SELECT status FROM agent_workflows WHERE id=NEW.workflow_id),'missing')<>'draft' \
+             BEGIN SELECT RAISE(ABORT,'agent workflow plan is immutable'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_agent_workflow_steps_delete_draft \
+             BEFORE DELETE ON agent_workflow_steps \
+             WHEN COALESCE((SELECT status FROM agent_workflows WHERE id=OLD.workflow_id),'missing')<>'draft' \
+             BEGIN SELECT RAISE(ABORT,'agent workflow plan is immutable'); END",
+        ] {
+            sqlx::query(statement).execute(pool).await?;
+        }
+        Ok(())
+    }
+
+    async fn add_columns_if_missing(
+        pool: &SqlitePool,
+        table: &str,
+        definitions: &[(&str, &str)],
+    ) -> Result<()> {
+        let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+            .fetch_all(pool)
+            .await?;
+        let columns = rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("name"))
+            .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
+        for (column, definition) in definitions {
+            if columns.contains(*column) {
+                continue;
+            }
+            let query = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
+            match sqlx::query(&query).execute(pool).await {
+                Ok(_) => {}
+                Err(error) if error.to_string().contains("duplicate column name") => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         Ok(())
     }
 
@@ -239,7 +379,7 @@ impl Store {
     }
 
     async fn record_migration(pool: &SqlitePool, version: &str) -> Result<()> {
-        sqlx::query("INSERT INTO wisp_schema_migrations(version,applied_at) VALUES(?,?)")
+        sqlx::query("INSERT OR IGNORE INTO wisp_schema_migrations(version,applied_at) VALUES(?,?)")
             .bind(version)
             .bind(chrono::Utc::now().timestamp())
             .execute(pool)

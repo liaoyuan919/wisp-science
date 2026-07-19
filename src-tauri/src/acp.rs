@@ -79,7 +79,7 @@ fn validate(profile: &AcpAgentProfile) -> Result<(), String> {
     Ok(())
 }
 
-fn fingerprint(profile: &AcpAgentProfile) -> String {
+pub(crate) fn fingerprint(profile: &AcpAgentProfile) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in serde_json::to_vec(&(profile.command.trim(), &profile.args)).unwrap_or_default() {
         hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
@@ -87,7 +87,7 @@ fn fingerprint(profile: &AcpAgentProfile) -> String {
     format!("fnv1a64:{hash:016x}")
 }
 
-async fn profiles(store: &wisp_store::Store) -> Vec<AcpAgentProfile> {
+pub(crate) async fn profiles(store: &wisp_store::Store) -> Vec<AcpAgentProfile> {
     store
         .get_setting(PROFILES_KEY)
         .await
@@ -108,7 +108,7 @@ async fn save_profiles(
         .map_err(|error| error.to_string())
 }
 
-fn launch_profile(profile: &AcpAgentProfile) -> LaunchProfile {
+pub(crate) fn launch_profile(profile: &AcpAgentProfile) -> LaunchProfile {
     LaunchProfile::new(
         profile.id.clone(),
         profile.label.clone(),

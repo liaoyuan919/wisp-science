@@ -6,6 +6,7 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteConnection, SqlitePoolOptions},
     Column, Connection, Row, Sqlite, Transaction, TypeInfo, ValueRef,
 };
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -22,6 +23,84 @@ pub struct ProjectTransferStats {
 /// Machine-global settings, execution contexts, credentials, and ACP runtime
 /// bindings are deliberately not project data and are not copied.
 async fn copy_project_children(tx: &mut Transaction<'_, Sqlite>, project_id: &str) -> Result<()> {
+    if attached_table_exists(tx, "agent_workflows").await? {
+        let workflow_columns = attached_table_columns(tx, "agent_workflows").await?;
+        let has_plan_columns = [
+            "frame_id",
+            "goal",
+            "mode",
+            "status",
+            "max_parallel",
+            "requires_confirmation",
+            "plan_json",
+            "approved_at",
+        ]
+        .iter()
+        .all(|column| workflow_columns.contains(*column));
+        let workflow_query = if has_plan_columns {
+            "INSERT INTO agent_workflows(id,project_id,workspace_id,frame_id,name,description,goal,mode,status,max_parallel,requires_confirmation,plan_json,version,enabled,approved_at,created_at,updated_at) \
+             SELECT id,project_id,workspace_id,frame_id,name,description,goal,mode,'draft',max_parallel,requires_confirmation,plan_json,version,enabled,approved_at,created_at,updated_at \
+             FROM transfer.agent_workflows WHERE project_id=?"
+        } else {
+            "INSERT INTO agent_workflows(id,project_id,workspace_id,frame_id,name,description,goal,mode,status,max_parallel,requires_confirmation,plan_json,version,enabled,approved_at,created_at,updated_at) \
+             SELECT id,project_id,workspace_id,NULL,name,description,name,'assisted','draft',2,1,'{}',version,enabled,NULL,created_at,updated_at \
+             FROM transfer.agent_workflows WHERE project_id=?"
+        };
+        sqlx::query(workflow_query)
+            .bind(project_id)
+            .execute(&mut **tx)
+            .await?;
+
+        if attached_table_exists(tx, "agent_workflow_steps").await? {
+            let columns = attached_table_columns(tx, "agent_workflow_steps").await?;
+            let has_contracts = ["input_contract_json", "output_contract_json", "budget_json"]
+                .iter()
+                .all(|column| columns.contains(*column));
+            let has_plan = ["template_id", "spec_json"]
+                .iter()
+                .all(|column| columns.contains(*column));
+            let template_expr = if has_plan {
+                "s.template_id"
+            } else {
+                "s.agent_id"
+            };
+            let spec_expr = if has_plan { "s.spec_json" } else { "'{}'" };
+            let input_contract_expr = if has_contracts {
+                "s.input_contract_json"
+            } else {
+                "'{}'"
+            };
+            let output_contract_expr = if has_contracts {
+                "s.output_contract_json"
+            } else {
+                "'{}'"
+            };
+            let budget_expr = if has_contracts {
+                "s.budget_json"
+            } else {
+                "'{}'"
+            };
+            let query = format!(
+                "INSERT INTO agent_workflow_steps(id,workflow_id,position,agent_id,template_id,role,backend,model,prompt_template,input_schema_json,output_schema_json,input_contract_json,output_contract_json,permissions_json,context_policy_json,budget_json,spec_json,timeout_secs,created_at,updated_at) \
+                 SELECT s.id,s.workflow_id,s.position,s.agent_id,{template_expr},s.role,s.backend,s.model,s.prompt_template,s.input_schema_json,s.output_schema_json,{input_contract_expr},{output_contract_expr},s.permissions_json,s.context_policy_json,{budget_expr},{spec_expr},s.timeout_secs,s.created_at,s.updated_at \
+                 FROM transfer.agent_workflow_steps s JOIN transfer.agent_workflows w ON w.id=s.workflow_id WHERE w.project_id=?"
+            );
+            sqlx::query(&query)
+                .bind(project_id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        if has_plan_columns {
+            sqlx::query(
+                "UPDATE agent_workflows SET status=(SELECT source.status FROM transfer.agent_workflows source WHERE source.id=agent_workflows.id) \
+                 WHERE project_id=?",
+            )
+            .bind(project_id)
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+
     const QUERIES: &[&str] = &[
         "INSERT INTO folders(id,project_id,name,created_at,updated_at) \
          SELECT id,project_id,name,created_at,updated_at FROM transfer.folders WHERE project_id=?",
@@ -82,7 +161,58 @@ async fn copy_project_children(tx: &mut Transaction<'_, Sqlite>, project_id: &st
             .execute(&mut **tx)
             .await?;
     }
+    if attached_table_exists(tx, "agent_workflow_attempts").await? {
+        sqlx::query(
+            "INSERT INTO agent_workflow_attempts(id,workflow_id,step_id,attempt,request_id,backend,status,request_json,response_json,output_json,artifact_ids_json,evidence_json,error,agent_session_id,child_frame_id,input_tokens,output_tokens,tool_calls,cost_microunits,cancel_requested,started_at,finished_at,created_at,updated_at) \
+             SELECT a.id,a.workflow_id,a.step_id,a.attempt,a.request_id,a.backend,a.status,a.request_json,a.response_json,a.output_json,a.artifact_ids_json,a.evidence_json,a.error,a.agent_session_id,a.child_frame_id,a.input_tokens,a.output_tokens,a.tool_calls,a.cost_microunits,a.cancel_requested,a.started_at,a.finished_at,a.created_at,a.updated_at \
+             FROM transfer.agent_workflow_attempts a JOIN transfer.agent_workflows w ON w.id=a.workflow_id WHERE w.project_id=?",
+        )
+        .bind(project_id)
+        .execute(&mut **tx)
+        .await?;
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query(
+            "UPDATE agent_workflow_attempts SET status='failed',error=COALESCE(error,'Imported from another device; the Agent attempt was not resumed.'),finished_at=COALESCE(finished_at,?),updated_at=? WHERE workflow_id IN (SELECT id FROM agent_workflows WHERE project_id=?) AND status IN ('queued','running')",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(project_id)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            "UPDATE agent_workflows SET status='failed',updated_at=? WHERE project_id=? AND status='running'",
+        )
+        .bind(now)
+        .bind(project_id)
+        .execute(&mut **tx)
+        .await?;
+    }
     Ok(())
+}
+
+async fn attached_table_exists(tx: &mut Transaction<'_, Sqlite>, table: &str) -> Result<bool> {
+    let exists: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM transfer.sqlite_master WHERE type='table' AND name=? LIMIT 1",
+    )
+    .bind(table)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(exists.is_some())
+}
+
+async fn attached_table_columns(
+    tx: &mut Transaction<'_, Sqlite>,
+    table: &str,
+) -> Result<HashSet<String>> {
+    // `table` is always a hard-coded name at the call sites; it cannot be
+    // bound in PRAGMA syntax, so keep this helper private and non-generic.
+    let rows = sqlx::query(&format!("PRAGMA transfer.table_info({table})"))
+        .fetch_all(&mut **tx)
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|row| row.try_get::<String, _>("name"))
+        .collect::<std::result::Result<HashSet<_>, _>>()?)
 }
 
 /// Remove every row owned by a project while retaining the project itself.
@@ -93,7 +223,11 @@ pub(crate) async fn delete_project_children(
     project_id: &str,
 ) -> Result<()> {
     const QUERIES: &[&str] = &[
+        "UPDATE agent_workflows SET status='draft' WHERE project_id=?",
         "DELETE FROM artifact_dependencies WHERE artifact_version_id IN (SELECT av.id FROM artifact_versions av JOIN artifacts a ON a.id=av.artifact_id WHERE a.project_id=?)",
+        "DELETE FROM agent_workflow_attempts WHERE workflow_id IN (SELECT id FROM agent_workflows WHERE project_id=?)",
+        "DELETE FROM agent_workflow_steps WHERE workflow_id IN (SELECT id FROM agent_workflows WHERE project_id=?)",
+        "DELETE FROM agent_workflows WHERE project_id=?",
         "DELETE FROM message_resource_links WHERE frame_id IN (SELECT id FROM frames WHERE project_id=?)",
         "DELETE FROM session_execution_contexts WHERE frame_id IN (SELECT id FROM frames WHERE project_id=?)",
         "DELETE FROM artifact_versions WHERE artifact_id IN (SELECT id FROM artifacts WHERE project_id=?)",
@@ -447,6 +581,9 @@ impl Store {
                 "id",
             ),
             ("folders", "*", "id"),
+            ("agent_workflows", "*", "id"),
+            ("agent_workflow_steps", "*", "id"),
+            ("agent_workflow_attempts", "*", "id"),
             ("frames", "*", "id"),
             ("messages", "*", "id"),
             ("session_reviews", "*", "id"),
@@ -472,6 +609,15 @@ impl Store {
             .await?;
         let mut digest = Sha256::new();
         for (table, columns, order) in TABLES {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+            )
+            .bind(table)
+            .fetch_one(&pool)
+            .await?;
+            if !exists {
+                continue;
+            }
             digest.update((table.len() as u64).to_le_bytes());
             digest.update(table.as_bytes());
             let query = format!("SELECT {columns} FROM {table} ORDER BY {order}");
@@ -799,6 +945,26 @@ mod tests {
             .create_project("project-1", "Study", r"C:\Users\Alice\Study")
             .await
             .unwrap();
+        let workflow =
+            crate::AgentWorkflow::new("workflow-1", "project-1", "workspace-1", "Review QC")
+                .unwrap();
+        source.create_agent_workflow(&workflow).await.unwrap();
+        let step = crate::AgentWorkflowStep::new(
+            "workflow-step-1",
+            "workflow-1",
+            0,
+            "reviewer",
+            "reviewer",
+            "acp",
+            "Review {{input}}",
+        )
+        .unwrap();
+        source.create_agent_workflow_step(&step).await.unwrap();
+        let workflow = source
+            .get_agent_workflow("workflow-1")
+            .await
+            .unwrap()
+            .unwrap();
         source
             .create_frame("frame-1", "project-1", "OPERON", "model")
             .await
@@ -877,6 +1043,17 @@ mod tests {
             "/Users/alice/Study"
         );
         assert_eq!(target.load_messages("frame-1").await.unwrap().len(), 1);
+        assert_eq!(
+            target.list_agent_workflows("project-1").await.unwrap(),
+            vec![workflow]
+        );
+        assert_eq!(
+            target
+                .list_agent_workflow_steps("workflow-1")
+                .await
+                .unwrap(),
+            vec![step]
+        );
         let imported_resources = target
             .list_message_resource_links("frame-1", 1, None)
             .await

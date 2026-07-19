@@ -1,7 +1,7 @@
 //! Process and protocol boundary for local ACP v1 agents.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     path::{Path, PathBuf},
     pin::pin,
     sync::{
@@ -41,6 +41,7 @@ pub struct AcpAgentProfile {
     pub label: String,
     pub command: PathBuf,
     pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
 }
 
 impl AcpAgentProfile {
@@ -55,7 +56,14 @@ impl AcpAgentProfile {
             label: label.into(),
             command: command.into(),
             args,
+            env: BTreeMap::new(),
         }
+    }
+
+    /// Adds one explicit environment override for the ACP child process.
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.insert(key.into(), value.into());
+        self
     }
 
     fn validate(&self) -> Result<(), AcpError> {
@@ -68,8 +76,47 @@ impl AcpAgentProfile {
         if self.command.as_os_str().is_empty() {
             return Err(AcpError::InvalidProfile("agent command is empty"));
         }
+        if self.env.keys().any(|key| key.is_empty()) {
+            return Err(AcpError::InvalidProfile("environment key is empty"));
+        }
         Ok(())
     }
+}
+
+/// Applies the Codex ACP policy used for controlled project execution.
+///
+/// Codex's `agent` mode is deliberately approval-aware: each turn is confined
+/// to workspace-write with network disabled, and requests outside that sandbox
+/// are returned to the ACP client. Callers must reject escalations at their
+/// permission boundary instead of treating this profile as approval-free.
+pub fn codex_project_sandbox_profile(mut profile: AcpAgentProfile) -> AcpAgentProfile {
+    let config = serde_json::json!({
+        "approval_policy": "on-request",
+        "sandbox_mode": "workspace-write",
+        "sandbox_workspace_write": {
+            "network_access": false,
+        },
+        "web_search": "disabled",
+        "mcp_servers": {},
+    });
+    profile.env.insert(
+        "CODEX_CONFIG".into(),
+        serde_json::to_string(&config).expect("static Codex config serializes"),
+    );
+    profile
+        .env
+        .insert("INITIAL_AGENT_MODE".into(), "agent".into());
+    for value in [
+        r#"approval_policy="on-request""#,
+        r#"sandbox_mode="workspace-write""#,
+        "sandbox_workspace_write.network_access=false",
+        r#"web_search="disabled""#,
+        "mcp_servers={}",
+    ] {
+        profile.args.push("-c".into());
+        profile.args.push(value.into());
+    }
+    profile
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,11 +183,25 @@ pub struct AcpPermissionRequest {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct AcpUsageCost {
+    pub amount: f64,
+    pub currency: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcpUsageUpdate {
+    pub used: u64,
+    pub size: u64,
+    pub cost: Option<AcpUsageCost>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum AcpSessionEvent {
     Update {
         session_id: String,
         kind: AcpUpdateKind,
         payload: serde_json::Value,
+        usage: Option<AcpUsageUpdate>,
     },
     Permission(AcpPermissionRequest),
     Exited {
@@ -472,6 +533,7 @@ async fn run_actor(
                         SessionNotification::parse_message(&message.method, &message.params)
                     {
                         let kind = update_kind(&notification.update);
+                        let usage = typed_usage_update(&notification.update);
                         let payload = serde_json::to_value(notification.update).unwrap_or_else(
                             |error| serde_json::json!({ "serializationError": error.to_string() }),
                         );
@@ -479,6 +541,7 @@ async fn run_actor(
                             session_id: notification.session_id.to_string(),
                             kind,
                             payload,
+                            usage,
                         });
                     }
                     // Ignore future update variants until Wisp learns how to display them.
@@ -794,6 +857,20 @@ fn update_kind(update: &SessionUpdate) -> AcpUpdateKind {
     }
 }
 
+fn typed_usage_update(update: &SessionUpdate) -> Option<AcpUsageUpdate> {
+    let SessionUpdate::UsageUpdate(update) = update else {
+        return None;
+    };
+    Some(AcpUsageUpdate {
+        used: update.used,
+        size: update.size,
+        cost: update.cost.as_ref().map(|cost| AcpUsageCost {
+            amount: cost.amount,
+            currency: cost.currency.clone(),
+        }),
+    })
+}
+
 fn stop_reason(reason: StopReason) -> AcpStopReason {
     match reason {
         StopReason::EndTurn => AcpStopReason::EndTurn,
@@ -847,7 +924,7 @@ struct ProcessTransport {
 impl ConnectTo<Client> for ProcessTransport {
     async fn connect_to(self, client: impl ConnectTo<Agent>) -> agent_client_protocol::Result<()> {
         let mut command = async_process::Command::new(&self.profile.command);
-        command.args(&self.profile.args);
+        command.args(&self.profile.args).envs(&self.profile.env);
         #[cfg(windows)]
         {
             use async_process::windows::CommandExt as _;
@@ -947,6 +1024,26 @@ mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{AgentCapabilities, InitializeResponse};
     use agent_client_protocol::Channel;
+
+    #[test]
+    fn standard_usage_update_is_exposed_as_typed_data() {
+        use agent_client_protocol::schema::v1::{Cost, UsageUpdate};
+
+        let update = SessionUpdate::UsageUpdate(
+            UsageUpdate::new(53_000, 200_000).cost(Cost::new(0.045, "USD")),
+        );
+        assert_eq!(
+            typed_usage_update(&update),
+            Some(AcpUsageUpdate {
+                used: 53_000,
+                size: 200_000,
+                cost: Some(AcpUsageCost {
+                    amount: 0.045,
+                    currency: "USD".into(),
+                }),
+            })
+        );
+    }
 
     #[tokio::test]
     async fn official_sdk_in_memory_v1_handshake() {

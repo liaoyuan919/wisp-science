@@ -112,6 +112,8 @@ export function tauriMock(): void {
   ];
   let memoryEnabled = true;
   let autoReviewEnabled = false;
+  const sessionDelegationEnabled: Record<string, boolean> = {};
+  let lastDelegationSessionId = "s-current";
   // Mutable workspace fixtures let live FileChanged events prove that open
   // previews re-read content written by an agent tool.
   const workspaceMd: Record<string, string> = {};
@@ -166,6 +168,84 @@ export function tauriMock(): void {
   let mockAcpAgents = [
     { id: "acp-test", label: "Test ACP Agent", command: "fake-acp", args: ["--stdio"] },
   ];
+  let mockAgentWorkflowCounter = 0;
+  let mockAgentWorkflows: any[] = [];
+  const agentWorkflowSnapshot = (goal: string, mode: string) => {
+    const id = `workflow-${++mockAgentWorkflowCounter}`;
+    return {
+      workflow: {
+        id,
+        project_id: "default",
+        workspace_id: project.root,
+        frame_id: lastDelegationSessionId,
+        name: goal,
+        description: "Controlled multi-Agent execution plan",
+        goal,
+        mode,
+        status: "draft",
+        max_parallel: 2,
+        requires_confirmation: true,
+        plan_json: "{}",
+        version: 1,
+        enabled: true,
+        approved_at: null,
+        created_at: 1,
+        updated_at: 1,
+      },
+      steps: [{
+        id: `${id}:code_execution`,
+        workflow_id: id,
+        position: 0,
+        agent_id: `${id}:code_execution`,
+        template_id: "code_execution",
+        role: "coder",
+        backend: "acp",
+        model: "acp-test",
+        prompt_template: "Run controlled project code",
+        input_schema_json: "{}",
+        output_schema_json: "{}",
+        input_contract_json: "{}",
+        output_contract_json: "{}",
+        permissions_json: JSON.stringify({ tools: ["codex_project_exec", "read_file"], paths: ["project://**"], network: false, write: true }),
+        context_policy_json: "{}",
+        budget_json: JSON.stringify({ max_tokens: 12000, max_tool_calls: 24 }),
+        spec_json: JSON.stringify({ name: "Code execution" }),
+        timeout_secs: 900,
+        created_at: 1,
+        updated_at: 1,
+      }],
+      attempts: [],
+      delegation_enabled: sessionDelegationEnabled[lastDelegationSessionId] ?? false,
+    };
+  };
+  const agentWorkflowAttempt = (snapshot: any, status: string) => ({
+    id: "attempt-1",
+    workflow_id: snapshot.workflow.id,
+    step_id: snapshot.steps[0].id,
+    attempt: 1,
+    request_id: "request-1",
+    backend: "acp",
+    status,
+    request_json: "{}",
+    response_json: status === "running" ? null : "{}",
+    output_json: status === "succeeded"
+      ? JSON.stringify({ summary: "Analysis and tests completed." })
+      : "{}",
+    artifact_ids_json: "[]",
+    evidence_json: "[]",
+    error: null,
+    agent_session_id: "agent-session-1",
+    child_frame_id: "agent-child-1",
+    input_tokens: status === "succeeded" ? 1200 : 0,
+    output_tokens: status === "succeeded" ? 300 : 0,
+    tool_calls: status === "succeeded" ? 4 : 0,
+    cost_microunits: status === "succeeded" ? 25000 : 0,
+    cancel_requested: status === "cancelled",
+    started_at: 2,
+    finished_at: status === "running" ? null : 3,
+    created_at: 2,
+    updated_at: status === "running" ? 2 : 3,
+  });
   const acpBindings: Record<string, string> = {};
   const acpPermissionFrames: Record<string, string> = {};
   const acpLongResolvers: Record<string, (value: string) => void> = {};
@@ -675,6 +755,67 @@ export function tauriMock(): void {
             return mockModels;
           case "list_acp_agents":
             return mockAcpAgents;
+          case "list_agent_workflows":
+            return mockAgentWorkflows;
+          case "create_agent_workflow": {
+            if (!(sessionDelegationEnabled[lastDelegationSessionId] ?? false)) {
+              throw new Error("Sub-Agent delegation is off for this conversation.");
+            }
+            const snapshot = agentWorkflowSnapshot(String(arg("goal") ?? ""), String(arg("mode") ?? "assisted"));
+            mockAgentWorkflows = [snapshot, ...mockAgentWorkflows];
+            return snapshot;
+          }
+          case "revise_agent_workflow": {
+            const snapshot = mockAgentWorkflows.find((item) => item.workflow.id === arg("workflowId"));
+            if (!snapshot) throw new Error("Agent workflow does not exist");
+            if (!snapshot.delegation_enabled) throw new Error("Sub-Agent delegation is off for this conversation.");
+            snapshot.workflow.goal = String(arg("goal") ?? snapshot.workflow.goal);
+            snapshot.workflow.name = snapshot.workflow.goal;
+            snapshot.workflow.mode = String(arg("mode") ?? snapshot.workflow.mode);
+            snapshot.workflow.version += 1;
+            return snapshot;
+          }
+          case "approve_agent_workflow": {
+            const snapshot = mockAgentWorkflows.find((item) => item.workflow.id === arg("workflowId"));
+            if (!snapshot) throw new Error("Agent workflow does not exist");
+            if (!snapshot.delegation_enabled) throw new Error("Sub-Agent delegation is off for this conversation.");
+            snapshot.workflow.status = "approved";
+            snapshot.workflow.version += 1;
+            return snapshot;
+          }
+          case "run_agent_workflow": {
+            const snapshot = mockAgentWorkflows.find((item) => item.workflow.id === arg("workflowId"));
+            if (!snapshot) throw new Error("Agent workflow does not exist");
+            if (!snapshot.delegation_enabled) throw new Error("Sub-Agent delegation is off for this conversation.");
+            snapshot.workflow.status = "running";
+            snapshot.attempts = [agentWorkflowAttempt(snapshot, "running")];
+            const cancellationDemo = snapshot.workflow.goal.includes("CANCEL DEMO");
+            await new Promise((resolve) => setTimeout(resolve, cancellationDemo ? 5_000 : 60));
+            if (snapshot.workflow.status === "cancelled") {
+              return { workflow_id: snapshot.workflow.id, status: "cancelled", steps: [] };
+            }
+            snapshot.workflow.status = "succeeded";
+            snapshot.workflow.version += 2;
+            snapshot.attempts = [agentWorkflowAttempt(snapshot, "succeeded")];
+            return { workflow_id: snapshot.workflow.id, status: "succeeded", steps: [] };
+          }
+          case "cancel_agent_workflow": {
+            const snapshot = mockAgentWorkflows.find((item) => item.workflow.id === arg("workflowId"));
+            if (!snapshot) throw new Error("Agent workflow does not exist");
+            snapshot.workflow.status = "cancelled";
+            snapshot.attempts = snapshot.attempts.map((attempt: any) =>
+              attempt.status === "running" ? agentWorkflowAttempt(snapshot, "cancelled") : attempt
+            );
+            return null;
+          }
+          case "retry_agent_workflow": {
+            const snapshot = mockAgentWorkflows.find((item) => item.workflow.id === arg("workflowId"));
+            if (!snapshot) throw new Error("Agent workflow does not exist");
+            if (!snapshot.delegation_enabled) throw new Error("Sub-Agent delegation is off for this conversation.");
+            snapshot.workflow.status = "approved";
+            snapshot.workflow.version += 1;
+            return snapshot;
+          }
           case "get_acp_session_agent":
             return acpBindings[String(arg("frameId") ?? "")] ?? null;
           case "save_acp_agent": {
@@ -1378,6 +1519,19 @@ export function tauriMock(): void {
           case "set_auto_review_enabled":
             autoReviewEnabled = !!args?.enabled;
             return autoReviewEnabled;
+          case "get_session_delegation_enabled":
+            return sessionDelegationEnabled[String(arg("sessionId") ?? "")] ?? false;
+          case "set_session_delegation_enabled": {
+            const sessionId = String(arg("sessionId") ?? "");
+            lastDelegationSessionId = sessionId;
+            sessionDelegationEnabled[sessionId] = Boolean(arg("enabled"));
+            for (const snapshot of mockAgentWorkflows) {
+              if (snapshot.workflow.frame_id === sessionId) {
+                snapshot.delegation_enabled = sessionDelegationEnabled[sessionId];
+              }
+            }
+            return sessionDelegationEnabled[sessionId];
+          }
           case "list_memory":
           case "write_memory_file":
           case "delete_memory_file":

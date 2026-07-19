@@ -3,14 +3,31 @@
 
 pub mod agent;
 pub mod context;
+pub mod delegation;
+pub mod execution;
 pub mod memory;
+pub mod orchestration;
 pub mod output;
 pub mod provenance;
 pub mod system_prompt;
 
 pub use agent::{agent_loop, agent_loop_continue};
 pub use context::ContextManager;
+pub use delegation::{
+    AgentArtifact, AgentBackend, AgentBudget, AgentDelegationRequest, AgentDelegationResponse,
+    AgentDelegator, AgentEvidence, AgentRole, AgentSessionPolicy, AgentSpec, AgentUsage,
+    ContextPolicy, DelegationStatus, PermissionSet, UnconfiguredAgentDelegator,
+    ValidatedAgentDelegationRequest,
+};
+pub use execution::{
+    DelegationExecutionObserver, DelegationExecutionResult, DelegationExecutionStatus,
+    DelegationExecutor, DelegationStepExecution, NoopDelegationObserver,
+};
 pub use memory::MemoryManager;
+pub use orchestration::{
+    AgentInstanceRequest, AgentTemplate, AgentTemplateRegistry, DelegationMode, DelegationPlan,
+    DelegationPlanStep, DelegationPlanner,
+};
 pub use output::{NullOutput, Output, StreamSinkAdapter, ToolEnvAdapter};
 pub use provenance::ProvenanceRecord;
 pub use system_prompt::SystemPrompt;

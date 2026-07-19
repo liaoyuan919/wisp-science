@@ -23,6 +23,8 @@ mod artifact_commands;
 mod channels;
 mod connector_commands;
 mod context_probe;
+mod delegation_runtime;
+mod delegation_tool;
 mod desktop_lifecycle;
 mod file_browser;
 mod harvest;
@@ -3360,6 +3362,8 @@ async fn send_message(
     // doc — a turn writing view state races the user's session/project switch.
 
     let specialist = specialists::session_specialist(&state.store, &frame_id).await;
+    let delegation_enabled =
+        delegation_runtime::session_delegation_enabled(&state.store, &frame_id).await;
     let (provider, api_url, model, api_key, max_tokens, reasoning_effort) = match &specialist {
         Some(spec) => specialists::specialist_llm(&state.store, spec).await,
         None => {
@@ -3406,6 +3410,15 @@ async fn send_message(
         // session's own root (#182).
         *guard = None;
     }
+    if guard
+        .as_ref()
+        .is_some_and(|agent| agent.tools.get("propose_delegation").is_some() != delegation_enabled)
+    {
+        // Delegation is a live per-session capability. Rebuild from persisted
+        // messages when the toggle changed so the next turn sees the exact
+        // tool set and prompt section selected by the user.
+        *guard = None;
+    }
     let reused_agent = guard.is_some();
     if guard.is_none() {
         let skills = active_skill_index(&state.store, &ap).await;
@@ -3448,6 +3461,13 @@ async fn send_message(
         agent.add_tool(Box::new(specialist_tool::SaveSpecialistTool {
             store: state.store.clone(),
         }));
+        if delegation_enabled {
+            agent.add_tool(Box::new(delegation_tool::ProposeDelegationTool::new(
+                state.store.clone(),
+                ap.clone(),
+                frame_id.clone(),
+            )));
+        }
         match state.store.load_messages(&frame_id).await {
             Ok(msgs) => {
                 agent.ctx.messages = msgs;
@@ -3462,6 +3482,11 @@ async fn send_message(
         rt.set_last_seq(agent.ctx.messages.len() as i64);
         if agent.ctx.is_empty() {
             agent.seed_system_prompt(&skills, None);
+        }
+        if let Some(message) = agent.ctx.messages.first_mut() {
+            if let wisp_llm::Content::Text(prompt) = &mut message.content {
+                delegation_runtime::sync_delegation_prompt(prompt, delegation_enabled);
+            }
         }
         if let Some(spec) = &specialist {
             if agent.ctx.messages.len() == 1 && !spec.instructions.trim().is_empty() {
@@ -6392,6 +6417,13 @@ pub fn run() {
             let approval_grants = Arc::new(StdMutex::new(tauri::async_runtime::block_on(
                 load_approval_grants(&store),
             )));
+            if let Ok((attempts, workflows)) = tauri::async_runtime::block_on(
+                store.recover_interrupted_agent_workflows(),
+            ) {
+                if workflows > 0 {
+                    tracing::warn!(target: "wisp", attempts, workflows, "recovered interrupted Agent workflows");
+                }
+            }
             let state = AppState {
                 app_data,
                 store,
@@ -6517,6 +6549,15 @@ pub fn run() {
             acp::set_acp_session_config,
             acp::set_acp_session_mode,
             test_reviewer_backend,
+            delegation_runtime::list_agent_workflows,
+            delegation_runtime::get_session_delegation_enabled,
+            delegation_runtime::set_session_delegation_enabled,
+            delegation_runtime::create_agent_workflow,
+            delegation_runtime::revise_agent_workflow,
+            delegation_runtime::approve_agent_workflow,
+            delegation_runtime::run_agent_workflow,
+            delegation_runtime::cancel_agent_workflow,
+            delegation_runtime::retry_agent_workflow,
             review_session,
             side_chat,
             context_probe::probe_execution_context,
