@@ -230,9 +230,11 @@ Full setup, Claude example, Windows notes, and troubleshooting:
 
 ### Controlled Agent workflows
 
-Open the right panel's **Agents** tab to create a persisted multi-Agent plan,
-review its capability limits, approve it, and then run, cancel, retry, or take
-over a child conversation. See
+Enable **Delegation** for the current conversation from the composer Agent
+menu, then open the right panel's **Agents** tab—or ask the main Agent to
+propose a plan—to create a persisted multi-Agent workflow. Review its
+capability limits, approve it, and then run, cancel, retry, or take over a
+child conversation. See
 [Controlled Agent delegation](docs/agent-delegation.md) for the lifecycle,
 safety boundary, and current limits.
 

@@ -30,12 +30,122 @@ use wisp_store::{
 };
 
 const RESULT_INSTRUCTIONS: &str = "Return one JSON object and no Markdown fence. Include summary (string), files_changed (array), diff_summary (string), artifacts (array), evidence (array), tests (array), and risks (array). Do not delegate further.";
+const DELEGATION_PROMPT_START: &str = "\n\n<delegation_capability>";
+const DELEGATION_PROMPT_END: &str = "</delegation_capability>";
+const DELEGATION_PROMPT_SECTION: &str = "\n\n<delegation_capability>\nThe user enabled controlled sub-Agent delegation for this conversation. When a task materially benefits from parallel code, biology, visualization, or independent review, use propose_delegation to create a persisted draft plan. This tool never approves or runs the plan. Tell the user to review it in the Agents panel; do not claim that delegated work has started.\n</delegation_capability>";
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct AgentWorkflowSnapshot {
-    workflow: AgentWorkflow,
-    steps: Vec<AgentWorkflowStep>,
-    attempts: Vec<AgentWorkflowAttempt>,
+    pub(crate) workflow: AgentWorkflow,
+    pub(crate) steps: Vec<AgentWorkflowStep>,
+    pub(crate) attempts: Vec<AgentWorkflowAttempt>,
+    delegation_enabled: bool,
+}
+
+fn delegation_setting_key(frame_id: &str) -> String {
+    format!("frame_delegation_enabled:{frame_id}")
+}
+
+pub(crate) async fn session_delegation_enabled(store: &Store, frame_id: &str) -> bool {
+    store
+        .get_setting(&delegation_setting_key(frame_id))
+        .await
+        .ok()
+        .flatten()
+        .and_then(|value| serde_json::from_str::<bool>(&value).ok())
+        .unwrap_or(false)
+}
+
+pub(crate) async fn save_session_delegation_enabled(
+    store: &Store,
+    project_id: &str,
+    frame_id: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    ensure_project_frame(store, project_id, frame_id).await?;
+    store
+        .set_setting(&delegation_setting_key(frame_id), &enabled.to_string())
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn ensure_project_frame(
+    store: &Store,
+    project_id: &str,
+    frame_id: &str,
+) -> Result<(), String> {
+    match store
+        .frame_project_id(frame_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .as_deref()
+    {
+        Some(owner) if owner == project_id => Ok(()),
+        Some(_) => Err("Conversation does not belong to the active project.".into()),
+        None => Err("Conversation does not exist.".into()),
+    }
+}
+
+pub(crate) async fn require_session_delegation(
+    store: &Store,
+    project_id: &str,
+    frame_id: &str,
+) -> Result<(), String> {
+    ensure_project_frame(store, project_id, frame_id).await?;
+    if !session_delegation_enabled(store, frame_id).await {
+        return Err("Sub-Agent delegation is off for this conversation. Enable Delegation in the Agent menu first.".into());
+    }
+    Ok(())
+}
+
+async fn require_workflow_delegation(
+    store: &Store,
+    workflow: &AgentWorkflow,
+) -> Result<(), String> {
+    let frame_id = workflow
+        .frame_id
+        .as_deref()
+        .ok_or_else(|| "Agent workflow has no owning conversation.".to_string())?;
+    require_session_delegation(store, &workflow.project_id, frame_id).await
+}
+
+pub(crate) fn sync_delegation_prompt(prompt: &mut String, enabled: bool) {
+    while let Some(start) = prompt.find(DELEGATION_PROMPT_START) {
+        let body_start = start + DELEGATION_PROMPT_START.len();
+        let Some(relative_end) = prompt[body_start..].find(DELEGATION_PROMPT_END) else {
+            prompt.truncate(start);
+            break;
+        };
+        let end = body_start + relative_end + DELEGATION_PROMPT_END.len();
+        prompt.replace_range(start..end, "");
+    }
+    if enabled {
+        prompt.push_str(DELEGATION_PROMPT_SECTION);
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn get_session_delegation_enabled(
+    state: State<'_, crate::AppState>,
+    window: tauri::WebviewWindow,
+    session_id: String,
+) -> Result<bool, String> {
+    let project = state.active(window.label());
+    ensure_project_frame(&state.store, &project.id, &session_id).await?;
+    Ok(session_delegation_enabled(&state.store, &session_id).await)
+}
+
+#[tauri::command]
+pub(crate) async fn set_session_delegation_enabled(
+    state: State<'_, crate::AppState>,
+    window: tauri::WebviewWindow,
+    session_id: String,
+    enabled: bool,
+) -> Result<bool, String> {
+    let project = state.active(window.label());
+    save_session_delegation_enabled(&state.store, &project.id, &session_id, enabled).await?;
+    crate::clear_idle_agents(&state).await;
+    Ok(enabled)
 }
 
 #[tauri::command]
@@ -70,19 +180,41 @@ pub(crate) async fn create_agent_workflow(
     mode: String,
 ) -> Result<AgentWorkflowSnapshot, String> {
     let project = state.active(window.label());
-    let mode = parse_delegation_mode(&mode)?;
+    let frame_id = state
+        .active_frame(window.label())
+        .ok_or_else(|| "Open a conversation before creating an Agent workflow.".to_string())?;
+    create_agent_workflow_draft(
+        &state.store,
+        &project.id,
+        &project.root,
+        frame_id,
+        goal,
+        &mode,
+    )
+    .await
+}
+
+pub(crate) async fn create_agent_workflow_draft(
+    store: &Store,
+    project_id: &str,
+    project_root: &std::path::Path,
+    frame_id: String,
+    goal: String,
+    mode: &str,
+) -> Result<AgentWorkflowSnapshot, String> {
+    require_session_delegation(store, project_id, &frame_id).await?;
+    let mode = parse_delegation_mode(mode)?;
     let mut plan = suggested_plan(&goal, mode)?;
     namespace_plan_steps(&mut plan);
     if plan.steps.is_empty() {
         return Err("This goal does not need a controlled multi-Agent plan.".into());
     }
-    let (workflow, steps) = workflow_records(&plan, &project, state.active_frame(window.label()))?;
-    state
-        .store
+    let (workflow, steps) = workflow_records(&plan, project_id, project_root, Some(frame_id))?;
+    store
         .create_agent_workflow_plan(&workflow, &steps)
         .await
         .map_err(|error| error.to_string())?;
-    load_workflow_snapshot(&state.store, workflow).await
+    load_workflow_snapshot(store, workflow).await
 }
 
 #[tauri::command]
@@ -96,6 +228,7 @@ pub(crate) async fn revise_agent_workflow(
 ) -> Result<AgentWorkflowSnapshot, String> {
     let project = state.active(window.label());
     let current = project_workflow(&state.store, &project.id, &workflow_id).await?;
+    require_workflow_delegation(&state.store, &current).await?;
     if current.status != AgentWorkflowStatus::Draft {
         return Err("Only draft Agent plans can be revised.".into());
     }
@@ -106,7 +239,8 @@ pub(crate) async fn revise_agent_workflow(
     if plan.steps.is_empty() {
         return Err("This goal does not need a controlled multi-Agent plan.".into());
     }
-    let (mut workflow, steps) = workflow_records(&plan, &project, current.frame_id.clone())?;
+    let (mut workflow, steps) =
+        workflow_records(&plan, &project.id, &project.root, current.frame_id.clone())?;
     workflow.created_at = current.created_at;
     workflow.version = current.version;
     if !state
@@ -167,7 +301,8 @@ fn namespace_plan_steps(plan: &mut DelegationPlan) {
 
 fn workflow_records(
     plan: &DelegationPlan,
-    project: &ActiveProject,
+    project_id: &str,
+    project_root: &std::path::Path,
     frame_id: Option<String>,
 ) -> Result<(AgentWorkflow, Vec<AgentWorkflowStep>), String> {
     plan.validate(&AgentTemplateRegistry::builtins())
@@ -178,7 +313,7 @@ fn workflow_records(
         plan.goal.clone()
     };
     let mut workflow =
-        AgentWorkflow::new(&plan.id, &project.id, project.root.to_string_lossy(), name)
+        AgentWorkflow::new(&plan.id, project_id, project_root.to_string_lossy(), name)
             .map_err(|error| error.to_string())?;
     workflow.frame_id = frame_id;
     workflow.description = "Controlled multi-Agent execution plan".into();
@@ -250,6 +385,10 @@ async fn load_workflow_snapshot(
     store: &Store,
     workflow: AgentWorkflow,
 ) -> Result<AgentWorkflowSnapshot, String> {
+    let delegation_enabled = match workflow.frame_id.as_deref() {
+        Some(frame_id) => session_delegation_enabled(store, frame_id).await,
+        None => false,
+    };
     let steps = store
         .list_agent_workflow_steps(&workflow.id)
         .await
@@ -262,6 +401,7 @@ async fn load_workflow_snapshot(
         workflow,
         steps,
         attempts,
+        delegation_enabled,
     })
 }
 
@@ -273,7 +413,8 @@ pub(crate) async fn approve_agent_workflow(
     expected_version: i64,
 ) -> Result<AgentWorkflowSnapshot, String> {
     let project = state.active(window.label());
-    project_workflow(&state.store, &project.id, &workflow_id).await?;
+    let current = project_workflow(&state.store, &project.id, &workflow_id).await?;
+    require_workflow_delegation(&state.store, &current).await?;
     if !state
         .store
         .approve_agent_workflow_plan(&workflow_id, expected_version)
@@ -317,6 +458,7 @@ pub(crate) async fn retry_agent_workflow(
 ) -> Result<AgentWorkflowSnapshot, String> {
     let project = state.active(window.label());
     let workflow = project_workflow(&state.store, &project.id, &workflow_id).await?;
+    require_workflow_delegation(&state.store, &workflow).await?;
     if !matches!(
         workflow.status,
         AgentWorkflowStatus::Failed | AgentWorkflowStatus::Cancelled
@@ -356,6 +498,7 @@ pub(crate) async fn run_agent_workflow(
     if workflow.project_id != project.id {
         return Err("Agent workflow does not belong to the active project".into());
     }
+    require_workflow_delegation(&state.store, &workflow).await?;
     let plan: DelegationPlan = serde_json::from_str(&workflow.plan_json)
         .map_err(|error| format!("Agent workflow plan is invalid: {error}"))?;
     if plan.id != workflow.id {
@@ -1941,6 +2084,44 @@ mod tests {
         assert!(parse_result_object(r#"{"summary":"done"}"#).is_err());
         assert!(parse_result_object(r#"{"summary":"done","files_changed":[],"diff_summary":"","artifacts":[],"evidence":[],"tests":[],"risks":[]}"#)
         .is_ok());
+    }
+
+    #[test]
+    fn delegation_prompt_section_tracks_the_toggle_idempotently() {
+        let mut prompt = "Base prompt".to_string();
+        sync_delegation_prompt(&mut prompt, true);
+        prompt.push_str("\n\n## Specialist\nKeep this section.");
+        sync_delegation_prompt(&mut prompt, true);
+        assert_eq!(prompt.matches("<delegation_capability>").count(), 1);
+        assert!(prompt.contains("never approves or runs"));
+        assert!(prompt.contains("## Specialist\nKeep this section."));
+        sync_delegation_prompt(&mut prompt, false);
+        assert_eq!(prompt, "Base prompt\n\n## Specialist\nKeep this section.");
+    }
+
+    #[tokio::test]
+    async fn delegation_setting_defaults_off_and_is_project_scoped() {
+        let path = std::env::temp_dir().join(format!(
+            "wisp_delegation_setting_{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Store::open(&path).await.unwrap();
+        store.create_project("p1", "One", "").await.unwrap();
+        store.create_project("p2", "Two", "").await.unwrap();
+        store
+            .create_frame("f1", "p1", "Agent", "model")
+            .await
+            .unwrap();
+        assert!(!session_delegation_enabled(&store, "f1").await);
+        assert!(save_session_delegation_enabled(&store, "p2", "f1", true)
+            .await
+            .is_err());
+        save_session_delegation_enabled(&store, "p1", "f1", true)
+            .await
+            .unwrap();
+        assert!(session_delegation_enabled(&store, "f1").await);
+        drop(store);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

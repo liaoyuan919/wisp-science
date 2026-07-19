@@ -4691,13 +4691,17 @@ pub(super) fn agent_workflows_panel(
     busy: RwSignal<bool>,
     launching: RwSignal<Vec<String>>,
     error: RwSignal<Option<String>>,
+    delegation_enabled: RwSignal<bool>,
     locale: RwSignal<Locale>,
     load_session: Callback<String>,
     refresh_sessions: Callback<()>,
 ) -> impl IntoView {
     let submit = move |event: ev::SubmitEvent| {
         event.prevent_default();
-        if busy.get_untracked() || goal.get_untracked().trim().is_empty() {
+        if !delegation_enabled.get_untracked()
+            || busy.get_untracked()
+            || goal.get_untracked().trim().is_empty()
+        {
             return;
         }
         let requested_goal = goal.get_untracked().trim().to_string();
@@ -4747,14 +4751,19 @@ pub(super) fn agent_workflows_panel(
 
     view! {
         <div class="agents-pane" data-testid="agent-workflows">
+            {move || (!delegation_enabled.get()).then(|| view! {
+                <div class="agent-delegation-off">{t(locale.get(), "agents.disabled")}</div>
+            })}
             <form class="agents-create" on:submit=submit>
                 <label for="agent-workflow-goal">{move || t(locale.get(), "agents.goal")}</label>
                 <textarea id="agent-workflow-goal" data-testid="agent-goal"
                     prop:value=move || goal.get()
                     prop:placeholder=move || t(locale.get(), "agents.goal_ph")
+                    disabled=move || !delegation_enabled.get()
                     on:input=move |event| goal.set(event_target_value(&event))></textarea>
                 <div class="agents-create-actions">
                     <select data-testid="agent-mode" prop:value=move || mode.get()
+                        disabled=move || !delegation_enabled.get()
                         on:change=move |event| mode.set(event_target_value(&event))>
                         <option value="manual">{move || t(locale.get(), "agents.mode.manual")}</option>
                         <option value="assisted">{move || t(locale.get(), "agents.mode.assisted")}</option>
@@ -4767,7 +4776,7 @@ pub(super) fn agent_workflows_panel(
                         }>{"×"}</button>
                     })}
                     <button type="submit" class="agents-primary" data-testid="agent-create"
-                        disabled=move || busy.get() || goal.get().trim().is_empty()>
+                        disabled=move || !delegation_enabled.get() || busy.get() || goal.get().trim().is_empty()>
                         {move || if busy.get() {
                             "…".into()
                         } else if editing.get().is_some() {
@@ -4797,6 +4806,7 @@ pub(super) fn agent_workflows_panel(
                         let cancel_id = workflow_id.clone();
                         let retry_id = workflow_id.clone();
                         let status_class = format!("agent-workflow-status {}", workflow.status);
+                        let workflow_delegation_enabled = snapshot.delegation_enabled;
                         let latest_attempts = snapshot.attempts.clone();
                         view! {
                             <article class="agent-workflow-card" data-workflow-id=workflow_id>
@@ -4811,17 +4821,22 @@ pub(super) fn agent_workflows_panel(
                                 {workflow.requires_confirmation.then(|| view! {
                                     <div class="agent-confirm-hint">{t(locale.get(), "agents.confirm_hint")}</div>
                                 })}
+                                {(!workflow_delegation_enabled).then(|| view! {
+                                    <div class="agent-delegation-off">{t(locale.get(), "agents.workflow_disabled")}</div>
+                                })}
                                 <div class="agent-workflow-actions">
                                     {(workflow.status == "draft").then(|| {
                                         let edit_goal = workflow.goal.clone();
                                         let edit_mode = workflow.mode.clone();
                                         view! {
-                                            <button type="button" class="agents-secondary" on:click=move |_| {
+                                            <button type="button" class="agents-secondary"
+                                                disabled=!workflow_delegation_enabled on:click=move |_| {
                                                 editing.set(Some(edit_id.clone()));
                                                 goal.set(edit_goal.clone());
                                                 mode.set(edit_mode.clone());
                                             }>{t(locale.get(), "agents.regenerate")}</button>
                                             <button type="button" class="agents-primary" data-testid="agent-approve"
+                                                disabled=!workflow_delegation_enabled
                                                 on:click=move |_| invoke_agent_workflow_action(
                                                     "approve_agent_workflow",
                                                     to_value(&serde_json::json!({
@@ -4835,7 +4850,7 @@ pub(super) fn agent_workflows_panel(
                                     })}
                                     {(workflow.status == "approved").then(|| view! {
                                         <button type="button" class="agents-primary" data-testid="agent-run"
-                                            disabled=move || launching.with(|ids| ids.contains(&run_busy_id))
+                                            disabled=move || !workflow_delegation_enabled || launching.with(|ids| ids.contains(&run_busy_id))
                                             on:click=move |_| launch_agent_workflow(
                                                 run_id.clone(),
                                                 workflows,
@@ -4854,6 +4869,7 @@ pub(super) fn agent_workflows_panel(
                                     })}
                                     {matches!(workflow.status.as_str(), "failed" | "cancelled").then(|| view! {
                                         <button type="button" class="agents-primary" data-testid="agent-retry"
+                                            disabled=!workflow_delegation_enabled
                                             on:click=move |_| invoke_agent_workflow_action(
                                                 "retry_agent_workflow",
                                                 to_value(&serde_json::json!({ "workflowId": retry_id })).unwrap(),

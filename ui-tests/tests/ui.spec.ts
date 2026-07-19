@@ -43,6 +43,16 @@ async function openAgentMenu(page: Page) {
   return page.getByRole("menu", { name: "Agent options" });
 }
 
+async function enableDelegation(page: Page) {
+  const menu = await openAgentMenu(page);
+  const row = menu.locator("label.agent-menu-row", { hasText: "Delegation" });
+  const toggle = row.locator('input[type="checkbox"]');
+  if (!(await toggle.isChecked())) await row.click();
+  await expect.poll(() => lastInvokeArgs(page, "set_session_delegation_enabled"))
+    .toMatchObject({ enabled: true });
+  await page.keyboard.press("Escape");
+}
+
 async function openComputeMenu(page: Page) {
   const agentMenu = await openAgentMenu(page);
   await agentMenu.getByRole("button", { name: /^Compute/ }).click();
@@ -1640,6 +1650,12 @@ test("Escape closes the compute resource menu", async ({ page }) => {
 test("agent menu updates review, reviewer model, and memory preferences", async ({ page }) => {
   await enterApp(page);
   let menu = await openAgentMenu(page);
+
+  const delegation = menu.locator("label.agent-menu-row", { hasText: "Delegation" });
+  await expect(delegation.locator('input[type="checkbox"]')).not.toBeChecked();
+  await delegation.click();
+  await expect.poll(() => lastInvokeArgs(page, "set_session_delegation_enabled"))
+    .toMatchObject({ enabled: true });
 
   await menu.locator("label.agent-menu-row", { hasText: "Auto-review" }).click();
   await expect.poll(() => lastInvokeArgs(page, "set_auto_review_enabled")).toMatchObject({ enabled: true });
@@ -4061,8 +4077,24 @@ test("ACP thinking folds into the steps panel instead of dangling under the repl
   expect(stepsY).toBeLessThan(replyY);
 });
 
+test("Delegation toggle gates new Agent workflows for the current conversation", async ({ page }) => {
+  await enterApp(page);
+  await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.locator(".rightpane").getByRole("button", { name: "Agents", exact: true }).click();
+  const panel = page.getByTestId("agent-workflows");
+  await expect(panel).toContainText("Delegation is off for this conversation");
+  await expect(panel.getByTestId("agent-goal")).toBeDisabled();
+  await expect(panel.getByTestId("agent-create")).toBeDisabled();
+
+  await enableDelegation(page);
+  await expect(panel.getByTestId("agent-goal")).toBeEnabled();
+  await panel.getByTestId("agent-goal").fill("analyze code");
+  await expect(panel.getByTestId("agent-create")).toBeEnabled();
+});
+
 test("Agents panel creates, revises, approves, runs, and takes over a workflow", async ({ page }) => {
   await enterApp(page);
+  await enableDelegation(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.locator(".rightpane").getByRole("button", { name: "Agents", exact: true }).click();
 
@@ -4096,6 +4128,7 @@ test("Agents panel creates, revises, approves, runs, and takes over a workflow",
 
 test("Agents panel cancels a running workflow and prepares it for retry", async ({ page }) => {
   await enterApp(page);
+  await enableDelegation(page);
   await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.locator(".rightpane").getByRole("button", { name: "Agents", exact: true }).click();
 
@@ -4111,9 +4144,19 @@ test("Agents panel cancels a running workflow and prepares it for retry", async 
 
   await expect(card).toContainText("running", { timeout: 2_000 });
   await expect(card.getByRole("button", { name: "Take over" })).toHaveCount(0);
+  const menu = await openAgentMenu(page);
+  await menu.locator("label.agent-menu-row", { hasText: "Delegation" }).click();
+  await expect.poll(() => lastInvokeArgs(page, "set_session_delegation_enabled"))
+    .toMatchObject({ enabled: false });
+  await page.keyboard.press("Escape");
+  await expect(card).toContainText("Delegation is off", { timeout: 2_000 });
+  await expect(card.getByTestId("agent-cancel")).toBeEnabled();
   await card.getByTestId("agent-cancel").click();
   await expect(card).toContainText("cancelled");
   await expect(card.getByRole("button", { name: "Take over" })).toBeVisible();
+  await expect(card.getByTestId("agent-retry")).toBeDisabled();
+  await enableDelegation(page);
+  await expect(card.getByTestId("agent-retry")).toBeEnabled({ timeout: 2_000 });
   await card.getByTestId("agent-retry").click();
   await expect(card).toContainText("approved");
 });

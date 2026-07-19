@@ -140,6 +140,11 @@ impl BridgeServer {
             get_run_tool_schema(),
             cancel_run_tool_schema(),
         ];
+        if let Some(frame_id) = self.cfg.frame_id.as_deref() {
+            if crate::delegation_runtime::session_delegation_enabled(&self.store, frame_id).await {
+                tools.push(propose_delegation_tool_schema());
+            }
+        }
         let remote = self.ensure_remote_tools().await?;
         tools.extend(remote);
         Ok(json!({ "tools": tools }))
@@ -155,7 +160,7 @@ impl BridgeServer {
             .cloned()
             .unwrap_or_else(|| json!({}));
         let (text, is_error) = match name {
-            "wisp_get_capabilities" => (self.capabilities_text()?, false),
+            "wisp_get_capabilities" => (self.capabilities_text().await?, false),
             "wisp_list_skills" => (self.list_skills_text(), false),
             "wisp_use_skill" => match self.use_skill_text(&args) {
                 Ok(s) => (s, false),
@@ -187,6 +192,26 @@ impl BridgeServer {
             }
             "wisp_cancel_run" => {
                 let result = self.cancel_run(&args).await;
+                (result.content, !result.success)
+            }
+            "wisp_propose_delegation" => {
+                let Some(frame_id) = self.cfg.frame_id.as_deref() else {
+                    return Err(anyhow!("delegation requires a conversation frame"));
+                };
+                let tool = crate::delegation_tool::ProposeDelegationTool::for_project(
+                    self.store.clone(),
+                    self.cfg.project_id.clone(),
+                    self.cfg.project_root.clone(),
+                    frame_id,
+                );
+                let result = tool
+                    .run(
+                        &args,
+                        &BridgeToolEnv {
+                            project_root: self.cfg.project_root.clone(),
+                        },
+                    )
+                    .await;
                 (result.content, !result.success)
             }
             other => {
@@ -394,7 +419,13 @@ impl BridgeServer {
         Ok(out)
     }
 
-    fn capabilities_text(&self) -> Result<String> {
+    async fn capabilities_text(&self) -> Result<String> {
+        let delegation_enabled = match self.cfg.frame_id.as_deref() {
+            Some(frame_id) => {
+                crate::delegation_runtime::session_delegation_enabled(&self.store, frame_id).await
+            }
+            None => false,
+        };
         pretty_json(&json!({
             "schemaVersion": 1,
             "projectId": self.cfg.project_id,
@@ -419,6 +450,12 @@ impl BridgeServer {
                     "name": "harness.write",
                     "allowed": false,
                     "reason": "Memory, artifact, graph, and persistent runtime writes require an approval broker and are not exposed by this bridge."
+                },
+                {
+                    "name": "delegation.propose",
+                    "allowed": delegation_enabled,
+                    "tools": if delegation_enabled { vec!["wisp_propose_delegation"] } else { vec![] },
+                    "policy": "draft_only; explicit UI approval and run remain required"
                 }
             ]
         }))
@@ -677,6 +714,15 @@ fn cancel_run_tool_schema() -> Value {
     })
 }
 
+fn propose_delegation_tool_schema() -> Value {
+    let schema = crate::delegation_tool::propose_delegation_schema();
+    json!({
+        "name": "wisp_propose_delegation",
+        "description": schema.function.description,
+        "inputSchema": schema.function.parameters,
+    })
+}
+
 fn is_builtin_tool(name: &str) -> bool {
     matches!(
         name,
@@ -690,6 +736,7 @@ fn is_builtin_tool(name: &str) -> bool {
             | "wisp_run_in_context"
             | "wisp_get_run"
             | "wisp_cancel_run"
+            | "wisp_propose_delegation"
     )
 }
 
@@ -873,6 +920,9 @@ mod tests {
 
         assert_eq!(get_run_tool_schema()["name"], "wisp_get_run");
         assert_eq!(cancel_run_tool_schema()["name"], "wisp_cancel_run");
+        let delegation = propose_delegation_tool_schema();
+        assert_eq!(delegation["name"], "wisp_propose_delegation");
+        assert_eq!(delegation["inputSchema"]["required"], json!(["goal"]));
     }
 
     #[test]
@@ -888,10 +938,81 @@ mod tests {
             "wisp_run_in_context",
             "wisp_get_run",
             "wisp_cancel_run",
+            "wisp_propose_delegation",
         ] {
             assert!(is_builtin_tool(name), "{name} must be reserved");
         }
         assert!(!is_builtin_tool("third_party_run"));
+    }
+
+    #[tokio::test]
+    async fn delegation_tool_is_listed_only_when_the_session_opted_in() {
+        let base =
+            std::env::temp_dir().join(format!("wisp_mcp_delegation_{}", uuid::Uuid::new_v4()));
+        let project_root = base.join("project");
+        let app_data = base.join("app-data");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let cfg = BridgeConfig {
+            app_data,
+            project_root: project_root.clone(),
+            resource_root: None,
+            project_id: "project-a".into(),
+            frame_id: Some("frame-a".into()),
+        };
+        let mut server = BridgeServer::new(cfg).await.unwrap();
+        server.bundled_bio_tools_loaded = true;
+        server.custom_mcp_tools_loaded = true;
+        server
+            .store
+            .create_project("project-a", "A", &project_root.to_string_lossy())
+            .await
+            .unwrap();
+        server
+            .store
+            .create_frame("frame-a", "project-a", "Agent", "model")
+            .await
+            .unwrap();
+
+        let disabled = server.tools_list().await.unwrap();
+        assert!(!disabled.to_string().contains("wisp_propose_delegation"));
+        crate::delegation_runtime::save_session_delegation_enabled(
+            &server.store,
+            "project-a",
+            "frame-a",
+            true,
+        )
+        .await
+        .unwrap();
+        let enabled = server.tools_list().await.unwrap();
+        assert!(enabled.to_string().contains("wisp_propose_delegation"));
+        let capabilities: Value =
+            serde_json::from_str(&server.capabilities_text().await.unwrap()).unwrap();
+        let delegation = capabilities["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == "delegation.propose")
+            .unwrap();
+        assert_eq!(delegation["allowed"], true);
+
+        let result = server
+            .tools_call(json!({
+                "name": "wisp_propose_delegation",
+                "arguments": { "goal": "analyze code and create a visualization" }
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["isError"], false);
+        let workflows = server
+            .store
+            .list_agent_workflows("project-a")
+            .await
+            .unwrap();
+        assert_eq!(workflows.len(), 1);
+        assert_eq!(workflows[0].status, wisp_store::AgentWorkflowStatus::Draft);
+
+        drop(server);
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[tokio::test]
@@ -994,7 +1115,7 @@ mod tests {
         assert!(!contexts.contains("must-not-leak"));
 
         let capabilities: Value =
-            serde_json::from_str(&server.capabilities_text().unwrap()).unwrap();
+            serde_json::from_str(&server.capabilities_text().await.unwrap()).unwrap();
         assert_eq!(capabilities["scope"], "active_project");
         let harness_write = capabilities["capabilities"]
             .as_array()

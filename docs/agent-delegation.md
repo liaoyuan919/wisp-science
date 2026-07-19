@@ -6,17 +6,21 @@ the model for a normal conversation.
 
 ## Workflow
 
-1. Open a project and the right panel, then choose **Agents**.
-2. Describe a code, analysis, biology, or visualization goal and choose Manual,
+1. Open the composer Agent menu and enable **Delegation** for the current
+   conversation. New conversations start with delegation off.
+2. Open the right panel and choose **Agents**, or ask the main Agent to propose
+   a delegated plan. The main Agent can only create a persisted draft; it
+   cannot approve or run the plan on the user's behalf.
+3. Describe a code, analysis, biology, or visualization goal and choose Manual,
    Assisted, or Automatic mode.
-3. Create the draft. Review each step's backend, tools, token budget, and
+4. Create the draft. Review each step's backend, tools, token budget, and
    timeout. A draft can be edited and regenerated without changing an approved
    plan behind the user's back.
-4. Approve the immutable plan, then run it.
-5. Follow persisted step attempts and usage in the panel. Cancel requests are
+5. Approve the immutable plan, then run it.
+6. Follow persisted step attempts and usage in the panel. Cancel requests are
    stored in SQLite, so the scheduler and both local and ACP backends observe
    the same state.
-6. Failed or cancelled workflows can be returned to Approved with **Retry**.
+7. Failed or cancelled workflows can be returned to Approved with **Retry**.
    Completed step sessions can be opened with **Take over** for ordinary chat.
 
 ## Safety and current limits
@@ -35,6 +39,9 @@ the model for a normal conversation.
 - Application shutdown marks interrupted workflows failed. Use **Retry** after
   inspecting the recorded error; Wisp does not silently resume an unknown
   external process.
+- Turning Delegation off blocks new drafts, approvals, runs, and retries for
+  that conversation. It does not hide history or cancel an already running
+  workflow; cancellation remains an explicit action in the Agents panel.
 
 The current planner is intentionally small and template-based. It recognizes
 code/analysis, biology, and visualization goals; unrelated simple goals stay in

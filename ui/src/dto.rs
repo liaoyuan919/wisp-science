@@ -1262,6 +1262,7 @@ pub(crate) struct AgentWorkflowSnapshot {
     pub(crate) workflow: AgentWorkflow,
     pub(crate) steps: Vec<AgentWorkflowStep>,
     pub(crate) attempts: Vec<AgentWorkflowAttempt>,
+    pub(crate) delegation_enabled: bool,
 }
 
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq)]

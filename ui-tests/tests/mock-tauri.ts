@@ -112,6 +112,8 @@ export function tauriMock(): void {
   ];
   let memoryEnabled = true;
   let autoReviewEnabled = false;
+  const sessionDelegationEnabled: Record<string, boolean> = {};
+  let lastDelegationSessionId = "s-current";
   // Mutable workspace fixtures let live FileChanged events prove that open
   // previews re-read content written by an agent tool.
   const workspaceMd: Record<string, string> = {};
@@ -175,7 +177,7 @@ export function tauriMock(): void {
         id,
         project_id: "default",
         workspace_id: project.root,
-        frame_id: null,
+        frame_id: lastDelegationSessionId,
         name: goal,
         description: "Controlled multi-Agent execution plan",
         goal,
@@ -213,6 +215,7 @@ export function tauriMock(): void {
         updated_at: 1,
       }],
       attempts: [],
+      delegation_enabled: sessionDelegationEnabled[lastDelegationSessionId] ?? false,
     };
   };
   const agentWorkflowAttempt = (snapshot: any, status: string) => ({
@@ -731,6 +734,9 @@ export function tauriMock(): void {
           case "list_agent_workflows":
             return mockAgentWorkflows;
           case "create_agent_workflow": {
+            if (!(sessionDelegationEnabled[lastDelegationSessionId] ?? false)) {
+              throw new Error("Sub-Agent delegation is off for this conversation.");
+            }
             const snapshot = agentWorkflowSnapshot(String(arg("goal") ?? ""), String(arg("mode") ?? "assisted"));
             mockAgentWorkflows = [snapshot, ...mockAgentWorkflows];
             return snapshot;
@@ -738,6 +744,7 @@ export function tauriMock(): void {
           case "revise_agent_workflow": {
             const snapshot = mockAgentWorkflows.find((item) => item.workflow.id === arg("workflowId"));
             if (!snapshot) throw new Error("Agent workflow does not exist");
+            if (!snapshot.delegation_enabled) throw new Error("Sub-Agent delegation is off for this conversation.");
             snapshot.workflow.goal = String(arg("goal") ?? snapshot.workflow.goal);
             snapshot.workflow.name = snapshot.workflow.goal;
             snapshot.workflow.mode = String(arg("mode") ?? snapshot.workflow.mode);
@@ -747,6 +754,7 @@ export function tauriMock(): void {
           case "approve_agent_workflow": {
             const snapshot = mockAgentWorkflows.find((item) => item.workflow.id === arg("workflowId"));
             if (!snapshot) throw new Error("Agent workflow does not exist");
+            if (!snapshot.delegation_enabled) throw new Error("Sub-Agent delegation is off for this conversation.");
             snapshot.workflow.status = "approved";
             snapshot.workflow.version += 1;
             return snapshot;
@@ -754,10 +762,11 @@ export function tauriMock(): void {
           case "run_agent_workflow": {
             const snapshot = mockAgentWorkflows.find((item) => item.workflow.id === arg("workflowId"));
             if (!snapshot) throw new Error("Agent workflow does not exist");
+            if (!snapshot.delegation_enabled) throw new Error("Sub-Agent delegation is off for this conversation.");
             snapshot.workflow.status = "running";
             snapshot.attempts = [agentWorkflowAttempt(snapshot, "running")];
             const cancellationDemo = snapshot.workflow.goal.includes("CANCEL DEMO");
-            await new Promise((resolve) => setTimeout(resolve, cancellationDemo ? 1_500 : 60));
+            await new Promise((resolve) => setTimeout(resolve, cancellationDemo ? 5_000 : 60));
             if (snapshot.workflow.status === "cancelled") {
               return { workflow_id: snapshot.workflow.id, status: "cancelled", steps: [] };
             }
@@ -778,6 +787,7 @@ export function tauriMock(): void {
           case "retry_agent_workflow": {
             const snapshot = mockAgentWorkflows.find((item) => item.workflow.id === arg("workflowId"));
             if (!snapshot) throw new Error("Agent workflow does not exist");
+            if (!snapshot.delegation_enabled) throw new Error("Sub-Agent delegation is off for this conversation.");
             snapshot.workflow.status = "approved";
             snapshot.workflow.version += 1;
             return snapshot;
@@ -1485,6 +1495,19 @@ export function tauriMock(): void {
           case "set_auto_review_enabled":
             autoReviewEnabled = !!args?.enabled;
             return autoReviewEnabled;
+          case "get_session_delegation_enabled":
+            return sessionDelegationEnabled[String(arg("sessionId") ?? "")] ?? false;
+          case "set_session_delegation_enabled": {
+            const sessionId = String(arg("sessionId") ?? "");
+            lastDelegationSessionId = sessionId;
+            sessionDelegationEnabled[sessionId] = Boolean(arg("enabled"));
+            for (const snapshot of mockAgentWorkflows) {
+              if (snapshot.workflow.frame_id === sessionId) {
+                snapshot.delegation_enabled = sessionDelegationEnabled[sessionId];
+              }
+            }
+            return sessionDelegationEnabled[sessionId];
+          }
           case "list_memory":
           case "write_memory_file":
           case "delete_memory_file":

@@ -3632,6 +3632,24 @@ fn App() -> impl IntoView {
     let compute_search = create_rw_signal(String::new());
     let specialist_menu_open = create_rw_signal(false);
     let auto_review_enabled = create_rw_signal(false);
+    let delegation_enabled = create_rw_signal(false);
+    let delegation_setting_busy = create_rw_signal(false);
+    create_effect(move |_| {
+        delegation_enabled.set(false);
+        delegation_setting_busy.set(false);
+        let Some(session_id) = active_session.get() else {
+            return;
+        };
+        spawn_local(async move {
+            let args = to_value(&serde_json::json!({ "sessionId": session_id.clone() })).unwrap();
+            let Ok(value) = invoke_checked("get_session_delegation_enabled", args).await else {
+                return;
+            };
+            if active_session.get_untracked().as_deref() == Some(session_id.as_str()) {
+                delegation_enabled.set(value.as_bool().unwrap_or(false));
+            }
+        });
+    });
     spawn_local(async move {
         let value = invoke("get_auto_review_enabled", JsValue::UNDEFINED).await;
         if let Some(enabled) = value.as_bool() {
@@ -6642,6 +6660,53 @@ fn App() -> impl IntoView {
                                 <div class="compose-menu agent-menu" role="menu"
                                     aria-label=move || t(locale.get(), "composer.agent_options")>
                                     <label class="agent-menu-row">
+                                        <span>{move || t(locale.get(), "composer.delegation")}</span>
+                                        <span class="toggle agent-menu-toggle">
+                                            <input type="checkbox" prop:checked=move || delegation_enabled.get()
+                                                disabled=move || delegation_setting_busy.get()
+                                                on:change=move |ev| {
+                                                    let enabled = event_target_checked(&ev);
+                                                    delegation_enabled.set(enabled);
+                                                    delegation_setting_busy.set(true);
+                                                    spawn_local(async move {
+                                                        let (session_id, created_session) = match active_session.get_untracked() {
+                                                            Some(session_id) => (session_id, false),
+                                                            None if enabled => {
+                                                                let Some(session_id) = invoke("new_session", JsValue::UNDEFINED).await.as_string() else {
+                                                                    delegation_enabled.set(false);
+                                                                    delegation_setting_busy.set(false);
+                                                                    return;
+                                                                };
+                                                                (session_id, true)
+                                                            }
+                                                            None => {
+                                                                delegation_enabled.set(false);
+                                                                delegation_setting_busy.set(false);
+                                                                return;
+                                                            }
+                                                        };
+                                                        let args = to_value(&serde_json::json!({
+                                                            "sessionId": session_id.clone(),
+                                                            "enabled": enabled,
+                                                        })).unwrap();
+                                                        let saved = invoke_checked("set_session_delegation_enabled", args).await
+                                                            .ok()
+                                                            .and_then(|value| value.as_bool());
+                                                        if created_session {
+                                                            active_session.set(Some(session_id.clone()));
+                                                            items.set(vec![]);
+                                                            refresh_session_history();
+                                                        }
+                                                        if active_session.get_untracked().as_deref() == Some(session_id.as_str()) {
+                                                            delegation_enabled.set(saved.unwrap_or(!enabled));
+                                                            delegation_setting_busy.set(false);
+                                                        }
+                                                    });
+                                                } />
+                                            <span class="toggle-track" aria-hidden="true"></span>
+                                        </span>
+                                    </label>
+                                    <label class="agent-menu-row">
                                         <span>{move || t(locale.get(), "composer.auto_review")}</span>
                                         <span class="toggle agent-menu-toggle">
                                             <input type="checkbox" prop:checked=move || auto_review_enabled.get()
@@ -7387,6 +7452,7 @@ fn App() -> impl IntoView {
                             agent_workflow_busy,
                             agent_workflow_launching,
                             agent_workflow_error,
+                            delegation_enabled,
                             locale,
                             load_session.clone(),
                             refresh_agent_sessions.clone(),
