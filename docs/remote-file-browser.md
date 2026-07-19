@@ -29,6 +29,11 @@ or downloaded, but cannot be created, renamed, or deleted from Files. Downloads
 are explicit user actions and do not otherwise synchronize large remote data
 into the project.
 
+Remote PDF, DOCX, XLSX, and PPTX previews use the same raw-byte IPC and bounded
+OOXML validation as local previews. The remote size check runs before transfer;
+Office archives are then checked locally for entry count, expanded size,
+compression ratio, unsafe paths, macros, ActiveX, and embedded OLE content.
+
 ## Manual smoke test
 
 1. Register or import an SSH host, **Probe** it successfully with the configured

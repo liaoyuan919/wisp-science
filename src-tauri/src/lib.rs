@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use tauri::menu::{
     AboutMetadata, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder,
 };
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{ipc::Response, AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 use wisp_core::{Agent, MemoryManager, Output};
 use wisp_llm::{Message, ProviderConfig};
@@ -59,7 +59,8 @@ mod wsl_contexts;
 use artifact_commands::{register_artifact, save_workspace_file_by_kind, upload_file};
 use file_browser::{
     append_review_note, create_directory, create_file, delete_entry, list_dir, list_remote_dir,
-    read_file, read_file_at, read_remote_file, rename_entry, search_files, write_file, FileContent,
+    read_file, read_file_at, read_file_bytes, read_file_bytes_at, read_remote_file,
+    read_remote_file_bytes, rename_entry, search_files, write_file, FileContent,
 };
 use session_export::{capture_env, export_session, get_artifact_provenance};
 #[cfg(test)]
@@ -5798,6 +5799,26 @@ async fn read_artifact(state: State<'_, AppState>, id: String) -> Result<FileCon
         .map_err(|e| format!("{e}"))?
 }
 
+#[tauri::command]
+async fn read_artifact_bytes(
+    state: State<'_, AppState>,
+    id: String,
+    max_bytes: Option<u64>,
+) -> Result<Response, String> {
+    let row = state
+        .store
+        .get_artifact_detail(&id)
+        .await
+        .map_err(|e| format!("{e}"))?
+        .ok_or_else(|| format!("artifact '{id}' not found"))?;
+    let root = PathBuf::from(row.project_root);
+    let bytes =
+        tokio::task::spawn_blocking(move || read_file_bytes_at(&root, &row.path, max_bytes))
+            .await
+            .map_err(|e| format!("{e}"))??;
+    Ok(Response::new(bytes))
+}
+
 /// Read the immutable artifact version captured by a message resource binding.
 /// Resource previews must never follow the artifact's mutable latest-version pointer.
 #[tauri::command]
@@ -5821,6 +5842,33 @@ async fn read_artifact_version(
     tokio::task::spawn_blocking(move || read_file_at(&root, version.storage_path, None))
         .await
         .map_err(|e| format!("{e}"))?
+}
+
+#[tauri::command]
+async fn read_artifact_version_bytes(
+    state: State<'_, AppState>,
+    version_id: String,
+    max_bytes: Option<u64>,
+) -> Result<Response, String> {
+    let version = state
+        .store
+        .get_artifact_version(&version_id)
+        .await
+        .map_err(|e| format!("{e}"))?
+        .ok_or_else(|| format!("artifact version '{version_id}' not found"))?;
+    let artifact = state
+        .store
+        .get_artifact_detail(&version.artifact_id)
+        .await
+        .map_err(|e| format!("{e}"))?
+        .ok_or_else(|| format!("artifact '{}' not found", version.artifact_id))?;
+    let root = PathBuf::from(artifact.project_root);
+    let bytes = tokio::task::spawn_blocking(move || {
+        read_file_bytes_at(&root, &version.storage_path, max_bytes)
+    })
+    .await
+    .map_err(|e| format!("{e}"))??;
+    Ok(Response::new(bytes))
 }
 
 fn mcp_lib_dir(_root: &std::path::Path) -> Option<PathBuf> {
@@ -6657,15 +6705,19 @@ pub fn run() {
             delete_entry,
             list_remote_dir,
             read_remote_file,
+            read_remote_file_bytes,
             search_files,
             read_file,
+            read_file_bytes,
             write_file,
             append_review_note,
             list_artifacts,
             search_artifacts,
             search_sessions,
             read_artifact,
+            read_artifact_bytes,
             read_artifact_version,
+            read_artifact_version_bytes,
             missing_files,
             set_viewed_session,
             upload_file,

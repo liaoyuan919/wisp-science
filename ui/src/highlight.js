@@ -8,10 +8,10 @@ function ensure() {
     loading = new Promise((resolve, reject) => {
       const css = document.createElement("link");
       css.rel = "stylesheet";
-      css.href = "/vendor/highlight-github.min.css";
+      css.href = "/vendor-runtime/highlight-github.min.css";
       document.head.appendChild(css);
       const s = document.createElement("script");
-      s.src = "/vendor/highlight.min.js";
+      s.src = "/vendor-runtime/highlight.min.js";
       s.onload = () => resolve(window.hljs);
       s.onerror = reject;
       document.head.appendChild(s);
@@ -24,9 +24,9 @@ function ensureKatex() {
   if (!katexLoading) {
     const css = document.createElement("link");
     css.rel = "stylesheet";
-    css.href = "/vendor/katex-DwwF5kvc.css";
+    css.href = "/vendor-runtime/katex-DwwF5kvc.css";
     document.head.appendChild(css);
-    katexLoading = import("/vendor/katex-Dn761jRB.js").then((m) => m.k);
+    katexLoading = import("/vendor-runtime/katex-Dn761jRB.js").then((m) => m.k);
   }
   return katexLoading;
 }

@@ -245,6 +245,14 @@ fn kind_and_mime(path: &Path, requested_kind: &str) -> Option<(String, String)> 
             "docx",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         ),
+        "xlsx" => (
+            "xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+        "pptx" => (
+            "pptx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ),
         "md" | "markdown" => ("markdown", "text/markdown"),
         "bib" => ("text", "text/x-bibtex"),
         "csv" => ("csv", "text/csv"),
@@ -506,6 +514,21 @@ mod tests {
             Some((
                 "docx".to_string(),
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    .to_string()
+            ))
+        );
+        assert_eq!(
+            kind_and_mime(Path::new("results.xlsx"), "file"),
+            Some((
+                "xlsx".to_string(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string()
+            ))
+        );
+        assert_eq!(
+            kind_and_mime(Path::new("talk.pptx"), "file"),
+            Some((
+                "pptx".to_string(),
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation"
                     .to_string()
             ))
         );

@@ -14,7 +14,7 @@ watch = [
   "index.html",
   "fonts.css",
   "fonts",
-  "vendor",
+  "vendor-runtime",
   "mock-bridge.js",
   "logo.svg",
   "logo-mark.svg",

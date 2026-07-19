@@ -165,7 +165,8 @@ extends beyond the visible viewport, including at 100% zoom.
 On macOS, run the same commands from a shell (`cargo tauri build` emits a
 `.app` and `.dmg` under `target/release/bundle`). `src-tauri/tauri.macos.conf.json`
 is auto-merged by Tauri to replace the PowerShell `beforeBuildCommand` with a
-cross-platform `trunk build`. For a universal binary (Apple Silicon + Intel):
+cross-platform vendor-runtime generation plus `trunk build`. For a universal
+binary (Apple Silicon + Intel):
 
 ```bash
 rustup target add x86_64-apple-darwin
@@ -351,6 +352,15 @@ notebook: text and tracebacks, raster images, SVG, static HTML, and LaTeX. HTML
 outputs run in a script-free sandbox with external references removed, SVG is
 loaded through an isolated image context, and large individual or aggregate
 outputs are omitted to keep the desktop WebView responsive.
+
+PDF and modern Office files are also previewed fully offline. DOCX keeps its
+document layout, XLSX opens as a read-only virtualized workbook with sheet tabs
+and a formula display, and PPTX uses lazy, windowed slide rendering. PDF and
+OOXML bytes cross the Tauri IPC boundary as raw ArrayBuffers instead of Base64.
+Office previews are bounded to 32 MiB compressed input and reject unsafe or
+excessively expanding ZIP packages; they do not execute macros, ActiveX, OLE,
+formulas, or external relationships. Complex Excel styling and PowerPoint
+animations may not match Microsoft Office exactly.
 
 ### Bundled demos
 
