@@ -34,10 +34,14 @@ fn settings_provider_defaults(provider: &str) -> (&'static str, &'static str) {
 
 /// One-click presets for popular OpenAI-compatible providers (#334):
 /// (label, api_url, model). The user only has to paste an API key.
-const MODEL_PRESETS: [(&str, &str, &str); 3] = [
+/// The "Coding" entries are the monthly coding-plan endpoints — those
+/// subscription keys only work there, not on the pay-per-token URLs.
+const MODEL_PRESETS: [(&str, &str, &str); 5] = [
     ("Kimi", "https://api.moonshot.cn/v1", "kimi-k3"),
     ("GLM", "https://open.bigmodel.cn/api/paas/v4", "glm-5"),
     ("DeepSeek", "https://api.deepseek.com", "deepseek-v4-pro"),
+    ("Kimi Coding", "https://api.kimi.com/coding/v1", "kimi-coding"),
+    ("GLM Coding", "https://open.bigmodel.cn/api/coding/paas/v4", "glm-5.2"),
 ];
 
 fn appearance_palette_options(dark: bool) -> [(&'static str, &'static str); 5] {
