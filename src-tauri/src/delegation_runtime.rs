@@ -451,6 +451,27 @@ pub(crate) async fn cancel_agent_workflow(
 }
 
 #[tauri::command]
+pub(crate) async fn discard_agent_workflow(
+    state: State<'_, crate::AppState>,
+    window: tauri::WebviewWindow,
+    workflow_id: String,
+) -> Result<(), String> {
+    let project = state.active(window.label());
+    let workflow = project_workflow(&state.store, &project.id, &workflow_id).await?;
+    // Cancel a running workflow before discarding; deleting mid-flight would
+    // orphan the live attempt.
+    if workflow.status == AgentWorkflowStatus::Running {
+        return Err("Cancel the running Agent workflow before discarding it.".into());
+    }
+    state
+        .store
+        .delete_agent_workflow(&workflow_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 pub(crate) async fn retry_agent_workflow(
     state: State<'_, crate::AppState>,
     window: tauri::WebviewWindow,

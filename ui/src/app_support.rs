@@ -4781,12 +4781,12 @@ pub(super) fn agent_workflows_panel(
                     disabled=move || !delegation_enabled.get()
                     on:input=move |event| goal.set(event_target_value(&event))></textarea>
                 <div class="agents-create-actions">
-                    <select data-testid="agent-mode" prop:value=move || mode.get()
+                    <select data-testid="agent-mode"
                         disabled=move || !delegation_enabled.get()
-                        on:change=move |event| mode.set(event_target_value(&event))>
-                        <option value="manual">{move || t(locale.get(), "agents.mode.manual")}</option>
-                        <option value="assisted">{move || t(locale.get(), "agents.mode.assisted")}</option>
-                        <option value="automatic">{move || t(locale.get(), "agents.mode.automatic")}</option>
+                        on:change=move |event| mode.set(dom_value(&event))>
+                        <option value="manual" prop:selected=move || mode.get() == "manual">{move || t(locale.get(), "agents.mode.manual")}</option>
+                        <option value="assisted" prop:selected=move || mode.get() == "assisted">{move || t(locale.get(), "agents.mode.assisted")}</option>
+                        <option value="automatic" prop:selected=move || mode.get() == "automatic">{move || t(locale.get(), "agents.mode.automatic")}</option>
                     </select>
                     {move || editing.get().map(|_| view! {
                         <button type="button" class="agents-secondary" on:click=move |_| {
@@ -4820,6 +4820,7 @@ pub(super) fn agent_workflows_panel(
                         let workflow_id = workflow.id.clone();
                         let edit_id = workflow_id.clone();
                         let approve_id = workflow_id.clone();
+                        let discard_id = workflow_id.clone();
                         let run_id = workflow_id.clone();
                         let run_busy_id = workflow_id.clone();
                         let cancel_id = workflow_id.clone();
@@ -4865,6 +4866,13 @@ pub(super) fn agent_workflows_panel(
                                                     workflows,
                                                     error,
                                                 )>{t(locale.get(), "agents.approve")}</button>
+                                            <button type="button" class="agents-danger" data-testid="agent-discard"
+                                                on:click=move |_| invoke_agent_workflow_action(
+                                                    "discard_agent_workflow",
+                                                    to_value(&serde_json::json!({ "workflowId": discard_id })).unwrap(),
+                                                    workflows,
+                                                    error,
+                                                )>{t(locale.get(), "agents.discard")}</button>
                                         }
                                     })}
                                     {(workflow.status == "approved").then(|| view! {

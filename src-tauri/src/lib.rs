@@ -6605,6 +6605,7 @@ pub fn run() {
             delegation_runtime::approve_agent_workflow,
             delegation_runtime::run_agent_workflow,
             delegation_runtime::cancel_agent_workflow,
+            delegation_runtime::discard_agent_workflow,
             delegation_runtime::retry_agent_workflow,
             review_session,
             side_chat,
