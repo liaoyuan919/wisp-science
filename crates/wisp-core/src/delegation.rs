@@ -204,6 +204,8 @@ fn empty_json_object() -> Value {
     serde_json::json!({})
 }
 
+pub const MAX_AGENT_OUTPUT_SCHEMA_BYTES: usize = 32 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentSessionPolicy {
@@ -211,6 +213,54 @@ pub enum AgentSessionPolicy {
     New,
     ReuseIfAvailable,
     RequireExisting,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SpecialistSnapshot {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub instructions: String,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub skills: Option<Vec<String>>,
+    #[serde(default)]
+    pub connectors: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "specialist", rename_all = "snake_case")]
+pub enum AgentOrigin {
+    #[default]
+    LegacyTemplate,
+    Temporary,
+    Specialist(SpecialistSnapshot),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentExecutorRef {
+    Native,
+    Acp { profile_id: String },
+    External { profile_id: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentWorkspacePolicy {
+    SharedReadOnly,
+    SerializedMutation,
+    Isolated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentOutputSchemaSource {
+    #[default]
+    Standard,
+    Task,
+    Specialist,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,6 +303,18 @@ pub struct AgentSpec {
     pub session_policy: AgentSessionPolicy,
     #[serde(default)]
     pub allow_delegation: bool,
+    #[serde(default)]
+    pub origin: AgentOrigin,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub executor: Option<AgentExecutorRef>,
+    #[serde(default)]
+    pub workspace_policy: Option<AgentWorkspacePolicy>,
+    #[serde(default)]
+    pub output_schema_source: AgentOutputSchemaSource,
+    #[serde(default)]
+    pub approval_reasons: Vec<String>,
 }
 
 impl AgentSpec {
@@ -310,6 +372,54 @@ impl AgentSpec {
         Ok(())
     }
 
+    pub fn validate_dynamic_metadata(&self) -> anyhow::Result<()> {
+        if serde_json::to_vec(&self.output_contract)?.len() > MAX_AGENT_OUTPUT_SCHEMA_BYTES {
+            anyhow::bail!(
+                "output_contract exceeds {MAX_AGENT_OUTPUT_SCHEMA_BYTES} serialized bytes"
+            );
+        }
+        match &self.origin {
+            AgentOrigin::LegacyTemplate => {
+                anyhow::bail!("dynamic agent origin cannot be a legacy template")
+            }
+            AgentOrigin::Temporary => {}
+            AgentOrigin::Specialist(snapshot) => {
+                if snapshot.id.trim().is_empty() || snapshot.name.trim().is_empty() {
+                    anyhow::bail!("specialist snapshot id and name are required");
+                }
+            }
+        }
+        if self.capabilities.is_empty() {
+            anyhow::bail!("dynamic agent requires at least one capability");
+        }
+        let mut seen = std::collections::HashSet::new();
+        for capability in &self.capabilities {
+            if !valid_capability_id(capability) {
+                anyhow::bail!("invalid capability id: {capability}");
+            }
+            if !seen.insert(capability) {
+                anyhow::bail!("dynamic agent capabilities must be unique");
+            }
+        }
+        let executor = self
+            .executor
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("dynamic agent executor is required"))?;
+        match executor {
+            AgentExecutorRef::Native => {}
+            AgentExecutorRef::Acp { profile_id } | AgentExecutorRef::External { profile_id }
+                if profile_id.trim().is_empty() =>
+            {
+                anyhow::bail!("external executor profile_id is required")
+            }
+            AgentExecutorRef::Acp { .. } | AgentExecutorRef::External { .. } => {}
+        }
+        if self.workspace_policy.is_none() {
+            anyhow::bail!("dynamic agent workspace_policy is required");
+        }
+        Ok(())
+    }
+
     pub fn constrained_by(
         &self,
         permission_ceiling: &PermissionSet,
@@ -325,6 +435,14 @@ impl AgentSpec {
             ..self.clone()
         }
     }
+}
+
+fn valid_capability_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -603,6 +721,12 @@ mod tests {
             requires_review: false,
             session_policy: AgentSessionPolicy::New,
             allow_delegation: false,
+            origin: AgentOrigin::LegacyTemplate,
+            capabilities: vec![],
+            executor: None,
+            workspace_policy: None,
+            output_schema_source: AgentOutputSchemaSource::Standard,
+            approval_reasons: vec![],
         }
     }
 
@@ -740,5 +864,46 @@ mod tests {
         assert!(spec.validate().is_err());
         spec.input_contract = serde_json::json!({"type":"object"});
         assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn dynamic_metadata_requires_bounded_capabilities_and_executor() {
+        let mut spec = AgentSpec {
+            template_id: "dynamic".into(),
+            origin: AgentOrigin::Temporary,
+            capabilities: vec!["project_read".into()],
+            executor: Some(AgentExecutorRef::Native),
+            workspace_policy: Some(AgentWorkspacePolicy::SharedReadOnly),
+            ..test_spec("temporary")
+        };
+        spec.validate_dynamic_metadata().unwrap();
+
+        spec.capabilities.push("project_read".into());
+        assert!(spec.validate_dynamic_metadata().is_err());
+        spec.capabilities = vec!["Project Read".into()];
+        assert!(spec.validate_dynamic_metadata().is_err());
+        spec.capabilities = vec!["project_read".into()];
+        spec.executor = Some(AgentExecutorRef::Acp {
+            profile_id: String::new(),
+        });
+        assert!(spec.validate_dynamic_metadata().is_err());
+    }
+
+    #[test]
+    fn oversized_output_contract_is_rejected() {
+        let spec = AgentSpec {
+            output_contract: serde_json::json!({
+                "type": "object",
+                "description": "x".repeat(MAX_AGENT_OUTPUT_SCHEMA_BYTES),
+            }),
+            template_id: "dynamic".into(),
+            origin: AgentOrigin::Temporary,
+            capabilities: vec!["project_read".into()],
+            executor: Some(AgentExecutorRef::Native),
+            workspace_policy: Some(AgentWorkspacePolicy::SharedReadOnly),
+            ..test_spec("temporary")
+        };
+        assert!(spec.validate().is_ok());
+        assert!(spec.validate_dynamic_metadata().is_err());
     }
 }

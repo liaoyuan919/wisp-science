@@ -1,14 +1,16 @@
 //! Controlled agent templates and editable delegation plans.
 
 use crate::{
-    AgentBackend, AgentBudget, AgentRole, AgentSessionPolicy, AgentSpec, ContextPolicy,
-    PermissionSet,
+    AgentBackend, AgentBudget, AgentOrigin, AgentRole, AgentSessionPolicy, AgentSpec,
+    ContextPolicy, PermissionSet,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
 pub const MAX_PARALLEL_AGENTS: usize = 2;
+pub const MAX_DELEGATION_TASKS: usize = 8;
+pub const DYNAMIC_DELEGATION_SCHEMA_VERSION: u32 = 2;
 pub const AUTOMATIC_TOKEN_CONFIRMATION_THRESHOLD: u32 = 20_000;
 pub const AUTOMATIC_COST_CONFIRMATION_THRESHOLD_MICROUNITS: u64 = 1_000_000;
 
@@ -76,6 +78,12 @@ impl AgentTemplate {
             requires_review: request.requires_review,
             session_policy: request.session_policy,
             allow_delegation: request.allow_delegation && self.allow_delegation,
+            origin: AgentOrigin::LegacyTemplate,
+            capabilities: vec![],
+            executor: None,
+            workspace_policy: None,
+            output_schema_source: Default::default(),
+            approval_reasons: vec![],
         }
         .constrained_by(
             &self.permission_ceiling,
@@ -152,6 +160,8 @@ pub struct DelegationPlanStep {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DelegationPlan {
+    #[serde(default = "legacy_delegation_schema_version")]
+    pub schema_version: u32,
     pub id: String,
     pub goal: String,
     pub mode: DelegationMode,
@@ -162,11 +172,34 @@ pub struct DelegationPlan {
 
 impl DelegationPlan {
     pub fn validate(&self, templates: &AgentTemplateRegistry) -> anyhow::Result<()> {
+        self.validate_structure()?;
+        for step in &self.steps {
+            if self.schema_version == DYNAMIC_DELEGATION_SCHEMA_VERSION {
+                step.spec.validate_dynamic_metadata()?;
+            } else {
+                templates
+                    .get(&step.spec.template_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("unknown agent template: {}", step.spec.template_id)
+                    })?
+                    .validate_spec(&step.spec)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_structure(&self) -> anyhow::Result<()> {
+        if !matches!(self.schema_version, 1 | DYNAMIC_DELEGATION_SCHEMA_VERSION) {
+            anyhow::bail!("unsupported delegation plan schema version");
+        }
         if self.id.trim().is_empty() || self.goal.trim().is_empty() {
             anyhow::bail!("delegation plan id and goal are required");
         }
         if self.max_parallel == 0 || self.max_parallel > MAX_PARALLEL_AGENTS {
             anyhow::bail!("max_parallel must be between 1 and {MAX_PARALLEL_AGENTS}");
+        }
+        if self.steps.len() > MAX_DELEGATION_TASKS {
+            anyhow::bail!("delegation plan cannot contain more than {MAX_DELEGATION_TASKS} tasks");
         }
         let ids = self
             .steps
@@ -180,12 +213,7 @@ impl DelegationPlan {
             if step.id != step.spec.agent_id {
                 anyhow::bail!("plan step id must match spec agent_id");
             }
-            templates
-                .get(&step.spec.template_id)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("unknown agent template: {}", step.spec.template_id)
-                })?
-                .validate_spec(&step.spec)?;
+            step.spec.validate()?;
             for dependency in &step.spec.dependencies {
                 if dependency == &step.id || !ids.contains(dependency.as_str()) {
                     anyhow::bail!("invalid dependency {dependency} for step {}", step.id);
@@ -195,6 +223,10 @@ impl DelegationPlan {
         ensure_acyclic(&self.steps)?;
         Ok(())
     }
+}
+
+const fn legacy_delegation_schema_version() -> u32 {
+    1
 }
 
 fn ensure_acyclic(steps: &[DelegationPlanStep]) -> anyhow::Result<()> {
@@ -304,6 +336,7 @@ impl DelegationPlanner {
         }
         if selected.is_empty() {
             return Ok(DelegationPlan {
+                schema_version: 1,
                 id: uuid::Uuid::new_v4().to_string(),
                 goal: goal.into(),
                 mode,
@@ -424,6 +457,7 @@ impl DelegationPlanner {
             }),
         };
         let plan = DelegationPlan {
+            schema_version: 1,
             id: uuid::Uuid::new_v4().to_string(),
             goal: goal.into(),
             mode,
@@ -918,5 +952,148 @@ mod tests {
         assert!(response.error.unwrap().contains("token budget"));
         assert_eq!(response.agent_session_id.as_deref(), Some("session"));
         assert_eq!(response.child_frame_id.as_deref(), Some("frame"));
+    }
+
+    fn dynamic_step(id: &str, dependencies: &[&str]) -> DelegationPlanStep {
+        DelegationPlanStep {
+            id: id.into(),
+            spec: AgentSpec {
+                template_id: "dynamic".into(),
+                agent_id: id.into(),
+                name: id.into(),
+                goal: "Complete the assigned task".into(),
+                context_summary: String::new(),
+                inputs: vec![],
+                acceptance_criteria: vec![],
+                dependencies: dependencies.iter().map(|value| (*value).into()).collect(),
+                role: AgentRole::Custom("worker".into()),
+                backend: AgentBackend::Local,
+                model: None,
+                prompt_template: "Complete only the assigned task.".into(),
+                input_contract: json!({"type":"object"}),
+                output_contract: json!({"type":"object"}),
+                permissions: PermissionSet::default(),
+                context_policy: ContextPolicy::default(),
+                budget: AgentBudget::default(),
+                timeout_secs: Some(60),
+                requires_review: false,
+                session_policy: AgentSessionPolicy::New,
+                allow_delegation: false,
+                origin: AgentOrigin::Temporary,
+                capabilities: vec!["project_read".into()],
+                executor: Some(crate::AgentExecutorRef::Native),
+                workspace_policy: Some(crate::AgentWorkspacePolicy::SharedReadOnly),
+                output_schema_source: Default::default(),
+                approval_reasons: vec![],
+            },
+            input: json!({}),
+        }
+    }
+
+    fn dynamic_plan(steps: Vec<DelegationPlanStep>) -> DelegationPlan {
+        DelegationPlan {
+            schema_version: DYNAMIC_DELEGATION_SCHEMA_VERSION,
+            id: "dynamic-plan".into(),
+            goal: "Complete a dynamic batch".into(),
+            mode: DelegationMode::Automatic,
+            requires_confirmation: false,
+            max_parallel: 2,
+            steps,
+        }
+    }
+
+    #[test]
+    fn dynamic_plan_accepts_parallel_fan_in_and_round_trips() {
+        let plan = dynamic_plan(vec![
+            dynamic_step("inspect", &[]),
+            dynamic_step("research", &[]),
+            dynamic_step("synthesize", &["inspect", "research"]),
+        ]);
+        plan.validate(&AgentTemplateRegistry::builtins()).unwrap();
+        assert_eq!(
+            plan.steps
+                .iter()
+                .map(|step| step.id.as_str())
+                .collect::<Vec<_>>(),
+            ["inspect", "research", "synthesize"]
+        );
+        let round_trip: DelegationPlan =
+            serde_json::from_str(&serde_json::to_string(&plan).unwrap()).unwrap();
+        assert_eq!(round_trip, plan);
+    }
+
+    #[test]
+    fn legacy_plan_without_v2_fields_keeps_v1_meaning() {
+        let plan = DelegationPlanner
+            .from_template_ids(
+                "interpret results",
+                DelegationMode::Manual,
+                "",
+                &[],
+                &[],
+                &["biology_interpreter".into()],
+                &AgentTemplateRegistry::builtins(),
+            )
+            .unwrap();
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value.as_object_mut().unwrap().remove("schema_version");
+        for step in value["steps"].as_array_mut().unwrap() {
+            let spec = step["spec"].as_object_mut().unwrap();
+            for key in [
+                "origin",
+                "capabilities",
+                "executor",
+                "workspace_policy",
+                "output_schema_source",
+                "approval_reasons",
+            ] {
+                spec.remove(key);
+            }
+        }
+        let restored: DelegationPlan = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.schema_version, 1);
+        assert_eq!(restored.steps[0].spec.origin, AgentOrigin::LegacyTemplate);
+        restored
+            .validate(&AgentTemplateRegistry::builtins())
+            .unwrap();
+    }
+
+    #[test]
+    fn dynamic_plan_rejects_task_overflow_and_bad_dependencies() {
+        let overflow = dynamic_plan(
+            (0..=MAX_DELEGATION_TASKS)
+                .map(|index| dynamic_step(&format!("task-{index}"), &[]))
+                .collect(),
+        );
+        assert!(overflow
+            .validate(&AgentTemplateRegistry::builtins())
+            .is_err());
+
+        let missing = dynamic_plan(vec![dynamic_step("task", &["missing"])]);
+        assert!(missing
+            .validate(&AgentTemplateRegistry::builtins())
+            .is_err());
+
+        let duplicate = dynamic_plan(vec![dynamic_step("task", &[]), dynamic_step("task", &[])]);
+        assert!(duplicate
+            .validate(&AgentTemplateRegistry::builtins())
+            .is_err());
+
+        let self_dependency = dynamic_plan(vec![dynamic_step("task", &["task"])]);
+        assert!(self_dependency
+            .validate(&AgentTemplateRegistry::builtins())
+            .is_err());
+
+        let mut invalid_concurrency = dynamic_plan(vec![dynamic_step("task", &[])]);
+        invalid_concurrency.max_parallel = 0;
+        assert!(invalid_concurrency
+            .validate(&AgentTemplateRegistry::builtins())
+            .is_err());
+
+        let mut unknown_schema = dynamic_plan(vec![dynamic_step("task", &[])]);
+        unknown_schema.schema_version = 99;
+        assert!(unknown_schema
+            .validate(&AgentTemplateRegistry::builtins())
+            .is_err());
     }
 }
