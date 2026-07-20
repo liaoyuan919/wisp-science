@@ -4969,6 +4969,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(created.workflow.version, 1);
+        assert!(created.steps.iter().all(|step| step.template_id.is_empty()));
         assert_eq!(created.approval_policy, AgentApprovalPolicy::ReviewAll);
         let dynamic = &created.dynamic;
         assert_eq!(dynamic.tasks[1].depends_on, ["first"]);
