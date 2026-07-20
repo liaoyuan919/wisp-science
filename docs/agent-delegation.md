@@ -57,6 +57,11 @@ requires approval is denied instead of silently escalating.
 - Wisp persists the resolved v2 plan before execution. Stored steps contain the
   immutable Specialist, capability revisions, permissions, model, executor,
   contracts, budgets, and policy integrity hash used for revalidation.
+- Before approval, a v2 draft exposes both its editable proposal and the
+  resolved authority that will actually run. Each edit checks the draft's
+  version, reruns dependency and policy resolution, and replaces the plan
+  atomically. Approval makes the snapshot immutable; run and retry reuse that
+  exact snapshot instead of asking a planner to recreate it.
 - Read-only tasks may share the project workspace. Until isolated workspaces
   are implemented, all writable or executable tasks use one mutation lane and
   cannot edit the same checkout concurrently. An isolation request is rejected
