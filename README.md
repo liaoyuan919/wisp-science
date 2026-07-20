@@ -272,6 +272,11 @@ Use Ctrl+K on Windows/Linux or Cmd+K on macOS to search projects, artifacts,
 sessions, and common commands. Enter opens the selected result; Shift+Enter
 attaches an artifact or session to the composer.
 
+The composer sends with Enter and inserts a newline with Shift+Enter by default.
+Under **Settings → General → Send and newline shortcuts**, you can instead use
+Ctrl+Enter on Windows/Linux or Cmd+Enter on macOS to send, leaving Enter for a
+newline.
+
 Saved conversations and conversation folders expose visible action buttons in
 the sidebar on macOS, Windows, and Linux. Use them to rename or delete folders,
 or to rename, organize, copy, move, export, or delete a conversation. The

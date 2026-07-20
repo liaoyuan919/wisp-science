@@ -207,6 +207,10 @@ Wisp 可以启动任何已安装、通过 stdio 使用稳定版 ACP v1 的本地
 会话和常用命令。按 Enter 打开所选结果；按 Shift+Enter 将产物或会话附加到
 编辑器。
 
+编辑器默认按 Enter 发送、按 Shift+Enter 换行。你也可以在
+**设置 → 常规 → 发送与换行快捷键**中改为 Windows/Linux 按 Ctrl+Enter、
+macOS 按 Cmd+Enter 发送，此时按 Enter 直接换行。
+
 在 macOS、Windows 和 Linux 的侧边栏中，已保存的会话和会话文件夹均提供
 可见的操作按钮。可以重命名或删除文件夹，也可以重命名、整理、复制、移动、
 导出或删除会话。远程文件行也提供可见的下载操作，同时仍可使用右键菜单。

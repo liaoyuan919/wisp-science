@@ -558,6 +558,8 @@ fn App() -> impl IntoView {
     create_effect(move |_| apply_font_sizes(ui_font_size.get(), code_font_size.get()));
     let selection_popup_enabled = create_rw_signal(load_selection_popup_enabled());
     create_effect(move |_| save_selection_popup_enabled(selection_popup_enabled.get()));
+    let send_with_modifier = create_rw_signal(load_send_with_modifier());
+    create_effect(move |_| save_send_with_modifier(send_with_modifier.get()));
 
     let items = create_rw_signal::<Vec<ChatItem>>(vec![]);
     // Disclosure choices belong to the session/step identity, not to a render
@@ -2297,7 +2299,10 @@ fn App() -> impl IntoView {
             }
             return;
         }
-        if ev.key() == "Enter" && !ev.shift_key() {
+        if ev.key() == "Enter"
+            && !ev.shift_key()
+            && (!send_with_modifier.get_untracked() || ev.ctrl_key() || ev.meta_key())
+        {
             ev.prevent_default();
             send.call(ComposerSendAction::Normal);
         }
@@ -7409,7 +7414,17 @@ fn App() -> impl IntoView {
                             </div>
                         </div>
                     </div>
-                    <div class="composer-hint">{move || t(locale.get(), "composer.hint")}</div>
+                    <div class="composer-hint">{move || {
+                        if send_with_modifier.get() {
+                            tf(
+                                locale.get(),
+                                "composer.hint_modifier",
+                                &[("modifier", if is_mac() { "Cmd" } else { "Ctrl" })],
+                            )
+                        } else {
+                            t(locale.get(), "composer.hint").into()
+                        }
+                    }}</div>
                 </div>
             </div>
         </main>
@@ -9058,7 +9073,7 @@ fn App() -> impl IntoView {
         })}
         <SettingsView
             state=SettingsViewState {
-                locale, theme_mode, light_palette, dark_palette, ui_font_size, code_font_size, selection_popup_enabled, update_check_enabled, show_settings, settings_section, open_conn_key, channels_open, connectors, model_form,
+                locale, theme_mode, light_palette, dark_palette, ui_font_size, code_font_size, selection_popup_enabled, send_with_modifier, update_check_enabled, show_settings, settings_section, open_conn_key, channels_open, connectors, model_form,
                 conn_form, memory_selected, specialist_form, settings, bootstrap, settings_message,
                 settings_busy, model_form_open, model_form_key, models, model_form_msg, show_acp_agents,
                 acp_agents, active_acp_agent_id, acp_form, acp_form_msg, acp_infos, specialists,
