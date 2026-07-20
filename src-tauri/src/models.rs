@@ -710,8 +710,15 @@ pub async fn active_has_key(store: &wisp_store::Store) -> bool {
 }
 
 pub async fn active_supports_vision(store: &wisp_store::Store) -> bool {
+    supports_vision(store, None).await
+}
+
+pub async fn supports_vision(store: &wisp_store::Store, profile_id: Option<&str>) -> bool {
     let profiles = ensure(store).await;
-    let id = active_id(store, &profiles).await;
+    let id = match profile_id.filter(|id| profiles.iter().any(|profile| profile.id == *id)) {
+        Some(id) => id.to_string(),
+        None => active_id(store, &profiles).await,
+    };
     profiles
         .iter()
         .find(|p| p.id == id)
@@ -914,6 +921,23 @@ mod tests {
             json[1]["use_for_vision"], true,
             "IPC response lost vision assignment"
         );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[tokio::test]
+    async fn vision_capability_follows_the_input_profile() {
+        let tmp =
+            std::env::temp_dir().join(format!("wisp_input_vision_{}.sqlite", uuid::Uuid::new_v4()));
+        let store = wisp_store::Store::open(&tmp).await.unwrap();
+        let text = test_profile("m0", "text", "text-model");
+        let mut vision = test_profile("m1", "vision", "vision-model");
+        vision.supports_vision = true;
+        save_raw(&store, &[text, vision]).await.unwrap();
+        store.set_setting(ACTIVE_KEY, "m0").await.unwrap();
+
+        assert!(!supports_vision(&store, None).await);
+        assert!(supports_vision(&store, Some("m1")).await);
+        assert!(!supports_vision(&store, Some("missing")).await);
         let _ = std::fs::remove_file(&tmp);
     }
 

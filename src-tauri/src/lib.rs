@@ -2709,6 +2709,23 @@ async fn build_vision_provider_config(store: &Store) -> Option<ProviderConfig> {
     }
 }
 
+fn load_image_attachments(
+    root: &Path,
+    attachments: &[String],
+) -> Result<Vec<wisp_tools::ImageData>, String> {
+    attachments
+        .iter()
+        .filter(|attachment| wisp_tools::image::is_supported_image(Path::new(attachment)))
+        .map(|attachment| {
+            let path = wisp_tools::safety::validate_file_path(root, attachment)?;
+            let result = wisp_tools::image::view_image(&path.to_string_lossy());
+            let mut image = result.image.ok_or(result.content)?;
+            image.label = format!("Attached image: {attachment}");
+            Ok(image)
+        })
+        .collect()
+}
+
 fn effective_api_key(new_key: Option<String>, stored_key: String) -> String {
     let key = new_key.unwrap_or_default();
     if key.trim().is_empty() || key.starts_with("(stored") {
@@ -3548,6 +3565,19 @@ async fn send_message_inner(
         max_tokens,
         &reasoning_effort,
     )?;
+    let primary_supports_vision = models::supports_vision(
+        &state.store,
+        specialist
+            .as_ref()
+            .map(|specialist| specialist.model_id.as_str())
+            .filter(|id| !id.trim().is_empty()),
+    )
+    .await;
+    let attached_images = if resume {
+        Vec::new()
+    } else {
+        load_image_attachments(&ap.root, attachments.as_deref().unwrap_or_default())?
+    };
 
     // Route on accepted send, not on eventual execution. In particular, a
     // follow-up queued behind a long turn must become the target immediately.
@@ -3914,7 +3944,15 @@ async fn send_message_inner(
     let result = if resume {
         agent.run_resume(&output, Some(&rt.cancel)).await
     } else {
-        agent.run(&message, &output, Some(&rt.cancel)).await
+        agent
+            .run_with_images(
+                &message,
+                &attached_images,
+                primary_supports_vision,
+                &output,
+                Some(&rt.cancel),
+            )
+            .await
     };
     if result.is_ok() {
         agent.ctx.clear_runtime_injections();

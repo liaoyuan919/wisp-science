@@ -136,6 +136,30 @@ impl Agent {
         .await
     }
 
+    pub async fn run_with_images(
+        &mut self,
+        user_input: &str,
+        images: &[wisp_tools::ImageData],
+        provider_supports_vision: bool,
+        output: &dyn Output,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> anyhow::Result<()> {
+        agent::agent_loop_with_images(
+            &mut self.ctx,
+            self.provider.as_ref(),
+            self.vision_provider.as_deref(),
+            &self.tools,
+            &self.root,
+            output,
+            user_input,
+            images,
+            provider_supports_vision,
+            self.max_iter,
+            cancel,
+        )
+        .await
+    }
+
     /// Resume a failed turn without appending another user message.
     pub async fn run_resume(
         &mut self,
