@@ -7071,6 +7071,17 @@ pub(super) fn download_artifact(path: String) {
     });
 }
 
+pub(super) fn reveal_in_file_manager(path: String) {
+    // Remote files have no local location to reveal in the OS file manager.
+    if remote_file_path(&path).is_some() {
+        return;
+    }
+    spawn_local(async move {
+        let arg = to_value(&serde_json::json!({ "path": path })).unwrap();
+        let _ = invoke_checked("reveal_in_file_manager", arg).await;
+    });
+}
+
 pub(super) fn keyboard_event_targets_text_entry(ev: &web_sys::KeyboardEvent) -> bool {
     let mut el = ev
         .target()
