@@ -4750,6 +4750,10 @@ test("a deleted ACP reviewer remains visibly selected as missing", async ({ page
   await page.getByTestId("open-acp-agents-from-settings").click();
   const row = page.getByTestId("acp-agent-row").filter({ hasText: "Test ACP Agent" });
   await row.locator(".settings-list-remove").click();
+  await page
+    .getByTestId("model-delete-confirm")
+    .getByRole("button", { name: "Remove model" })
+    .click();
   await expect(row).toHaveCount(0);
 
   await nav.getByRole("button", { name: "Specialists", exact: true }).click();
