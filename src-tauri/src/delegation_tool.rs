@@ -1,25 +1,27 @@
 //! Parent-facing delegation tools. `delegate_tasks` resolves and runs a
 //! dynamic batch inline; `propose_delegation` remains for v1 UI compatibility.
 
-use crate::{delegation_runtime, run_context::RunManager, specialists, ActiveProject};
+use crate::{
+    delegation_runtime,
+    dynamic_workflow::{
+        self, AgentApprovalPolicy, DynamicAgentTaskProposal, DynamicAgentWorkflowProposal,
+        MAX_CONTEXT_CHARS, MAX_GOAL_CHARS, MAX_INSTRUCTION_CHARS,
+    },
+    run_context::RunManager,
+    specialists, ActiveProject,
+};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc};
 use wisp_core::{
-    AgentDelegator, CapabilityRegistry, DelegatedTaskProposal, DelegationExecutionResult,
-    DelegationHostPolicy, DelegationMode, SpecialistSnapshot, MAX_AGENT_OUTPUT_SCHEMA_BYTES,
+    AgentDelegator, CapabilityRegistry, DelegationExecutionResult, DelegationHostPolicy,
     MAX_DELEGATION_TASKS,
 };
 use wisp_llm::ToolSchema;
 use wisp_store::Store;
 use wisp_tools::{ConfirmDecision, Tool, ToolEnv, ToolResult};
 
-const DEFAULT_INLINE_PARALLELISM: usize = 2;
-const MAX_MODEL_TASK_ID_BYTES: usize = 31;
-const MAX_GOAL_CHARS: usize = 2_000;
-const MAX_CONTEXT_CHARS: usize = 12_000;
-const MAX_INSTRUCTION_CHARS: usize = 8_000;
 const INLINE_DATA_BYTES: usize = 4_000;
 const INLINE_TEXT_CHARS: usize = 1_000;
 
@@ -261,74 +263,47 @@ impl DelegateTasksTool {
         .await?;
         let parsed: DelegateTasksArgs = serde_json::from_value(args.clone())
             .map_err(|error| format!("invalid task batch: {error}"))?;
-        validate_batch(&parsed)?;
         let workflow_id = uuid::Uuid::new_v4().to_string();
-        let mut display_ids = HashMap::with_capacity(parsed.tasks.len());
-        let mut proposals = Vec::with_capacity(parsed.tasks.len());
-        for task in parsed.tasks {
-            let stored_id = stored_task_id(&workflow_id, &task.id);
-            display_ids.insert(stored_id.clone(), task.id.clone());
-            let specialist = match task.specialist_id.as_deref() {
-                Some(id) => {
-                    let specialist = specialists::get(&self.store, id)
-                        .await
-                        .ok_or_else(|| format!("unknown Specialist: {id}"))?;
-                    if specialist.id == "reviewer"
-                        && (task.capabilities.iter().any(|capability| {
-                            !matches!(capability.as_str(), "reasoning" | "project_read" | "review")
-                        }) || !task
-                            .capabilities
-                            .iter()
-                            .any(|capability| capability == "review"))
-                    {
-                        return Err(
-                            "the built-in Reviewer requires the review capability and cannot receive write or execute capabilities"
-                                .into(),
-                        );
-                    }
-                    Some(SpecialistSnapshot {
-                        id: specialist.id,
-                        name: specialist.name,
-                        instructions: specialist.instructions,
-                        model_id: (!specialist.model_id.trim().is_empty())
-                            .then_some(specialist.model_id),
-                        skills: specialist.skills,
-                        connectors: specialist.connectors,
-                    })
-                }
-                None => None,
-            };
-            proposals.push(DelegatedTaskProposal {
-                id: stored_id,
-                instruction: task.instruction.trim().to_string(),
-                context_summary: parsed.context.trim().to_string(),
-                depends_on: task
-                    .depends_on
-                    .iter()
-                    .map(|dependency| stored_task_id(&workflow_id, dependency))
-                    .collect(),
-                capabilities: task.capabilities,
-                specialist,
-                output_schema: task.output_schema,
-                isolated: task.isolated,
-                model_id: None,
-                executor: None,
-                budget: None,
-                input: json!({"task_id": task.id}),
-            });
-        }
         let (registry, host) = self.policy().await?;
-        let plan = registry
-            .resolve_plan_with_id(
-                workflow_id.clone(),
-                parsed.goal.trim().to_string(),
-                DelegationMode::Automatic,
-                DEFAULT_INLINE_PARALLELISM,
-                proposals,
-                &host,
-            )
-            .map_err(|error| error.to_string())?
-            .into_plan();
+        let proposal = DynamicAgentWorkflowProposal {
+            goal: parsed.goal,
+            context: parsed.context,
+            approval_policy: AgentApprovalPolicy::AutoSafe,
+            tasks: parsed
+                .tasks
+                .into_iter()
+                .map(|task| DynamicAgentTaskProposal {
+                    id: task.id,
+                    instruction: task.instruction,
+                    depends_on: task.depends_on,
+                    capabilities: task.capabilities,
+                    specialist_id: task.specialist_id,
+                    output_schema: task.output_schema,
+                    isolated: task.isolated,
+                    model_id: None,
+                    executor: None,
+                    budget: None,
+                })
+                .collect(),
+        };
+        let plan = dynamic_workflow::resolve_proposal(
+            &self.store,
+            workflow_id.clone(),
+            proposal,
+            &registry,
+            &host,
+        )
+        .await?;
+        let display_ids = plan
+            .steps
+            .iter()
+            .filter_map(|step| {
+                step.input
+                    .get("task_id")
+                    .and_then(Value::as_str)
+                    .map(|id| (step.id.clone(), id.to_string()))
+            })
+            .collect::<HashMap<_, _>>();
         let snapshot = delegation_runtime::persist_dynamic_agent_workflow(
             &self.store,
             &self.project.id,
@@ -384,109 +359,6 @@ impl DelegateTasksTool {
         };
         Ok(compact_execution_result(&execution, &display_ids))
     }
-}
-
-fn validate_batch(args: &DelegateTasksArgs) -> Result<(), String> {
-    let goal = args.goal.trim();
-    if goal.is_empty() || goal.chars().count() > MAX_GOAL_CHARS {
-        return Err(format!(
-            "goal must contain 1 to {MAX_GOAL_CHARS} characters"
-        ));
-    }
-    if args.context.chars().count() > MAX_CONTEXT_CHARS {
-        return Err(format!(
-            "shared context cannot exceed {MAX_CONTEXT_CHARS} characters"
-        ));
-    }
-    if args.tasks.is_empty() || args.tasks.len() > MAX_DELEGATION_TASKS {
-        return Err(format!(
-            "a batch requires 1 to {MAX_DELEGATION_TASKS} tasks"
-        ));
-    }
-    let mut ids = std::collections::HashSet::new();
-    for task in &args.tasks {
-        if !valid_model_task_id(&task.id) {
-            return Err(format!(
-                "invalid task id '{}'; use a lowercase letter followed by at most 30 lowercase letters, digits, '_' or '-'",
-                task.id
-            ));
-        }
-        if !ids.insert(task.id.as_str()) {
-            return Err(format!("duplicate task id: {}", task.id));
-        }
-        let instruction = task.instruction.trim();
-        if instruction.is_empty() || instruction.chars().count() > MAX_INSTRUCTION_CHARS {
-            return Err(format!(
-                "task {} instruction must contain 1 to {MAX_INSTRUCTION_CHARS} characters",
-                task.id
-            ));
-        }
-        if task.capabilities.is_empty() {
-            return Err(format!("task {} requires at least one capability", task.id));
-        }
-        if task.output_schema.as_ref().is_some_and(|schema| {
-            !schema.is_object()
-                || serde_json::to_vec(schema)
-                    .is_ok_and(|bytes| bytes.len() > MAX_AGENT_OUTPUT_SCHEMA_BYTES)
-        }) {
-            return Err(format!(
-                "task {} output_schema must be an object no larger than {MAX_AGENT_OUTPUT_SCHEMA_BYTES} bytes",
-                task.id
-            ));
-        }
-    }
-    for task in &args.tasks {
-        let mut dependencies = std::collections::HashSet::new();
-        for dependency in &task.depends_on {
-            if !dependencies.insert(dependency.as_str()) {
-                return Err(format!(
-                    "task {} contains duplicate dependency {dependency}",
-                    task.id
-                ));
-            }
-            if dependency == &task.id {
-                return Err(format!("task {} cannot depend on itself", task.id));
-            }
-            if !ids.contains(dependency.as_str()) {
-                return Err(format!(
-                    "task {} depends on unknown task {dependency}",
-                    task.id
-                ));
-            }
-        }
-    }
-    let mut completed = std::collections::HashSet::new();
-    while completed.len() < args.tasks.len() {
-        let before = completed.len();
-        for task in &args.tasks {
-            if !completed.contains(task.id.as_str())
-                && task
-                    .depends_on
-                    .iter()
-                    .all(|dependency| completed.contains(dependency.as_str()))
-            {
-                completed.insert(task.id.as_str());
-            }
-        }
-        if completed.len() == before {
-            return Err("task dependencies contain a cycle".into());
-        }
-    }
-    Ok(())
-}
-
-fn valid_model_task_id(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    !bytes.is_empty()
-        && bytes.len() <= MAX_MODEL_TASK_ID_BYTES
-        && bytes[0].is_ascii_lowercase()
-        && bytes.iter().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
-        })
-}
-
-fn stored_task_id(workflow_id: &str, task_id: &str) -> String {
-    format!("{workflow_id}:{task_id}")
 }
 
 fn approval_prompt(
@@ -1212,34 +1084,6 @@ mod tests {
     }
 
     #[test]
-    fn batch_validation_rejects_unknown_duplicate_and_cyclic_dependencies() {
-        let parse = |tasks: Value| DelegateTasksArgs {
-            goal: "test dependencies".into(),
-            context: String::new(),
-            tasks: serde_json::from_value(tasks).unwrap(),
-        };
-        let task = |id: &str, dependencies: &[&str]| {
-            json!({
-                "id": id,
-                "instruction": format!("Run {id}"),
-                "depends_on": dependencies,
-                "capabilities": ["reasoning"]
-            })
-        };
-
-        let unknown = parse(json!([task("a", &["missing"])]));
-        assert!(validate_batch(&unknown)
-            .unwrap_err()
-            .contains("unknown task"));
-        let duplicate = parse(json!([task("a", &[]), task("b", &["a", "a"])]));
-        assert!(validate_batch(&duplicate)
-            .unwrap_err()
-            .contains("duplicate dependency"));
-        let cycle = parse(json!([task("a", &["b"]), task("b", &["a"])]));
-        assert!(validate_batch(&cycle).unwrap_err().contains("cycle"));
-    }
-
-    #[test]
     fn compact_preview_respects_utf8_byte_limit() {
         let compact = compact_value(&json!({"text": "界界界界界界"}), 10, "workflow", "task");
         let preview = compact["preview"].as_str().unwrap();
@@ -1421,15 +1265,16 @@ mod tests {
         assert_eq!(value["feedback"], "keep this read-only");
         assert!(value["results"].as_array().unwrap().is_empty());
         assert!(delegator.calls().is_empty());
-        let prompts = env.prompts.lock().unwrap();
-        assert_eq!(prompts.len(), 1);
-        assert!(prompts[0].contains(wisp_tools::plan::PLAN_APPROVAL_PREFIX));
-        assert!(prompts[0].contains("project_write"));
-        assert!(prompts[0].contains("native"));
+        {
+            let prompts = env.prompts.lock().unwrap();
+            assert_eq!(prompts.len(), 1);
+            assert!(prompts[0].contains(wisp_tools::plan::PLAN_APPROVAL_PREFIX));
+            assert!(prompts[0].contains("project_write"));
+            assert!(prompts[0].contains("native"));
+        }
         let workflow = store.list_agent_workflows("p").await.unwrap().remove(0);
         assert_eq!(workflow.status, wisp_store::AgentWorkflowStatus::Draft);
 
-        drop(prompts);
         drop(store);
         let _ = std::fs::remove_dir_all(root);
     }

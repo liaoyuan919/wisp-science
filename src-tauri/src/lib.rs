@@ -27,6 +27,7 @@ mod debug_request;
 mod delegation_runtime;
 mod delegation_tool;
 mod desktop_lifecycle;
+mod dynamic_workflow;
 mod file_browser;
 mod harvest;
 mod library_commands;
@@ -6661,6 +6662,8 @@ pub fn run() {
             delegation_runtime::set_session_delegation_enabled,
             delegation_runtime::create_agent_workflow,
             delegation_runtime::revise_agent_workflow,
+            delegation_runtime::create_dynamic_agent_workflow,
+            delegation_runtime::revise_dynamic_agent_workflow,
             delegation_runtime::approve_agent_workflow,
             delegation_runtime::run_agent_workflow,
             delegation_runtime::cancel_agent_workflow,

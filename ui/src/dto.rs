@@ -1283,6 +1283,138 @@ pub(crate) struct AgentWorkflowSnapshot {
     pub(crate) steps: Vec<AgentWorkflowStep>,
     pub(crate) attempts: Vec<AgentWorkflowAttempt>,
     pub(crate) delegation_enabled: bool,
+    #[serde(default = "legacy_agent_plan_schema_version")]
+    pub(crate) plan_schema_version: u32,
+    #[serde(default)]
+    pub(crate) approval_policy: AgentApprovalPolicy,
+    #[serde(default)]
+    pub(crate) dynamic: Option<DynamicAgentWorkflowSummary>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AgentApprovalPolicy {
+    ReviewAll,
+    AutoSafe,
+}
+
+impl Default for AgentApprovalPolicy {
+    fn default() -> Self {
+        Self::ReviewAll
+    }
+}
+
+fn legacy_agent_plan_schema_version() -> u32 {
+    1
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgentExecutorSelection {
+    pub(crate) kind: String,
+    pub(crate) profile_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) struct AgentBudgetProposal {
+    pub(crate) max_tokens: Option<u32>,
+    pub(crate) max_tool_calls: Option<u32>,
+    pub(crate) max_cost_microunits: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DynamicAgentTaskProposal {
+    pub(crate) id: String,
+    pub(crate) instruction: String,
+    pub(crate) depends_on: Vec<String>,
+    pub(crate) capabilities: Vec<String>,
+    pub(crate) specialist_id: Option<String>,
+    pub(crate) output_schema: Option<serde_json::Value>,
+    pub(crate) isolated: bool,
+    pub(crate) model_id: Option<String>,
+    pub(crate) executor: Option<AgentExecutorSelection>,
+    pub(crate) budget: Option<AgentBudgetProposal>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DynamicAgentWorkflowProposal {
+    pub(crate) goal: String,
+    pub(crate) context: String,
+    pub(crate) approval_policy: AgentApprovalPolicy,
+    pub(crate) tasks: Vec<DynamicAgentTaskProposal>,
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgentExecutorSummary {
+    pub(crate) kind: String,
+    pub(crate) profile_id: Option<String>,
+    pub(crate) model_id: Option<String>,
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgentApprovalReasonSummary {
+    pub(crate) task_id: String,
+    pub(crate) message: String,
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgentResultSummary {
+    pub(crate) status: String,
+    pub(crate) summary: Option<String>,
+    pub(crate) error: Option<String>,
+    pub(crate) child_frame_id: Option<String>,
+    pub(crate) input_tokens: i64,
+    pub(crate) output_tokens: i64,
+    pub(crate) tool_calls: i64,
+    pub(crate) cost_microunits: i64,
+    pub(crate) duration_secs: Option<i64>,
+    pub(crate) full_result_available: bool,
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResolvedAgentTaskSummary {
+    pub(crate) id: String,
+    pub(crate) stored_step_id: String,
+    pub(crate) instruction: String,
+    pub(crate) depends_on: Vec<String>,
+    pub(crate) capabilities: Vec<String>,
+    pub(crate) specialist_id: Option<String>,
+    pub(crate) specialist_name: Option<String>,
+    pub(crate) executor: AgentExecutorSummary,
+    pub(crate) workspace_policy: String,
+    pub(crate) tools: Vec<String>,
+    pub(crate) can_write: bool,
+    pub(crate) can_execute: bool,
+    pub(crate) can_access_network: bool,
+    pub(crate) budget: AgentBudgetProposal,
+    pub(crate) timeout_secs: Option<u64>,
+    pub(crate) approval_reasons: Vec<String>,
+    pub(crate) output_schema: Option<serde_json::Value>,
+    pub(crate) result: Option<AgentResultSummary>,
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DynamicAgentWorkflowSummary {
+    pub(crate) schema_version: u32,
+    pub(crate) approval_policy: AgentApprovalPolicy,
+    pub(crate) editable_proposal: DynamicAgentWorkflowProposal,
+    pub(crate) tasks: Vec<ResolvedAgentTaskSummary>,
+    pub(crate) approval_reasons: Vec<AgentApprovalReasonSummary>,
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct AgentWorkflowVersionConflict {
+    pub(crate) workflow_id: String,
+    pub(crate) expected_version: i64,
+    pub(crate) actual_version: i64,
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct DynamicWorkflowCommandError {
+    pub(crate) code: String,
+    pub(crate) message: String,
+    pub(crate) version_conflict: Option<AgentWorkflowVersionConflict>,
 }
 
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
