@@ -7,6 +7,12 @@ use std::path::Path;
 const MAX_BYTES: usize = 5 * 1024 * 1024;
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 
+pub fn is_supported_image(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| IMAGE_EXTS.contains(&ext.to_ascii_lowercase().as_str()))
+}
+
 pub fn view_image(path: &str) -> ToolResult {
     if path.starts_with("http://") || path.starts_with("https://") {
         return ToolResult::fail(
@@ -30,7 +36,7 @@ pub fn view_image(path: &str) -> ToolResult {
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
         .unwrap_or_default();
-    if !IMAGE_EXTS.contains(&ext.as_str()) {
+    if !is_supported_image(Path::new(path)) {
         return ToolResult::fail(format!(
             "view_image error: unsupported image format '{ext}' (supported: png,jpg,jpeg,gif,webp)"
         ));

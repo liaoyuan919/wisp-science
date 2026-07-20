@@ -7,7 +7,6 @@ use serde_json::json;
 use std::io::Read;
 use wisp_llm::ToolSchema;
 
-const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 const MAX_READ_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
@@ -65,12 +64,7 @@ impl Tool for ReadTool {
             Ok(path) => path,
             Err(error) => return ToolResult::fail(format!("read {requested_path} error: {error}")),
         };
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase())
-            .unwrap_or_default();
-        if IMAGE_EXTS.contains(&ext.as_str())
+        if crate::image::is_supported_image(&path)
             && arg_int_opt(args, "offset").is_none()
             && arg_int_opt(args, "limit").is_none()
         {

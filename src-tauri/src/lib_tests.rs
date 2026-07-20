@@ -14,6 +14,26 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
 #[test]
+fn image_attachments_are_loaded_for_model_input() {
+    let root = std::env::temp_dir().join(format!("wisp_message_images_{}", uuid::Uuid::new_v4()));
+    let uploads = root.join("uploads");
+    std::fs::create_dir_all(&uploads).unwrap();
+    std::fs::write(uploads.join("plot.PNG"), b"image bytes").unwrap();
+    std::fs::write(uploads.join("notes.txt"), b"notes").unwrap();
+
+    let images = super::load_image_attachments(
+        &root,
+        &["uploads/plot.PNG".into(), "uploads/notes.txt".into()],
+    )
+    .unwrap();
+
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].label, "Attached image: uploads/plot.PNG");
+    assert!(images[0].data_url.starts_with("data:image/png;base64,"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn llm_dispatch_debug_detects_cached_model_mismatch() {
     assert!(!super::llm_model_mismatch("glm-5.2", "GLM-5.2"));
     assert!(super::llm_model_mismatch("gpt-5.6-luna", "glm-5.2"));

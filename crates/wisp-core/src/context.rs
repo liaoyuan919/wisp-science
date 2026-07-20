@@ -102,7 +102,12 @@ impl ContextManager {
         self.messages.push(Message::system(content));
     }
     pub fn append_user(&mut self, content: impl Into<String>) {
-        self.messages.push(Message::user(content));
+        self.append_user_content(Content::text(content));
+    }
+    pub fn append_user_content(&mut self, content: Content) {
+        let mut message = Message::user("");
+        message.content = content;
+        self.messages.push(message);
     }
     pub fn inject_user(&mut self, content: impl Into<String>) {
         self.runtime_injections.push(Message::user(content));
@@ -342,7 +347,10 @@ impl ContextManager {
                 .iter()
                 .map(|p| match p {
                     Part::Text { text, .. } => text.len() + 24,
-                    Part::Image { image_url, .. } => image_url.url.len() + 40,
+                    // Base64 size is not an image model's token cost. Keep a
+                    // conservative fixed allowance so a normal attachment
+                    // cannot trigger text-context compaction before first use.
+                    Part::Image { .. } => 8_192,
                 })
                 .sum(),
         };
@@ -648,5 +656,24 @@ mod tests {
             est >= json / 2 && est <= json * 2,
             "estimate {est} should be within 2x of json-based {json}"
         );
+    }
+
+    #[test]
+    fn estimated_tokens_do_not_count_base64_bytes_as_text() {
+        let message = Message {
+            role: Role::User,
+            content: image_content(
+                "plot",
+                &format!("data:image/png;base64,{}", "a".repeat(1_000_000)),
+            ),
+            tool_calls: vec![],
+            tool_call_id: None,
+            tool_name: None,
+            reasoning: None,
+            ts: 0,
+            model_name: None,
+        };
+
+        assert!(ContextManager::estimated_tokens(&message) < 3_000);
     }
 }

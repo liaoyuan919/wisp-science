@@ -9,7 +9,7 @@ agent**. External coding agents (Codex / Claude via ACP) are configured under
 **Settings → Models → ACP Agents** — see [ACP Agents](acp-agents.md). Do not put
 an ACP launch command in an HTTP model profile.
 
-For image workflows, mark an API profile as **Supports image input** and optionally **Use for image analysis**. `view_image` and image reads call that assigned vision model and return text observations to the main agent, so the active/default chat model can remain non-visual.
+For image workflows, mark an API profile as **Supports image input** and optionally **Use for image analysis**. Image attachments are sent directly to a visual input model. When the input model is non-visual, Wisp first calls the assigned vision model and passes its text observations to the input model. `view_image` and image reads use the assigned vision model in the same way. Raster image input supports PNG, JPEG, GIF, and WebP files up to 5 MiB.
 
 ## API providers
 
