@@ -15,9 +15,10 @@ pub use agent::{agent_loop, agent_loop_continue};
 pub use context::ContextManager;
 pub use delegation::{
     AgentArtifact, AgentBackend, AgentBudget, AgentDelegationRequest, AgentDelegationResponse,
-    AgentDelegator, AgentEvidence, AgentRole, AgentSessionPolicy, AgentSpec, AgentUsage,
-    ContextPolicy, DelegationStatus, PermissionSet, UnconfiguredAgentDelegator,
-    ValidatedAgentDelegationRequest,
+    AgentDelegator, AgentEvidence, AgentExecutorRef, AgentOrigin, AgentOutputSchemaSource,
+    AgentRole, AgentSessionPolicy, AgentSpec, AgentUsage, AgentWorkspacePolicy, ContextPolicy,
+    DelegationStatus, PermissionSet, SpecialistSnapshot, UnconfiguredAgentDelegator,
+    ValidatedAgentDelegationRequest, MAX_AGENT_OUTPUT_SCHEMA_BYTES,
 };
 pub use execution::{
     DelegationExecutionObserver, DelegationExecutionResult, DelegationExecutionStatus,
@@ -26,7 +27,7 @@ pub use execution::{
 pub use memory::MemoryManager;
 pub use orchestration::{
     AgentInstanceRequest, AgentTemplate, AgentTemplateRegistry, DelegationMode, DelegationPlan,
-    DelegationPlanStep, DelegationPlanner,
+    DelegationPlanStep, DelegationPlanner, DYNAMIC_DELEGATION_SCHEMA_VERSION, MAX_DELEGATION_TASKS,
 };
 pub use output::{NullOutput, Output, StreamSinkAdapter, ToolEnvAdapter};
 pub use provenance::ProvenanceRecord;
