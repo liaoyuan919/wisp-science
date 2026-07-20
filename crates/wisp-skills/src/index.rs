@@ -79,15 +79,6 @@ impl SkillIndex {
         }
     }
 
-    /// One `- name: description` line per skill, for the system prompt.
-    pub fn descriptions(&self) -> String {
-        self.skills
-            .iter()
-            .map(|s| format!("- {}: {}", s.name, s.description))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
     pub fn get(&self, name: &str) -> Option<&Skill> {
         self.skills.iter().find(|s| s.name == name)
     }

@@ -32,6 +32,9 @@ impl Tool for McpTool {
     fn schema(&self) -> ToolSchema {
         self.schema.clone()
     }
+    fn defer_schema(&self) -> bool {
+        true
+    }
     fn preview(&self, args: &Value) -> String {
         let s = args.to_string();
         s.chars().take(120).collect()

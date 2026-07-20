@@ -1,4 +1,4 @@
-//! `use_skill` — load an installed skill's guidance, scripts, and references.
+//! Search installed skill metadata, then load one skill's full guidance on demand.
 
 use crate::index::{list_resources, Skill, SkillIndex};
 use async_trait::async_trait;
@@ -6,6 +6,14 @@ use serde_json::json;
 use std::sync::Arc;
 use wisp_llm::ToolSchema;
 use wisp_tools::{Tool, ToolEnv, ToolResult};
+
+const DEFAULT_SEARCH_LIMIT: usize = 5;
+const MAX_SEARCH_LIMIT: usize = 10;
+const MAX_DESCRIPTION_CHARS: usize = 512;
+
+pub struct SearchSkillsTool {
+    skills: Arc<SkillIndex>,
+}
 
 pub struct UseSkillTool {
     skills: Arc<SkillIndex>,
@@ -32,6 +40,117 @@ pub fn render_skill(skill: &Skill) -> String {
         }
     }
     out
+}
+
+impl SearchSkillsTool {
+    pub fn new(skills: Arc<SkillIndex>) -> Self {
+        Self { skills }
+    }
+
+    fn search(&self, args: &serde_json::Value) -> ToolResult {
+        let Some(query) = args
+            .get("query")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+        else {
+            return ToolResult::fail("missing required argument 'query'");
+        };
+        let limit = args
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .map(|limit| limit as usize)
+            .unwrap_or(DEFAULT_SEARCH_LIMIT)
+            .clamp(1, MAX_SEARCH_LIMIT);
+        let query = query.to_lowercase();
+        let browse = query == "*";
+        let terms: Vec<_> = query.split_whitespace().collect();
+        let mut matches = vec![];
+        for skill in self.skills.all() {
+            let name = skill.name.to_lowercase();
+            let description = skill.description.to_lowercase();
+            let tags = skill.tags.join(" ").to_lowercase();
+            let mut score = usize::from(browse);
+            if name == query {
+                score += 1_000;
+            } else if name.contains(&query) {
+                score += 100;
+            }
+            if description.contains(&query) || tags.contains(&query) {
+                score += 50;
+            }
+            for term in &terms {
+                if name.contains(term) {
+                    score += 20;
+                }
+                if description.contains(term) {
+                    score += 5;
+                }
+                if tags.contains(term) {
+                    score += 10;
+                }
+            }
+            if score > 0 {
+                matches.push((score, skill));
+            }
+        }
+        matches.sort_by(|(left_score, left), (right_score, right)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        let matched_skills = matches.len();
+        let results: Vec<_> = matches
+            .into_iter()
+            .take(limit)
+            .map(|(_, skill)| {
+                json!({
+                    "name": skill.name,
+                    "description": truncate_chars(&skill.description, MAX_DESCRIPTION_CHARS),
+                    "tags": skill.tags,
+                })
+            })
+            .collect();
+        ToolResult::ok(
+            serde_json::to_string_pretty(&json!({
+                "results": results,
+                "matched_skills": matched_skills,
+                "total_skills": self.skills.all().len(),
+                "next": "Call 'use_skill' with the exact name of the relevant skill. Use query '*' to browse.",
+            }))
+            .unwrap_or_default(),
+        )
+    }
+}
+
+#[async_trait]
+impl Tool for SearchSkillsTool {
+    fn name(&self) -> &str {
+        "search_skills"
+    }
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "search_skills",
+            "Search installed skill names, descriptions, and tags without loading every skill body.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Task, workflow, domain keywords, or '*' to browse" },
+                    "limit": { "type": "integer", "description": "Maximum matches to return (default 5, maximum 10)" }
+                },
+                "required": ["query"]
+            }),
+        )
+    }
+    fn preview(&self, args: &serde_json::Value) -> String {
+        args.get("query")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string()
+    }
+    async fn run(&self, args: &serde_json::Value, _env: &dyn ToolEnv) -> ToolResult {
+        self.search(args)
+    }
 }
 
 impl UseSkillTool {
@@ -67,5 +186,61 @@ impl Tool for UseSkillTool {
             return ToolResult::fail(format!("skill '{name}' not found"));
         };
         ToolResult::ok(render_skill(skill))
+    }
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut truncated: String = value.chars().take(max_chars).collect();
+    truncated.push_str("… [truncated]");
+    truncated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skill_search_returns_only_relevant_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "wisp-skill-search-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for (name, description, tags) in [
+            (
+                "pubmed-review",
+                "Find biomedical papers and synthesize evidence.",
+                "literature, medicine",
+            ),
+            (
+                "plot-figure",
+                "Create publication-ready charts.",
+                "visualization",
+            ),
+        ] {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {description}\ntags: [{tags}]\n---\nbody"),
+            )
+            .unwrap();
+        }
+        let search = SearchSkillsTool::new(Arc::new(SkillIndex::load(&[root.clone()])));
+
+        let result = search.search(&json!({ "query": "biomedical literature" }));
+        assert!(result.success, "search failed: {}", result.content);
+        let output: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(output["results"][0]["name"], "pubmed-review");
+        assert_eq!(output["results"].as_array().unwrap().len(), 1);
+        assert!(!result.content.contains("publication-ready charts"));
+
+        std::fs::remove_dir_all(root).ok();
     }
 }
