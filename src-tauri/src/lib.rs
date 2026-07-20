@@ -3423,7 +3423,7 @@ async fn send_message(
     }
     if guard
         .as_ref()
-        .is_some_and(|agent| agent.tools.get("propose_delegation").is_some() != delegation_enabled)
+        .is_some_and(|agent| agent.tools.get("delegate_tasks").is_some() != delegation_enabled)
     {
         // Delegation is a live per-session capability. Rebuild from persisted
         // messages when the toggle changed so the next turn sees the exact
@@ -3477,6 +3477,20 @@ async fn send_message(
             store: state.store.clone(),
         }));
         if delegation_enabled {
+            agent.add_tool(Box::new(
+                delegation_tool::DelegateTasksTool::new(
+                    state.store.clone(),
+                    ap.clone(),
+                    frame_id.clone(),
+                    state.run_manager.clone(),
+                )
+                .await?,
+            ));
+            agent.add_tool(Box::new(delegation_tool::GetDelegatedResultTool::new(
+                state.store.clone(),
+                ap.id.clone(),
+                frame_id.clone(),
+            )));
             agent.add_tool(Box::new(delegation_tool::ProposeDelegationTool::new(
                 state.store.clone(),
                 ap.clone(),
