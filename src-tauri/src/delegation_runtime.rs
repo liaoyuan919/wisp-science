@@ -37,7 +37,7 @@ const PLANNER_TIMEOUT: Duration = Duration::from_secs(90);
 const PLANNER_CONTEXT_CHARS: usize = 6_000;
 const DELEGATION_PROMPT_START: &str = "\n\n<delegation_capability>";
 const DELEGATION_PROMPT_END: &str = "</delegation_capability>";
-const DELEGATION_PROMPT_SECTION: &str = "\n\n<delegation_capability>\nThe user enabled controlled sub-Agent delegation for this conversation. When a task materially benefits from parallel code, biology, visualization, or independent review, use propose_delegation to create a persisted draft plan. This tool never approves or runs the plan. Tell the user to review it in the Agents panel; do not claim that delegated work has started.\n</delegation_capability>";
+const DELEGATION_PROMPT_SECTION: &str = "\n\n<delegation_capability>\nThe user enabled controlled sub-Agent delegation for this conversation. When a task materially benefits from independent or parallel work, decompose it yourself and call delegate_tasks with the smallest useful temporary task DAG. Results return as tool output in this same turn: inspect partial failures and synthesize the evidence into your final answer. Use capability IDs from the tool schema; omit specialist_id for generic temporary Agents. Do not delegate trivial work, do not claim work started before the tool returns, and do not ask the user to visit the Agents panel merely to receive results. propose_delegation remains a legacy draft-only tool and is not the normal execution path.\n</delegation_capability>";
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct AgentWorkflowSnapshot {
@@ -249,6 +249,31 @@ pub(crate) async fn create_agent_workflow_draft(
         return Err("This goal does not need a controlled multi-Agent plan.".into());
     }
     let (workflow, steps) = workflow_records(&plan, project_id, project_root, Some(frame_id))?;
+    store
+        .create_agent_workflow_plan(&workflow, &steps)
+        .await
+        .map_err(|error| error.to_string())?;
+    load_workflow_snapshot(store, workflow).await
+}
+
+pub(crate) async fn persist_dynamic_agent_workflow(
+    store: &Store,
+    project_id: &str,
+    project_root: &std::path::Path,
+    frame_id: String,
+    plan: &DelegationPlan,
+    registry: &CapabilityRegistry,
+    host: &DelegationHostPolicy,
+) -> Result<AgentWorkflowSnapshot, String> {
+    require_session_delegation(store, project_id, &frame_id).await?;
+    if plan.schema_version != DYNAMIC_DELEGATION_SCHEMA_VERSION {
+        return Err("Inline delegation requires a v2 Agent plan.".into());
+    }
+    registry
+        .validate_resolved_plan(plan, host)
+        .map_err(|error| error.to_string())?;
+    let (mut workflow, steps) = workflow_records(plan, project_id, project_root, Some(frame_id))?;
+    workflow.description = "Inline dynamic Agent batch".into();
     store
         .create_agent_workflow_plan(&workflow, &steps)
         .await
@@ -549,7 +574,11 @@ fn workflow_records(
                 spec.backend.as_str(),
                 &spec.prompt_template,
             )?;
-            stored.template_id.clone_from(&spec.template_id);
+            stored.template_id = if spec.template_id.trim().is_empty() {
+                "dynamic".into()
+            } else {
+                spec.template_id.clone()
+            };
             stored.model.clone_from(&spec.model);
             stored.input_schema_json = serde_json::to_string(&spec.input_contract)?;
             stored.output_schema_json = serde_json::to_string(&spec.output_contract)?;
@@ -611,7 +640,7 @@ async fn load_workflow_snapshot(
     })
 }
 
-async fn approve_created_automatic_workflow(
+pub(crate) async fn approve_created_automatic_workflow(
     store: &Store,
     snapshot: AgentWorkflowSnapshot,
 ) -> Result<AgentWorkflowSnapshot, String> {
@@ -902,12 +931,47 @@ async fn execute_agent_workflow(
     run_manager: crate::run_context::RunManager,
     workflow_id: &str,
 ) -> Result<DelegationExecutionResult, String> {
+    let delegator = Arc::new(TauriDelegator::new(
+        store.clone(),
+        project.clone(),
+        run_manager,
+    ));
+    let result = execute_agent_workflow_with_delegator(
+        store,
+        &project.id,
+        workflow_id,
+        delegator.clone(),
+        None,
+    )
+    .await;
+    if result.is_err() {
+        delegator.cancel_all().await;
+    }
+    result
+}
+
+pub(crate) async fn execute_inline_agent_workflow(
+    store: &Store,
+    project: ActiveProject,
+    run_manager: crate::run_context::RunManager,
+    workflow_id: &str,
+) -> Result<DelegationExecutionResult, String> {
+    execute_agent_workflow(store, project, run_manager, workflow_id).await
+}
+
+pub(crate) async fn execute_agent_workflow_with_delegator(
+    store: &Store,
+    project_id: &str,
+    workflow_id: &str,
+    delegator: Arc<dyn AgentDelegator>,
+    dynamic_policy: Option<(CapabilityRegistry, DelegationHostPolicy)>,
+) -> Result<DelegationExecutionResult, String> {
     let workflow = store
         .get_agent_workflow(&workflow_id)
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "Agent workflow does not exist".to_string())?;
-    if workflow.project_id != project.id {
+    if workflow.project_id != project_id {
         return Err("Agent workflow does not belong to the active project".into());
     }
     require_workflow_delegation(store, &workflow).await?;
@@ -916,16 +980,17 @@ async fn execute_agent_workflow(
     if plan.id != workflow.id {
         return Err("Agent workflow plan identity does not match its persisted record".into());
     }
-    let delegator = Arc::new(TauriDelegator::new(store.clone(), project, run_manager));
     let observer = Arc::new(StoreDelegationObserver::new(store.clone()));
     let mut executor = DelegationExecutor::new(delegator.clone()).with_observer(observer.clone());
     if plan.schema_version == DYNAMIC_DELEGATION_SCHEMA_VERSION {
-        let (registry, host) = dynamic_delegation_policy(store).await?;
+        let (registry, host) = match dynamic_policy {
+            Some(policy) => policy,
+            None => dynamic_delegation_policy(store).await?,
+        };
         executor = executor.with_dynamic_policy(registry, host);
     }
     let result = executor.execute(plan).await;
     if result.is_err() {
-        delegator.cancel_all().await;
         let _ = fail_owned_agent_workflow_execution(
             store,
             &observer,
@@ -2556,7 +2621,9 @@ mod tests {
         prompt.push_str("\n\n## Specialist\nKeep this section.");
         sync_delegation_prompt(&mut prompt, true);
         assert_eq!(prompt.matches("<delegation_capability>").count(), 1);
-        assert!(prompt.contains("never approves or runs"));
+        assert!(prompt.contains("call delegate_tasks"));
+        assert!(prompt.contains("synthesize the evidence"));
+        assert!(prompt.contains("legacy draft-only"));
         assert!(prompt.contains("## Specialist\nKeep this section."));
         sync_delegation_prompt(&mut prompt, false);
         assert_eq!(prompt, "Base prompt\n\n## Specialist\nKeep this section.");

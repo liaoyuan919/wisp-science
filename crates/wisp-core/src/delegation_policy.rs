@@ -453,7 +453,7 @@ impl CapabilityRegistry {
         )
     }
 
-    fn resolve_plan_with_id(
+    pub fn resolve_plan_with_id(
         &self,
         id: String,
         goal: String,
@@ -717,7 +717,7 @@ fn validate_host(host: &DelegationHostPolicy) -> Result<(), ResolutionError> {
 }
 
 fn validate_proposal(proposal: &DelegatedTaskProposal) -> Result<(), ResolutionError> {
-    if !valid_id(&proposal.id) || proposal.instruction.trim().is_empty() {
+    if !valid_task_id(&proposal.id) || proposal.instruction.trim().is_empty() {
         return Err(ResolutionError::InvalidProposal(
             "task id and instruction are required".into(),
         ));
@@ -743,6 +743,14 @@ fn validate_proposal(proposal: &DelegatedTaskProposal) -> Result<(), ResolutionE
         ));
     }
     Ok(())
+}
+
+fn valid_task_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-' | b':')
+        })
 }
 
 fn definition_available(definition: &CapabilityDefinition, host: &DelegationHostPolicy) -> bool {

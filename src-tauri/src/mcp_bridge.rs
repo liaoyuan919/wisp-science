@@ -7,7 +7,7 @@
 
 use crate::{
     bio_domains, connect_mcp, load_disabled_connectors, load_disabled_skills,
-    load_enabled_skill_names, load_mcp_connections, run_context, skill_paths,
+    load_enabled_skill_names, load_mcp_connections, run_context, skill_paths, ActiveProject,
 };
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
@@ -149,6 +149,8 @@ impl BridgeServer {
         ];
         if let Some(frame_id) = self.cfg.frame_id.as_deref() {
             if crate::delegation_runtime::session_delegation_enabled(&self.store, frame_id).await {
+                tools.push(delegate_tasks_tool_schema(&self.store).await?);
+                tools.push(get_delegated_result_tool_schema());
                 tools.push(propose_delegation_tool_schema());
             }
         }
@@ -221,6 +223,53 @@ impl BridgeServer {
             }
             "wisp_cancel_run" => {
                 let result = self.cancel_run(&args).await;
+                (result.content, !result.success)
+            }
+            "wisp_delegate_tasks" => {
+                let Some(frame_id) = self.cfg.frame_id.as_deref() else {
+                    return Err(anyhow!("delegation requires a conversation frame"));
+                };
+                let project = ActiveProject {
+                    id: self.cfg.project_id.clone(),
+                    root: self.cfg.project_root.clone(),
+                    skills: self.skills.clone(),
+                    memory: Arc::new(wisp_core::MemoryManager::new(&self.cfg.project_root)),
+                };
+                let tool = crate::delegation_tool::DelegateTasksTool::new(
+                    self.store.clone(),
+                    project,
+                    frame_id,
+                    self.run_manager.clone(),
+                )
+                .await
+                .map_err(anyhow::Error::msg)?;
+                let result = tool
+                    .run(
+                        &args,
+                        &BridgeToolEnv {
+                            project_root: self.cfg.project_root.clone(),
+                        },
+                    )
+                    .await;
+                (result.content, !result.success)
+            }
+            "wisp_get_delegated_result" => {
+                let Some(frame_id) = self.cfg.frame_id.as_deref() else {
+                    return Err(anyhow!("delegation requires a conversation frame"));
+                };
+                let tool = crate::delegation_tool::GetDelegatedResultTool::new(
+                    self.store.clone(),
+                    self.cfg.project_id.clone(),
+                    frame_id,
+                );
+                let result = tool
+                    .run(
+                        &args,
+                        &BridgeToolEnv {
+                            project_root: self.cfg.project_root.clone(),
+                        },
+                    )
+                    .await;
                 (result.content, !result.success)
             }
             "wisp_propose_delegation" => {
@@ -493,10 +542,16 @@ impl BridgeServer {
                     "reason": "Memory, artifact, graph, and persistent runtime writes require an approval broker and are not exposed by this bridge."
                 },
                 {
+                    "name": "delegation.inline",
+                    "allowed": delegation_enabled,
+                    "tools": if delegation_enabled { vec!["wisp_delegate_tasks", "wisp_get_delegated_result"] } else { vec![] },
+                    "policy": "bounded Native child Agents; read-only batches run inline; any requested approval is denied by this non-interactive bridge"
+                },
+                {
                     "name": "delegation.propose",
                     "allowed": delegation_enabled,
                     "tools": if delegation_enabled { vec!["wisp_propose_delegation"] } else { vec![] },
-                    "policy": "draft_only; explicit UI approval and run remain required"
+                    "policy": "legacy draft-only compatibility path; explicit UI approval and run remain required"
                 }
             ]
         }))
@@ -908,6 +963,26 @@ fn propose_delegation_tool_schema() -> Value {
     })
 }
 
+async fn delegate_tasks_tool_schema(store: &Store) -> Result<Value> {
+    let schema = crate::delegation_tool::delegate_tasks_schema(store)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    Ok(json!({
+        "name": "wisp_delegate_tasks",
+        "description": schema.function.description,
+        "inputSchema": schema.function.parameters,
+    }))
+}
+
+fn get_delegated_result_tool_schema() -> Value {
+    let schema = crate::delegation_tool::get_delegated_result_schema();
+    json!({
+        "name": "wisp_get_delegated_result",
+        "description": schema.function.description,
+        "inputSchema": schema.function.parameters,
+    })
+}
+
 fn is_builtin_tool(name: &str) -> bool {
     matches!(
         name,
@@ -924,6 +999,8 @@ fn is_builtin_tool(name: &str) -> bool {
             | "wisp_get_run"
             | "wisp_monitor_run"
             | "wisp_cancel_run"
+            | "wisp_delegate_tasks"
+            | "wisp_get_delegated_result"
             | "wisp_propose_delegation"
     )
 }
@@ -1111,6 +1188,12 @@ mod tests {
         assert_eq!(get_run_tool_schema()["name"], "wisp_get_run");
         assert_eq!(monitor_run_tool_schema()["name"], "wisp_monitor_run");
         assert_eq!(cancel_run_tool_schema()["name"], "wisp_cancel_run");
+        let delegated_result = get_delegated_result_tool_schema();
+        assert_eq!(delegated_result["name"], "wisp_get_delegated_result");
+        assert_eq!(
+            delegated_result["inputSchema"]["required"],
+            json!(["workflow_id", "task_id"])
+        );
         let delegation = propose_delegation_tool_schema();
         assert_eq!(delegation["name"], "wisp_propose_delegation");
         assert_eq!(delegation["inputSchema"]["required"], json!(["goal"]));
@@ -1132,6 +1215,8 @@ mod tests {
             "wisp_get_run",
             "wisp_monitor_run",
             "wisp_cancel_run",
+            "wisp_delegate_tasks",
+            "wisp_get_delegated_result",
             "wisp_propose_delegation",
         ] {
             assert!(is_builtin_tool(name), "{name} must be reserved");
@@ -1198,6 +1283,8 @@ mod tests {
 
         let disabled = server.tools_list().await.unwrap();
         assert!(!disabled.to_string().contains("wisp_propose_delegation"));
+        assert!(!disabled.to_string().contains("wisp_delegate_tasks"));
+        assert!(!disabled.to_string().contains("wisp_get_delegated_result"));
         crate::delegation_runtime::save_session_delegation_enabled(
             &server.store,
             "project-a",
@@ -1208,8 +1295,31 @@ mod tests {
         .unwrap();
         let enabled = server.tools_list().await.unwrap();
         assert!(enabled.to_string().contains("wisp_propose_delegation"));
+        assert!(enabled.to_string().contains("wisp_delegate_tasks"));
+        assert!(enabled.to_string().contains("wisp_get_delegated_result"));
+        let inline_schema = enabled["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "wisp_delegate_tasks")
+            .unwrap();
+        assert_eq!(
+            inline_schema["inputSchema"]["required"],
+            json!(["goal", "tasks"])
+        );
         let capabilities: Value =
             serde_json::from_str(&server.capabilities_text().await.unwrap()).unwrap();
+        let inline = capabilities["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == "delegation.inline")
+            .unwrap();
+        assert_eq!(inline["allowed"], true);
+        assert!(inline["tools"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("wisp_delegate_tasks")));
         let delegation = capabilities["capabilities"]
             .as_array()
             .unwrap()
@@ -1217,6 +1327,16 @@ mod tests {
             .find(|entry| entry["name"] == "delegation.propose")
             .unwrap();
         assert_eq!(delegation["allowed"], true);
+
+        let malformed_inline = server
+            .tools_call(json!({
+                "name": "wisp_delegate_tasks",
+                "arguments": {}
+            }))
+            .await
+            .unwrap();
+        assert_eq!(malformed_inline["isError"], true);
+        assert!(malformed_inline.to_string().contains("invalid task batch"));
 
         let result = server
             .tools_call(json!({

@@ -9,7 +9,13 @@ use async_trait::async_trait;
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    time::Duration,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -179,6 +185,7 @@ impl DelegationExecutor {
         let mut responses = HashMap::<String, AgentDelegationResponse>::new();
         let mut running = FuturesUnordered::new();
         let mut running_requests = HashMap::<String, String>::new();
+        let mut running_mutations = HashSet::<String>::new();
         let mut cancellation_applied = false;
 
         while !pending.is_empty() || !running.is_empty() {
@@ -224,15 +231,12 @@ impl DelegationExecutor {
 
             while running.len() < plan.max_parallel {
                 let Some(index) = pending.iter().position(|step_id| {
-                    requests[step_id]
-                        .spec
-                        .dependencies
-                        .iter()
-                        .all(|dependency| {
-                            responses.get(dependency).is_some_and(|response| {
-                                response.status == DelegationStatus::Succeeded
-                            })
-                        })
+                    let request = &requests[step_id];
+                    request.spec.dependencies.iter().all(|dependency| {
+                        responses
+                            .get(dependency)
+                            .is_some_and(|response| response.status == DelegationStatus::Succeeded)
+                    }) && (!uses_mutation_lane(request) || running_mutations.is_empty())
                 }) else {
                     break;
                 };
@@ -246,6 +250,9 @@ impl DelegationExecutor {
                 let request = self.validate_request(request, plan.schema_version)?;
                 self.observer.step_started(request.as_request()).await?;
                 running_requests.insert(step_id.clone(), request.as_request().request_id.clone());
+                if uses_mutation_lane(request.as_request()) {
+                    running_mutations.insert(step_id.clone());
+                }
                 running.push(run_request(self.delegator.clone(), step_id, request));
             }
 
@@ -262,6 +269,7 @@ impl DelegationExecutor {
             };
             if let Some((step_id, request, response)) = next {
                 running_requests.remove(&step_id);
+                running_mutations.remove(&step_id);
                 self.observer.step_finished(&request, &response).await?;
                 responses.insert(step_id, response);
             }
@@ -296,6 +304,15 @@ impl DelegationExecutor {
                 .collect(),
         })
     }
+}
+
+fn uses_mutation_lane(request: &AgentDelegationRequest) -> bool {
+    request.spec.permissions.write
+        || request.spec.permissions.execute
+        || matches!(
+            request.spec.workspace_policy,
+            Some(crate::AgentWorkspacePolicy::SerializedMutation)
+        )
 }
 
 type DelegationFuture = Pin<
@@ -603,6 +620,39 @@ mod tests {
         assert_eq!(calls.last().map(String::as_str), Some("reviewer"));
         let reviewer = result.steps.last().unwrap();
         assert!(reviewer.response.output.is_object());
+    }
+
+    #[tokio::test]
+    async fn scheduler_serializes_shared_workspace_mutations() {
+        let mut plan = DelegationPlanner
+            .from_template_ids(
+                "implement and visualize the result",
+                DelegationMode::Automatic,
+                "",
+                &[],
+                &[],
+                &["code_execution".into(), "visualization".into()],
+                &AgentTemplateRegistry::builtins(),
+            )
+            .unwrap();
+        plan.steps.truncate(2);
+        for step in &mut plan.steps {
+            step.spec.dependencies.clear();
+        }
+        let delegator = Arc::new(RecordingDelegator {
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            calls: Mutex::new(vec![]),
+            fail: None,
+        });
+
+        let result = DelegationExecutor::new(delegator.clone())
+            .execute(plan)
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DelegationExecutionStatus::Succeeded);
+        assert_eq!(delegator.max_active.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

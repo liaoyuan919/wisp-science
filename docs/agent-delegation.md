@@ -1,60 +1,96 @@
-# Controlled Agent delegation
+# Agent delegation
 
-The **Agents** tab in the right panel turns a project goal into a persisted,
-reviewable multi-Agent workflow. It is separate from choosing an ACP Agent as
-the model for a normal conversation.
+Delegation lets the main Agent create a bounded set of temporary sub-Agents,
+run independent work in parallel, and synthesize their evidence in the same
+conversation turn. Codex and ACP are optional executor choices; neither is part
+of the meaning of a code-capable Agent.
 
-## Workflow
+## Inline temporary Agents
 
 1. Open the composer Agent menu and enable **Delegation** for the current
    conversation. New conversations start with delegation off.
-2. Open the right panel and choose **Agents**, or ask the main Agent to propose
-   a delegated plan. The main Agent can only create a persisted draft; it
-   cannot approve or run the plan on the user's behalf.
-3. Describe a code, analysis, biology, or visualization goal and choose a mode:
-   - **Manual** requires an explicit ordered Agent team. The selected steps run
-     sequentially, and Reviewer is optional but must be last.
-   - **Assisted** asks the active model to select the smallest useful team from
-     the controlled templates using the recent conversation as context. It
-     persists a draft for review and never starts work automatically.
-   - **Automatic** uses the same model-backed planning step, then approves and
-     starts a low-risk local read-only plan in the background. Plans involving
-     ACP, file writes, network access, or a larger budget pause as a draft and
-     require **Approve and run**.
-4. A generated card is a plan, not an Agent result. Review each step's backend,
-   tools, token budget, and timeout. A draft can be edited and regenerated
-   without changing an approved plan behind the user's back.
-5. In Manual or Assisted mode, approve the immutable plan and run it. Automatic
-   mode starts as described above.
-6. Follow persisted step attempts and usage in the panel. Cancel requests are
-   stored in SQLite, so the scheduler and both local and ACP backends observe
-   the same state.
-7. Failed or cancelled workflows can be returned to Approved with **Retry**.
-   Completed step sessions can be opened with **Take over** for ordinary chat.
+2. Ask the main Agent for an outcome that materially benefits from independent
+   or parallel work. The main Agent decides whether delegation is useful and,
+   when it is, calls `delegate_tasks` itself.
+3. The call describes an overall goal, bounded shared context, and up to eight
+   tasks. Each task has its own instruction, dependency IDs, capability IDs,
+   optional Specialist, optional JSON output schema, and optional isolation
+   request.
+4. Wisp resolves every capability through host policy into an exact model,
+   executor, tool set, project scope, workspace policy, budget, and timeout.
+   The model cannot grant raw tools or permissions to a child.
+5. Safe read-only tasks run immediately. A batch that can write, execute code,
+   use an external service, request isolation, or exceed normal budgets uses
+   the existing approval prompt. Rejecting it starts no child and returns the
+   feedback to the main Agent so it can revise the batch.
+6. Independent tasks run concurrently up to the batch limit. A dependent task
+   starts only after its direct dependencies succeed and receives their
+   structured results. An unrelated branch continues after another branch
+   fails; only descendants of the failed branch are blocked.
+7. Ordered, compact results return as tool output. The main Agent must combine
+   them into its final response rather than sending the user elsewhere. If a
+   result was truncated, `get_delegated_result` reads that task's full persisted
+   result for the same conversation.
 
-## Safety and current limits
+Omitting `specialist_id` creates a generic temporary Agent. Selecting a
+Specialist reuses its persona, model preference, skills, and connector
+restrictions as an immutable snapshot for that run. A Specialist is therefore
+an optional preset, not a required fixed team slot.
 
-- Assisted and Automatic workflows run at most two delegated steps concurrently.
-  Manual workflows run their explicit order sequentially. Dependencies are
-  respected and a generated final Reviewer runs only after its inputs succeed.
-- Templates cap tools, project paths, context, time, tokens, tool calls, and
-  cost. Delegated Agents cannot delegate again.
-- Code-capable ACP steps require a configured Codex ACP profile. Codex runs in
-  workspace-write mode with command network access disabled. Its effective
-  approval policy is `on-request`; Wisp rejects command, process, MCP, network,
-  and unscoped file escalations at the ACP boundary.
-- Wisp stores attempts, structured results, evidence, artifacts, usage, child
-  conversation IDs, and ACP session IDs. API keys and private keys remain in
-  their existing credential stores and are not copied into workflow records.
-- Application shutdown marks interrupted workflows failed. Use **Retry** after
-  inspecting the recorded error; Wisp does not silently resume an unknown
-  external process.
-- Turning Delegation off blocks new drafts, approvals, runs, and retries for
-  that conversation. It does not hide history or cancel an already running
-  workflow; cancellation remains an explicit action in the Agents panel.
+## Native, ACP, and code execution
 
-Model-backed planning can only select the built-in code execution, biology
-interpretation, and visualization templates; Wisp constructs and validates the
-actual Agent specs and appends Reviewer. The model cannot invent tools,
-permissions, backends, or nested delegation. Unrelated simple goals can remain
-in the main conversation.
+Native execution runs the ordinary Wisp Agent loop in a separate child
+conversation with only the resolved tools. It supports project reading,
+project writing, and bounded Run Manager execution without starting an ACP
+client. This is the default eligible executor and is enough for a code task.
+
+ACP profiles remain available to workflows that explicitly resolve to an ACP
+executor. A profile may use Codex or another compatible Agent, but the task is
+still defined by capabilities and contracts, not by an ACP or Codex template.
+The same inline delegation surface is exposed through the Wisp MCP bridge as
+`wisp_delegate_tasks` and `wisp_get_delegated_result` when the owning
+conversation opted in. Because that bridge is non-interactive, a batch that
+requires approval is denied instead of silently escalating.
+
+## Persistence and safety
+
+- Wisp persists the resolved v2 plan before execution. Stored steps contain the
+  immutable Specialist, capability revisions, permissions, model, executor,
+  contracts, budgets, and policy integrity hash used for revalidation.
+- Read-only tasks may share the project workspace. Until isolated workspaces
+  are implemented, all writable or executable tasks use one mutation lane and
+  cannot edit the same checkout concurrently. An isolation request is rejected
+  when no eligible isolated executor exists.
+- Children receive only their instruction, bounded shared context, applicable
+  project instructions, explicit inputs, and direct dependency results. They
+  do not receive the full parent transcript.
+- Delegated Agents cannot call `delegate_tasks`; nesting remains disabled until
+  depth, breadth, and total-budget limits are implemented.
+- Output contracts are checked before results reach the parent. Attempts,
+  structured results, artifacts, evidence, usage, child conversation IDs, and
+  backend session IDs remain auditable in SQLite. Secrets stay in the existing
+  credential stores.
+- Turning Delegation off prevents the main conversation and its MCP bridge from
+  listing or invoking delegation tools. It does not erase workflow history or
+  implicitly cancel a workflow that is already running.
+
+## Legacy Agents panel
+
+The right-panel workflow remains available during migration. Manual mode runs
+an explicitly ordered built-in team; Assisted and Automatic modes use the old
+model-selected templates and persisted draft/approval flow. The legacy
+`propose_delegation` tool creates only such a draft and never starts work.
+
+This compatibility path is useful for reviewing and retrying existing v1
+workflows, but it is no longer the normal main-Agent path. Dynamic inline
+delegation does not call the legacy template selector and does not require the
+user to assemble a permanent Biology, Code Execution, Visualization, and
+Reviewer team before each task.
+
+## Manual smoke check
+
+Enable Delegation and ask the main Agent to compare two project files using two
+independent temporary Agents. Confirm that two child tasks overlap, the
+workflow is persisted, and the final chat response contains one synthesized
+comparison. Repeat with a write capability: Wisp should show the exact plan and
+start zero children if approval is denied.

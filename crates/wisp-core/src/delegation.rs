@@ -630,7 +630,57 @@ impl AgentDelegationResponse {
 }
 
 fn matches_json_contract(value: &Value, contract: &Value) -> bool {
-    match contract.get("type").and_then(Value::as_str) {
+    matches_json_contract_at_depth(value, contract, 0)
+}
+
+fn matches_json_contract_at_depth(value: &Value, contract: &Value, depth: usize) -> bool {
+    if depth > 32 || !contract.is_object() {
+        return false;
+    }
+    if contract
+        .get("const")
+        .is_some_and(|expected| expected != value)
+        || contract
+            .get("enum")
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.contains(value))
+    {
+        return false;
+    }
+    if contract
+        .get("allOf")
+        .and_then(Value::as_array)
+        .is_some_and(|schemas| {
+            !schemas
+                .iter()
+                .all(|schema| matches_json_contract_at_depth(value, schema, depth + 1))
+        })
+        || contract
+            .get("anyOf")
+            .and_then(Value::as_array)
+            .is_some_and(|schemas| {
+                !schemas
+                    .iter()
+                    .any(|schema| matches_json_contract_at_depth(value, schema, depth + 1))
+            })
+        || contract
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .is_some_and(|schemas| {
+                schemas
+                    .iter()
+                    .filter(|schema| matches_json_contract_at_depth(value, schema, depth + 1))
+                    .count()
+                    != 1
+            })
+        || contract
+            .get("not")
+            .is_some_and(|schema| matches_json_contract_at_depth(value, schema, depth + 1))
+    {
+        return false;
+    }
+
+    let type_matches = match contract.get("type").and_then(Value::as_str) {
         None => true,
         Some("object") => value.is_object(),
         Some("array") => value.is_array(),
@@ -640,7 +690,151 @@ fn matches_json_contract(value: &Value, contract: &Value) -> bool {
         Some("boolean") => value.is_boolean(),
         Some("null") => value.is_null(),
         Some(_) => false,
+    };
+    if !type_matches {
+        return false;
     }
+
+    if let Some(object) = value.as_object() {
+        if contract
+            .get("minProperties")
+            .and_then(Value::as_u64)
+            .is_some_and(|minimum| object.len() < minimum as usize)
+            || contract
+                .get("maxProperties")
+                .and_then(Value::as_u64)
+                .is_some_and(|maximum| object.len() > maximum as usize)
+        {
+            return false;
+        }
+        if contract
+            .get("required")
+            .and_then(Value::as_array)
+            .is_some_and(|required| {
+                required
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|key| !object.contains_key(key))
+            })
+        {
+            return false;
+        }
+        let properties = contract.get("properties").and_then(Value::as_object);
+        if properties.is_some_and(|properties| {
+            properties.iter().any(|(key, schema)| {
+                object
+                    .get(key)
+                    .is_some_and(|value| !matches_json_contract_at_depth(value, schema, depth + 1))
+            })
+        }) {
+            return false;
+        }
+        if let Some(additional) = contract.get("additionalProperties") {
+            for (key, value) in object {
+                if properties.is_some_and(|properties| properties.contains_key(key)) {
+                    continue;
+                }
+                match additional {
+                    Value::Bool(true) => {}
+                    Value::Bool(false) => return false,
+                    Value::Object(_) => {
+                        if !matches_json_contract_at_depth(value, additional, depth + 1) {
+                            return false;
+                        }
+                    }
+                    _ => return false,
+                }
+            }
+        }
+    }
+
+    if let Some(array) = value.as_array() {
+        if contract
+            .get("minItems")
+            .and_then(Value::as_u64)
+            .is_some_and(|minimum| array.len() < minimum as usize)
+            || contract
+                .get("maxItems")
+                .and_then(Value::as_u64)
+                .is_some_and(|maximum| array.len() > maximum as usize)
+            || contract.get("uniqueItems") == Some(&Value::Bool(true))
+                && array
+                    .iter()
+                    .enumerate()
+                    .any(|(index, item)| array[..index].contains(item))
+        {
+            return false;
+        }
+        if let Some(items) = contract.get("items") {
+            if !array
+                .iter()
+                .all(|item| matches_json_contract_at_depth(item, items, depth + 1))
+            {
+                return false;
+            }
+        }
+    }
+
+    if let Some(text) = value.as_str() {
+        let chars = text.chars().count();
+        if contract
+            .get("minLength")
+            .and_then(Value::as_u64)
+            .is_some_and(|minimum| chars < minimum as usize)
+            || contract
+                .get("maxLength")
+                .and_then(Value::as_u64)
+                .is_some_and(|maximum| chars > maximum as usize)
+            || contract
+                .get("pattern")
+                .and_then(Value::as_str)
+                .is_some_and(|pattern| {
+                    regex::Regex::new(pattern).map_or(true, |regex| !regex.is_match(text))
+                })
+        {
+            return false;
+        }
+    }
+
+    if let Some(number) = value.as_f64() {
+        if contract
+            .get("minimum")
+            .and_then(Value::as_f64)
+            .is_some_and(|minimum| number < minimum)
+            || contract
+                .get("maximum")
+                .and_then(Value::as_f64)
+                .is_some_and(|maximum| number > maximum)
+            || contract
+                .get("exclusiveMinimum")
+                .and_then(Value::as_f64)
+                .is_some_and(|minimum| number <= minimum)
+            || contract
+                .get("exclusiveMaximum")
+                .and_then(Value::as_f64)
+                .is_some_and(|maximum| number >= maximum)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn task_output_envelope(data: Value, response: &AgentDelegationResponse) -> Value {
+    let summary = data
+        .get("summary")
+        .and_then(Value::as_str)
+        .filter(|summary| !summary.trim().is_empty())
+        .unwrap_or("Structured task output is available in data.")
+        .to_string();
+    serde_json::json!({
+        "summary": summary,
+        "data": data,
+        "artifacts": response.artifacts.clone(),
+        "evidence": response.evidence.clone(),
+        "tests": [],
+        "risks": [],
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -673,6 +867,8 @@ pub trait AgentDelegator: Send + Sync {
     ) -> anyhow::Result<AgentDelegationResponse> {
         let request_id = request.as_request().request_id.clone();
         let output_contract = request.as_request().spec.output_contract.clone();
+        let task_output =
+            request.as_request().spec.output_schema_source == AgentOutputSchemaSource::Task;
         let budget = request.as_request().spec.budget.clone();
         let mut response = self.delegate_validated(request).await?;
         response.validate()?;
@@ -687,7 +883,12 @@ pub trait AgentDelegator: Send + Sync {
         if response.status == DelegationStatus::Succeeded
             && !matches_json_contract(&response.output, &output_contract)
         {
-            anyhow::bail!("delegation output does not satisfy output_contract");
+            response.status = DelegationStatus::Failed;
+            response.output = Value::Object(Default::default());
+            response.error = Some("delegation output does not satisfy output_contract".into());
+        } else if response.status == DelegationStatus::Succeeded && task_output {
+            let data = std::mem::take(&mut response.output);
+            response.output = task_output_envelope(data, &response);
         }
         response.validate()?;
         Ok(response)
@@ -930,6 +1131,68 @@ mod tests {
         assert!(spec.validate().is_err());
         spec.input_contract = serde_json::json!({"type":"object"});
         assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn json_contract_checks_nested_required_properties_and_arrays() {
+        let contract = serde_json::json!({
+            "type": "object",
+            "required": ["label", "scores"],
+            "properties": {
+                "label": {"type": "string", "minLength": 2},
+                "scores": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+                }
+            },
+            "additionalProperties": false
+        });
+        assert!(matches_json_contract(
+            &serde_json::json!({"label": "ok", "scores": [0.2, 1.0]}),
+            &contract
+        ));
+        assert!(!matches_json_contract(
+            &serde_json::json!({"label": "x", "scores": [1.2]}),
+            &contract
+        ));
+        assert!(!matches_json_contract(
+            &serde_json::json!({"label": "ok", "scores": [], "extra": true}),
+            &contract
+        ));
+    }
+
+    #[test]
+    fn task_data_is_wrapped_in_the_standard_parent_envelope() {
+        let response = AgentDelegationResponse {
+            request_id: "request".into(),
+            status: DelegationStatus::Succeeded,
+            output: serde_json::json!({}),
+            artifact_ids: vec![],
+            artifacts: vec![AgentArtifact {
+                id: "artifact".into(),
+                ..Default::default()
+            }],
+            evidence: vec![AgentEvidence {
+                kind: "test".into(),
+                summary: "verified".into(),
+                reference: None,
+            }],
+            usage: AgentUsage::default(),
+            agent_session_id: None,
+            child_frame_id: None,
+            error: None,
+        };
+
+        let envelope = task_output_envelope(
+            serde_json::json!({"summary": "measured", "value": 3}),
+            &response,
+        );
+
+        assert_eq!(envelope["summary"], "measured");
+        assert_eq!(envelope["data"]["value"], 3);
+        assert_eq!(envelope["artifacts"][0]["id"], "artifact");
+        assert_eq!(envelope["evidence"][0]["summary"], "verified");
     }
 
     #[test]
