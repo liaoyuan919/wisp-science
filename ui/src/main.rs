@@ -4095,6 +4095,14 @@ fn App() -> impl IntoView {
         });
     }
     refresh_execution_contexts(execution_contexts);
+    // Auto-register installed WSL distributions so they show up as checkable
+    // rows in the compute menu. No-op on non-Windows and (via a registry guard
+    // in the backend) on Windows machines without WSL, so it never spawns
+    // wsl.exe where there is nothing to detect.
+    spawn_local(async move {
+        let _ = invoke("import_wsl_contexts", JsValue::UNDEFINED).await;
+        refresh_execution_contexts(execution_contexts);
+    });
     refresh_runtimes(runtime_infos);
     refresh_runs(run_records, locale);
     {
@@ -7361,6 +7369,40 @@ fn App() -> impl IntoView {
                                                             }>
                                                             <span class="compute-resource-icon">{compose_icon("server")}</span>
                                                             <span class="compute-resource-name">{host.alias}</span>
+                                                            <span class="compute-resource-state">
+                                                                {if enabled { t(locale.get(), "compute.enabled") } else { t(locale.get(), "compute.disabled") }}
+                                                            </span>
+                                                        </button>
+                                                    }
+                                                }).collect_view()}}
+                                                {move || {
+                                                    let query = compute_search.get().trim().to_lowercase();
+                                                    execution_contexts.get().into_iter()
+                                                        .filter(|ctx| ctx.kind == "wsl")
+                                                        .filter(|ctx| query.is_empty() || ctx.label.to_lowercase().contains(&query))
+                                                        .map(|ctx| {
+                                                    let context_id = ctx.id.clone();
+                                                    let enabled = session_execution_contexts.get().contains(&context_id);
+                                                    let toggle_id = context_id.clone();
+                                                    let name = if ctx.label.trim().is_empty() { ctx.id.clone() } else { ctx.label.clone() };
+                                                    let is_default = serde_json::from_str::<serde_json::Value>(&ctx.config_json)
+                                                        .ok()
+                                                        .and_then(|cfg| cfg.get("is_default").and_then(|v| v.as_bool()))
+                                                        .unwrap_or(false);
+                                                    view! {
+                                                        <button type="button" class="agent-submenu-row compute-resource-row"
+                                                            class:enabled=enabled data-context-id=context_id.clone()
+                                                            aria-pressed=enabled.to_string()
+                                                            on:click=move |_| {
+                                                                toggle_session_compute_resource.call((toggle_id.clone(), !enabled));
+                                                            }>
+                                                            <span class="compute-resource-icon">{compose_icon("terminal")}</span>
+                                                            <span class="compute-resource-name-wrap">
+                                                                <span class="compute-resource-name">{name}</span>
+                                                                {is_default.then(|| view! {
+                                                                    <span class="compute-resource-default">{t(locale.get(), "compute.default")}</span>
+                                                                })}
+                                                            </span>
                                                             <span class="compute-resource-state">
                                                                 {if enabled { t(locale.get(), "compute.enabled") } else { t(locale.get(), "compute.disabled") }}
                                                             </span>

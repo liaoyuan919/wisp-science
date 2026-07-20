@@ -901,7 +901,9 @@ details.tool:not([open]) > summary.head .run-dot { animation: tool-pulse 1.1s ea
 .compute-resource-row > .compute-resource-icon { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; color: var(--text-faint); }
 .compute-resource-row .compute-resource-icon svg { width: 15px; height: 15px; }
 .compute-resource-row.enabled .compute-resource-icon { color: var(--clay-strong); }
+.compute-resource-name-wrap { min-width: 0; display: flex; align-items: center; gap: 6px; }
 .compute-resource-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.compute-resource-default { flex: 0 0 auto; padding: 0 6px; border-radius: 999px; border: 1px solid var(--clay); color: var(--clay-strong); font-size: 10px; font-weight: 650; line-height: 15px; }
 .compute-resource-state { color: var(--text-faint); font-size: 11px; }
 .compute-resource-row.enabled .compute-resource-state { color: var(--clay-strong); font-weight: 650; }
 .agent-submenu-row.compute-manage-row { flex: 0 0 auto; justify-content: center; min-height: 38px; margin-top: 4px; border-top: 1px solid var(--border); border-radius: 0 0 10px 10px; color: var(--text-muted); font-size: 12.5px; }

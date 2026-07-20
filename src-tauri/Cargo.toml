@@ -56,3 +56,6 @@ wisp-tools = { workspace = true }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 futures-util.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"

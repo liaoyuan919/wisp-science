@@ -108,10 +108,29 @@ pub async fn persist_wsl_contexts(
     Ok(contexts)
 }
 
+/// True when at least one WSL distribution is registered. Reads the registry
+/// only — it never spawns `wsl.exe`, because on a machine without WSL the
+/// bundled `wsl.exe` App Execution Alias stub opens an interactive installer
+/// that can block for up to a minute. The `Lxss` key exists exactly when a
+/// distribution is registered, so it doubles as "is there anything to list".
+#[cfg(target_os = "windows")]
+fn wsl_available() -> bool {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Lxss")
+        .is_ok()
+}
+
 #[tauri::command]
 pub async fn list_wsl_distros() -> Result<Vec<WslDistro>, String> {
     #[cfg(target_os = "windows")]
     {
+        // Guard the spawn: no registered distro means running wsl.exe would at
+        // best print nothing and at worst trigger the install stub. See above.
+        if !wsl_available() {
+            return Ok(Vec::new());
+        }
         let mut command = std::process::Command::new("wsl.exe");
         command.args(["-l", "-q"]);
         wisp_tools::process::hide_console(&mut command);
