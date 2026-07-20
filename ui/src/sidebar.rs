@@ -1,6 +1,6 @@
 use crate::app_support::{
-    allow_drop, bucket_sessions_by_date, compose_icon, drag_session_id, start_session_drag,
-    FolderModal,
+    allow_drop, bucket_sessions_by_date, compose_icon, drag_session_id, load_view_pref,
+    save_view_pref, start_session_drag, AvailableUpdate, FolderModal,
 };
 use crate::dto::*;
 use crate::i18n::{t, tf, Locale};
@@ -33,6 +33,8 @@ pub(super) struct SidebarState {
     pub(super) demos: RwSignal<Vec<DemoInfo>>,
     pub(super) session_history_cursor: RwSignal<Option<SessionCursor>>,
     pub(super) session_history_loading: RwSignal<bool>,
+    /// Newer release surfaced by the auto-check → prompt card in the footer.
+    pub(super) update_banner: RwSignal<Option<AvailableUpdate>>,
 }
 
 #[component]
@@ -53,6 +55,7 @@ pub(super) fn Sidebar(
     open_folder_actions: Callback<(web_sys::MouseEvent, String, String)>,
     open_capabilities: Callback<web_sys::MouseEvent>,
     open_settings: Callback<web_sys::MouseEvent>,
+    open_update: Callback<web_sys::MouseEvent>,
     on_sidebar_resize_start: Callback<web_sys::MouseEvent>,
 ) -> impl IntoView {
     let SidebarState {
@@ -79,8 +82,20 @@ pub(super) fn Sidebar(
         demos,
         session_history_cursor,
         session_history_loading,
+        update_banner,
     } = state;
     let load_older_sessions_button = load_older_sessions.clone();
+
+    // Sidebar-local view state (persisted to localStorage; nothing else reads it,
+    // so it stays out of the shared SidebarState). Sort is client-side over the
+    // sessions already loaded; group is a pure render toggle over existing data.
+    let sort_by = create_rw_signal(load_view_pref("wisp-session-sort", "newest", &["newest", "name"]));
+    let group_by = create_rw_signal(load_view_pref(
+        "wisp-session-group",
+        "folder",
+        &["folder", "date", "none"],
+    ));
+    let sort_menu_open = create_rw_signal(false);
 
     view! {
         <aside class="sidebar" class:collapsed=move || !show_sidebar.get()
@@ -136,6 +151,51 @@ pub(super) fn Sidebar(
                 <button class="side-btn" title=move || t(locale.get(), "sidebar.files") on:click=move |ev| open_files.call(ev)><span class="gi doc"></span>{move || t(locale.get(), "sidebar.files")}</button>
                 <button class="side-btn" title=move || t(locale.get(), "sidebar.library") on:click=move |ev| open_library.call(ev)>{compose_icon("star")}{move || t(locale.get(), "sidebar.library")}</button>
             </nav>
+            {move || (!demo_mode.get()).then(|| {
+                let loc = locale.get();
+                let group_opts = [("none", "sidebar.group_none"), ("folder", "sidebar.group_folder"), ("date", "sidebar.group_date")];
+                let sort_opts = [("newest", "sidebar.sort_newest"), ("name", "sidebar.sort_name")];
+                view! {
+                    <div class="side-sessions-head">
+                        <span class="side-sessions-title">{t(loc, "sidebar.sessions")}</span>
+                        <button type="button" class="icon-btn side-sort-btn"
+                            class:active=move || sort_menu_open.get()
+                            title=move || t(locale.get(), "sidebar.sort_group")
+                            aria-label=move || t(locale.get(), "sidebar.sort_group")
+                            on:click=move |ev: web_sys::MouseEvent| { ev.stop_propagation(); sort_menu_open.update(|v| *v = !*v); }>
+                            {compose_icon("adjustments")}
+                        </button>
+                        {move || sort_menu_open.get().then(|| view! {
+                            <div class="side-sort-backdrop" on:click=move |_| sort_menu_open.set(false)></div>
+                            <div class="side-sort-menu" role="menu" on:click=|ev: web_sys::MouseEvent| ev.stop_propagation()>
+                                <div class="side-sort-label">{t(loc, "sidebar.group_by")}</div>
+                                <div class="side-sort-opts">
+                                    {group_opts.into_iter().map(|(val, key)| view! {
+                                        <button type="button" class="side-sort-opt"
+                                            class:active=move || group_by.get().as_str() == val
+                                            on:click=move |_| { group_by.set(val.into()); save_view_pref("wisp-session-group", val); sort_menu_open.set(false); }>
+                                            <span>{t(loc, key)}</span>
+                                            <span class="side-sort-check" class:on=move || group_by.get().as_str() == val>{compose_icon("check")}</span>
+                                        </button>
+                                    }).collect_view()}
+                                </div>
+                                <div class="side-sort-sep"></div>
+                                <div class="side-sort-label">{t(loc, "sidebar.sort_by")}</div>
+                                <div class="side-sort-opts">
+                                    {sort_opts.into_iter().map(|(val, key)| view! {
+                                        <button type="button" class="side-sort-opt"
+                                            class:active=move || sort_by.get().as_str() == val
+                                            on:click=move |_| { sort_by.set(val.into()); save_view_pref("wisp-session-sort", val); sort_menu_open.set(false); }>
+                                            <span>{t(loc, key)}</span>
+                                            <span class="side-sort-check" class:on=move || sort_by.get().as_str() == val>{compose_icon("check")}</span>
+                                        </button>
+                                    }).collect_view()}
+                                </div>
+                            </div>
+                        })}
+                    </div>
+                }
+            })}
             <div class="side-list">
                 {move || {
                     let loc = locale.get();
@@ -152,11 +212,20 @@ pub(super) fn Sidebar(
                             }
                         }).collect_view();
                     }
-                    let list = sessions.get();
+                    let mut list = sessions.get();
                     let folder_list = folders.get();
                     if list.is_empty() && folder_list.is_empty() {
                         return view! { <div class="side-hint">{t(loc, "sidebar.no_sessions")}</div> }.into_view();
                     }
+                    // Sort applies to the sessions already loaded into the sidebar;
+                    // "load older" pages are appended and re-sorted on the next render.
+                    // ponytail: no server-side sort — the loaded set is rarely large
+                    // enough for client-side ordering to feel wrong; revisit if it is.
+                    if sort_by.get() == "name" {
+                        list.sort_by(|a, b| a.title.trim().to_lowercase().cmp(&b.title.trim().to_lowercase()));
+                    }
+                    // "newest" keeps the backend's created_at DESC order.
+                    let group = group_by.get();
                     // Whether any folder exists — used to keep the "ungrouped" drop
                     // zone available (so a session can be dragged out of a folder) without
                     // reading drag_session here, which would rebuild the whole list mid-drag.
@@ -228,6 +297,26 @@ pub(super) fn Sidebar(
                             </div>
                         }.into_view()
                     };
+                    // "None": one flat, sorted list, no folder blocks or date headers.
+                    if group == "none" {
+                        return list.iter().map(&make).collect_view();
+                    }
+                    // "Date": folders hidden, every session bucketed by date. Folder
+                    // membership stays in the DB — switch to "Folders" to drag/reassign.
+                    if group == "date" {
+                        let (today, earlier) = bucket_sessions_by_date(&list);
+                        return view! {
+                            {(!today.is_empty()).then(|| view! {
+                                <div class="side-group-title">{t(loc, "sidebar.today")}</div>
+                                {today.iter().map(&make).collect_view()}
+                            })}
+                            {(!earlier.is_empty()).then(|| view! {
+                                <div class="side-group-title">{t(loc, "sidebar.earlier")}</div>
+                                {earlier.iter().map(&make).collect_view()}
+                            })}
+                        }.into_view();
+                    }
+                    // "Folders" (default): folder blocks + ungrouped sessions by date.
                     let ungrouped: Vec<SessionInfo> = list.iter()
                         .filter(|s| s.folder_id.is_none())
                         .cloned()
@@ -372,6 +461,18 @@ pub(super) fn Sidebar(
                 })
             }}
             <div class="side-foot">
+                {move || update_banner.get().map(|u| view! {
+                    <button type="button" class="update-card" data-testid="update-card"
+                        title=move || t(locale.get(), "update_card.title")
+                        on:click=move |ev| open_update.call(ev)>
+                        <span class="update-card-icon gi grid" aria-hidden="true"></span>
+                        <span class="update-card-text">
+                            <span class="update-card-title">{move || t(locale.get(), "update_card.title")}</span>
+                            <span class="update-card-ver">{format!("v{}", u.version)}</span>
+                        </span>
+                        <span class="update-card-arrow" aria-hidden="true">"→"</span>
+                    </button>
+                })}
                 {move || project_info.get().map(|p| {
                     let loc = locale.get();
                     view! {

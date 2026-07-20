@@ -147,6 +147,22 @@ pub(super) fn apply_palette_modes(light: &str, dark: &str) {
     }
 }
 
+/// Load a small persisted view preference (sidebar sort/group), constrained to
+/// a known set of values so a stale/garbage localStorage entry can't wedge the UI.
+pub(super) fn load_view_pref(key: &str, fallback: &str, valid: &[&str]) -> String {
+    web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .and_then(|s| s.get_item(key).ok().flatten())
+        .filter(|v| valid.contains(&v.as_str()))
+        .unwrap_or_else(|| fallback.into())
+}
+
+pub(super) fn save_view_pref(key: &str, value: &str) {
+    if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let _ = s.set_item(key, value);
+    }
+}
+
 fn load_font_size(key: &str, fallback: u16, min: u16, max: u16) -> u16 {
     web_sys::window()
         .and_then(|w| w.local_storage().ok().flatten())
@@ -396,6 +412,7 @@ pub(super) enum UpdateCheckModal {
     Checking,
     Available {
         version: String,
+        notes: String,
         release_url: String,
     },
     UpToDate {
@@ -404,6 +421,14 @@ pub(super) enum UpdateCheckModal {
     Failed {
         message: String,
     },
+}
+
+/// A newer release found by the auto-check, surfaced as the sidebar prompt card.
+#[derive(Clone)]
+pub(super) struct AvailableUpdate {
+    pub(super) version: String,
+    pub(super) notes: String,
+    pub(super) release_url: String,
 }
 
 /// First open vs after a failed probe (failed phase must not keep probing).
@@ -2193,6 +2218,118 @@ pub(super) fn run_title(run: &RunRecord) -> String {
     }
 }
 
+pub(super) fn run_progress(run: &RunRecord) -> Option<RunProgress> {
+    serde_json::from_str(&run.progress_json).ok()
+}
+
+pub(super) fn transfer_progress_visible(progress: &RunProgress, run_status: &str) -> bool {
+    (matches!(run_status, "submitted" | "running" | "cancelling")
+        && matches!(progress.phase.as_str(), "uploading" | "downloading"))
+        || (js_sys::Date::now() as i64 / 1000 - progress.updated_at).abs() <= 10
+}
+
+fn transfer_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.2} {}", UNITS[unit])
+    }
+}
+
+pub(super) fn transfer_duration(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h {}m", seconds / 3600, seconds % 3600 / 60)
+    }
+}
+
+pub(super) fn run_status_label(locale: Locale, status: &str) -> String {
+    let key = match status {
+        "submitted" => "runs.status.submitted",
+        "running" => "runs.status.running",
+        "cancelling" => "runs.status.cancelling",
+        "succeeded" => "runs.status.succeeded",
+        "failed" => "runs.status.failed",
+        "timed_out" => "runs.status.timed_out",
+        "cancelled" => "runs.status.cancelled",
+        "lost" => "runs.status.lost",
+        _ => return status.to_string(),
+    };
+    t(locale, key).to_string()
+}
+
+pub(super) fn run_progress_meter(progress: RunProgress, locale: Locale) -> impl IntoView {
+    let percent = if progress.total_bytes == 0 {
+        0
+    } else {
+        progress
+            .completed_bytes
+            .saturating_mul(100)
+            .div_ceil(progress.total_bytes)
+            .min(100)
+    };
+    let phase_key = match progress.phase.as_str() {
+        "uploading" => "transfer.uploading",
+        "uploaded" => "transfer.uploaded",
+        "downloading" => "transfer.downloading",
+        "downloaded" => "transfer.downloaded",
+        "cancelled" => "transfer.cancelled",
+        "failed" => "transfer.failed",
+        _ => "transfer.transferring",
+    };
+    let bytes = format!(
+        "{} / {} · {percent}%",
+        transfer_bytes(progress.completed_bytes),
+        transfer_bytes(progress.total_bytes)
+    );
+    let speed = progress
+        .bytes_per_second
+        .map(|rate| format!("{}/s", transfer_bytes(rate)));
+    let eta = progress.eta_seconds.map(|seconds| {
+        tf(
+            locale,
+            "transfer.eta",
+            &[("time", &transfer_duration(seconds))],
+        )
+    });
+    let files = (progress.files_total > 1).then(|| {
+        tf(
+            locale,
+            "transfer.files",
+            &[
+                ("done", &progress.files_completed.to_string()),
+                ("total", &progress.files_total.to_string()),
+            ],
+        )
+    });
+    view! {
+        <div class="run-progress" data-direction=progress.direction>
+            <div class="run-progress-head">
+                <strong>{t(locale, phase_key)}</strong>
+                {progress.current_file.map(|file| view! { <span>{file}</span> })}
+            </div>
+            <progress max="100" value=percent.to_string()
+                aria-label=t(locale, phase_key)></progress>
+            <div class="run-progress-meta">
+                <span>{bytes}</span>
+                {speed.map(|value| view! { <span>{value}</span> })}
+                {eta.map(|value| view! { <span>{value}</span> })}
+                {files.map(|value| view! { <span>{value}</span> })}
+            </div>
+        </div>
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ContextModalKind {
     Machine,
@@ -2373,6 +2510,7 @@ pub(super) fn ContextDetailsOverlay(
                                             let cancellable = matches!(run.status.as_str(), "submitted" | "running");
                                             let remote_workdir = run.remote_workdir.clone();
                                             let poll_error = run.last_poll_error.clone();
+                                            let progress = run_progress(&run);
                                             let stdout_tail = run.stdout_tail.clone().unwrap_or_default();
                                             let stderr_tail = run.stderr_tail.clone().unwrap_or_default();
                                             let output = match (stdout_tail.is_empty(), stderr_tail.is_empty()) {
@@ -2408,6 +2546,7 @@ pub(super) fn ContextDetailsOverlay(
                                                         })}
                                                     </div>
                                                     <div class="run-meta">{meta}</div>
+                                                    {progress.map(|progress| run_progress_meter(progress, locale.get()))}
                                                     {run.command.clone().filter(|command| !command.trim().is_empty()).map(|command| view! {
                                                         <div class="run-command">{command}</div>
                                                     })}
@@ -7768,6 +7907,7 @@ pub(super) fn compose_icon(kind: &str) -> impl IntoView {
         "image" => view! { <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/> }.into_view(),
         "review" => view! { <circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18Z" fill="currentColor" stroke="none"/> }.into_view(),
         "controls" => view! { <path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/> }.into_view(),
+        "adjustments" => view! { <path d="M4 7h9"/><path d="M17 7h3"/><circle cx="15" cy="7" r="2"/><path d="M4 17h3"/><path d="M11 17h9"/><circle cx="9" cy="17" r="2"/> }.into_view(),
         "check" => view! { <path d="m20 6-11 11-5-5"/> }.into_view(),
         "skill" => view! { <path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/> }.into_view(),
         "computer" => view! { <rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/> }.into_view(),
