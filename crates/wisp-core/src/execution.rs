@@ -561,6 +561,13 @@ mod tests {
 
     fn dynamic_plan() -> DelegationPlan {
         let (registry, host) = dynamic_policy();
+        resolve_dynamic_plan(&registry, &host)
+    }
+
+    fn resolve_dynamic_plan(
+        registry: &CapabilityRegistry,
+        host: &DelegationHostPolicy,
+    ) -> DelegationPlan {
         registry
             .resolve_plan(
                 "reason independently",
@@ -759,9 +766,10 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_preserves_backend_session_provenance() {
-        let (registry, host) = dynamic_policy();
-        let mut plan = dynamic_plan();
-        plan.steps[0].spec.timeout_secs = Some(1);
+        let (registry, mut host) = dynamic_policy();
+        host.default_timeout_secs = Some(1);
+        host.timeout_ceiling_secs = Some(1);
+        let plan = resolve_dynamic_plan(&registry, &host);
         let result = DelegationExecutor::new(Arc::new(TimeoutDelegator))
             .with_dynamic_policy(registry, host)
             .execute(plan)

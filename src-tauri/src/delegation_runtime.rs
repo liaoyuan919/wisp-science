@@ -653,7 +653,6 @@ fn workflow_records(
                 spec.backend.as_str(),
                 &spec.prompt_template,
             )?;
-            stored.template_id.clear();
             stored.model.clone_from(&spec.model);
             stored.input_schema_json = serde_json::to_string(&spec.input_contract)?;
             stored.output_schema_json = serde_json::to_string(&spec.output_contract)?;
@@ -5680,7 +5679,6 @@ mod tests {
         let mut unsupported =
             AgentWorkflow::new("unsupported-plan", "p", "workspace", "Unsupported plan").unwrap();
         unsupported.frame_id = Some("f".into());
-        unsupported.status = AgentWorkflowStatus::Failed;
         unsupported.plan_json = json!({
             "schema_version": 1,
             "id": unsupported.id.clone(),
@@ -5690,27 +5688,43 @@ mod tests {
         .to_string();
         store.create_agent_workflow(&unsupported).await.unwrap();
 
-        assert!(load_agent_workflow_snapshots(&store, "p")
-            .await
-            .unwrap()
-            .is_empty());
-        assert!(project_workflow(&store, "p", &unsupported.id)
-            .await
-            .unwrap_err()
-            .contains("supported dynamic Agent plan"));
-        assert!(prepare_agent_workflow_retry(&store, "p", &unsupported.id)
-            .await
-            .unwrap_err()
-            .contains("supported dynamic Agent plan"));
-        assert!(execute_agent_workflow_with_delegator(
-            &store,
-            "p",
-            &unsupported.id,
-            Arc::new(SuccessfulDelegator),
-            Some(test_dynamic_policy()),
-            None,
+        assert!(tokio::time::timeout(
+            Duration::from_secs(2),
+            load_agent_workflow_snapshots(&store, "p")
         )
         .await
+        .expect("listing should reject unsupported records immediately")
+        .unwrap()
+        .is_empty());
+        assert!(tokio::time::timeout(
+            Duration::from_secs(2),
+            project_workflow(&store, "p", &unsupported.id)
+        )
+        .await
+        .expect("lookup should reject unsupported records immediately")
+        .unwrap_err()
+        .contains("supported dynamic Agent plan"));
+        assert!(tokio::time::timeout(
+            Duration::from_secs(2),
+            prepare_agent_workflow_retry(&store, "p", &unsupported.id)
+        )
+        .await
+        .expect("retry should reject unsupported records immediately")
+        .unwrap_err()
+        .contains("supported dynamic Agent plan"));
+        assert!(tokio::time::timeout(
+            Duration::from_secs(2),
+            execute_agent_workflow_with_delegator(
+                &store,
+                "p",
+                &unsupported.id,
+                Arc::new(SuccessfulDelegator),
+                Some(test_dynamic_policy()),
+                None,
+            )
+        )
+        .await
+        .expect("execution should reject unsupported records immediately")
         .unwrap_err()
         .contains("supported dynamic Agent plan"));
         assert!(store
@@ -6184,7 +6198,7 @@ mod tests {
         .await
         .unwrap();
         let (workflow, steps) =
-            workflow_records(&plan, "p", std::path::Path::new(""), None).unwrap();
+            workflow_records(&plan, "p", std::path::Path::new("workspace"), None).unwrap();
         store
             .create_agent_workflow_plan(&workflow, &steps)
             .await
