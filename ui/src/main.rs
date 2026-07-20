@@ -4241,6 +4241,10 @@ fn App() -> impl IntoView {
                 download_artifact(payload);
                 return;
             }
+            if action == "revealInFileManager" {
+                reveal_in_file_manager(payload);
+                return;
+            }
             if action == "copyImage" {
                 spawn_local(async move {
                     if context_menu::copy_image(&payload).await {
@@ -7925,6 +7929,7 @@ fn App() -> impl IntoView {
                                                 (mi == i).then(|| {
                                                 let (p, n, k) = (path.clone(), vn.clone(), fkind.clone());
                                                 let (mv, sp, dw) = (p.clone(), p.clone(), p.clone());
+                                                let rv = p.clone();
                                                 let oc = CenterFileTab::new(p.clone(), n.clone(), k.clone());
                                                 let (mvn, mvk) = (n.clone(), k.clone());
                                                 view! {
@@ -7965,6 +7970,9 @@ fn App() -> impl IntoView {
                                                         <button type="button" class="rp-tile-menu-item"
                                                             on:click=move |_| { artifact_menu.set(None); download_artifact(dw.clone()); }>
                                                             {move || t(locale.get(), "artifact.download")}</button>
+                                                        <button type="button" class="rp-tile-menu-item"
+                                                            on:click=move |_| { artifact_menu.set(None); reveal_in_file_manager(rv.clone()); }>
+                                                            {move || t(locale.get(), "ctx.reveal_in_manager")}</button>
                                                     </div>
                                                 }
                                             })

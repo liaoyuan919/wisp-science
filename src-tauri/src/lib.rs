@@ -6500,6 +6500,24 @@ fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn reveal_in_file_manager(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
+    path: String,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let ap = state.active(window.label());
+    let real = wisp_tools::safety::validate_file_path(&ap.root, &path)?;
+    if !real.exists() {
+        return Err(format!("file not found: {path}"));
+    }
+    app.opener()
+        .reveal_item_in_dir(&real)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn check_for_updates() -> Result<UpdateCheck, String> {
     const LATEST_RELEASE_API: &str =
         "https://api.github.com/repos/xuzhougeng/wisp-science/releases/latest";
@@ -7038,6 +7056,7 @@ pub fn run() {
             get_bootstrap_status,
             check_for_updates,
             open_external_url,
+            reveal_in_file_manager,
             connector_commands::list_mcp_connections,
             connector_commands::add_mcp_connection,
             connector_commands::authorize_http_connection,

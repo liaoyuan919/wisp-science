@@ -390,6 +390,11 @@ pub fn build(
                 items.push(item(
                     "downloadFile",
                     i18n::t(locale, "artifact.download"),
+                    path.clone(),
+                ));
+                items.push(item(
+                    "revealInFileManager",
+                    i18n::t(locale, "ctx.reveal_in_manager"),
                     path,
                 ));
             }
@@ -461,7 +466,16 @@ pub fn build(
                         i18n::t(locale, "ctx.attach_file"),
                         path.clone(),
                     ),
-                    item("downloadFile", i18n::t(locale, "artifact.download"), path),
+                    item(
+                        "downloadFile",
+                        i18n::t(locale, "artifact.download"),
+                        path.clone(),
+                    ),
+                    item(
+                        "revealInFileManager",
+                        i18n::t(locale, "ctx.reveal_in_manager"),
+                        path,
+                    ),
                     item(
                         "renameWorkspaceFile",
                         i18n::t(locale, "files.rename_file"),
