@@ -3494,9 +3494,7 @@ async fn send_message(
             Err(e) => tracing::warn!("load session from sqlite failed: {e}"),
         }
         rt.set_last_seq(agent.ctx.messages.len() as i64);
-        if agent.ctx.is_empty() {
-            agent.seed_system_prompt(&skills, None);
-        }
+        agent.seed_system_prompt(&skills, None);
         if let Some(message) = agent.ctx.messages.first_mut() {
             if let wisp_llm::Content::Text(prompt) = &mut message.content {
                 delegation_runtime::sync_delegation_prompt(prompt, delegation_enabled);

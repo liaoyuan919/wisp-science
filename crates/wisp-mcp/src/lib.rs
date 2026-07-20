@@ -1,8 +1,10 @@
-//! Minimal stdio JSON-RPC MCP client + `McpTool` adapter.
+//! Minimal stdio JSON-RPC MCP client + deferred `McpTool` adapter.
 //!
 //! Launch a server with [`McpClient::launch`], enumerate its tools with
 //! [`McpClient::tools_list`], and wrap each as an [`McpTool`] to register with
-//! the agent's tool registry. Example (bio-tools):
+//! the agent's tool registry. The registry exposes MCP schemas through a fixed
+//! search/dispatch pair instead of sending the full catalog on every turn.
+//! Example (bio-tools):
 //!
 //! ```ignore
 //! let client = Arc::new(McpClient::launch("python",

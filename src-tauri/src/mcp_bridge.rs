@@ -20,6 +20,10 @@ use wisp_skills::{list_resources, SkillIndex};
 use wisp_store::Store;
 use wisp_tools::{Approval, Tool, ToolEnv, ToolEvent, ToolResult};
 
+const DEFAULT_TOOL_SEARCH_LIMIT: usize = 5;
+const MAX_TOOL_SEARCH_LIMIT: usize = 10;
+const MAX_TOOL_DESCRIPTION_CHARS: usize = 2_048;
+
 #[derive(Debug, Clone)]
 pub(crate) struct BridgeConfig {
     pub(crate) app_data: PathBuf,
@@ -132,6 +136,8 @@ impl BridgeServer {
                     "required": ["name"]
                 }
             }),
+            search_tools_tool_schema(),
+            use_tool_tool_schema(),
             search_memory_tool_schema(),
             list_artifacts_tool_schema(),
             get_research_graph_tool_schema(),
@@ -146,8 +152,6 @@ impl BridgeServer {
                 tools.push(propose_delegation_tool_schema());
             }
         }
-        let remote = self.ensure_remote_tools().await?;
-        tools.extend(remote);
         Ok(json!({ "tools": tools }))
     }
 
@@ -167,6 +171,26 @@ impl BridgeServer {
                 Ok(s) => (s, false),
                 Err(e) => (e.to_string(), true),
             },
+            "wisp_search_tools" => match self.search_tools_text(&args).await {
+                Ok(s) => (s, false),
+                Err(e) => (e.to_string(), true),
+            },
+            "wisp_use_tool" => {
+                let Some(tool_name) = args.get("tool_name").and_then(Value::as_str) else {
+                    return Ok(tool_call_result(
+                        "missing required argument 'tool_name'",
+                        true,
+                    ));
+                };
+                let Some(tool_input) = args.get("tool_input").filter(|value| value.is_object())
+                else {
+                    return Ok(tool_call_result("'tool_input' must be a JSON object", true));
+                };
+                match self.call_remote_tool(tool_name, tool_input).await {
+                    Ok(result) => result,
+                    Err(error) => (error.to_string(), true),
+                }
+            }
             "wisp_search_memory" => match self.search_memory_text(&args) {
                 Ok(s) => (s, false),
                 Err(e) => (e.to_string(), true),
@@ -219,35 +243,12 @@ impl BridgeServer {
                     .await;
                 (result.content, !result.success)
             }
-            other => {
-                self.ensure_remote_tools().await?;
-                let Some(route) = self.routes.get(other).cloned() else {
-                    return Err(anyhow!("unknown Wisp bridge tool '{other}'"));
-                };
-                match route {
-                    Route::Bio {
-                        client,
-                        remote_name,
-                        ..
-                    }
-                    | Route::Custom {
-                        client,
-                        remote_name,
-                        ..
-                    } => match client.tool_call(&remote_name, &args).await {
-                        Ok(s) => (s, false),
-                        Err(e) => (e.to_string(), true),
-                    },
-                }
-            }
+            other => self.call_remote_tool(other, &args).await?,
         };
-        Ok(json!({
-            "content": [{ "type": "text", "text": text }],
-            "isError": is_error
-        }))
+        Ok(tool_call_result(text, is_error))
     }
 
-    async fn ensure_remote_tools(&mut self) -> Result<Vec<Value>> {
+    async fn ensure_remote_tools(&mut self) -> Result<()> {
         if !self.bundled_bio_tools_loaded {
             self.bundled_bio_tools_loaded = true;
             self.register_bundled_bio_tools().await;
@@ -256,7 +257,7 @@ impl BridgeServer {
             self.custom_mcp_tools_loaded = true;
             self.register_custom_mcp_tools().await;
         }
-        Ok(self.route_tools())
+        Ok(())
     }
 
     async fn register_bundled_bio_tools(&mut self) {
@@ -381,6 +382,36 @@ impl BridgeServer {
             .collect()
     }
 
+    async fn search_tools_text(&mut self, args: &Value) -> Result<String> {
+        self.ensure_remote_tools().await?;
+        search_tool_catalog(self.route_tools(), args)
+    }
+
+    async fn call_remote_tool(&mut self, name: &str, args: &Value) -> Result<(String, bool)> {
+        self.ensure_remote_tools().await?;
+        let route = self
+            .routes
+            .get(name)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown Wisp bridge tool '{name}'"))?;
+        let (client, remote_name) = match route {
+            Route::Bio {
+                client,
+                remote_name,
+                ..
+            }
+            | Route::Custom {
+                client,
+                remote_name,
+                ..
+            } => (client, remote_name),
+        };
+        Ok(match client.tool_call(&remote_name, args).await {
+            Ok(text) => (text, false),
+            Err(error) => (error.to_string(), true),
+        })
+    }
+
     fn is_reserved(&self, name: &str) -> bool {
         is_builtin_tool(name) || self.routes.contains_key(name)
     }
@@ -450,7 +481,12 @@ impl BridgeServer {
                     "tools": ["wisp_run_in_context", "wisp_cancel_run"],
                     "policy": "non_interactive; dangerous commands requiring confirmation are denied"
                 },
-                { "name": "scientific_mcp", "allowed": true, "discovery": "tools/list" },
+                {
+                    "name": "scientific_mcp",
+                    "allowed": true,
+                    "tools": ["wisp_search_tools", "wisp_use_tool"],
+                    "discovery": "wisp_search_tools"
+                },
                 {
                     "name": "harness.write",
                     "allowed": false,
@@ -610,6 +646,127 @@ fn parse_json_or_string(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
 }
 
+fn tool_call_result(text: impl Into<String>, is_error: bool) -> Value {
+    json!({
+        "content": [{ "type": "text", "text": text.into() }],
+        "isError": is_error
+    })
+}
+
+fn search_tool_catalog(tools: Vec<Value>, args: &Value) -> Result<String> {
+    let query = args
+        .get("query")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .ok_or_else(|| anyhow!("missing required argument 'query'"))?
+        .to_lowercase();
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|limit| limit as usize)
+        .unwrap_or(DEFAULT_TOOL_SEARCH_LIMIT)
+        .clamp(1, MAX_TOOL_SEARCH_LIMIT);
+    let browse = query == "*";
+    let terms: Vec<_> = query.split_whitespace().collect();
+    let total_hidden_tools = tools.len();
+    let mut matches = vec![];
+    for mut tool in tools {
+        let name = tool["name"].as_str().unwrap_or_default().to_lowercase();
+        let description = tool["description"]
+            .as_str()
+            .unwrap_or_default()
+            .to_lowercase();
+        let parameters = tool["inputSchema"].to_string().to_lowercase();
+        let mut score = usize::from(browse);
+        if name == query {
+            score += 1_000;
+        } else if name.contains(&query) {
+            score += 100;
+        }
+        if description.contains(&query) {
+            score += 50;
+        }
+        for term in &terms {
+            if name.contains(term) {
+                score += 20;
+            }
+            if description.contains(term) {
+                score += 5;
+            }
+            if parameters.contains(term) {
+                score += 1;
+            }
+        }
+        if score > 0 {
+            tool["description"] = Value::String(truncate_catalog_description(
+                tool["description"].as_str().unwrap_or_default(),
+            ));
+            matches.push((score, name, tool));
+        }
+    }
+    matches.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    let matched_tools = matches.len();
+    let results: Vec<_> = matches
+        .into_iter()
+        .take(limit)
+        .map(|(_, _, tool)| {
+            json!({
+                "tool_name": tool["name"],
+                "description": tool["description"],
+                "input_schema": tool["inputSchema"],
+            })
+        })
+        .collect();
+    Ok(serde_json::to_string_pretty(&json!({
+        "results": results,
+        "matched_tools": matched_tools,
+        "total_hidden_tools": total_hidden_tools,
+        "next": "Call 'wisp_use_tool' with a returned tool_name and matching tool_input. Use query '*' to browse.",
+    }))?)
+}
+
+fn truncate_catalog_description(value: &str) -> String {
+    if value.chars().count() <= MAX_TOOL_DESCRIPTION_CHARS {
+        return value.to_string();
+    }
+    let mut truncated: String = value.chars().take(MAX_TOOL_DESCRIPTION_CHARS).collect();
+    truncated.push_str("… [truncated]");
+    truncated
+}
+
+fn search_tools_tool_schema() -> Value {
+    json!({
+        "name": "wisp_search_tools",
+        "description": "Search enabled Wisp scientific and custom MCP tools. Returns only matching input schemas instead of exposing the full catalog on every request.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Capability, connector, action, known tool name, or '*' to browse" },
+                "limit": { "type": "integer", "description": "Maximum matches to return (default 5, maximum 10)" }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        }
+    })
+}
+
+fn use_tool_tool_schema() -> Value {
+    json!({
+        "name": "wisp_use_tool",
+        "description": "Call a Wisp MCP tool found by wisp_search_tools. tool_input must match the returned input_schema.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tool_name": { "type": "string", "description": "Exact tool_name returned by wisp_search_tools" },
+                "tool_input": { "type": "object", "description": "Arguments matching the selected tool's input_schema", "additionalProperties": true }
+            },
+            "required": ["tool_name", "tool_input"],
+            "additionalProperties": false
+        }
+    })
+}
+
 fn get_capabilities_tool_schema() -> Value {
     json!({
         "name": "wisp_get_capabilities",
@@ -757,6 +914,8 @@ fn is_builtin_tool(name: &str) -> bool {
         "wisp_get_capabilities"
             | "wisp_list_skills"
             | "wisp_use_skill"
+            | "wisp_search_tools"
+            | "wisp_use_tool"
             | "wisp_search_memory"
             | "wisp_list_artifacts"
             | "wisp_get_research_graph"
@@ -920,6 +1079,8 @@ mod tests {
             "wisp_get_capabilities"
         );
         assert_eq!(search_memory_tool_schema()["name"], "wisp_search_memory");
+        assert_eq!(search_tools_tool_schema()["name"], "wisp_search_tools");
+        assert_eq!(use_tool_tool_schema()["name"], "wisp_use_tool");
         assert_eq!(list_artifacts_tool_schema()["name"], "wisp_list_artifacts");
         assert_eq!(
             get_research_graph_tool_schema()["name"],
@@ -961,6 +1122,8 @@ mod tests {
             "wisp_get_capabilities",
             "wisp_list_skills",
             "wisp_use_skill",
+            "wisp_search_tools",
+            "wisp_use_tool",
             "wisp_search_memory",
             "wisp_list_artifacts",
             "wisp_get_research_graph",
@@ -974,6 +1137,35 @@ mod tests {
             assert!(is_builtin_tool(name), "{name} must be reserved");
         }
         assert!(!is_builtin_tool("third_party_run"));
+    }
+
+    #[test]
+    fn bridge_mcp_catalog_is_searched_on_demand() {
+        let catalog = vec![
+            json!({
+                "name": "pubmed_search",
+                "description": "Search biomedical literature.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "query": { "type": "string" } }
+                }
+            }),
+            json!({
+                "name": "notion_create_page",
+                "description": "Create a Notion page.",
+                "inputSchema": { "type": "object", "properties": {} }
+            }),
+        ];
+
+        let result = search_tool_catalog(catalog, &json!({ "query": "biomedical" })).unwrap();
+        let result: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["total_hidden_tools"], 2);
+        assert_eq!(result["results"].as_array().unwrap().len(), 1);
+        assert_eq!(result["results"][0]["tool_name"], "pubmed_search");
+        assert_eq!(
+            result["results"][0]["input_schema"]["properties"]["query"]["type"],
+            "string"
+        );
     }
 
     #[tokio::test]

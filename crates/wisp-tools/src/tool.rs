@@ -9,6 +9,11 @@ use wisp_llm::ToolSchema;
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn schema(&self) -> ToolSchema;
+    /// Keep this tool callable but omit its schema from ordinary model requests.
+    /// Deferred tools are discovered through the registry's MCP search/dispatch pair.
+    fn defer_schema(&self) -> bool {
+        false
+    }
     /// One-line preview shown in the tool-call card (e.g. the file path).
     fn preview(&self, _args: &Value) -> String {
         String::new()

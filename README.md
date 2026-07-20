@@ -39,7 +39,7 @@ wisp-science/
 │  ├─ wisp-core/    ContextManager (3-tier compaction), SystemPrompt, agent_loop, memory
 │  ├─ wisp-tools/   read/write/edit/search/grep/shell/attempt_completion + Windows safety
 │  ├─ wisp-store/   sqlx SQLite (projects/frames/messages/artifacts/settings) + OS keyring
-│  ├─ wisp-skills/  SKILL.md discovery + use_skill tool (bundled catalog at skills/)
+│  ├─ wisp-skills/  SKILL.md discovery + search_skills/use_skill progressive loading
 │  ├─ wisp-runtime/ project-scoped Python/R runtime manager + REPL tools
 │  ├─ wisp-mcp/     stdio JSON-RPC MCP client + McpTool adapter (bundled bio-tools)
 │  ├─ wisp-acp/     ACP v1 stdio client for external coding agents
@@ -343,7 +343,9 @@ uv pip install mcp requests
 # plus any server-specific deps (httpx, xmltodict, etc.) the package imports
 ```
 
-Then the agent can call that server's tools (e.g. PubMed search) directly.
+The agent first discovers matching tools with `search_mcp_tools`, then calls the
+selected tool through `use_mcp_tool`. The full server catalog is never copied
+into every model request.
 
 ### Notion MCP
 
@@ -420,6 +422,8 @@ correctly.
 - **Context compaction** (`wisp-core::context`): three tiers fire before each
   model call at 80% of the context budget — micro-compact oversized tool
   output, drop old turns, then an LLM-driven full summary as a last resort.
+  Skill catalogs and MCP schemas use progressive disclosure instead of living
+  in the baseline prompt.
 - **Providers** (`wisp-llm`): one trait, two wire formats (OpenAI
   `/chat/completions` and Anthropic `/v1/messages`), both with SSE streaming.
   `RoutedProvider` picks a low/medium/high tier per turn from the last user
@@ -438,7 +442,8 @@ correctly.
   with object names, types, shapes/sizes, and bounded metadata. The table can be
   pinned over the conversation and dragged without interrupting the runtime.
 - **MCP** (`wisp-mcp`): a minimal newline-JSON-RPC client launches any stdio
-  MCP server and exposes each remote tool as a first-class agent tool.
+  MCP server. Remote schemas stay behind the fixed `search_mcp_tools` /
+  `use_mcp_tool` pair until a task needs them.
 
 ## Acknowledgements
 

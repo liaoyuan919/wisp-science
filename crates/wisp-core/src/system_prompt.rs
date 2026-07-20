@@ -86,11 +86,33 @@ Before any `pip`, `uv`, `npm`, or `pixi add` download, consider the user's netwo
     }
 
     fn skills_guidance(&self) -> String {
-        let desc = self.skills.descriptions();
-        if desc.is_empty() {
+        let count = self.skills.all().len();
+        if count == 0 {
             return "## Skills Selection Guidelines\n\nNo skills available.\n".into();
         }
-        format!("## Skills Selection Guidelines\n\n{desc}\n\n- If an installed skill is relevant, call `use_skill` first before proceeding.\n- Skills may contain: workflows, best practices, reusable scripts, references\n")
+        let availability = if count == 1 { "skill is" } else { "skills are" };
+        format!(
+            "## Skills Selection Guidelines\n\n\
+{count} installed {availability} available. Their catalog and bodies are not preloaded.\n\n\
+- When a task may match an installed workflow, call `search_skills` with concise task or domain keywords.\n\
+- Then call `use_skill` with the exact returned name before proceeding.\n\
+- If the user already attached a selected skill's guidance to the turn, follow that content without loading it again.\n"
+        )
+    }
+
+    /// Replace only the skills section in a persisted system prompt. Other
+    /// session-specific sections (specialist, delegation, user rules) stay intact.
+    pub fn refresh_skills_guidance(&self, prompt: &mut String) {
+        const HEADER: &str = "## Skills Selection Guidelines";
+        let Some(start) = prompt.find(HEADER) else {
+            return;
+        };
+        let search_from = start + HEADER.len();
+        let end = prompt[search_from..]
+            .find("\n\n## ")
+            .map(|offset| search_from + offset)
+            .unwrap_or(prompt.len());
+        prompt.replace_range(start..end, self.skills_guidance().trim_end());
     }
 
     fn memory(&self) -> String {
@@ -225,5 +247,47 @@ mod tests {
             out.contains("nested-quote one-liners"),
             "ssh quoting guidance missing:\n{out}"
         );
+    }
+
+    #[test]
+    fn prompt_keeps_skill_catalog_out_of_context() {
+        let root = std::env::temp_dir().join(format!(
+            "wisp-system-prompt-skills-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let skill_dir = root.join("secret-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: secret-skill\ndescription: SHOULD_NOT_BE_IN_SYSTEM_PROMPT\n---\nbody",
+        )
+        .unwrap();
+        let skills = SkillIndex::load(&[root.clone()]);
+
+        let out = SystemPrompt::new(std::path::Path::new("/tmp"), &skills, None).assemble();
+        assert!(out.contains("1 installed skill is available"), "{out}");
+        assert!(out.contains("`search_skills`"), "{out}");
+        assert!(!out.contains("secret-skill"), "{out}");
+        assert!(!out.contains("SHOULD_NOT_BE_IN_SYSTEM_PROMPT"), "{out}");
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn persisted_prompt_drops_legacy_skill_catalog_only() {
+        let skills = SkillIndex::default();
+        let system = SystemPrompt::new(std::path::Path::new("/tmp"), &skills, None);
+        let mut prompt = "before\n\n## Skills Selection Guidelines\n\n- old: HUGE DESCRIPTION\n\n## User Rules\n\nkeep me\n\n## Specialist: reviewer\n\nkeep this too".to_string();
+
+        system.refresh_skills_guidance(&mut prompt);
+
+        assert!(!prompt.contains("HUGE DESCRIPTION"), "{prompt}");
+        assert!(prompt.contains("No skills available."), "{prompt}");
+        assert!(prompt.contains("## User Rules\n\nkeep me"), "{prompt}");
+        assert!(prompt.contains("## Specialist: reviewer"), "{prompt}");
     }
 }

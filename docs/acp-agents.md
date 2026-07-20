@@ -126,12 +126,13 @@ bridge exposes the following project-scoped Wisp Harness gateway:
 
 - `wisp_get_capabilities` — inspect the exact grant and current limitations
 - `wisp_list_skills` / `wisp_use_skill` — discover and load enabled skills
+- `wisp_search_tools` / `wisp_use_tool` — discover and call scientific or custom MCP tools without loading the full schema catalog
 - `wisp_search_memory` — read durable project memory
 - `wisp_list_artifacts` — list artifacts owned by the active project
 - `wisp_get_research_graph` — read project research nodes and edges
 - `wisp_list_execution_contexts` — read context capabilities and probe status
 - `wisp_run_in_context`, `wisp_get_run`, `wisp_monitor_run`, and `wisp_cancel_run` — persisted Run controls; `wisp_monitor_run` waits without repeated model polling
-- enabled scientific tools and enabled custom MCP connections
+- enabled scientific tools and custom MCP connections, available through the search/use pair above
 
 This is deliberately a capability gateway, not an unrestricted export of every
 internal Rust object or UI command. Memory/artifact/graph writes and persistent

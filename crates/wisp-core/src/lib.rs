@@ -47,6 +47,7 @@ pub fn build_registry(
     memory_enabled: bool,
 ) -> Registry {
     let mut reg = Registry::builtins();
+    reg.add(Box::new(wisp_skills::SearchSkillsTool::new(skills.clone())));
     reg.add(Box::new(wisp_skills::UseSkillTool::new(skills)));
     if memory_enabled {
         reg.add(Box::new(SearchMemoryTool::new(memory.clone())));
@@ -94,11 +95,15 @@ impl Agent {
         }
     }
 
-    /// Seed the system prompt once when the session is fresh.
+    /// Seed a fresh system prompt or refresh its catalog-free skills section.
     pub fn seed_system_prompt(&mut self, skills: &SkillIndex, compute_hosts: Option<String>) {
+        let system_prompt = SystemPrompt::new(&self.root, skills, compute_hosts);
         if self.ctx.is_empty() {
-            let prompt = SystemPrompt::new(&self.root, skills, compute_hosts).assemble();
-            self.ctx.append_system(prompt);
+            self.ctx.append_system(system_prompt.assemble());
+        } else if let Some(message) = self.ctx.messages.first_mut() {
+            if let wisp_llm::Content::Text(prompt) = &mut message.content {
+                system_prompt.refresh_skills_guidance(prompt);
+            }
         }
     }
 
