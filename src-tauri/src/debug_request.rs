@@ -213,7 +213,10 @@ pub(super) async fn export_debug_request(
     }
 
     let json = serde_json::to_string_pretty(&snapshot).map_err(|e| format!("{e}"))?;
-    let default_name = format!("wisp-debug-request-{}.json", sanitize_component(&session_id));
+    let default_name = format!(
+        "wisp-debug-request-{}.json",
+        sanitize_component(&session_id)
+    );
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
@@ -261,9 +264,7 @@ mod tests {
         // (rather than read by a tool), it must be visible in the export.
         let msgs = vec![
             Message::system("sys"),
-            Message::user(
-                "Selected excerpt from workspace file data.xls:\ncol_a,col_b\n1,2\n3,4",
-            ),
+            Message::user("Selected excerpt from workspace file data.xls:\ncol_a,col_b\n1,2\n3,4"),
         ];
         let snap = build_snapshot("s1", "t".into(), &msgs, &[], None, None, "stored-messages");
         assert!(snap.messages[1].text.contains("data.xls"));
