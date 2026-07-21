@@ -61,13 +61,26 @@ MAX_JOBS=8 uv pip install --no-deps --no-build-isolation "flash-attn<3"
 # slips ESMC's guard and kills ESMFold2Model import.
 ```
 
-The bundled `esmfold2_gpu` Modal env (remote-compute-modal skill) is the
-canonical, version-pinned recipe.
+For remote execution, install this version-pinned recipe on a selected and
+probed direct SSH GPU context, then submit inference through
+`run_in_context`. Wisp does not currently provide a Modal execution backend.
 
 **Gotchas:**
 - **Default kernel backend is `None`** (reference PyTorch, ~12x slower than paper). Call `model.set_kernel_backend('fused')` after `from_pretrained()`. See section below.
 - Match torch CUDA build to your driver; the pin `<2.8` targets CUDA 12.2.
 - Weights via Xet bridge ~300 MB/s: ESMFold2 1.36 GB, ESMFold2-Fast 0.76 GB. Set `HF_HOME=/work/hf_cache`.
+
+## Wisp execution
+
+Use `python` only for bounded interactive checks. For structure prediction,
+require a selected and probed `ssh:<alias>` GPU context and load
+`remote-compute-ssh`. Put the documented invocation in a self-contained project
+script, activate the version-pinned remote environment explicitly, stage only
+small files with `input_paths`, and write predictions to a known absolute remote
+directory. Submit it with `run_in_context`, register exact `ssh://` result paths
+in `output_specs`, call `monitor_run` once when waiting is useful, use `get_run`
+once for a snapshot, or `cancel_run` to stop. Do not submit a scheduler job
+through the SSH-direct runner.
 
 ## Usage — local model
 

@@ -76,48 +76,32 @@ embedding (`n_cells × emb_dim`, 512 by default). Downstream: feed to
 ## Remote compute
 
 Needs ≥24 GB VRAM and the released human checkpoint (~200 MB:
-`args.json`, `best_model.pt`, `vocab.json`). Read
-`compute_details({provider, mode:'read'})` for an environment with `scgpt`
-and a pre-cached checkpoint directory, then:
+`args.json`, `best_model.pt`, `vocab.json`). Use a selected and probed
+`ssh:<alias>` context and load `remote-compute-ssh`. Confirm the environment
+and checkpoint with bounded read-only discovery, then write a self-contained
+`runs/scgpt_embed.py` and submit it with `run_in_context`:
 
-```python
-c = host.compute.create(provider)
-job = c.submit_job(
-    intent="scGPT embed 50k cells — 1×GPU, ~5 min",
-    inputs=[
-        {"src": "dataset.h5ad", "dst_filename": "dataset.h5ad"},
-        {"src": "embed.py", "dst_filename": "embed.py"},
-    ],
-    command="python3 embed.py",
-    environment=...,   # env name from compute_details
-    outputs=["embedded.h5ad"],
-    timeout_seconds=1800,
-)
-print(job.job_id)   # cell ends here — kernel never blocks on compute
+```json
+{
+  "context_id": "ssh:gpu-box",
+  "title": "scGPT embedding for 50k cells",
+  "command": "source ~/miniforge3/etc/profile.d/conda.sh && conda activate scgpt && python scgpt_embed.py --input dataset.h5ad --model-dir /srv/models/scgpt-human --output /home/me/wisp-results/scgpt/embedded.h5ad",
+  "timeout_secs": 1800,
+  "input_paths": ["runs/scgpt_embed.py", "data/dataset.h5ad"],
+  "output_specs": [
+    {
+      "glob": "ssh://gpu-box/home/me/wisp-results/scgpt/embedded.h5ad",
+      "kind": "h5ad",
+      "residency": "remote"
+    }
+  ]
+}
 ```
 
-Then call the `wait_for_notification` brain-tool. When the
-`compute_done` notification arrives, act on its payload:
-
-```python
-save_artifacts(payload["featured_files"])   # paths under hpc/<job_id>/
-```
-
-For the full result dict (`output_files`, `remote_workdir`, …), re-enter the
-kernel and bind the compute handle separately — `.close()` lives on the
-handle, not on the job object:
-
-```python
-h = host.compute.create(provider)
-res = h.attach_job(job_id).result()
-h.close()
-```
-
-See the `remote-compute-ssh` / `remote-compute-modal` skill for the
-orchestration details.
-
-In `embed.py`, pass `model_dir=` the checkpoint path from `compute_details`.
-If `flash-attn` is unavailable in that environment, set
+Replace every context and remote path with discovered values. For large data
+already on the server, use an absolute remote path instead of staging it. Call
+`monitor_run` once to wait, `get_run` once for a snapshot, or `cancel_run` to
+stop. If `flash-attn` is unavailable in that environment, set
 `use_fast_transformer=False`.
 
 

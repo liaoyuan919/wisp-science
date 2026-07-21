@@ -273,6 +273,7 @@ pixi info    # shows config paths and channels
 
 ## Not in scope
 
-- Remote GPU / SSH / Modal → `compute-env-setup`
+- Remote GPU or direct SSH → `compute-env-setup`; managed cloud backends are
+  unavailable until Wisp implements a matching execution-context backend
 - Replacing pixi with conda/micromamba when pixi suffices locally
 - SciMaster API billing / key provisioning beyond pointing to `sci init`

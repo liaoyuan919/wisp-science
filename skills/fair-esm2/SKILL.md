@@ -91,40 +91,31 @@ drop BOS/EOS. `out["contacts"]` (when `return_contacts=True`) is `(B, L, L)`.
 ## Remote compute
 
 Needs ≥16 GB VRAM (650M model) and either pre-cached `.pt` checkpoints or
-egress to `dl.fbaipublicfiles.com`. Read
-`compute_details({provider, mode:'read'})` for an environment with `fair-esm`
-and a torch-hub weight cache, then:
+egress to `dl.fbaipublicfiles.com`. Use a selected and probed `ssh:<alias>`
+context and load `remote-compute-ssh`. Confirm the `fair-esm` environment and
+torch-hub cache, then submit a self-contained runner with `run_in_context`:
 
-```python
-c = host.compute.create(provider)
-job = c.submit_job(
-    intent="ESM-2 650M embeddings for 200 sequences — 1×GPU, ~2 min",
-    inputs=[
-        {"src": "seqs.fasta", "dst_filename": "seqs.fasta"},
-        {"src": "embed_esm2.py", "dst_filename": "embed_esm2.py"},
-    ],
-    command="python3 embed_esm2.py",
-    environment=...,   # env name from compute_details
-    outputs=["embeddings.pt"],
-    timeout_seconds=1800,
-)
-print(job.job_id)   # cell ends here — kernel never blocks on compute
+```json
+{
+  "context_id": "ssh:gpu-box",
+  "title": "ESM-2 embeddings for 200 sequences",
+  "command": "source ~/miniforge3/etc/profile.d/conda.sh && conda activate fair-esm && TORCH_HOME=/srv/torch-cache python embed_esm2.py --input seqs.fasta --output /home/me/wisp-results/esm2/embeddings.pt",
+  "timeout_secs": 1800,
+  "input_paths": ["runs/embed_esm2.py", "data/seqs.fasta"],
+  "output_specs": [
+    {
+      "glob": "ssh://gpu-box/home/me/wisp-results/esm2/embeddings.pt",
+      "kind": "pytorch",
+      "residency": "remote"
+    }
+  ]
+}
 ```
 
-Then call the `wait_for_notification` brain-tool. When the
-`compute_done` notification arrives, act on its payload:
-
-```python
-save_artifacts(payload["featured_files"])   # paths under hpc/<job_id>/
-```
-
-For the full result dict (`output_files`, `remote_workdir`, …), re-enter the
-kernel: `c.attach_job(job_id).result()` then `c.close()`. See the
-`remote-compute-ssh` / `remote-compute-modal` skill for the orchestration
-details.
-
-Inside `embed_esm2.py`, set `TORCH_HOME` to the provider's torch-hub cache
-mount (path is in `compute_details`) so `esm.pretrained.*` resolves locally.
+Replace context, environment, cache, and output paths with discovered values.
+For a large input already on the server, use its absolute path instead of
+staging it. Call `monitor_run` once to wait, `get_run` once for a snapshot, or
+`cancel_run` to stop.
 
 
 ## Troubleshooting

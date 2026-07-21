@@ -58,35 +58,30 @@ biosample) is in `borzoi_pytorch.pytorch_borzoi_model.TRACKS_DF` (or `model.trac
 ## Remote compute
 
 Needs ≥24 GB VRAM and either pre-cached HF weights or egress to
-`huggingface.co`. Read `compute_details({provider, mode:'read'})` for an
-environment with `borzoi-pytorch`, then:
+`huggingface.co`. Use a selected and probed `ssh:<alias>` context and load
+`remote-compute-ssh`. Confirm `borzoi-pytorch` and the cache location, then
+submit a self-contained runner with `run_in_context`:
 
-```python
-c = host.compute.create(provider)
-job = c.submit_job(
-    intent="Borzoi track prediction for 1 locus — 1×GPU, ~2 min",
-    inputs=[{"src": "borzoi_run.py", "dst_filename": "borzoi_run.py"}],
-    command="python3 borzoi_run.py",   # env selection is host-specific — see compute_details for your provider
-    outputs=["tracks.npz"],
-    timeout_seconds=1800,
-)
-print(job.job_id)   # cell ends here — kernel never blocks on compute
+```json
+{
+  "context_id": "ssh:gpu-box",
+  "title": "Borzoi prediction for one locus",
+  "command": "source ~/miniforge3/etc/profile.d/conda.sh && conda activate borzoi && HF_HOME=/srv/model-cache python borzoi_run.py --output /home/me/wisp-results/borzoi/tracks.npz",
+  "timeout_secs": 1800,
+  "input_paths": ["runs/borzoi_run.py"],
+  "output_specs": [
+    {
+      "glob": "ssh://gpu-box/home/me/wisp-results/borzoi/tracks.npz",
+      "kind": "npz",
+      "residency": "remote"
+    }
+  ]
+}
 ```
 
-Then call the `wait_for_notification` brain-tool. When the
-`compute_done` notification arrives, act on its payload:
-
-```python
-save_artifacts(payload["featured_files"])   # paths under hpc/<job_id>/
-```
-
-For the full result dict (`output_files`, `remote_workdir`, …), re-enter the
-kernel: `c.attach_job(job_id).result()` then `c.close()`. See the
-`remote-compute-ssh` / `remote-compute-modal` skill for the orchestration
-details.
-
-If the provider exposes a weight-cache mount, point `HF_HOME` at it inside
-`borzoi_run.py` (path is in `compute_details`).
+Replace context, environment, cache, and output paths with discovered values.
+Call `monitor_run` once to wait, `get_run` once for a snapshot, or `cancel_run`
+to stop.
 
 
 ## Troubleshooting

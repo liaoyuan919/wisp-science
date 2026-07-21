@@ -292,7 +292,7 @@ These are correctness failures, not style preferences:
 
 ## §9 Render-then-verify
 
-After `fig.savefig(...)`, before `save_artifacts`:
+After `fig.savefig(...)`, before presenting the file:
 
 **9.1 Geometric (bbox) check.**
 ```python
@@ -313,12 +313,16 @@ spine is not a finding. Fix (move, shorten, stagger) and re-save until clean.
 
 **9.2 Perceptual check.** The bbox check is geometric, not perceptual — it will
 not catch a low-contrast label, a leader that crosses three others, or a series
-colour mistakable for another. Crop the saved PNG to each panel and look:
+colour mistakable for another. Save every panel crop as a concrete file with
+Pillow, then inspect each crop with Wisp's `view_image` tool:
 ```python
+from PIL import Image
+
 fig.savefig("figure.png")
 for letter, box in panel_crops(fig).items():
-    host.view_image("figure.png", crop=box)
+    Image.open("figure.png").crop(box).save(f"figure-{letter}.png")
 ```
+Leave Python after creating the files and call `view_image` once per crop.
 For each crop: Is every glyph and mark legible against its background? Does the
 smallest plotted element have a stroke or stub? Do any leaders cross? Could any
 series colour be mistaken for another? Does the legend sit beside what it keys?

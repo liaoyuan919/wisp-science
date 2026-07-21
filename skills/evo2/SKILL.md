@@ -96,37 +96,32 @@ Need a DNA model?
 
 ## Remote compute
 
-7B/40B inference is GPU-bound (≥24 GB / 80 GB VRAM). Read
-`compute_details({provider, mode:'read'})` for an environment with `evo2` +
-`flash-attn` and a pre-cached HF weight mount, then submit:
+7B/40B inference is GPU-bound (≥24 GB / 80 GB VRAM). Use a selected and
+probed `ssh:<alias>` context and load `remote-compute-ssh`. Confirm that the
+environment imports Evo 2 and that the desired weights are cached. Submit a
+self-contained scoring script through one `run_in_context` call:
 
-```python
-c = host.compute.create(provider)
-job = c.submit_job(
-    intent="Evo2-7B score 200bp variant window — 1×GPU, ~2 min",
-    inputs=[{"src": "score_evo2.py", "dst_filename": "score_evo2.py"}],
-    command="python3 score_evo2.py",   # env selection is host-specific — see compute_details for your provider
-    outputs=["scores.json"],
-    timeout_seconds=1800,
-)
-print(job.job_id)   # cell ends here — kernel never blocks on compute
+```json
+{
+  "context_id": "ssh:gpu-box",
+  "title": "Evo 2 variant scoring",
+  "command": "source ~/miniforge3/etc/profile.d/conda.sh && conda activate evo2 && HF_HOME=/srv/model-cache HF_HUB_OFFLINE=1 python score_evo2.py --output /home/me/wisp-results/evo2/scores.json",
+  "timeout_secs": 1800,
+  "input_paths": ["runs/score_evo2.py"],
+  "output_specs": [
+    {
+      "glob": "ssh://gpu-box/home/me/wisp-results/evo2/scores.json",
+      "kind": "json",
+      "residency": "remote"
+    }
+  ]
+}
 ```
 
-Then call the `wait_for_notification` brain-tool. When the
-`compute_done` notification arrives, act on its payload:
-
-```python
-save_artifacts(payload["featured_files"])   # paths under hpc/<job_id>/
-```
-
-For the full result dict (`output_files`, `remote_workdir`, …), re-enter the
-kernel: `c.attach_job(job_id).result()` then `c.close()`. See the
-`remote-compute-ssh` / `remote-compute-modal` skill for the orchestration
-details.
-
-Inside `score_evo2.py`, point `HF_HOME` at the provider's weight-cache mount
-(path is in `compute_details`) and set `HF_HUB_OFFLINE=1` so the loader
-doesn't try to write `refs/` into a read-only mount. Weight footprint:
+Replace context, environment, cache, and output paths with discovered values.
+Call `monitor_run` once to wait, `get_run` once for a snapshot, or `cancel_run`
+to stop. Set `HF_HUB_OFFLINE=1` only after confirming the cache is complete, so
+the loader does not try to write `refs/` into a read-only mount. Weight footprint:
 ~15 GB (7B), ~80 GB (40B).
 
 
