@@ -4221,14 +4221,16 @@ pub(super) fn flush_delta_buf(
     items: RwSignal<Vec<ChatItem>>,
     transcripts: RwSignal<HashMap<String, Vec<ChatItem>>>,
     models: RwSignal<Vec<ModelProfile>>,
+    session_models: RwSignal<HashMap<String, String>>,
 ) {
     let drained: Vec<_> = buf.borrow_mut().drain().collect();
     if drained.is_empty() {
         return;
     }
-    let fallback_model = active_model_label(&models.get_untracked());
+    let profiles = models.get_untracked();
+    let bindings = session_models.get_untracked();
     for (fid, deltas) in drained {
-        let model = fallback_model.clone();
+        let model = session_model_label(&profiles, &bindings, Some(&fid));
         route_items(active, items, transcripts, &fid, move |v| {
             for d in deltas {
                 match d {
@@ -4248,6 +4250,7 @@ pub(super) fn schedule_delta_flush(
     items: RwSignal<Vec<ChatItem>>,
     transcripts: RwSignal<HashMap<String, Vec<ChatItem>>>,
     models: RwSignal<Vec<ModelProfile>>,
+    session_models: RwSignal<HashMap<String, String>>,
 ) {
     if scheduled.get() {
         return;
@@ -4258,7 +4261,7 @@ pub(super) fn schedule_delta_flush(
     set_timeout(
         move || {
             scheduled.set(false);
-            flush_delta_buf(&buf, active, items, transcripts, models);
+            flush_delta_buf(&buf, active, items, transcripts, models, session_models);
         },
         std::time::Duration::from_millis(50),
     );

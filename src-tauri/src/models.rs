@@ -499,6 +499,36 @@ async fn active_id(store: &wisp_store::Store, profiles: &[ModelProfile]) -> Stri
     }
 }
 
+pub async fn active_profile_id(store: &wisp_store::Store) -> String {
+    let profiles = ensure(store).await;
+    active_id(store, &profiles).await
+}
+
+pub async fn session_profile_id(store: &wisp_store::Store, frame_id: &str) -> String {
+    let profiles = ensure(store).await;
+    let bound = store
+        .frame_model(frame_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if profiles.iter().any(|profile| profile.id == bound) {
+        bound
+    } else {
+        active_id(store, &profiles).await
+    }
+}
+
+pub async fn session_label(store: &wisp_store::Store, frame_id: &str) -> String {
+    let profiles = ensure(store).await;
+    let id = session_profile_id(store, frame_id).await;
+    profiles
+        .iter()
+        .find(|profile| profile.id == id)
+        .map(|profile| profile.label.clone())
+        .unwrap_or_default()
+}
+
 /// Key for a profile, falling back to the legacy `api_key` secret for the
 /// migrated "default" profile (so a not-yet-re-saved default still works).
 fn key_for(id: &str) -> String {
@@ -761,6 +791,26 @@ pub async fn list_models(state: State<'_, crate::AppState>) -> Result<Vec<ModelP
     Ok(decorated(&state.store).await)
 }
 
+#[tauri::command]
+pub async fn get_session_model(
+    state: State<'_, crate::AppState>,
+    window: tauri::WebviewWindow,
+    session_id: String,
+) -> Result<String, String> {
+    let project = state.active(window.label());
+    if state
+        .store
+        .frame_project_id(&session_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .as_deref()
+        != Some(project.id.as_str())
+    {
+        return Err("Session not found".into());
+    }
+    Ok(session_profile_id(&state.store, &session_id).await)
+}
+
 /// Upsert a profile. An empty `id` creates a new one; a non-empty `key` updates
 /// the keyring (a blank key leaves the stored one untouched).
 #[tauri::command]
@@ -863,18 +913,29 @@ pub async fn remove_model(
 #[tauri::command]
 pub async fn set_active_model(
     state: State<'_, crate::AppState>,
+    window: tauri::WebviewWindow,
     id: String,
+    session_id: Option<String>,
 ) -> Result<Vec<ModelProfile>, String> {
     let profiles = ensure(&state.store).await;
     if !profiles.iter().any(|p| p.id == id) {
         return Err("Unknown model.".into());
     }
-    state
-        .store
-        .set_setting(ACTIVE_KEY, &id)
-        .await
-        .map_err(|e| e.to_string())?;
-    crate::clear_idle_agents(&state).await;
+    if let Some(session_id) = session_id.filter(|value| !value.is_empty()) {
+        let project = state.active(window.label());
+        state
+            .store
+            .set_frame_model(&session_id, &project.id, &id)
+            .await
+            .map_err(|error| error.to_string())?;
+        crate::clear_session_agent(&state, &session_id).await;
+    } else {
+        state
+            .store
+            .set_setting(ACTIVE_KEY, &id)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
     Ok(decorated(&state.store).await)
 }
 
@@ -921,6 +982,35 @@ mod tests {
             json[1]["use_for_vision"], true,
             "IPC response lost vision assignment"
         );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[tokio::test]
+    async fn session_profile_binding_does_not_change_other_sessions() {
+        let tmp = std::env::temp_dir().join(format!(
+            "wisp_session_models_{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = wisp_store::Store::open(&tmp).await.unwrap();
+        store.create_project("p", "project", "").await.unwrap();
+        save_raw(
+            &store,
+            &[
+                test_profile("m1", "first", "model-1"),
+                test_profile("m2", "second", "model-2"),
+            ],
+        )
+        .await
+        .unwrap();
+        store.set_setting(ACTIVE_KEY, "m1").await.unwrap();
+        store.create_frame("a", "p", "OPERON", "m1").await.unwrap();
+        store.create_frame("b", "p", "OPERON", "m1").await.unwrap();
+
+        store.set_frame_model("a", "p", "m2").await.unwrap();
+
+        assert_eq!(session_profile_id(&store, "a").await, "m2");
+        assert_eq!(session_profile_id(&store, "b").await, "m1");
+        drop(store);
         let _ = std::fs::remove_file(&tmp);
     }
 

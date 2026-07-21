@@ -4,6 +4,12 @@ wisp-science calls remote LLM APIs through model profiles. Desktop users
 configure these in **Settings -> Models**. Each row is a model profile with its
 own display name, provider, API URL, model ID, advanced options, and API key.
 
+The composer model picker binds the selected HTTP model to the current
+conversation. Switching one populated conversation asks for confirmation and
+does not change any other conversation. Empty conversations switch immediately
+without a warning. The active profile in Settings remains the default for new
+conversations.
+
 Model profiles describe model access and capabilities for the **built-in Wisp
 agent**. External coding agents (Codex / Claude via ACP) are configured under
 **Settings → Models → ACP Agents** — see [ACP Agents](acp-agents.md). Do not put

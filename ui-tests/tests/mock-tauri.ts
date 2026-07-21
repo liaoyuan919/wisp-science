@@ -68,7 +68,12 @@ export function tauriMock(fixtures?: { xlsxBase64?: string; pptxBase64?: string 
       ? [{ id: "long-session", title: "Long transcript", ts: 2000, running: false }]
       : query.has("mockAgentWorkflow")
         ? [{ id: "s-current", title: "Agent workflow conversation", ts: 2000, running: false }]
-        : [];
+        : query.get("mockSessionModels") === "1"
+          ? [
+              { id: "s-model-a", title: "First model session", ts: 2000, running: false },
+              { id: "s-model-b", title: "Second model session", ts: 1900, running: false },
+            ]
+          : [];
   let activeProjectId = "default";
   let terminalCounter = 0;
   let mockUpdateCheck = {
@@ -176,6 +181,10 @@ export function tauriMock(fixtures?: { xlsxBase64?: string; pptxBase64?: string 
       use_for_vision: false,
     },
   ];
+  const activeHttpModelId = () => mockModels.find((model) => model.active)?.id ?? mockModels[0]?.id ?? "";
+  const sessionModels: Record<string, string> = query.get("mockSessionModels") === "1"
+    ? { "s-model-a": "default", "s-model-b": "default" }
+    : {};
   let mockAcpAgents = [
     { id: "acp-test", label: "Test ACP Agent", command: "fake-acp", args: ["--stdio"] },
   ];
@@ -725,6 +734,17 @@ export function tauriMock(fixtures?: { xlsxBase64?: string; pptxBase64?: string 
           case "load_demo":
             return demo;
           case "load_session":
+            if (query.get("mockSessionModels") === "1") {
+              const id = String(arg("id") ?? "");
+              return {
+                items: [
+                  { role: "user", text: `Question in ${id}`, tool_name: null, ok: null },
+                  { role: "assistant", text: `Answer in ${id}`, tool_name: null, ok: null },
+                ],
+                next_before_seq: null,
+                user_offset: 0,
+              };
+            }
             if (mockResourceSession) {
               return {
                 items: [{
@@ -942,6 +962,10 @@ export function tauriMock(fixtures?: { xlsxBase64?: string; pptxBase64?: string 
             return null;
           case "list_models":
             return mockModels;
+          case "get_session_model": {
+            const sessionId = String(arg("sessionId") ?? "");
+            return sessionModels[sessionId] ?? activeHttpModelId();
+          }
           case "list_acp_agents":
             return mockAcpAgents;
           case "get_dynamic_agent_options":
@@ -1358,7 +1382,12 @@ export function tauriMock(fixtures?: { xlsxBase64?: string; pptxBase64?: string 
           }
           case "set_active_model": {
             const id = arg("id") ?? "";
-            mockModels = mockModels.map((m) => ({ ...m, active: m.id === id }));
+            const sessionId = String(arg("sessionId") ?? "");
+            if (sessionId) {
+              sessionModels[sessionId] = id;
+            } else {
+              mockModels = mockModels.map((m) => ({ ...m, active: m.id === id }));
+            }
             return mockModels;
           }
           case "get_project_info":
@@ -1806,10 +1835,17 @@ export function tauriMock(fixtures?: { xlsxBase64?: string; pptxBase64?: string 
             return memoryFiles;
           case "read_memory_file":
             return "User prefers DeepSeek.\n";
-          case "new_session":
-            return `s-${Math.random().toString(36).slice(2)}`;
-          case "branch_session":
-            return `branch-${Math.random().toString(36).slice(2)}`;
+          case "new_session": {
+            const id = `s-${Math.random().toString(36).slice(2)}`;
+            sessionModels[id] = activeHttpModelId();
+            return id;
+          }
+          case "branch_session": {
+            const id = `branch-${Math.random().toString(36).slice(2)}`;
+            const source = String(arg("sessionId") ?? "");
+            sessionModels[id] = sessionModels[source] ?? activeHttpModelId();
+            return id;
+          }
           case "side_chat": {
             const question = String(arg("question") ?? "");
             if (question === "SIDESCROLLTEST") {
@@ -1835,6 +1871,7 @@ export function tauriMock(fixtures?: { xlsxBase64?: string; pptxBase64?: string 
           case "send_message": {
             const fid = (args && (args.sessionId ?? args.session_id)) || "t1";
             const msg = (args && args.message) || "";
+            sessionModels[fid] ??= activeHttpModelId();
             const acpAgentId = args?.acpAgentId ?? acpBindings[fid];
             if (acpAgentId && String(msg).includes("ACPTHINK")) {
               // Codex-style ordering: a short reply streams first, THEN thinking,

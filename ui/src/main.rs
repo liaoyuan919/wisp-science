@@ -653,6 +653,8 @@ fn App() -> impl IntoView {
     let pet_status = create_rw_signal(PetStatus::default());
     // Configured model profiles + the composer's bottom-right picker state.
     let models = create_rw_signal::<Vec<ModelProfile>>(vec![]);
+    let active_session = create_rw_signal::<Option<String>>(None);
+    let session_model_ids = create_rw_signal::<HashMap<String, String>>(HashMap::new());
     let acp_agents = create_rw_signal::<Vec<AcpAgentProfile>>(vec![]);
     let active_acp_agent_id = create_rw_signal::<Option<String>>(None);
     // An ACP Agent can only bind an empty frame. When the picker creates that
@@ -685,12 +687,22 @@ fn App() -> impl IntoView {
     let switch_http_model = Callback::new(move |(id, dont_ask_again): (String, bool)| {
         provisional_acp_selection.set(None);
         active_acp_agent_id.set(None);
+        let session_id = active_session.get_untracked();
         spawn_local(async move {
-            let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
+            let arg = to_value(&serde_json::json!({
+                "id": id.clone(),
+                "sessionId": session_id.clone(),
+            }))
+            .unwrap();
             match invoke_checked("set_active_model", arg).await {
                 Ok(v) => {
                     if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<ModelProfile>>(v) {
                         models.set(list);
+                    }
+                    if let Some(session_id) = session_id {
+                        session_model_ids.update(|models| {
+                            models.insert(session_id, id);
+                        });
                     }
                     if dont_ask_again {
                         disable_model_switch_warning();
@@ -815,8 +827,27 @@ fn App() -> impl IntoView {
     let collapsed_folders = create_rw_signal::<HashSet<String>>(HashSet::new());
     let drag_session = create_rw_signal::<Option<String>>(None);
     let drop_target = create_rw_signal::<Option<String>>(None);
-    let active_session = create_rw_signal::<Option<String>>(None);
     let session_execution_contexts = create_rw_signal::<HashSet<String>>(HashSet::new());
+    create_effect(move |_| {
+        let Some(session_id) = active_session.get() else {
+            return;
+        };
+        spawn_local(async move {
+            let args =
+                to_value(&serde_json::json!({ "sessionId": session_id.clone() })).unwrap();
+            let Ok(value) = invoke_checked("get_session_model", args).await else {
+                return;
+            };
+            let Some(model_id) = value.as_string() else {
+                return;
+            };
+            if active_session.get_untracked().as_deref() == Some(session_id.as_str()) {
+                session_model_ids.update(|models| {
+                    models.insert(session_id, model_id);
+                });
+            }
+        });
+    });
     create_effect(move |_| {
         let Some(session_id) = active_session.get() else {
             session_execution_contexts.set(HashSet::new());
@@ -1462,6 +1493,7 @@ fn App() -> impl IntoView {
     let status_cb = status;
     let locale_cb = locale;
     let models_cb = models;
+    let session_models_cb = session_model_ids;
     let center_file_revisions_cb = center_file_revisions;
     let project_info_cb = project_info;
     // Streaming deltas are buffered and flushed on a timer (~20 fps) instead of
@@ -1480,7 +1512,16 @@ fn App() -> impl IntoView {
         };
         // Ordered, non-delta events (tool calls, results, done…) must observe
         // every delta buffered before them, so drain the buffer first.
-        let flush_now = || flush_delta_buf(&cb_buf, active_cb, items_cb, transcripts_cb, models_cb);
+        let flush_now = || {
+            flush_delta_buf(
+                &cb_buf,
+                active_cb,
+                items_cb,
+                transcripts_cb,
+                models_cb,
+                session_models_cb,
+            )
+        };
         let queue = |fid: String, d: PendingDelta| {
             queue_delta(&cb_buf, fid, d);
             schedule_delta_flush(
@@ -1490,6 +1531,7 @@ fn App() -> impl IntoView {
                 items_cb,
                 transcripts_cb,
                 models_cb,
+                session_models_cb,
             );
         };
         let set_pet_activity = |frame_id: &str, state: &str| {
@@ -1504,9 +1546,13 @@ fn App() -> impl IntoView {
             AgentEvent::User { frame_id, text } => {
                 set_pet_activity(&frame_id, "running");
                 flush_now();
+                let model = session_model_label(
+                    &models_cb.get_untracked(),
+                    &session_models_cb.get_untracked(),
+                    Some(&frame_id),
+                );
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
-                    let model = active_model_label(&models_cb.get());
-                    start_user_turn(v, text, model);
+                    start_user_turn(v, text, model.clone());
                 })
             }
             AgentEvent::MessageBoundary { .. } => {}
@@ -1674,7 +1720,11 @@ fn App() -> impl IntoView {
             AgentEvent::Error { frame_id, message } => {
                 flush_now();
                 notify_desktop(&frame_id, "error", &message);
-                let model = active_model_label(&models_cb.get());
+                let model = session_model_label(
+                    &models_cb.get_untracked(),
+                    &session_models_cb.get_untracked(),
+                    Some(&frame_id),
+                );
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
                     strip_approval_pending(v);
                     v.push(ChatItem::Assistant {
@@ -2163,7 +2213,11 @@ fn App() -> impl IntoView {
                 .map(|agent| agent.label)
                 .or_else(|| Some("ACP Agent".into()))
         } else {
-            active_model_label(&models.get())
+            session_model_label(
+                &models.get(),
+                &session_model_ids.get(),
+                active.as_deref(),
+            )
         };
         input.set(String::new());
         attachments.set(vec![]);
@@ -2523,7 +2577,11 @@ fn App() -> impl IntoView {
                 status.set("ACP protocol v1 cannot replay a Wisp transcript.".into());
                 return;
             }
-            let model = active_model_label(&models.get());
+            let model = session_model_label(
+                &models.get(),
+                &session_model_ids.get(),
+                Some(&id),
+            );
             items.update(|v| {
                 strip_error_at(v, error_idx);
                 ensure_streaming_assistant(v, model.clone());
@@ -7446,7 +7504,10 @@ fn App() -> impl IntoView {
                                                 acp_agents.get().into_iter().find(|agent| agent.id == id).map(|agent| agent.label).unwrap_or_else(|| "ACP Agent".into())
                                             } else {
                                                 let l = models.get();
-                                                l.iter().find(|m| m.active).or_else(|| l.first()).map(|m| m.label.clone()).unwrap_or_default()
+                                                let selected = active_session.get().and_then(|session_id| {
+                                                    session_model_ids.with(|models| models.get(&session_id).cloned())
+                                                });
+                                                model_label(&l, selected.as_deref()).unwrap_or_default()
                                             }
                                         }}</span>
                                         <span class="model-picker-chev">"▾"</span>
@@ -7456,11 +7517,14 @@ fn App() -> impl IntoView {
                                         <div class="model-menu">
                                             {move || {
                                                 let list = models.get();
+                                                let selected = active_session.get().and_then(|session_id| {
+                                                    session_model_ids.with(|models| models.get(&session_id).cloned())
+                                                });
                                                 let acp_locked = active_acp_agent_id.get().is_some() && items.with(|rows| !rows.is_empty());
                                                 list.into_iter().map(|m| {
                                                     let pick_id = m.id.clone();
                                                     let pick_label = m.label.clone();
-                                                    let is_active = m.active;
+                                                    let is_active = selected.as_deref().map_or(m.active, |id| id == m.id);
                                                     let show_sub = !m.model.is_empty() && m.model != m.label;
                                                     view! {
                                                         <div class="model-menu-row" class:active=is_active>
@@ -7476,7 +7540,7 @@ fn App() -> impl IntoView {
                                                                     return;
                                                                 }
                                                                 let id = pick_id.clone();
-                                                                if model_switch_warning_disabled() {
+                                                                if model_switch_warning_disabled() || items.with(|rows| rows.is_empty()) {
                                                                     switch_http_model.call((id, false));
                                                                 } else {
                                                                     model_switch_confirm.set(Some((id, pick_label.clone())));

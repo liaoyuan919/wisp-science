@@ -9,6 +9,7 @@
 
 use crate::i18n::Locale;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -288,12 +289,28 @@ pub(crate) struct PlanCard {
 }
 
 pub(crate) fn active_model_label(models: &[ModelProfile]) -> Option<String> {
+    model_label(models, None)
+}
+
+pub(crate) fn model_label(models: &[ModelProfile], model_id: Option<&str>) -> Option<String> {
     models
         .iter()
-        .find(|m| m.active)
+        .find(|model| model_id == Some(model.id.as_str()))
+        .or_else(|| models.iter().find(|model| model.active))
         .or_else(|| models.first())
         .map(|m| m.label.clone())
         .filter(|s| !s.is_empty())
+}
+
+pub(crate) fn session_model_label(
+    models: &[ModelProfile],
+    session_models: &HashMap<String, String>,
+    session_id: Option<&str>,
+) -> Option<String> {
+    model_label(
+        models,
+        session_id.and_then(|session_id| session_models.get(session_id).map(String::as_str)),
+    )
 }
 
 /// Selection captured from a file preview by `api.js`'s `preview_selection`.
