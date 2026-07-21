@@ -749,6 +749,11 @@ impl RunManager {
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Run not found: {run_id}"))?;
         if refreshed.status.is_terminal() {
+            // The lifecycle task can confirm the cancellation requested above
+            // before this re-read; that is success, not an error.
+            if requested && refreshed.status == wisp_store::RunStatus::Cancelled {
+                return Ok(());
+            }
             return Err(format!("Run is already {}", refreshed.status.as_str()));
         }
         if refreshed.kind == "file_transfer" {
