@@ -3743,9 +3743,9 @@ pub(super) fn start_user_turn(items: &mut Vec<ChatItem>, text: String, model: Op
 mod start_user_turn_tests {
     use super::{
         append_assistant_delta, append_reasoning_delta, composer_text_from_user_message,
-        message_with_attachments, message_with_composer_context, message_with_quotes,
-        runtime_object_quote, start_user_turn, trailing_queue_start, ComposerQuote,
-        ComposerReferenceChip,
+        is_process_item_at, message_with_attachments, message_with_composer_context,
+        message_with_quotes, process_item_insert_index, runtime_object_quote, start_user_turn,
+        trailing_queue_start, ComposerQuote, ComposerReferenceChip,
     };
     use crate::dto::ChatItem;
 
@@ -3981,6 +3981,81 @@ mod start_user_turn_tests {
     }
 
     #[test]
+    fn assistant_deltas_do_not_cross_tool_rows() {
+        let mut items = vec![
+            ChatItem::User("question".into()),
+            ChatItem::Assistant {
+                text: "first status".into(),
+                model: None,
+                resources: Vec::new(),
+            },
+            ChatItem::Tool {
+                name: "python".into(),
+                ok: Some(true),
+                input: "print(1)".into(),
+                output: "1".into(),
+                started_at_ms: None,
+                duration_ms: Some(1),
+            },
+        ];
+
+        append_assistant_delta(&mut items, "final answer".into(), None);
+
+        assert!(matches!(&items[1], ChatItem::Assistant { text, .. } if text == "first status"));
+        assert!(matches!(&items[3], ChatItem::Assistant { text, .. } if text == "final answer"));
+    }
+
+    #[test]
+    fn intermediate_assistant_rows_fold_with_their_tools() {
+        let assistant = |text: &str| ChatItem::Assistant {
+            text: text.into(),
+            model: None,
+            resources: Vec::new(),
+        };
+        let tool = |name: &str| ChatItem::Tool {
+            name: name.into(),
+            ok: Some(true),
+            input: String::new(),
+            output: String::new(),
+            started_at_ms: None,
+            duration_ms: None,
+        };
+        let items = vec![
+            ChatItem::User("question".into()),
+            assistant("first status"),
+            tool("python"),
+            assistant("second status"),
+            ChatItem::Reasoning("checking".into()),
+            tool("read_file"),
+            assistant("final answer"),
+        ];
+
+        assert!(is_process_item_at(&items, 1));
+        assert!(is_process_item_at(&items, 3));
+        assert!(!is_process_item_at(&items, 6));
+    }
+
+    #[test]
+    fn tool_rows_stay_before_the_usage_tail() {
+        let items = vec![
+            ChatItem::User("question".into()),
+            ChatItem::Assistant {
+                text: "status".into(),
+                model: None,
+                resources: Vec::new(),
+            },
+            ChatItem::Usage {
+                input: 10,
+                output: 2,
+                reasoning: 0,
+            },
+            ChatItem::QueuedUser("next".into()),
+        ];
+
+        assert_eq!(process_item_insert_index(&items), 2);
+    }
+
+    #[test]
     fn promotes_queued_turn_when_backend_acks_bare_body() {
         let display = message_with_attachments("图片里有啥文字?", &["uploads/img.png".into()]);
         let mut items = vec![
@@ -4102,14 +4177,12 @@ pub(super) fn append_assistant_delta(
     model: Option<String>,
 ) {
     let queue_start = trailing_queue_start(items);
-    if let Some(idx) = items[..queue_start]
-        .iter()
-        .rposition(|item| matches!(item, ChatItem::Assistant { .. }))
+    if let Some(ChatItem::Assistant { text, .. }) = queue_start
+        .checked_sub(1)
+        .and_then(|idx| items.get_mut(idx))
     {
-        if let ChatItem::Assistant { text, .. } = &mut items[idx] {
-            text.push_str(&delta);
-            return;
-        }
+        text.push_str(&delta);
+        return;
     }
     items.insert(
         queue_start,
@@ -4119,6 +4192,45 @@ pub(super) fn append_assistant_delta(
             resources: Vec::new(),
         },
     );
+}
+
+/// Keep the per-turn usage line at the tail while a new tool row is inserted.
+/// Otherwise usage splits the assistant preamble from the tool it introduces.
+pub(super) fn process_item_insert_index(items: &[ChatItem]) -> usize {
+    let queue_start = trailing_queue_start(items);
+    if queue_start > 0 && matches!(items[queue_start - 1], ChatItem::Usage { .. }) {
+        queue_start - 1
+    } else {
+        queue_start
+    }
+}
+
+pub(super) fn is_run_monitor_tool(name: &str) -> bool {
+    matches!(name, "monitor_run" | "wisp_monitor_run")
+}
+
+pub(super) fn is_process_item(item: &ChatItem) -> bool {
+    match item {
+        ChatItem::Reasoning(_) => true,
+        ChatItem::Tool { name, .. } => name != "attempt_completion" && !is_run_monitor_tool(name),
+        ChatItem::AcpTool { .. } => true,
+        _ => false,
+    }
+}
+
+/// Assistant text is process narration when the same model round proceeds to
+/// a foldable tool call. Final answers have no following tool and stay visible.
+pub(super) fn is_process_item_at(items: &[ChatItem], index: usize) -> bool {
+    if is_process_item(&items[index]) {
+        return true;
+    }
+    if !matches!(&items[index], ChatItem::Assistant { text, .. } if !text.trim().is_empty()) {
+        return false;
+    }
+    items[index + 1..]
+        .iter()
+        .find(|item| !matches!(item, ChatItem::Reasoning(_) | ChatItem::Usage { .. }))
+        .is_some_and(is_process_item)
 }
 
 pub(super) fn append_reasoning_delta(items: &mut Vec<ChatItem>, delta: String) {
@@ -5855,7 +5967,12 @@ pub(super) fn assemble_artifacts(
 /// Fold one round's token usage into the current turn's single usage row and
 /// float that row to the tail, so the reply ends with one cumulative line and
 /// the row never splits the coalesced tool-steps panel mid-turn.
-pub(super) fn upsert_turn_usage(items: &mut Vec<ChatItem>, input: u64, output: u64, reasoning: u64) {
+pub(super) fn upsert_turn_usage(
+    items: &mut Vec<ChatItem>,
+    input: u64,
+    output: u64,
+    reasoning: u64,
+) {
     let turn_start = items
         .iter()
         .rposition(|i| matches!(i, ChatItem::User(_)))
@@ -5915,7 +6032,11 @@ mod usage_row_tests {
         // Single cumulative row at the tail, prior turns untouched.
         assert!(matches!(
             items.last(),
-            Some(ChatItem::Usage { input: 300, output: 30, reasoning: 5 })
+            Some(ChatItem::Usage {
+                input: 300,
+                output: 30,
+                reasoning: 5
+            })
         ));
         assert_eq!(
             items
@@ -5929,7 +6050,11 @@ mod usage_row_tests {
         upsert_turn_usage(&mut items, 50, 5, 0);
         assert!(matches!(
             items.last(),
-            Some(ChatItem::Usage { input: 50, output: 5, reasoning: 0 })
+            Some(ChatItem::Usage {
+                input: 50,
+                output: 5,
+                reasoning: 0
+            })
         ));
     }
 }

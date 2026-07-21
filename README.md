@@ -306,6 +306,10 @@ transcript only. Project files and runs remain in their source project;
 conversation-linked artifact records are not transferred, and the underlying
 workspace files are never deleted.
 
+During an agent turn, assistant progress notes, reasoning, and ordinary tool
+calls are grouped into one collapsible steps panel. The final answer remains a
+normal message, and reopening the conversation preserves the same separation.
+
 On macOS, the native app menu mirrors the global desktop command surface,
 including project navigation, new-session commands, edit shortcuts, and
 `Check for Updates…`. Row-specific conversation and folder actions stay beside

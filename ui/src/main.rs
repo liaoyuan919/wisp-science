@@ -833,8 +833,7 @@ fn App() -> impl IntoView {
             return;
         };
         spawn_local(async move {
-            let args =
-                to_value(&serde_json::json!({ "sessionId": session_id.clone() })).unwrap();
+            let args = to_value(&serde_json::json!({ "sessionId": session_id.clone() })).unwrap();
             let Ok(value) = invoke_checked("get_session_model", args).await else {
                 return;
             };
@@ -1231,9 +1230,7 @@ fn App() -> impl IntoView {
                     if picker_mode.get_untracked() == Some(mode)
                         && picker_query.get_untracked() == query
                     {
-                        if let Ok(project) =
-                            serde_wasm_bindgen::from_value::<ProjectInfo>(value)
-                        {
+                        if let Ok(project) = serde_wasm_bindgen::from_value::<ProjectInfo>(value) {
                             project_info.set(Some(project));
                         }
                     }
@@ -1287,8 +1284,7 @@ fn App() -> impl IntoView {
                         std::cmp::Reverse(s.activity_at),
                     )
                 });
-                let mut items: Vec<_> =
-                    rows.into_iter().map(ComposerPickerItem::Session).collect();
+                let mut items: Vec<_> = rows.into_iter().map(ComposerPickerItem::Session).collect();
                 if let Some(project) = project_info.get() {
                     if query.is_empty()
                         || "project".contains(&query)
@@ -1336,9 +1332,7 @@ fn App() -> impl IntoView {
                 title: s.title,
                 project_name: s.project_name,
             },
-            ComposerPickerItem::Project { id, name } => {
-                ComposerReferenceChip::Project { id, name }
-            }
+            ComposerPickerItem::Project { id, name } => ComposerReferenceChip::Project { id, name },
             ComposerPickerItem::Skill(s) => ComposerReferenceChip::Skill { name: s.name },
             ComposerPickerItem::Context { id, label } => {
                 ComposerReferenceChip::Context { id, label }
@@ -1590,7 +1584,7 @@ fn App() -> impl IntoView {
                 set_pet_activity(&frame_id, "review");
                 flush_now();
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
-                    let idx = trailing_queue_start(v);
+                    let idx = process_item_insert_index(v);
                     v.insert(
                         idx,
                         ChatItem::Tool {
@@ -1614,7 +1608,7 @@ fn App() -> impl IntoView {
                 set_pet_activity(&frame_id, if ok { "running" } else { "failed" });
                 flush_now();
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
-                    let queue_start = trailing_queue_start(v);
+                    let queue_start = process_item_insert_index(v);
                     let idx = v[..queue_start].iter().rposition(
                         |c| matches!(c, ChatItem::Tool { name: n, ok: None, .. } if n == &name),
                     );
@@ -1765,11 +1759,7 @@ fn App() -> impl IntoView {
                 } else {
                     t(loc, "agents.background.completed")
                 };
-                notify_desktop(
-                    &frame_id,
-                    if succeeded { "done" } else { "error" },
-                    &label,
-                );
+                notify_desktop(&frame_id, if succeeded { "done" } else { "error" }, &label);
                 let workflow_label = workflow_id.chars().take(8).collect::<String>();
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |items| {
                     let index = trailing_queue_start(items);
@@ -2221,11 +2211,7 @@ fn App() -> impl IntoView {
                 .map(|agent| agent.label)
                 .or_else(|| Some("ACP Agent".into()))
         } else {
-            session_model_label(
-                &models.get(),
-                &session_model_ids.get(),
-                active.as_deref(),
-            )
+            session_model_label(&models.get(), &session_model_ids.get(), active.as_deref())
         };
         input.set(String::new());
         attachments.set(vec![]);
@@ -2585,11 +2571,7 @@ fn App() -> impl IntoView {
                 status.set("ACP protocol v1 cannot replay a Wisp transcript.".into());
                 return;
             }
-            let model = session_model_label(
-                &models.get(),
-                &session_model_ids.get(),
-                Some(&id),
-            );
+            let model = session_model_label(&models.get(), &session_model_ids.get(), Some(&id));
             items.update(|v| {
                 strip_error_at(v, error_idx);
                 ensure_streaming_assistant(v, model.clone());
@@ -6475,17 +6457,20 @@ fn App() -> impl IntoView {
                             let mut i = window.start;
                             while i < window.end {
                                 if renders_nothing(&list[i]) { i += 1; continue; }
-                                if is_process_item(&list[i]) {
+                                if is_process_item_at(list, i) {
                                     let start = i;
                                     let mut run: Vec<(usize, ChatItem)> = Vec::new();
                                     let mut j = i;
                                     while j < window.end {
                                         if renders_nothing(&list[j]) { j += 1; continue; }
-                                        if is_process_item(&list[j]) { run.push((j, list[j].clone())); j += 1; }
+                                        if is_process_item_at(list, j) { run.push((j, list[j].clone())); j += 1; }
                                         else { break; }
                                     }
-                                    // Run reaching the tail while busy is the live one.
-                                    let live = j > last && busy_now;
+                                    // Usage is metadata for the whole reply, not
+                                    // a boundary that closes the live step run.
+                                    let live = busy_now && (j > last || list[j..=last].iter().all(|item| {
+                                        renders_nothing(item) || matches!(item, ChatItem::Usage { .. })
+                                    }));
                                     let has_tool = run.iter().any(|(_, c)| {
                                         matches!(c, ChatItem::Tool { .. } | ChatItem::AcpTool { .. })
                                     });
@@ -9593,10 +9578,6 @@ fn renders_nothing(item: &ChatItem) -> bool {
         || matches!(item, ChatItem::Tool { name, .. } if name == "attempt_completion")
 }
 
-fn is_run_monitor_tool(name: &str) -> bool {
-    matches!(name, "monitor_run" | "wisp_monitor_run")
-}
-
 fn class_for(item: &ChatItem) -> &'static str {
     match item {
         ChatItem::User(_) => "msg user",
@@ -9604,9 +9585,7 @@ fn class_for(item: &ChatItem) -> &'static str {
         ChatItem::Assistant { text, .. } if text.starts_with("Error: ") => "tool-wrap",
         ChatItem::Assistant { .. } => "msg assistant",
         ChatItem::Reasoning(_) => "msg reasoning",
-        ChatItem::Tool { name, .. } if is_run_monitor_tool(name) => {
-            "tool-wrap run-monitor-wrap"
-        }
+        ChatItem::Tool { name, .. } if is_run_monitor_tool(name) => "tool-wrap run-monitor-wrap",
         ChatItem::Tool { .. } => "tool-wrap",
         ChatItem::ApprovalPending { .. } => "tool-wrap approval-wrap-row",
         ChatItem::AcpPermission { .. } => "tool-wrap approval-wrap-row",
@@ -9624,21 +9603,6 @@ fn fmt_tokens(n: u64) -> String {
         n.to_string()
     } else {
         format!("{:.1}k", n as f64 / 1000.0)
-    }
-}
-
-/// A run of consecutive "process" items (thinking + tool calls) folds into one
-/// collapsible steps panel; every other item renders as a normal row. Keeps the
-/// main thread to messages + a foldable activity summary instead of a wall of
-/// tool cards (#82).
-fn is_process_item(item: &ChatItem) -> bool {
-    match item {
-        ChatItem::Reasoning(_) => true,
-        ChatItem::Tool { name, .. } => {
-            name != "attempt_completion" && !is_run_monitor_tool(name)
-        }
-        ChatItem::AcpTool { .. } => true,
-        _ => false,
     }
 }
 
@@ -9724,6 +9688,31 @@ fn render_steps_group(
         (total_ms > 0 && (!live || n_tools > 0)).then(|| format_duration_ms(total_ms));
     let open = disclosure_signal(disclosure_state, &group_id, live);
     let rows = items.into_iter().enumerate().map(|(position, it)| match it {
+        ChatItem::Assistant { text, .. } => {
+            let step_id = format!("{group_id}:progress:{position}");
+            let popen = disclosure_signal(disclosure_state, &step_id, false);
+            let toggle_id = step_id.clone();
+            let detail: String = text
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(100)
+                .collect();
+            view! {
+                <div class="step step-progress" class:open=move || popen.get()>
+                    <div class="step-head" on:click=move |_| {
+                        toggle_disclosure(popen, disclosure_state, &toggle_id)
+                    }>
+                        <span class="step-icon progress"></span>
+                        <span class="step-name">{move || t(locale.get(), "chat.progress")}</span>
+                        <span class="step-detail">{detail}</span>
+                    </div>
+                    <div class="step-progress-body">{text}</div>
+                </div>
+            }.into_view()
+        }
         ChatItem::Reasoning(text) => {
             let step_id = format!("{group_id}:reasoning:{position}");
             let ropen = disclosure_signal(disclosure_state, &step_id, false);

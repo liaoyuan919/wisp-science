@@ -809,15 +809,14 @@ fn dynamic_editor(
                 Err(error) => {
                     let (message, conflict) = dynamic_command_error(error);
                     if conflict {
-                        if let Ok(value) =
-                            invoke_checked(
-                                "list_agent_workflows",
-                                to_value(&serde_json::json!({
-                                    "sessionId": state.session_id.get_untracked(),
-                                }))
-                                .unwrap(),
-                            )
-                            .await
+                        if let Ok(value) = invoke_checked(
+                            "list_agent_workflows",
+                            to_value(&serde_json::json!({
+                                "sessionId": state.session_id.get_untracked(),
+                            }))
+                            .unwrap(),
+                        )
+                        .await
                         {
                             if let Ok(items) =
                                 serde_wasm_bindgen::from_value::<Vec<AgentWorkflowSnapshot>>(value)
@@ -1389,10 +1388,7 @@ mod tests {
             kind: "acp".into(),
             profile_id: Some("remote-coder".into()),
         };
-        assert_eq!(
-            parse_executor_key(&executor_key(&executor)),
-            Some(executor)
-        );
+        assert_eq!(parse_executor_key(&executor_key(&executor)), Some(executor));
         assert_eq!(parse_executor_key(""), None);
     }
 

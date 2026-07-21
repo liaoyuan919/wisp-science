@@ -1,10 +1,9 @@
 use crate::app_support::{
     allow_drop, build_conn_json, close_details_ancestor, compose_icon, conn_form_from_row,
     context_capability_summary, drag_session_id, focus_element_soon, join_tags, js_error_text,
-    new_acp_form, start_session_drag,
-    new_model_form, profile_to_form, reviewer_backend_key, reviewer_backend_label,
+    new_acp_form, new_model_form, profile_to_form, reviewer_backend_key, reviewer_backend_label,
     reviewer_missing_acp_profile_id, set_reviewer_backend, settings_section_label,
-    settings_subpage_label, skill_matches_filter, CRED_GROUPS,
+    settings_subpage_label, skill_matches_filter, start_session_drag, CRED_GROUPS,
 };
 use crate::bindings::{invoke, invoke_checked, is_mac, is_windows};
 use crate::dto::*;
@@ -88,7 +87,10 @@ mod effort_values_tests {
 
     #[test]
     fn maps_families_and_leaves_unknown_open() {
-        assert_eq!(known_effort_values("anthropic", "claude-sonnet-5"), Some(&[][..]));
+        assert_eq!(
+            known_effort_values("anthropic", "claude-sonnet-5"),
+            Some(&[][..])
+        );
         assert_eq!(
             known_effort_values("openai", "gpt-5.1-codex-max"),
             Some(&["low", "medium", "high", "xhigh"][..])
@@ -153,8 +155,16 @@ const MODEL_PRESETS: [(&str, &str, &str); 5] = [
     ("Kimi", "https://api.moonshot.cn/v1", "kimi-k3"),
     ("GLM", "https://open.bigmodel.cn/api/paas/v4", "glm-5"),
     ("DeepSeek", "https://api.deepseek.com", "deepseek-v4-pro"),
-    ("Kimi Coding", "https://api.kimi.com/coding/v1", "kimi-coding"),
-    ("GLM Coding", "https://open.bigmodel.cn/api/coding/paas/v4", "glm-5.2"),
+    (
+        "Kimi Coding",
+        "https://api.kimi.com/coding/v1",
+        "kimi-coding",
+    ),
+    (
+        "GLM Coding",
+        "https://open.bigmodel.cn/api/coding/paas/v4",
+        "glm-5.2",
+    ),
 ];
 
 fn appearance_palette_options(dark: bool) -> [(&'static str, &'static str); 5] {
