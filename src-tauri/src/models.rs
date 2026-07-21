@@ -1014,13 +1014,22 @@ mod tests {
         ];
         // Full reversal.
         let out = reordered(src.clone(), &ids(&["c", "b", "a"]));
-        assert_eq!(out.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["c", "b", "a"]);
+        assert_eq!(
+            out.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["c", "b", "a"]
+        );
         // Only "c" named: it leads, unlisted a/b keep their original order.
         let out = reordered(src.clone(), &ids(&["c"]));
-        assert_eq!(out.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["c", "a", "b"]);
+        assert_eq!(
+            out.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["c", "a", "b"]
+        );
         // Unknown id in the list is ignored, real ids still reorder.
         let out = reordered(src, &ids(&["ghost", "b", "a"]));
-        assert_eq!(out.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["b", "a", "c"]);
+        assert_eq!(
+            out.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["b", "a", "c"]
+        );
     }
 
     #[tokio::test]
