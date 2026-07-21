@@ -1100,8 +1100,7 @@ pub(super) fn SettingsView(
                                                 let current = form.as_ref().map(|f| f.reasoning_effort.clone()).unwrap_or_default();
                                                 let provider = form.as_ref().map(|f| f.provider.clone()).unwrap_or_default();
                                                 let model = form.as_ref().map(|f| f.model.clone()).unwrap_or_default();
-                                                let known = known_effort_values(&provider, &model);
-                                                let mut values: Vec<String> = known
+                                                let mut values: Vec<String> = known_effort_values(&provider, &model)
                                                     .unwrap_or(ALL_EFFORT_VALUES)
                                                     .iter()
                                                     .map(|v| v.to_string())
@@ -1112,11 +1111,6 @@ pub(super) fn SettingsView(
                                                     values.push(current.clone());
                                                 }
                                                 let loc = locale.get();
-                                                let hint = match known {
-                                                    Some([]) => t(loc, "settings.reasoning_effort.unsupported_hint").to_string(),
-                                                    Some(list) => tf(loc, "settings.reasoning_effort.known_hint", &[("list", &list.join(" / "))]),
-                                                    None => t(loc, "settings.reasoning_effort.unknown_hint").to_string(),
-                                                };
                                                 view! {
                                                     <select
                                                         on:change=move|ev| model_form.update(|o| if let Some(o)=o {
@@ -1132,10 +1126,23 @@ pub(super) fn SettingsView(
                                                             view! { <option value=v.clone() selected=sel>{v}</option> }
                                                         }).collect_view()}
                                                     </select>
-                                                    <span class="hint effort-hint">{hint}</span>
                                                 }
                                             }}
                                         </label>
+                                        // Hint lives OUTSIDE the <label> on purpose: its text mentions
+                                        // "model", and nesting it would fold that into the <select>'s
+                                        // accessible name, so getByLabel("Model") would match it (#e2e).
+                                        <span class="hint effort-hint span-2">{move || {
+                                            let form = model_form.get();
+                                            let provider = form.as_ref().map(|f| f.provider.clone()).unwrap_or_default();
+                                            let model = form.as_ref().map(|f| f.model.clone()).unwrap_or_default();
+                                            let loc = locale.get();
+                                            match known_effort_values(&provider, &model) {
+                                                Some([]) => t(loc, "settings.reasoning_effort.unsupported_hint").to_string(),
+                                                Some(list) => tf(loc, "settings.reasoning_effort.known_hint", &[("list", &list.join(" / "))]),
+                                                None => t(loc, "settings.reasoning_effort.unknown_hint").to_string(),
+                                            }
+                                        }}</span>
                                         <div class="span-2 settings-form-grid">
                                             <label class="settings-check">
                                                 <input type="checkbox"
