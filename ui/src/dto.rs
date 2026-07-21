@@ -80,6 +80,8 @@ pub(crate) enum AgentEvent {
         output: u64,
         #[serde(default)]
         reasoning: u64,
+        #[serde(default)]
+        cached: u64,
         ctx_tokens: usize,
         max_context: usize,
     },
@@ -225,6 +227,7 @@ pub(crate) enum ChatItem {
         input: u64,
         output: u64,
         reasoning: u64,
+        cached: u64,
     },
     /// A visible handoff between the main agent and the independent reviewer.
     ReviewTransition {
@@ -288,7 +291,8 @@ impl ChatItem {
                 input,
                 output,
                 reasoning,
-            } => (8u8, input, output, reasoning).hash(&mut h),
+                cached,
+            } => (8u8, input, output, reasoning, cached).hash(&mut h),
             Self::ReviewTransition { phase, model } => (11u8, phase, model).hash(&mut h),
             Self::Review(report) => (5u8, report).hash(&mut h),
             Self::Plan(plan) => (7u8, plan).hash(&mut h),

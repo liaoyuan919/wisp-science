@@ -1649,6 +1649,7 @@ fn App() -> impl IntoView {
                 input,
                 output,
                 reasoning,
+                cached,
                 ctx_tokens,
                 max_context,
                 ..
@@ -1658,7 +1659,7 @@ fn App() -> impl IntoView {
                 // it never splits the coalesced tool-steps panel.
                 flush_now();
                 route_items(active_cb, items_cb, transcripts_cb, &frame_id, |v| {
-                    upsert_turn_usage(v, input, output, reasoning);
+                    upsert_turn_usage(v, input, output, reasoning, cached);
                 });
                 // Status bar reflects only the active session's usage.
                 if active_cb.get().as_deref() == Some(&frame_id) {
@@ -10171,8 +10172,8 @@ fn render_item(
         ChatItem::Tool { name, ok, input, output, .. } => view! {
             <ToolBlock name=name.clone() ok=*ok input=input.clone() output=output.clone() />
         }.into_view(),
-        ChatItem::Usage { input, output, reasoning } => {
-            let (input, output, reasoning) = (*input, *output, *reasoning);
+        ChatItem::Usage { input, output, reasoning, cached } => {
+            let (input, output, reasoning, cached) = (*input, *output, *reasoning, *cached);
             view! {
                 <div class="usage-line" title=move || t(locale.get(), "msg.usage_title")>
                     {move || {
@@ -10181,6 +10182,9 @@ fn render_item(
                             ("in", &fmt_tokens(input)),
                             ("out", &fmt_tokens(output)),
                         ]);
+                        if cached > 0 {
+                            s.push_str(&tf(loc, "msg.usage.cached", &[("c", &fmt_tokens(cached))]));
+                        }
                         if reasoning > 0 {
                             s.push_str(&tf(loc, "msg.usage.reasoning", &[("r", &fmt_tokens(reasoning))]));
                         }

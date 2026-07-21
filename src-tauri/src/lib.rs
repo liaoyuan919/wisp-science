@@ -116,6 +116,7 @@ enum AgentEvent {
         input: u64,
         output: u64,
         reasoning: u64,
+        cached: u64,
         ctx_tokens: usize,
         max_context: usize,
     },
@@ -1605,6 +1606,7 @@ impl Output for TauriOutput {
         input: u64,
         output: u64,
         reasoning: u64,
+        cached: u64,
         ctx_tokens: usize,
         max_context: usize,
     ) {
@@ -1614,6 +1616,7 @@ impl Output for TauriOutput {
             input,
             output,
             reasoning,
+            cached,
             ctx_tokens,
             max_context,
         });
