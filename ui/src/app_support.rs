@@ -6597,10 +6597,36 @@ fn ZoomableFilePreview(dom_id: String, path: String, kind: String) -> impl IntoV
     let crop_mode = create_rw_signal(false);
     let crop_busy = create_rw_signal(false);
     let crop_path = create_rw_signal(None::<String>);
-    // Live rubber-band rect in client (viewport) pixels: (left, top, right, bottom).
+    // Live rubber-band rect as fractions (0..1) of the crop layer, rendered
+    // with percent positioning: (left, top, right, bottom). Content-anchored
+    // coordinates keep the rect, the crop, and the action popup glued to the
+    // image through zoom/scroll — and inside the modal, whose filling
+    // entrance animation makes it the containing block for position:fixed
+    // descendants in WebKit, which skewed the old client-pixel math.
     let crop_rect = create_rw_signal(None::<(f64, f64, f64, f64)>);
+    // Pointer position as fractions of the crop layer. Resolved via
+    // `target.closest` because Leptos delegates pointer events, so
+    // `current_target` is the delegation root rather than the layer.
+    fn layer_point(ev: &web_sys::PointerEvent) -> Option<(web_sys::Element, f64, f64)> {
+        let layer = ev
+            .target()?
+            .dyn_into::<web_sys::Element>()
+            .ok()?
+            .closest(".file-preview-crop-layer")
+            .ok()
+            .flatten()?;
+        let rect = layer.get_bounding_client_rect();
+        if rect.width() < 1.0 || rect.height() < 1.0 {
+            return None;
+        }
+        let x = ((ev.client_x() as f64 - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        let y = ((ev.client_y() as f64 - rect.top()) / rect.height()).clamp(0.0, 1.0);
+        Some((layer, x, y))
+    }
     let crop_host_id = dom_id.clone();
-    let finish_crop = Callback::new(move |()| {
+    // Takes the layer's on-screen size so the stray-click guard stays in
+    // physical pixels regardless of zoom.
+    let finish_crop = Callback::new(move |(layer_w, layer_h): (f64, f64)| {
         if crop_busy.get_untracked() || crop_path.get_untracked().is_some() {
             return;
         }
@@ -6610,7 +6636,7 @@ fn ZoomableFilePreview(dom_id: String, path: String, kind: String) -> impl IntoV
         let (left, top) = (l.min(r), t.min(b));
         let (w, h) = ((l - r).abs(), (t - b).abs());
         // Ignore stray clicks; require a real region.
-        if w < 8.0 || h < 8.0 {
+        if w * layer_w < 8.0 || h * layer_h < 8.0 {
             crop_rect.set(None);
             return;
         }
@@ -6629,6 +6655,44 @@ fn ZoomableFilePreview(dom_id: String, path: String, kind: String) -> impl IntoV
             }
         });
     });
+    // Esc cancels the pending selection first, then crop mode itself.
+    // Capture phase so this wins over the app-level Escape stack, which
+    // would otherwise close the surrounding artifact modal.
+    if is_image {
+        let esc = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::wrap(Box::new(
+            move |ev: web_sys::KeyboardEvent| {
+                if ev.key() != "Escape" || crop_busy.get_untracked() {
+                    return;
+                }
+                if crop_rect.get_untracked().is_some() || crop_path.get_untracked().is_some() {
+                    crop_path.set(None);
+                    crop_rect.set(None);
+                } else if crop_mode.get_untracked() {
+                    crop_mode.set(false);
+                } else {
+                    return;
+                }
+                ev.prevent_default();
+                ev.stop_propagation();
+            },
+        ));
+        if let Some(window) = web_sys::window() {
+            let _ = window.add_event_listener_with_callback_and_bool(
+                "keydown",
+                esc.as_ref().unchecked_ref(),
+                true,
+            );
+        }
+        on_cleanup(move || {
+            if let Some(window) = web_sys::window() {
+                let _ = window.remove_event_listener_with_callback_and_bool(
+                    "keydown",
+                    esc.as_ref().unchecked_ref(),
+                    true,
+                );
+            }
+        });
+    }
     let adjust_zoom = move |delta: i16| {
         zoom.update(|value| {
             *value = ((*value as i16) + delta).clamp(25, 400) as u16;
@@ -6755,9 +6819,10 @@ fn ZoomableFilePreview(dom_id: String, path: String, kind: String) -> impl IntoV
                 <div class="file-preview-zoom-content" data-zoom-kind=kind.clone()
                     style=move || format!("--preview-zoom:{}", zoom.get() as f32 / 100.0)>
                     <FilePreview dom_id=dom_id path=path kind=kind />
-                </div>
-                // Region-crop overlay: captures the drag so it never pans, draws
-                // the rubber-band, and on release crops+uploads the region.
+                // Region-crop overlay: lives inside the zoomed content so the
+                // fraction-based rubber-band tracks the image through zoom and
+                // scroll. Captures the drag so it never pans; on release
+                // crops+uploads the region.
                 {move || crop_mode.get().then(|| view! {
                     <div class="file-preview-crop-layer"
                         on:pointerdown=move |ev: web_sys::PointerEvent| {
@@ -6768,32 +6833,41 @@ fn ZoomableFilePreview(dom_id: String, path: String, kind: String) -> impl IntoV
                                 return;
                             }
                             ev.prevent_default();
-                            if let Some(target) = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()) {
-                                let _ = target.set_pointer_capture(ev.pointer_id());
-                            }
-                            let (x, y) = (ev.client_x() as f64, ev.client_y() as f64);
+                            let Some((target, x, y)) = layer_point(&ev) else {
+                                return;
+                            };
+                            let _ = target.set_pointer_capture(ev.pointer_id());
                             crop_rect.set(Some((x, y, x, y)));
                         }
                         on:pointermove=move |ev: web_sys::PointerEvent| {
                             if crop_busy.get_untracked() || crop_path.get_untracked().is_some() {
                                 return;
                             }
+                            let Some((_, x, y)) = layer_point(&ev) else {
+                                return;
+                            };
                             crop_rect.update(|r| {
                                 if let Some((l, t, _, _)) = *r {
-                                    *r = Some((l, t, ev.client_x() as f64, ev.client_y() as f64));
+                                    *r = Some((l, t, x, y));
                                 }
                             });
                         }
-                        on:pointerup=move |_| finish_crop.call(())
+                        on:pointerup=move |ev: web_sys::PointerEvent| {
+                            let Some((layer, _, _)) = layer_point(&ev) else {
+                                return;
+                            };
+                            let rect = layer.get_bounding_client_rect();
+                            finish_crop.call((rect.width(), rect.height()));
+                        }
                         on:pointercancel=move |_| crop_rect.set(None)>
                         {move || crop_rect.get().map(|(left, top, right, bottom)| {
                             let selected = crop_path.get().is_some();
                             let style = format!(
-                                "left:{}px;top:{}px;width:{}px;height:{}px",
-                                left.min(right),
-                                top.min(bottom),
-                                (left - right).abs(),
-                                (top - bottom).abs(),
+                                "left:{}%;top:{}%;width:{}%;height:{}%",
+                                left.min(right) * 100.0,
+                                top.min(bottom) * 100.0,
+                                (left - right).abs() * 100.0,
+                                (top - bottom).abs() * 100.0,
                             );
                             view! {
                                 <div class="file-preview-crop-rect" class:selected=selected style=style>
@@ -6808,10 +6882,12 @@ fn ZoomableFilePreview(dom_id: String, path: String, kind: String) -> impl IntoV
                         {move || crop_path.get().and_then(|path| crop_rect.get().map(|(left, top, right, bottom)| {
                             let add_path = path.clone();
                             let jump_path = path;
-                            let x = (left + right) / 2.0;
-                            let y = top.min(bottom);
+                            let x = (left + right) / 2.0 * 100.0;
+                            let y = top.min(bottom) * 100.0;
+                            // Clamped inside the layer: the scroll viewport
+                            // clips anything outside the content box.
                             let style = format!(
-                                "left:clamp(190px,{x}px,calc(100vw - 190px));top:max(52px,{y}px)",
+                                "left:clamp(150px,{x}%,calc(100% - 150px));top:max(52px,{y}%)",
                             );
                             view! {
                                 <div class="selection-popup file-preview-crop-actions" style=style
@@ -6842,6 +6918,7 @@ fn ZoomableFilePreview(dom_id: String, path: String, kind: String) -> impl IntoV
                         }))}
                     </div>
                 })}
+                </div>
             </div>
         </div>
     }

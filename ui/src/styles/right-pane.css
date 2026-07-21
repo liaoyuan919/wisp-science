@@ -444,7 +444,7 @@
    off the same var in api.js, so scaling here too would apply the zoom twice —
    and worse, feed the zoomed width back into the fit-to-width measurement that
    reads viewer.clientWidth on the next page render. */
-.file-preview-zoom-content { display: inline-block; width: 100%; vertical-align: top; }
+.file-preview-zoom-content { display: inline-block; width: 100%; vertical-align: top; position: relative; }
 .file-preview-zoom-content[data-zoom-kind="image"] { width: calc(var(--preview-zoom, 1) * 100%); min-width: 25%; }
 /* Region crop: toggle button + full-viewport capture layer + rubber-band. */
 .file-preview-crop-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; height: 28px; padding: 0 7px; border: 1px solid var(--border-strong); background: var(--bg-elev); color: var(--text-muted); border-radius: 7px; cursor: pointer; }
@@ -452,10 +452,13 @@
 .file-preview-crop-btn.active { color: var(--on-clay); background: var(--clay); border-color: var(--clay); }
 .file-preview-crop-btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .file-preview-crop-layer { position: absolute; inset: 0; z-index: 3; cursor: crosshair; touch-action: none; }
-.file-preview-crop-rect { position: fixed; z-index: 4; border: 1.5px solid var(--clay); background: color-mix(in srgb, var(--clay) 18%, transparent); pointer-events: none; }
+.file-preview-crop-rect { position: absolute; z-index: 4; border: 1.5px solid var(--clay); background: color-mix(in srgb, var(--clay) 18%, transparent); pointer-events: none; }
 .file-preview-crop-rect.selected { border-width: 2px; box-shadow: 0 0 0 1px color-mix(in srgb, var(--bg-elev) 70%, transparent); }
 .file-preview-crop-label { position: absolute; top: 6px; left: 6px; padding: 3px 7px; border-radius: 5px; background: var(--clay); color: var(--on-clay); font-size: 11px; font-weight: 650; white-space: nowrap; box-shadow: var(--shadow-sm); }
-.file-preview-crop-actions { cursor: default; }
+/* Anchored inside the crop layer, not the window: absolute overrides the base
+   .selection-popup fixed, and the entrance animation is dropped because its
+   fill-mode `to { transform: none }` would cancel the centering translate. */
+.file-preview-crop-actions { cursor: default; position: absolute; animation: none; }
 .file-preview-zoom-content .rp-img { display: block; width: 100%; max-width: none; height: auto; margin: 0 auto; user-select: none; -webkit-user-drag: none; }
 .rp-html {
   width: 100%;
