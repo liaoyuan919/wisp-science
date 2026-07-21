@@ -86,7 +86,20 @@
   }
   function mockFile(path) {
     const name = String(path ?? "report.csv");
-    const text = mockFiles[name.split(".").pop().toLowerCase()];
+    const ext = name.split(".").pop().toLowerCase();
+    if (ext === "png") {
+      // Labeled grid so region-crop accuracy is verifiable by eye.
+      const cells = [];
+      for (let r = 0; r < 6; r++) {
+        for (let c = 0; c < 8; c++) {
+          cells.push(`<rect x="${c * 100}" y="${r * 100}" width="100" height="100" fill="${(r + c) % 2 ? "#eef" : "#fff"}" stroke="#99a"/>`);
+          cells.push(`<text x="${c * 100 + 50}" y="${r * 100 + 55}" font-size="20" text-anchor="middle" fill="#334">${String.fromCharCode(65 + r)}${c}</text>`);
+        }
+      }
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600">${cells.join("")}</svg>`;
+      return { path: name, mime: "image/svg+xml", text: null, base64: btoa(svg) };
+    }
+    const text = mockFiles[ext];
     if (text !== undefined) return { path: name, mime: "text/plain", text, base64: null };
     return { path: name, mime: "text/csv", text: "gene,score\nFX-cell,0.91", base64: null };
   }
@@ -310,6 +323,7 @@
           case "list_dir":
             return [
               { name: "data", is_dir: true, size: 0 },
+              { name: "volcano_plot.png", is_dir: false, size: 51200 },
               { name: "report.csv", is_dir: false, size: 4096 },
               { name: "01-metacell.R", is_dir: false, size: 2048 },
               { name: "run.py", is_dir: false, size: 1024 },
@@ -318,6 +332,22 @@
             ];
           case "read_file":
             return mockFile(argValue(args, "path"));
+          case "upload_file": {
+            const filename = String(args?.filename ?? "upload.png");
+            return {
+              id: "up-" + Date.now(),
+              name: filename,
+              kind: "image/png",
+              path: project.root + "/uploads/" + filename,
+              ts: Math.floor(Date.now() / 1000),
+              project_id: "default",
+              project_name: project.name,
+              session_id: "s1",
+              session_title: "查找文献, FX-cell",
+              size_bytes: 1024,
+              origin: "upload",
+            };
+          }
           case "list_remote_dir":
             return {
               path: String(argValue(args, "path") ?? "~") === "~" ? "/home/researcher" : String(argValue(args, "path")),

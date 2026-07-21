@@ -110,9 +110,11 @@ export async function upload_files(files) {
 }
 
 /**
- * Crop a rectangular region (given in viewport/client pixels) from the image
- * inside `#hostId` and upload it as a PNG. Maps the client rect to the image's
- * natural pixels via getBoundingClientRect, so it is correct under any zoom/pan.
+ * Crop a rectangular region (given as fractions 0..1 of the preview host,
+ * which the crop layer exactly covers) from the image inside `#hostId` and
+ * upload it as a PNG. Content-relative fractions map to the image's natural
+ * pixels via getBoundingClientRect, so the crop matches what the rubber-band
+ * covered regardless of zoom, scroll, or a transformed modal ancestor.
  * Returns the saved workspace path, or "" on failure.
  * @param {string} hostId @param {number} left @param {number} top @param {number} width @param {number} height
  */
@@ -120,6 +122,7 @@ export async function crop_region_to_upload(hostId, left, top, width, height) {
   const host = document.getElementById(hostId);
   const img = host?.querySelector("img.rp-img");
   if (!img || !img.naturalWidth) return "";
+  const hostRect = host.getBoundingClientRect();
   const rect = img.getBoundingClientRect();
   if (rect.width < 1 || rect.height < 1) return "";
   // The browser emits a click after the crop's pointerup. Do not return the
@@ -129,10 +132,10 @@ export async function crop_region_to_upload(hostId, left, top, width, height) {
   });
   const scaleX = img.naturalWidth / rect.width;
   const scaleY = img.naturalHeight / rect.height;
-  let sx = (left - rect.left) * scaleX;
-  let sy = (top - rect.top) * scaleY;
-  let sw = width * scaleX;
-  let sh = height * scaleY;
+  let sx = (hostRect.left + left * hostRect.width - rect.left) * scaleX;
+  let sy = (hostRect.top + top * hostRect.height - rect.top) * scaleY;
+  let sw = width * hostRect.width * scaleX;
+  let sh = height * hostRect.height * scaleY;
   // Clamp the source rect to the image bounds.
   sx = Math.max(0, Math.min(sx, img.naturalWidth));
   sy = Math.max(0, Math.min(sy, img.naturalHeight));
