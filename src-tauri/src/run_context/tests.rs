@@ -464,7 +464,7 @@ async fn ssh_run_detaches_persists_handle_and_finishes_from_poller() {
     // Hold the poller until the pre-completion status has been observed, so
     // the run cannot finish before the assertions below run under load.
     let poll_gate = Arc::new(tokio::sync::Semaphore::new(0));
-    *runner.poll_gate.lock().unwrap() = Some(poll_gate.clone());
+    *runner.rpc_gate.lock().unwrap() = Some(poll_gate.clone());
     let command = "printf '%s\\n' '$HOME' && printf '%s\\n' '$(date)'";
     let submitted = manager
         .submit(
@@ -754,6 +754,10 @@ async fn ssh_cancel_stays_cancelling_until_remote_group_confirms() {
     let runner = Arc::new(ScriptedRunRunner::new(vec![ok_output(
         "__WISP_CANCEL__:cancelled\n",
     )]));
+    // Hold the remote cancel RPC so the group has not confirmed yet when the
+    // pre-confirmation status is asserted, even under slow scheduling.
+    let cancel_gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *runner.rpc_gate.lock().unwrap() = Some(cancel_gate.clone());
     let manager = RunManager::with_runner(runner.clone());
 
     manager.cancel(&store, "remote").await.unwrap();
@@ -761,6 +765,7 @@ async fn ssh_cancel_stays_cancelling_until_remote_group_confirms() {
         store.get_run("remote").await.unwrap().unwrap().status,
         wisp_store::RunStatus::Cancelling
     );
+    cancel_gate.add_permits(1);
     assert_eq!(
         wait_for_terminal(&store, "remote").await.status,
         wisp_store::RunStatus::Cancelled
@@ -929,9 +934,10 @@ struct ScriptedRunRunner {
     commands: StdMutex<Vec<RunCommand>>,
     synthesize_launch_ack: std::sync::atomic::AtomicBool,
     token: StdMutex<Option<String>>,
-    // When set, "poll SSH Run" commands block until the test releases a permit,
-    // so a test can observe pre-completion state without racing the poller.
-    poll_gate: StdMutex<Option<Arc<tokio::sync::Semaphore>>>,
+    // When set, poll/cancel SSH RPCs block until the test releases a permit,
+    // so a test can observe pre-confirmation state without racing the
+    // background lifecycle task.
+    rpc_gate: StdMutex<Option<Arc<tokio::sync::Semaphore>>>,
 }
 
 impl ScriptedRunRunner {
@@ -941,7 +947,7 @@ impl ScriptedRunRunner {
             commands: StdMutex::new(Vec::new()),
             synthesize_launch_ack: std::sync::atomic::AtomicBool::new(false),
             token: StdMutex::new(None),
-            poll_gate: StdMutex::new(None),
+            rpc_gate: StdMutex::new(None),
         }
     }
 
@@ -957,8 +963,8 @@ impl RunCommandRunner for ScriptedRunRunner {
         command: RunCommand,
         _timeout: Duration,
     ) -> Result<RunCommandOutput, String> {
-        if command.script == "poll SSH Run" {
-            let gate = self.poll_gate.lock().unwrap().clone();
+        if matches!(command.script.as_str(), "poll SSH Run" | "cancel SSH Run") {
+            let gate = self.rpc_gate.lock().unwrap().clone();
             if let Some(gate) = gate {
                 let _permit = gate.acquire().await.unwrap();
             }
