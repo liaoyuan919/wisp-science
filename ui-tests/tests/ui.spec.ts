@@ -4381,6 +4381,7 @@ test("a thinking + tool run folds into one collapsible steps panel (#82)", async
   await page.getByRole("button", { name: "Send" }).click();
   // The assistant answer renders as a normal message…
   await expect(page.getByText(/60,675 genes/)).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator(".msg.assistant")).toHaveCount(1);
   // …and the 3 tool calls collapse into exactly one steps panel, closed by default.
   const steps = page.locator(".steps");
   await expect(steps).toHaveCount(1);
@@ -4389,7 +4390,9 @@ test("a thinking + tool run folds into one collapsible steps panel (#82)", async
   // Expanding reveals the individual steps (3 tools + folded thinking).
   await page.locator(".steps-head").click();
   await expect(steps).toHaveClass(/open/);
-  await expect(page.locator(".steps .step-name")).toContainText(["thinking", "shell", "python", "write"]);
+  await expect(page.locator(".steps .step-name")).toContainText([
+    "thinking", "progress", "shell", "progress", "python", "progress", "write",
+  ]);
 });
 
 test("live step disclosure choices survive tool updates and completion (#172)", async ({ page }) => {
