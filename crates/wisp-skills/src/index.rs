@@ -315,4 +315,154 @@ mod tests {
         let idx = SkillIndex::load(&[dir]);
         assert!(idx.get("agent-infini").is_some());
     }
+
+    #[test]
+    fn self_awareness_skill_uses_the_real_wisp_tool_contract() {
+        let skill = include_str!("../../../skills/self-awareness/SKILL.md");
+        for tool in [
+            "read",
+            "write",
+            "edit",
+            "search",
+            "grep",
+            "shell",
+            "view_image",
+            "update_plan",
+            "attempt_completion",
+            "python",
+            "r",
+            "search_skills",
+            "use_skill",
+            "search_memory",
+            "append_memory",
+            "explore",
+            "delegate_tasks",
+            "get_delegated_result",
+            "run_in_context",
+            "get_run",
+            "monitor_run",
+            "cancel_run",
+            "research_graph",
+            "save_specialist",
+        ] {
+            assert!(
+                skill.contains(&format!("`{tool}`")),
+                "missing Wisp tool: {tool}"
+            );
+        }
+        for stale in [
+            "host.",
+            "repl",
+            "[delegation]",
+            "sdk_enabled",
+            "[llm]",
+            "kernel_default_model",
+        ] {
+            assert!(
+                !skill.contains(stale),
+                "stale host contract remains: {stale}"
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_skills_do_not_depend_on_the_legacy_host_sdk() {
+        fn visit(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read bundled skill directory") {
+                let path = entry.expect("read bundled skill entry").path();
+                if path.is_dir() {
+                    visit(&path, files);
+                } else if matches!(
+                    path.extension().and_then(|value| value.to_str()),
+                    Some("md" | "py" | "json")
+                ) {
+                    files.push(path);
+                }
+            }
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
+        let mut files = Vec::new();
+        visit(&root, &mut files);
+
+        for path in files {
+            let source = std::fs::read_to_string(&path).expect("read bundled skill file");
+            let lower = source.to_ascii_lowercase();
+            for stale in [
+                "host.",
+                "import host",
+                "operon",
+                "claude-bioscience",
+                "claude science",
+                "compute_provider",
+                "compute_details",
+                "wait_for_notification",
+                "save_artifacts",
+                "attach_job",
+                "ask_user",
+                "repl tool",
+                "repl kernel",
+            ] {
+                assert!(
+                    !lower.contains(stale),
+                    "legacy host contract {stale:?} remains in {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_bundled_skill_parses_and_matches_its_directory() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
+        let mut names = std::collections::HashSet::new();
+        let mut count = 0usize;
+        for entry in std::fs::read_dir(&root).expect("read bundled skills") {
+            let dir = entry.expect("read bundled skill entry").path();
+            let path = dir.join("SKILL.md");
+            if !path.is_file() {
+                continue;
+            }
+            let skill = parse_skill_file(&path)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            let folder = dir.file_name().and_then(|value| value.to_str()).unwrap();
+            assert_eq!(skill.name, folder, "skill name differs from folder");
+            assert!(
+                !skill.description.trim().is_empty(),
+                "{} has no description",
+                path.display()
+            );
+            assert!(names.insert(skill.name), "duplicate bundled skill name");
+            count += 1;
+        }
+        assert!(
+            count >= 40,
+            "unexpectedly small bundled skill catalog: {count}"
+        );
+    }
+
+    #[test]
+    fn gpu_skills_use_the_persisted_wisp_run_lifecycle() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
+        for entry in std::fs::read_dir(&root).expect("read bundled skills") {
+            let path = entry
+                .expect("read bundled skill entry")
+                .path()
+                .join("SKILL.md");
+            if !path.is_file() {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read bundled skill");
+            if !source.contains("requirements: [gpu]") {
+                continue;
+            }
+            for tool in ["run_in_context", "get_run", "monitor_run", "cancel_run"] {
+                assert!(
+                    source.contains(tool),
+                    "GPU skill {} omits {tool}",
+                    path.display()
+                );
+            }
+        }
+    }
 }

@@ -64,6 +64,18 @@ Output is `out/seqs/<stem>.fa` with `score=` and `seq_recovery=` in each
 header. Expect recovery against a native structure to drop a few points
 relative to vanilla — that is the prior working, not a bug.
 
+## Wisp execution
+
+Use `python` only for bounded interactive checks. For a long or GPU-backed
+workload, require a selected and probed `ssh:<alias>` context and load
+`remote-compute-ssh`. Put the documented invocation in a self-contained project
+script, activate the remote environment explicitly, stage only small files with
+`input_paths`, and make the command write to a known absolute remote result
+path. Submit it with `run_in_context` and register that exact `ssh://` path in
+`output_specs`. Call `monitor_run` once when waiting is needed, `get_run` once
+for a snapshot, or `cancel_run` to stop. Do not send a scheduler submission
+through the SSH-direct runner.
+
 ## Hydrophobic surface patches still recur where the fold needs them
 
 Soluble weights shift the distribution; they do not enforce a hydrophobicity

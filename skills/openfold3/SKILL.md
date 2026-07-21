@@ -129,6 +129,18 @@ let you supply your own a3m instead of the server.
 | `--use-templates` | true | ColabFold template search + RCSB remap |
 | `--inference-ckpt-path` | auto-discovered under `$OPENFOLD_CACHE` | Override only — for non-standard layouts or to pin a specific checkpoint file |
 
+## Wisp execution
+
+Use `python` only for bounded interactive checks. For a long or GPU-backed
+workload, require a selected and probed `ssh:<alias>` context and load
+`remote-compute-ssh`. Put the documented invocation in a self-contained project
+script, activate the remote environment explicitly, stage only small files with
+`input_paths`, and make the command write to a known absolute remote result
+path. Submit it with `run_in_context` and register that exact `ssh://` path in
+`output_specs`. Call `monitor_run` once when waiting is needed, `get_run` once
+for a snapshot, or `cancel_run` to stop. Do not send a scheduler submission
+through the SSH-direct runner.
+
 ## Output format
 
 ```

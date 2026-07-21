@@ -1,13 +1,13 @@
 """
-Literature-review helpers. Auto-loaded into the python kernel by the host
-when the skill loads:
+Literature-review helpers loaded into Wisp's persistent Python kernel when the
+skill is used:
 
     verify_dois, crossref_lookup, search_openalex, expand_citations,
     extract_dois, style_pass
 
 Module top level is definition-only (functions, imports, literal constants) so
 the sidecar AST gate accepts it; everything that touches the network or the
-host runtime happens inside a function body.
+runtime happens inside a function body.
 """
 
 import json
@@ -21,32 +21,24 @@ import urllib.request
 DOI_PATTERN = r"10\.\d{4,9}/[^\s\"'`\]\}—–&|]+"
 
 
-def lr_sdk():
-    """Rebind-proof SDK handle — see pdf-explore/kernel.py:pdf_sdk."""
-    import host
-    return host
-
-
 def litrev_contact() -> str | None:
-    """User contact email for polite-pool API headers; None if unavailable/declined."""
-    # get_user_email() returns the address as a plain str and raises
-    # host.ContactEmailUnavailable (ContactEmailDeclined is a subclass)
-    # when there is no address. The bare `except Exception` deliberately
-    # also covers host-call failures (this helper runs in the analysis
-    # kernel, where the host refuses the call outright): the polite-pool
-    # `mailto:` UA suffix is best-effort, never worth failing a fetch.
-    try:
-        r = lr_sdk().get_user_email()
-    except Exception:
-        return None
-    return (r or None) if isinstance(r, str) else None
+    """Return an explicitly supplied polite-pool contact email, if any.
+
+    Wisp does not expose credentials or profile data inside Python. A user who
+    wants to identify these requests may set ``WISP_LITERATURE_CONTACT_EMAIL``
+    in the selected Python environment before starting the kernel.
+    """
+    import os
+
+    value = os.environ.get("WISP_LITERATURE_CONTACT_EMAIL", "").strip()
+    return value or None
 
 
 def litrev_openalex_auth() -> str:
     """`&api_key=...` query fragment for api.openalex.org requests, or ""
-    when no key is configured. The key is the user's OpenAlex credential,
-    injected into this kernel by the host app as OPENALEX_API_KEY (#115).
-    OpenAlex-only — never append it to other hosts' URLs."""
+    when no key is configured. Wisp does not inject credentials into Python;
+    this only honors an ``OPENALEX_API_KEY`` explicitly present in the selected
+    environment. OpenAlex-only — never append it to other services' URLs."""
     import os
     k = os.environ.get("OPENALEX_API_KEY")
     return f"&api_key={urllib.parse.quote(k, safe='')}" if k else ""
@@ -55,7 +47,7 @@ def litrev_openalex_auth() -> str:
 def litrev_get(url: str, timeout: float = 15) -> dict | None:
     """GET `url` and JSON-decode. One 2s retry on HTTP 429; None on any error."""
     c = litrev_contact()
-    ua = "ClaudeScience-literature-review/1.0" + (f" (mailto:{c})" if c else "")
+    ua = "WispScience-literature-review/1.0" + (f" (mailto:{c})" if c else "")
     ua = ua.encode("ascii", "ignore").decode("ascii")
     for attempt in (0, 1):
         req = urllib.request.Request(url, headers={"User-Agent": ua})
@@ -92,7 +84,7 @@ def litrev_head(url: str, timeout: float = 10) -> int | None:
     unregistered one — not the publisher's status). One 2s retry on 429.
     Returns None only when no status could be obtained (connection/timeout)."""
     c = litrev_contact()
-    ua = ("ClaudeScience-literature-review/1.0" + (f" (mailto:{c})" if c else "")).encode(
+    ua = ("WispScience-literature-review/1.0" + (f" (mailto:{c})" if c else "")).encode(
         "ascii", "ignore"
     ).decode("ascii")
 

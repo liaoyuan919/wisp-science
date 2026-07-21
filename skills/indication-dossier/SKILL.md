@@ -80,11 +80,10 @@ anti-fabrication rules for every phase. Then create `<workdir>/waypoints/`.
 The dossier is built in five phases. After each phase, write the waypoint
 file and emit a ≤200-word summary of what you found and what's uncertain,
 then proceed directly to the next phase. The one exception is Phase 1: after
-writing `meta.json`, show the resolved indication identity and call
-`ask_user` with options **Proceed** / **Revise identity** / **Stop**, so a
-misread indication name can be caught before the expensive phases run. If
-`ask_user` is unavailable, state "proceeding on this interpretation;
-interrupt now to correct it" and continue.
+writing `meta.json`, show the resolved indication identity and end the turn
+with a concise request for **Proceed**, **Revise identity**, or **Stop**. Do
+not start the expensive phases until the user answers; Wisp has no separate
+interactive-question tool that can be called from the workflow.
 
 ### Phase 1 — Meta initialization
 

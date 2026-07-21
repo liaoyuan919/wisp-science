@@ -101,49 +101,38 @@ mode).
 
 ## Remote compute
 
-A100-class GPU recommended for >50k cells. The prebuilt **`singlecell_gpu`**
-Modal env ships scvi-tools 1.4.2 + scanpy 1.11.5 + anndata 0.11.4 — read
-`compute_details({provider: 'byoc:modal', mode: 'read'})` for the current
-image ref, then:
+A100-class GPU is recommended for more than 50,000 cells. Use a selected and
+probed `ssh:<alias>` execution context, then load `remote-compute-ssh` for the
+Run lifecycle. Confirm that the remote Python environment imports `scvi`,
+`scanpy`, and `anndata`; do not assume Wisp provisioned an image.
 
-```python
-c = host.compute.create('byoc:modal', provider_params={'modal': {
-    'image':  '<image ref from compute_details>',   # e.g. im-...
-    'gpu':    'A100',
-    'cpu':    8,
-    'memory': 32768,
-    'timeout': 3600,
-}})
-job = c.submit_job(
-    intent="scVI+scANVI on 80k cells — 1×A100, ~15 min",
-    inputs=[
-        {"src": "dataset.h5ad", "dst_filename": "dataset.h5ad"},
-        {"src": "pipeline.py",  "dst_filename": "pipeline.py"},
-    ],
-    command="python pipeline.py",
-    outputs=["out/**"],
-    timeout_seconds=2400,
-)
-print(job.job_id)   # cell ends here — kernel never blocks on compute
+Write a self-contained project script such as `runs/scvi_pipeline.py`. The
+sidecar helper `h5ad_safe_obs` exists only in the interactive `python` kernel,
+so copy its small coercion into the standalone script before writing H5AD.
+Submit one persisted Run with `run_in_context`:
+
+```json
+{
+  "context_id": "ssh:gpu-box",
+  "title": "scVI and scANVI on 80k cells",
+  "command": "source ~/miniforge3/etc/profile.d/conda.sh && conda activate singlecell && python scvi_pipeline.py --input dataset.h5ad --output /home/me/wisp-results/scvi/annotated.h5ad",
+  "timeout_secs": 3600,
+  "input_paths": ["runs/scvi_pipeline.py", "data/dataset.h5ad"],
+  "output_specs": [
+    {
+      "glob": "ssh://gpu-box/home/me/wisp-results/scvi/annotated.h5ad",
+      "kind": "h5ad",
+      "residency": "remote"
+    }
+  ]
+}
 ```
 
-`h5ad_safe_obs` is auto-loaded into the **local** analysis kernel only — in
-`pipeline.py` running on Modal, paste the helper at the top of the script
-(or inline the `pd.Index(np.asarray(..., dtype=object))` coercion) before
-`.write_h5ad()`.
-
-Then call the `wait_for_notification` brain-tool. When `compute_done`
-arrives, `save_artifacts(payload["featured_files"])`. For the full result
-dict, re-enter the kernel and bind the **compute handle** (not the job)
-separately — `.close()` lives on the handle, not on the job:
-
-```python
-h = host.compute.create('byoc:modal')
-res = h.attach_job(job_id).result()   # output_files, remote_workdir, ...
-h.close()
-```
-
-See the `remote-compute-modal` skill for orchestration details.
+Replace the context, environment, and absolute output path with probed values.
+Staged inputs are flattened to basenames. For a large H5AD already on the
+server, omit it from `input_paths` and pass its absolute remote path instead.
+Call `monitor_run` exactly once when waiting is needed, `get_run` for one
+snapshot only, and `cancel_run` when the user requests cancellation.
 
 ## Gotchas
 
@@ -163,8 +152,8 @@ See the `remote-compute-modal` skill for orchestration details.
 | `TypeError: ... unexpected keyword argument 'use_gpu'` | Replace with `accelerator="gpu", devices=1`. |
 | `ValueError: ... non-negative integers` / NB loss explodes | `layer="counts"` points at log/float data — restore raw counts. |
 | `MisconfigurationException: No supported gpu backend found` | No CUDA visible — drop `accelerator`/`devices` to fall back to CPU, or dispatch via Remote compute. |
-| `UnicodeEncodeError: 'ascii' codec can't encode character ...` writing a summary / printing | Container has no `LANG` so Python defaults to ASCII. Open files with `encoding="utf-8"` and/or `sys.stdout.reconfigure(encoding="utf-8")` at script top. The prebuilt `singlecell_gpu` env sets `PYTHONIOENCODING=utf-8`, so this only bites user-built images. |
-| `AttributeError: ... object has no attribute 'close'` on a job handle | You chained `host.compute.create(...).attach_job(...)` and called `.close()` on the job. Bind the compute handle separately and close that — see Remote compute above. |
+| `UnicodeEncodeError: 'ascii' codec can't encode character ...` writing a summary / printing | The remote environment has no UTF-8 locale. Open files with `encoding="utf-8"` and/or call `sys.stdout.reconfigure(encoding="utf-8")` at script start. |
+| Run remains active after the conversation ends | This is expected: the persisted Run owns the lifecycle. Use the Runs panel or one `get_run` snapshot later. |
 
 ---
 

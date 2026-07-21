@@ -68,10 +68,9 @@ the YAML, edit the copy, and point `--config` at it.
 ## The first run is silent for ~11 minutes and needs ≥32 GB host RAM
 
 Before the first complex, DiffDock precomputes SO(3) and torus lookup tables.
-That step is silent on stderr, takes ~11 minutes, and on the default Modal
-tier runs out of host memory and SIGKILLs mid-precompute. Set
-`provider_params.modal.memory: 65536` (or your provider's equivalent), and do
-not assume a hang means a crash.
+That step is silent on stderr, takes ~11 minutes, and may exhaust a small machine.
+Use a probed SSH context with at least 64 GiB RAM and precompute the tables while
+building the environment; do not assume a quiet Run has crashed.
 
 ## The README's `--ligand` works on the CLI by accident — use `--ligand_description`
 
@@ -80,6 +79,18 @@ prefix-matches it to the real flag `--ligand_description`. That shortcut is
 CLI-only: as a CSV column header or YAML key, `ligand` matches nothing and the
 row is silently treated as having no ligand. Spell the flag and the column
 header out in full.
+
+## Wisp execution
+
+Use `python` only for bounded interactive checks. For a long or GPU-backed
+workload, require a selected and probed `ssh:<alias>` context and load
+`remote-compute-ssh`. Put the documented invocation in a self-contained project
+script, activate the remote environment explicitly, stage only small files with
+`input_paths`, and make the command write to a known absolute remote result
+path. Submit it with `run_in_context` and register that exact `ssh://` path in
+`output_specs`. Call `monitor_run` once when waiting is needed, `get_run` once
+for a snapshot, or `cancel_run` to stop. Do not send a scheduler submission
+through the SSH-direct runner.
 
 ## Errors worth recognizing
 

@@ -1,6 +1,6 @@
 # Third-Party Licenses
 
-This distribution of Claude Science includes components derived from or bundling
+This distribution of Wisp Science includes components derived from or bundling
 third-party open-source software. The required attributions and license texts
 are reproduced below. Per-skill `LICENSE`/`NOTICE` files, where present in a
 skill directory, ship alongside that skill and also apply.

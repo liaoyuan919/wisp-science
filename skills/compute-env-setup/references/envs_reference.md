@@ -1,11 +1,17 @@
 ---
 name: compute-envs-reference
-description: The Claude Science compute environments as worked examples of the generalized build-spec pattern. Read alongside compute-env-setup. Triggers on "what's in proteomics-gpu", "which env has X", "rebuild <env>", "weight cache for <tool>".
+description: Historical scientific environment recipes translated into package-order, cache, and validation examples for Wisp direct execution contexts. Read alongside compute-env-setup when building a matching user-space environment on SSH.
 ---
 
 # Compute environment reference — worked examples
 
-Each entry is the build-spec that **renders unchanged** through any provider's `render_image`. Validated on two backends (managed-sandbox sm_90, Modal sm_80). Tier defaults and mounts are deploy-spec — listed here for reference, but live in `ENV_TABLE`, not the build dict.
+These are recipe examples, not environments Wisp automatically provides. Translate
+the relevant package phases, cache variables, and validation witness into an
+idempotent setup script for the selected direct SSH context. Container paths and
+resource tiers are historical reference values; replace them with probed,
+user-writable paths and actual hardware. Record the resulting activation command
+and validation evidence in the project rather than assuming an environment-name
+resolver exists.
 
 | env | base | weights | sm_90 | tier default |
 |---|---|---|---|---|

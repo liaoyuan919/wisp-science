@@ -263,7 +263,7 @@ def panel_crops(fig, dpi=None, pad_px=6, bbox_inches=None, pad_inches=None):
     """§9.2: pixel-space crop boxes for each lettered panel in the SAVED PNG.
 
     Returns ``{letter: (x0, y0, x1, y1)}`` in image-space pixels (origin
-    top-left, matching ``host.view_image(path, crop=...)`` and PIL's
+    top-left, matching PIL's
     ``Image.crop``). Panels are detected as bold single-character ``Text``
     objects placed by :func:`panel_letter`; each panel's crop is its axes'
     tightbbox mapped into the saved file's pixel space, padded by ``pad_px``.
@@ -279,8 +279,9 @@ def panel_crops(fig, dpi=None, pad_px=6, bbox_inches=None, pad_inches=None):
     boxes are clamped to the saved image extent regardless.
 
         >>> fig.savefig("fig.png")            # bbox_inches='tight' via rcParams
+        >>> from PIL import Image
         >>> for letter, box in panel_crops(fig).items():
-        ...     host.view_image("fig.png", crop=box)
+        ...     Image.open("fig.png").crop(box).save(f"fig-{letter}.png")
     """
     import matplotlib as mpl
     import matplotlib.text

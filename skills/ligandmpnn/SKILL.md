@@ -84,10 +84,10 @@ so run from inside the clone or pass the absolute path.
 
 `run.py` imports ProDy unconditionally for ligand atom parsing. On py3.11 the
 prebuilt wheel is missing on PyPI, so `pip install ProDy` compiles from source
-and needs a working C/C++ compiler. On Modal's `add_python` bases the default
-`CXX=clang++` points at a missing binary — `apt_install("build-essential")`
-and export `CC=gcc CXX=g++` before the install. On most CPU-local Python
-distributions the sdist builds in ~10 s if no wheel matches your Python.
+and needs a working C/C++ compiler. On an unprivileged SSH context, prefer an
+existing compiler module or conda-provided toolchain and export `CC=gcc
+CXX=g++`; do not assume system package installation is allowed. On most
+CPU-local Python distributions the sdist builds in ~10 s if no wheel matches.
 
 ## Turning ligand context off changes the answer, not the model
 
@@ -107,6 +107,18 @@ clean-up step, and `--parse_these_chains_only` naming the protein chains but
 not the ligand's. If `ligand_confidence` in the FASTA header is missing or
 zero across every design, the model never saw the ligand — fix the input, do
 not trust the sequences.
+
+## Wisp execution
+
+Use `python` only for bounded interactive checks. For a long or GPU-backed
+workload, require a selected and probed `ssh:<alias>` context and load
+`remote-compute-ssh`. Put the documented invocation in a self-contained project
+script, activate the remote environment explicitly, stage only small files with
+`input_paths`, and make the command write to a known absolute remote result
+path. Submit it with `run_in_context` and register that exact `ssh://` path in
+`output_specs`. Call `monitor_run` once when waiting is needed, `get_run` once
+for a snapshot, or `cancel_run` to stop. Do not send a scheduler submission
+through the SSH-direct runner.
 
 ## Errors worth recognizing
 
