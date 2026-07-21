@@ -9686,6 +9686,11 @@ fn render_steps_group(
     };
     let total_label =
         (total_ms > 0 && (!live || n_tools > 0)).then(|| format_duration_ms(total_ms));
+    // The group re-renders on every streaming delta (fingerprint-keyed row),
+    // so this static line tracks the in-flight step while collapsed.
+    let now_line = live
+        .then(|| steps_now_line(&items, &t(locale.get(), "chat.thinking")))
+        .flatten();
     let open = disclosure_signal(disclosure_state, &group_id, live);
     let rows = items.into_iter().enumerate().map(|(position, it)| match it {
         ChatItem::Assistant { text, .. } => {
@@ -9820,10 +9825,89 @@ fn render_steps_group(
             }>
                 <span class="steps-chevron"></span>
                 <span class="steps-title">{title}</span>
+                {now_line.map(|text| view! { <span class="steps-now">{text}</span> })}
                 {total_label.map(|label| view! { <span class="steps-meta">{label}</span> })}
             </div>
             <div class="steps-body">{rows}</div>
         </div>
+    }
+}
+
+/// Latest step of a live run as "name · detail", shown in the collapsed
+/// steps header so folding the panel hides detail, not progress.
+fn steps_now_line(items: &[ChatItem], thinking_label: &str) -> Option<String> {
+    let first_line = |s: &str| -> String {
+        s.lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .take(80)
+            .collect()
+    };
+    items.iter().rev().find_map(|item| match item {
+        ChatItem::Tool { name, input, .. } => {
+            let detail = first_line(input);
+            Some(if detail.is_empty() {
+                name.clone()
+            } else {
+                format!("{name} · {detail}")
+            })
+        }
+        ChatItem::AcpTool {
+            title,
+            kind,
+            content,
+            locations,
+            ..
+        } => {
+            let detail = acp_tool_step_detail(kind, content, locations);
+            Some(if detail.is_empty() {
+                title.clone()
+            } else {
+                format!("{title} · {detail}")
+            })
+        }
+        ChatItem::Assistant { text, .. } => {
+            let line = first_line(text);
+            (!line.is_empty()).then_some(line)
+        }
+        ChatItem::Reasoning(_) => Some(thinking_label.to_string()),
+        _ => None,
+    })
+}
+
+#[cfg(test)]
+mod steps_now_line_tests {
+    use super::steps_now_line;
+    use crate::dto::ChatItem;
+
+    fn tool(name: &str, input: &str) -> ChatItem {
+        ChatItem::Tool {
+            name: name.into(),
+            ok: None,
+            input: input.into(),
+            output: String::new(),
+            started_at_ms: None,
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn shows_latest_step() {
+        let items = vec![
+            ChatItem::Reasoning("hmm".into()),
+            tool("python", "\nfrom pypdf import PdfReader\nmore"),
+        ];
+        assert_eq!(
+            steps_now_line(&items, "thinking"),
+            Some("python · from pypdf import PdfReader".into())
+        );
+        assert_eq!(
+            steps_now_line(&[ChatItem::Reasoning("hmm".into())], "thinking"),
+            Some("thinking".into())
+        );
+        assert_eq!(steps_now_line(&[], "thinking"), None);
     }
 }
 
