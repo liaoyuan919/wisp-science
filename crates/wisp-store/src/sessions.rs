@@ -281,6 +281,36 @@ impl Store {
         Ok(())
     }
 
+    pub async fn frame_model(&self, frame_id: &str) -> Result<Option<String>> {
+        Ok(
+            sqlx::query_scalar::<_, Option<String>>("SELECT model FROM frames WHERE id=?")
+                .bind(frame_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .flatten(),
+        )
+    }
+
+    pub async fn set_frame_model(
+        &self,
+        frame_id: &str,
+        project_id: &str,
+        model: &str,
+    ) -> Result<()> {
+        let updated =
+            sqlx::query("UPDATE frames SET model=?,updated_at=? WHERE id=? AND project_id=?")
+                .bind(model)
+                .bind(chrono::Utc::now().timestamp())
+                .bind(frame_id)
+                .bind(project_id)
+                .execute(&self.pool)
+                .await?;
+        if updated.rows_affected() != 1 {
+            anyhow::bail!("Session not found");
+        }
+        Ok(())
+    }
+
     pub async fn append_message(&self, frame_id: &str, seq: i64, msg: &Message) -> Result<()> {
         let id = uuid::Uuid::new_v4().to_string();
         let role = if msg.role == wisp_llm::Role::User

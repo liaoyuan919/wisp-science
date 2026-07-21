@@ -211,6 +211,9 @@ test("background Agent completion appears in its owning conversation", async ({ 
 
 test("switching HTTP models confirms cache invalidation", async ({ page }) => {
   await enterApp(page);
+  await composer(page).fill("bind this conversation model");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText("Hello from mock wisp-science.")).toBeVisible();
 
   await page.locator(".model-picker-btn").click();
   const opusOption = page.getByRole("button", { name: /opus-4\.8/ });
@@ -236,6 +239,9 @@ test("switching HTTP models confirms cache invalidation", async ({ page }) => {
 
 test("model switch warning can be permanently dismissed", async ({ page }) => {
   await enterApp(page);
+  await composer(page).fill("bind this conversation model");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText("Hello from mock wisp-science.")).toBeVisible();
 
   await page.locator(".model-picker-btn").click();
   await page.getByRole("button", { name: /opus-4\.8/ }).click();
@@ -250,6 +256,38 @@ test("model switch warning can be permanently dismissed", async ({ page }) => {
   await page.getByRole("button", { name: /deepseek-v4-pro/ }).click();
   await expect(page.getByTestId("model-switch-confirm")).toHaveCount(0);
   await expect.poll(() => lastInvokeArgs(page, "set_active_model")).toMatchObject({ id: "default" });
+});
+
+test("empty conversations switch models without warning", async ({ page }) => {
+  await enterApp(page);
+  await newSessionButton(page).click();
+
+  await page.locator(".model-picker-btn").click();
+  await page.getByRole("button", { name: /opus-4\.8/ }).click();
+
+  await expect(page.getByTestId("model-switch-confirm")).toHaveCount(0);
+  await expect.poll(() => lastInvokeArgs(page, "set_active_model")).toMatchObject({
+    id: "opus",
+    sessionId: expect.any(String),
+  });
+  await expect(page.locator(".model-picker-label")).toHaveText("opus-4.8");
+});
+
+test("model selection stays bound to its conversation", async ({ page }) => {
+  await enterApp(page, "/?mockSessionModels=1");
+  await page.locator('[data-session-id="s-model-a"]').click();
+  await expect(page.locator(".model-picker-label")).toHaveText("deepseek-v4-pro");
+
+  await page.locator(".model-picker-btn").click();
+  await page.getByRole("button", { name: /opus-4\.8/ }).click();
+  await page.getByTestId("model-switch-confirm")
+    .getByRole("button", { name: "Yes, switch" }).click();
+  await expect(page.locator(".model-picker-label")).toHaveText("opus-4.8");
+
+  await page.locator('[data-session-id="s-model-b"]').click();
+  await expect(page.locator(".model-picker-label")).toHaveText("deepseek-v4-pro");
+  await page.locator('[data-session-id="s-model-a"]').click();
+  await expect(page.locator(".model-picker-label")).toHaveText("opus-4.8");
 });
 
 test("Settings Models page can open ACP Agents dialog", async ({ page }) => {

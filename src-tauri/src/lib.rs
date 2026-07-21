@@ -1294,6 +1294,15 @@ async fn clear_idle_agents(state: &AppState) {
     }
 }
 
+async fn clear_session_agent(state: &AppState, frame_id: &str) {
+    let runtime = state.sessions.lock().await.get(frame_id).cloned();
+    if let Some(runtime) = runtime {
+        if let Ok(mut guard) = runtime.agent.try_lock() {
+            *guard = None;
+        }
+    }
+}
+
 #[cfg(debug_assertions)]
 fn llm_model_mismatch(configured_model: &str, actual_model: &str) -> bool {
     !configured_model
@@ -2192,11 +2201,12 @@ fn apply_llm_advanced(
     cfg.reasoning_effort = effective_reasoning_effort(reasoning_effort);
 }
 
-pub(crate) async fn load_settings(store: &Store) -> (String, String, String, String) {
-    // Resolve through the active model profile (migrates legacy single-model
-    // installs on first read), then apply env/default fallbacks so a blank
-    // field still produces a usable config.
-    let (provider, api_url, model, api_key) = models::active_config(store).await;
+fn resolve_model_settings(
+    provider: String,
+    api_url: String,
+    model: String,
+    api_key: String,
+) -> (String, String, String, String) {
     let provider = normalized_provider(&non_empty_setting(Some(provider), || {
         env_or("WISP_PROVIDER", "openai")
     }));
@@ -2212,6 +2222,47 @@ pub(crate) async fn load_settings(store: &Store) -> (String, String, String, Str
         api_key
     };
     (provider, api_url, model, api_key)
+}
+
+pub(crate) async fn load_settings(store: &Store) -> (String, String, String, String) {
+    // Resolve through the active model profile (migrates legacy single-model
+    // installs on first read), then apply env/default fallbacks so a blank
+    // field still produces a usable config.
+    let (provider, api_url, model, api_key) = models::active_config(store).await;
+    resolve_model_settings(provider, api_url, model, api_key)
+}
+
+async fn load_session_settings(
+    store: &Store,
+    frame_id: &str,
+) -> (String, String, String, String, u64, String) {
+    let profile_id = models::session_profile_id(store, frame_id).await;
+    let (provider, api_url, model, api_key, max_tokens, reasoning_effort) =
+        match models::profile_llm(store, &profile_id).await {
+            Some(config) => config,
+            None => {
+                let (provider, api_url, model, api_key) = load_settings(store).await;
+                let (max_tokens, reasoning_effort) = models::active_llm_advanced(store).await;
+                return (
+                    provider,
+                    api_url,
+                    model,
+                    api_key,
+                    max_tokens,
+                    reasoning_effort,
+                );
+            }
+        };
+    let (provider, api_url, model, api_key) =
+        resolve_model_settings(provider, api_url, model, api_key);
+    (
+        provider,
+        api_url,
+        model,
+        api_key,
+        max_tokens,
+        reasoning_effort,
+    )
 }
 
 fn parse_disabled_skills(raw: Option<&str>) -> HashSet<String> {
@@ -3008,8 +3059,9 @@ async fn register_mcp_filtered(
 /// concrete session id before streaming starts.
 async fn create_session_frame(store: &Store, project_id: &str) -> Result<String, String> {
     let id = Uuid::new_v4().to_string();
+    let model_id = models::active_profile_id(store).await;
     store
-        .create_frame(&id, project_id, "OPERON", "wisp")
+        .create_frame(&id, project_id, "OPERON", &model_id)
         .await
         .map_err(|e| format!("{e}"))?;
     Ok(id)
@@ -3503,7 +3555,6 @@ async fn send_message_inner(
             }
         }
     }
-    let model_label = models::active_label(&state.store).await;
     let vision_cfg = build_vision_provider_config(&state.store).await;
 
     let max_context = state
@@ -3546,16 +3597,16 @@ async fn send_message_inner(
     // Deliberately no set_active_frame here: see the `AppState::active_frame`
     // doc — a turn writing view state races the user's session/project switch.
 
+    let session_profile_id = models::session_profile_id(&state.store, &frame_id).await;
+    let model_label = models::session_label(&state.store, &frame_id).await;
     let specialist = specialists::session_specialist(&state.store, &frame_id).await;
     let delegation_enabled =
         delegation_runtime::session_delegation_enabled(&state.store, &frame_id).await;
     let (provider, api_url, model, api_key, max_tokens, reasoning_effort) = match &specialist {
-        Some(spec) => specialists::specialist_llm(&state.store, spec).await,
-        None => {
-            let (p, u, m, k) = load_settings(&state.store).await;
-            let (mt, re) = models::active_llm_advanced(&state.store).await;
-            (p, u, m, k, mt, re)
+        Some(spec) if !spec.model_id.trim().is_empty() => {
+            specialists::specialist_llm(&state.store, spec).await
         }
+        _ => load_session_settings(&state.store, &frame_id).await,
     };
     let cfg = build_provider_config(
         &provider,
@@ -3570,7 +3621,8 @@ async fn send_message_inner(
         specialist
             .as_ref()
             .map(|specialist| specialist.model_id.as_str())
-            .filter(|id| !id.trim().is_empty()),
+            .filter(|id| !id.trim().is_empty())
+            .or(Some(session_profile_id.as_str())),
     )
     .await;
     let attached_images = if resume {
@@ -4659,6 +4711,12 @@ async fn branch_session(
     let _project_activity = state.begin_project_activity(&ap.id)?;
     let id = create_session_frame(&state.store, &ap.id).await?;
     if let Some(source) = session_id.as_deref().filter(|s| !s.is_empty()) {
+        let model_id = models::session_profile_id(&state.store, source).await;
+        state
+            .store
+            .set_frame_model(&id, &ap.id, &model_id)
+            .await
+            .map_err(|error| error.to_string())?;
         let msgs = state
             .store
             .load_messages(source)
@@ -7001,6 +7059,7 @@ pub fn run() {
             pet_commands::open_pet_session,
             desktop_lifecycle::set_pet_window_visible,
             models::list_models,
+            models::get_session_model,
             models::save_model,
             models::remove_model,
             models::set_active_model,

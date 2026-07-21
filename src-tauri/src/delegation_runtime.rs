@@ -1028,8 +1028,17 @@ pub(crate) async fn dynamic_delegation_policy_for_project(
     .await?;
     let isolation_available =
         crate::delegation_isolation::git_worktree_available(&project.root).await;
-    let (registry, host) =
-        build_dynamic_delegation_policy(store, Some(&resources), isolation_available).await?;
+    let preferred_model_id = match frame_id {
+        Some(frame_id) => Some(models::session_profile_id(store, frame_id).await),
+        None => None,
+    };
+    let (registry, host) = build_dynamic_delegation_policy(
+        store,
+        Some(&resources),
+        isolation_available,
+        preferred_model_id.as_deref(),
+    )
+    .await?;
     Ok(ProjectDelegationPolicy {
         registry,
         host,
@@ -1040,21 +1049,51 @@ pub(crate) async fn dynamic_delegation_policy_for_project(
 pub(crate) async fn dynamic_delegation_policy(
     store: &Store,
 ) -> Result<(CapabilityRegistry, DelegationHostPolicy), String> {
-    build_dynamic_delegation_policy(store, None, false).await
+    build_dynamic_delegation_policy(store, None, false, None).await
+}
+
+fn select_default_model_id(
+    model_policies: &[ModelProfilePolicy],
+    preferred_model_id: Option<&str>,
+    active_model_id: Option<&str>,
+) -> Option<String> {
+    preferred_model_id
+        .filter(|id| {
+            model_policies
+                .iter()
+                .any(|profile| profile.enabled && profile.id == *id)
+        })
+        .map(str::to_string)
+        .or_else(|| {
+            active_model_id
+                .filter(|id| {
+                    model_policies
+                        .iter()
+                        .any(|profile| profile.enabled && profile.id == *id)
+                })
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            model_policies
+                .iter()
+                .find(|profile| profile.enabled)
+                .map(|profile| profile.id.clone())
+        })
 }
 
 async fn build_dynamic_delegation_policy(
     store: &Store,
     resources: Option<&crate::delegation_resources::ScientificResourceCatalog>,
     isolation_available: bool,
+    preferred_model_id: Option<&str>,
 ) -> Result<(CapabilityRegistry, DelegationHostPolicy), String> {
     let model_profiles = models::delegation_profiles(store).await;
     let (active_provider, active_url, active_model, active_key) = load_settings(store).await;
-    let mut default_model_id = None;
+    let mut active_model_id = None;
     let mut model_policies = Vec::new();
     for profile in model_profiles {
         let (provider, api_url, model, has_key) = if profile.active {
-            default_model_id = Some(profile.id.clone());
+            active_model_id = Some(profile.id.clone());
             (
                 active_provider.clone(),
                 active_url.clone(),
@@ -1087,12 +1126,11 @@ async fn build_dynamic_delegation_policy(
                 && !model.trim().is_empty(),
         });
     }
-    if default_model_id.is_none() {
-        default_model_id = model_policies
-            .iter()
-            .find(|profile| profile.enabled)
-            .map(|profile| profile.id.clone());
-    }
+    let default_model_id = select_default_model_id(
+        &model_policies,
+        preferred_model_id,
+        active_model_id.as_deref(),
+    );
     let enabled_model_ids = model_policies
         .iter()
         .filter(|profile| profile.enabled)
@@ -4387,6 +4425,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn session_model_is_the_dynamic_delegation_default() {
+        let models = vec![
+            ModelProfilePolicy {
+                id: "global".into(),
+                features: vec![],
+                external: false,
+                enabled: true,
+            },
+            ModelProfilePolicy {
+                id: "session".into(),
+                features: vec![],
+                external: false,
+                enabled: true,
+            },
+        ];
+
+        assert_eq!(
+            select_default_model_id(&models, Some("session"), Some("global")).as_deref(),
+            Some("session")
+        );
+    }
+
     #[tokio::test]
     async fn dynamic_policy_registers_native_and_each_available_acp_profile() {
         let (store, root) = dynamic_fixture().await;
@@ -4480,9 +4541,10 @@ mod tests {
             &["web"],
             &["python"],
         );
-        let (registry, host) = build_dynamic_delegation_policy(&store, Some(&resources), true)
-            .await
-            .unwrap();
+        let (registry, host) =
+            build_dynamic_delegation_policy(&store, Some(&resources), true, None)
+                .await
+                .unwrap();
 
         for capability in ["literature_search", "external_research", "visualization"] {
             assert!(host.enabled_capabilities.contains(&capability.into()));
@@ -4513,9 +4575,10 @@ mod tests {
 
         let offline =
             crate::delegation_resources::ScientificResourceCatalog::fake(&[], &[], &[], &[], &[]);
-        let (_, offline_host) = build_dynamic_delegation_policy(&store, Some(&offline), false)
-            .await
-            .unwrap();
+        let (_, offline_host) =
+            build_dynamic_delegation_policy(&store, Some(&offline), false, None)
+                .await
+                .unwrap();
         assert!(!offline_host
             .enabled_capabilities
             .contains(&"literature_search".into()));

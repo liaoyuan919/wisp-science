@@ -202,6 +202,38 @@ async fn child_agent_frames_stay_out_of_top_level_session_history() {
 }
 
 #[tokio::test]
+async fn frame_models_are_session_scoped() {
+    let tmp = std::env::temp_dir().join(format!(
+        "wisp_store_frame_models_{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = Store::open(&tmp).await.unwrap();
+    store.create_project("p", "proj", "").await.unwrap();
+    store
+        .create_frame("first", "p", "OPERON", "m1")
+        .await
+        .unwrap();
+    store
+        .create_frame("second", "p", "OPERON", "m1")
+        .await
+        .unwrap();
+
+    store.set_frame_model("first", "p", "m2").await.unwrap();
+
+    assert_eq!(
+        store.frame_model("first").await.unwrap().as_deref(),
+        Some("m2")
+    );
+    assert_eq!(
+        store.frame_model("second").await.unwrap().as_deref(),
+        Some("m1")
+    );
+    assert!(store.set_frame_model("first", "other", "m3").await.is_err());
+    store.pool.close().await;
+    let _ = std::fs::remove_file(tmp);
+}
+
+#[tokio::test]
 async fn agent_workflow_and_steps_roundtrip() {
     let tmp = std::env::temp_dir().join(format!(
         "wisp_agent_workflow_{}.sqlite",
