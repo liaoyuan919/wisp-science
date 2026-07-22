@@ -4373,26 +4373,42 @@ test("assistant markdown uses normal whitespace (no phantom blank lines)", async
   expect(whiteSpace).toBe("normal");
 });
 
-test("a thinking + tool run folds into one collapsible steps panel (#82)", async ({ page }) => {
-  // Instead of a wall of separate tool cards, consecutive thinking/tool activity
-  // collapses into a single foldable "Ran N steps" panel, collapsed by default.
+test("commentary, reasoning, and tool activity render as separate layers", async ({ page }) => {
+  const browserErrors: string[] = [];
+  page.on("pageerror", (error) => browserErrors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") browserErrors.push(message.text());
+  });
   await enterApp(page);
   await composer(page).fill("STEPSDEMO");
   await page.getByRole("button", { name: "Send" }).click();
-  // The assistant answer renders as a normal message…
   await expect(page.getByText(/60,675 genes/)).toBeVisible({ timeout: 10_000 });
-  await expect(page.locator(".msg.assistant")).toHaveCount(1);
-  // …and the 3 tool calls collapse into exactly one steps panel, closed by default.
+  await expect(page.locator(".msg.assistant")).toHaveCount(4);
+  await expect(page.locator(".msg.assistant.commentary")).toHaveCount(3);
+
+  // Each visible progress note remains in the transcript and bounds its own
+  // tool batch, instead of being folded into one giant activity panel.
   const steps = page.locator(".steps");
-  await expect(steps).toHaveCount(1);
-  await expect(steps).not.toHaveClass(/open/);
+  await expect(steps).toHaveCount(3);
+  expect(browserErrors).toEqual([]);
+  await expect(steps.first()).not.toHaveClass(/open/);
   await expect(page.locator(".step-body:visible")).toHaveCount(0);
-  // Expanding reveals the individual steps (3 tools + folded thinking).
-  await page.locator(".steps-head").click();
-  await expect(steps).toHaveClass(/open/);
-  await expect(page.locator(".steps .step-name")).toContainText([
-    "thinking", "progress", "shell", "progress", "python", "progress", "write",
-  ]);
+  const firstStepsHead = steps.first().getByRole("button", { name: /Ran 1 step/ });
+  await expect(firstStepsHead).toHaveAttribute("aria-expanded", "false");
+  await firstStepsHead.focus();
+  await page.keyboard.press("Enter");
+  await expect(firstStepsHead).toHaveAttribute("aria-expanded", "true");
+  await page.keyboard.press("Space");
+  await expect(firstStepsHead).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator(".steps .step-name")).toContainText(["shell", "python", "write"]);
+  await expect(page.locator(".steps .step-think, .steps .step-progress")).toHaveCount(0);
+
+  // Raw model reasoning is still inspectable, but it is separate and never
+  // auto-expanded into the live conversation.
+  const reasoning = page.locator("details.rz");
+  await expect(reasoning).toHaveCount(2);
+  await expect(reasoning.first()).not.toHaveAttribute("open", "");
+  expect(browserErrors).toEqual([]);
 });
 
 test("live step disclosure choices survive tool updates and completion (#172)", async ({ page }) => {
@@ -4426,7 +4442,7 @@ test("live step disclosure choices survive tool updates and completion (#172)", 
   await expect(shell).toHaveClass(/open/);
 });
 
-test("ACP thinking folds into the steps panel instead of dangling under the reply", async ({ page }) => {
+test("ACP commentary stays above separate reasoning and tool activity", async ({ page }) => {
   await enterApp(page);
   await newSessionButton(page).click();
   await page.locator(".model-picker-btn").click();
@@ -4436,22 +4452,24 @@ test("ACP thinking folds into the steps panel instead of dangling under the repl
 
   await expect(page.getByText("Let me search the literature first.")).toBeVisible({ timeout: 4_000 });
 
-  // Thinking + the ACP tool coalesce into exactly one steps panel (order within
-  // the panel follows flush timing, so assert membership, not position)…
   const steps = page.locator(".steps");
   await expect(steps).toHaveCount(1);
   await steps.locator(".steps-head").click();
-  await expect(steps.getByText("thinking")).toBeVisible();
   await expect(steps.getByText("web_search")).toBeVisible();
-  // …and there is no lone thinking row stranded outside the panel (the bug).
-  await expect(page.locator(".msg.reasoning")).toHaveCount(0);
+  await expect(steps.locator(".step-think")).toHaveCount(0);
 
-  // The panel sits above the reply, not below it.
-  const stepsY = await steps.evaluate((el) => el.getBoundingClientRect().top);
+  const reasoning = page.locator(".msg.reasoning details.rz");
+  await expect(reasoning).toHaveCount(1);
+  await expect(reasoning).not.toHaveAttribute("open", "");
+
+  // Preserve the event order: visible commentary, reasoning disclosure, tool.
   const replyY = await page
     .getByText("Let me search the literature first.")
     .evaluate((el) => el.getBoundingClientRect().top);
-  expect(stepsY).toBeLessThan(replyY);
+  const reasoningY = await reasoning.evaluate((el) => el.getBoundingClientRect().top);
+  const stepsY = await steps.evaluate((el) => el.getBoundingClientRect().top);
+  expect(replyY).toBeLessThan(reasoningY);
+  expect(reasoningY).toBeLessThan(stepsY);
 });
 
 test("Delegation toggle gates the dynamic temporary-Agent editor", async ({ page }) => {

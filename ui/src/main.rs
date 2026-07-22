@@ -389,7 +389,7 @@ fn upsert_acp_tool(items: &mut Vec<ChatItem>, payload: &serde_json::Value) {
             content: acp_value_text(payload.get("content")),
             locations: acp_value_text(payload.get("locations")),
         };
-        let index = acp_tool_insert_index(items);
+        let index = process_item_insert_index(items);
         items.insert(index, row);
     }
 }
@@ -2034,10 +2034,21 @@ fn App() -> impl IntoView {
         let _ = listen("permission-request", &acp_permission_js).await;
     });
 
+    let acp_update_buf = delta_buf.clone();
     let acp_update_cb = Closure::wrap(Box::new(move |payload: JsValue| {
         let Ok(update) = serde_wasm_bindgen::from_value::<AcpSessionUpdate>(payload) else {
             return;
         };
+        // ACP tool updates arrive on a second event channel. Drain assistant
+        // deltas first so commentary → reasoning → action keeps wire order.
+        flush_delta_buf(
+            &acp_update_buf,
+            active_session,
+            items,
+            transcripts,
+            models,
+            session_model_ids,
+        );
         match update.kind.as_str() {
             "ToolCall" | "ToolCallUpdate" => route_items(
                 active_session,
@@ -6474,11 +6485,9 @@ fn App() -> impl IntoView {
                             // Queued user turns live after the active turn and
                             // must not make its process group look historical.
                             let last = trailing_queue_start(list).saturating_sub(1);
-                            // Coalesce consecutive thinking + tool items into one
-                            // foldable steps panel; render everything else as a
-                            // normal row (#82). Items that render nothing (empty
-                            // streaming placeholder, attempt_completion) are skipped
-                            // so no `.thread` gap is left behind (#19).
+                            // Visible commentary stays in the transcript. Only
+                            // consecutive tool calls fold into a steps panel;
+                            // reasoning remains a separate, collapsed row.
                             let mut rows: Vec<(usize, u64, ThreadRow)> = Vec::new();
                             let (window, _, _) = transcript_render_window(
                                 list,
@@ -6488,13 +6497,13 @@ fn App() -> impl IntoView {
                             let mut i = window.start;
                             while i < window.end {
                                 if renders_nothing(&list[i]) { i += 1; continue; }
-                                if is_process_item_at(list, i) {
+                                if is_tool_activity(&list[i]) {
                                     let start = i;
                                     let mut run: Vec<(usize, ChatItem)> = Vec::new();
                                     let mut j = i;
                                     while j < window.end {
                                         if renders_nothing(&list[j]) { j += 1; continue; }
-                                        if is_process_item_at(list, j) { run.push((j, list[j].clone())); j += 1; }
+                                        if is_tool_activity(&list[j]) { run.push((j, list[j].clone())); j += 1; }
                                         else { break; }
                                     }
                                     // Usage is metadata for the whole reply, not
@@ -6502,30 +6511,33 @@ fn App() -> impl IntoView {
                                     let live = busy_now && (j > last || list[j..=last].iter().all(|item| {
                                         renders_nothing(item) || matches!(item, ChatItem::Usage { .. })
                                     }));
-                                    let has_tool = run.iter().any(|(_, c)| {
-                                        matches!(c, ChatItem::Tool { .. } | ChatItem::AcpTool { .. })
-                                    });
-                                    if has_tool {
-                                        let mut h = std::collections::hash_map::DefaultHasher::new();
-                                        for (idx, it) in &run { (idx, it.fingerprint()).hash(&mut h); }
-                                        live.hash(&mut h);
-                                        let items_only: Vec<ChatItem> = run.into_iter().map(|(_, c)| c).collect();
-                                        rows.push((start, h.finish(), ThreadRow::Steps { items: items_only, live }));
-                                    } else {
-                                        // Pure thinking (no tool): keep the bare .rz rows (#31).
-                                        for (idx, it) in run {
-                                            let is_last = idx == last;
-                                            let fp = it.fingerprint() ^ (is_last && busy_now) as u64;
-                                            rows.push((idx, fp, ThreadRow::Item { i: idx, item: it, is_last }));
-                                        }
-                                    }
+                                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                                    for (idx, it) in &run { (idx, it.fingerprint()).hash(&mut h); }
+                                    live.hash(&mut h);
+                                    let items_only: Vec<ChatItem> = run.into_iter().map(|(_, c)| c).collect();
+                                    rows.push((start, h.finish(), ThreadRow::Steps { items: items_only, live }));
                                     i = j;
                                 } else {
-                                    let is_last = i == last;
+                                    let commentary = is_commentary_at(list, i);
+                                    // A text row can become commentary when the
+                                    // next tool event arrives. Keep streaming
+                                    // assistant rows lightweight so replacing
+                                    // one cannot strand async markdown effects
+                                    // under a disposed Leptos owner.
+                                    let compact_assistant = commentary
+                                        || (busy_now
+                                            && matches!(&list[i], ChatItem::Assistant { .. }));
                                     let mut fp = list[i].fingerprint();
                                     // Assistant markdown embeds artifact chips (index + label).
                                     if matches!(&list[i], ChatItem::Assistant { .. }) { fp ^= arts_fp; }
-                                    rows.push((i, fp, ThreadRow::Item { i, item: list[i].clone(), is_last }));
+                                    fp ^= (commentary as u64) << 63;
+                                    fp ^= (compact_assistant as u64) << 62;
+                                    rows.push((i, fp, ThreadRow::Item {
+                                        i,
+                                        item: list[i].clone(),
+                                        commentary,
+                                        compact_assistant,
+                                    }));
                                     i += 1;
                                 }
                             }
@@ -6535,15 +6547,25 @@ fn App() -> impl IntoView {
                         key=|(start, fp, _)| (*start, *fp)
                         children=move |(start, _, row)| {
                             match row {
-                                ThreadRow::Item { i, item, is_last } => {
+                                ThreadRow::Item {
+                                    i,
+                                    item,
+                                    commentary,
+                                    compact_assistant,
+                                } => {
                                     let arts = artifacts.get_untracked();
                                     let sid = active_session.get().unwrap_or_default();
                                     let on_resume = Callback::new(resume_turn);
+                                    let class = if commentary {
+                                        "msg assistant commentary"
+                                    } else {
+                                        class_for(&item)
+                                    };
                                     view! {
-                                        <div class=class_for(&item) data-ui-index=i.to_string()>
+                                        <div class=class data-ui-index=i.to_string()>
                                             {render_item(
                                                 i, &item, &arts, on_artifact_select, on_file_link,
-                                                run_records, busy.read_only(), is_last, active_acp_agent_id.get().is_none(), edit_message, branch_message, sid,
+                                                run_records, busy.read_only(), compact_assistant, active_acp_agent_id.get().is_none(), edit_message, branch_message, sid,
                                                 respond_confirm, on_resume,
                                             )}
                                         </div>
@@ -9643,7 +9665,8 @@ enum ThreadRow {
     Item {
         i: usize,
         item: ChatItem,
-        is_last: bool,
+        commentary: bool,
+        compact_assistant: bool,
     },
     Steps {
         items: Vec<ChatItem>,
@@ -9651,30 +9674,21 @@ enum ThreadRow {
     },
 }
 
-/// Compact, foldable summary of a thinking + tool run (#82). Collapsed by
-/// default; auto-opens while it is the live tail so progress stays visible.
+/// Compact, foldable summary of consecutive tool calls. Collapsed by default;
+/// auto-opens while it is the live tail so progress stays visible.
 ///
 /// Built as a manual accordion (signal + `class:open`) rather than
 /// `<details>/<summary>`: the UA disclosure marker survives `list-style:none`
 /// + `::-webkit-details-marker` here (WebKit and Blink alike), and there is no
 /// portable way to drop it — so we don't render one.
-fn disclosure_signal(
-    states: RwSignal<HashMap<String, bool>>,
-    id: &str,
-    automatic: bool,
-) -> RwSignal<bool> {
-    create_rw_signal(
-        states
-            .with_untracked(|values| values.get(id).copied())
-            .unwrap_or(automatic),
-    )
+fn disclosure_open(states: RwSignal<HashMap<String, bool>>, id: &str, automatic: bool) -> bool {
+    states.with(|values| values.get(id).copied().unwrap_or(automatic))
 }
 
-fn toggle_disclosure(open: RwSignal<bool>, states: RwSignal<HashMap<String, bool>>, id: &str) {
-    let next = !open.get_untracked();
-    open.set(next);
+fn toggle_disclosure(states: RwSignal<HashMap<String, bool>>, id: &str, automatic: bool) {
     states.update(|values| {
-        values.insert(id.to_string(), next);
+        let current = values.get(id).copied().unwrap_or(automatic);
+        values.insert(id.to_string(), !current);
     });
 }
 
@@ -9719,55 +9733,13 @@ fn render_steps_group(
         (total_ms > 0 && (!live || n_tools > 0)).then(|| format_duration_ms(total_ms));
     // The group re-renders on every streaming delta (fingerprint-keyed row),
     // so this static line tracks the in-flight step while collapsed.
-    let now_line = live
-        .then(|| steps_now_line(&items, &t(locale.get(), "chat.thinking")))
-        .flatten();
-    let open = disclosure_signal(disclosure_state, &group_id, live);
+    let now_line = live.then(|| steps_now_line(&items)).flatten();
     let rows = items.into_iter().enumerate().map(|(position, it)| match it {
-        ChatItem::Assistant { text, .. } => {
-            let step_id = format!("{group_id}:progress:{position}");
-            let popen = disclosure_signal(disclosure_state, &step_id, false);
-            let toggle_id = step_id.clone();
-            let detail: String = text
-                .lines()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or("")
-                .trim()
-                .chars()
-                .take(100)
-                .collect();
-            view! {
-                <div class="step step-progress" class:open=move || popen.get()>
-                    <div class="step-head" on:click=move |_| {
-                        toggle_disclosure(popen, disclosure_state, &toggle_id)
-                    }>
-                        <span class="step-icon progress"></span>
-                        <span class="step-name">{move || t(locale.get(), "chat.progress")}</span>
-                        <span class="step-detail">{detail}</span>
-                    </div>
-                    <div class="step-progress-body">{text}</div>
-                </div>
-            }.into_view()
-        }
-        ChatItem::Reasoning(text) => {
-            let step_id = format!("{group_id}:reasoning:{position}");
-            let ropen = disclosure_signal(disclosure_state, &step_id, false);
-            let toggle_id = step_id.clone();
-            view! {
-                <div class="step step-think" class:open=move || ropen.get()>
-                    <div class="step-head" on:click=move |_| {
-                        toggle_disclosure(ropen, disclosure_state, &toggle_id)
-                    }>
-                        <span class="step-icon think"></span>
-                        <span class="step-name">{move || t(locale.get(), "chat.thinking")}</span>
-                    </div>
-                    <div class="step-think-body">{text}</div>
-                </div>
-            }.into_view()
-        }
         ChatItem::Tool { name, ok, input, output, started_at_ms, duration_ms, .. } => {
             let step_id = format!("{group_id}:tool:{position}");
-            let sopen = disclosure_signal(disclosure_state, &step_id, ok.is_none() && live);
+            let automatic = ok.is_none() && live;
+            let class_id = step_id.clone();
+            let aria_id = step_id.clone();
             let toggle_id = step_id.clone();
             let detail: String = input
                 .lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim()
@@ -9782,17 +9754,21 @@ fn render_steps_group(
             let meta_text = step_tool_meta(locale.get(), duration_ms, started_at_ms, ok, lines, now);
             let meta = meta_text.map(|text| view! { <span class="step-meta">{text}</span> });
             view! {
-                <div class="step" class:open=move || sopen.get() class=("no-body", !has_body)>
-                    <div class="step-head" on:click=move |_| {
+                <div class="step"
+                    class:open=move || disclosure_open(disclosure_state, &class_id, automatic)
+                    class=("no-body", !has_body)>
+                    <button type="button" class="step-head" disabled=!has_body
+                        aria-expanded=move || (has_body && disclosure_open(disclosure_state, &aria_id, automatic)).to_string()
+                        on:click=move |_| {
                         if has_body {
-                            toggle_disclosure(sopen, disclosure_state, &toggle_id)
+                            toggle_disclosure(disclosure_state, &toggle_id, automatic)
                         }
                     }>
                         {icon}
                         <span class="step-name">{name}</span>
                         {(!detail.is_empty()).then(|| view! { <span class="step-detail">{detail}</span> })}
                         {meta}
-                    </div>
+                    </button>
                     {has_body.then(|| view! {
                         <div class="step-body">
                             {(!input.is_empty()).then(|| view! { <pre class="tool-input">{input.clone()}</pre> })}
@@ -9812,7 +9788,9 @@ fn render_steps_group(
                 call_id.clone()
             };
             let step_id = format!("{group_id}:acp:{stable_part}");
-            let sopen = disclosure_signal(disclosure_state, &step_id, running && live);
+            let automatic = running && live;
+            let class_id = step_id.clone();
+            let aria_id = step_id.clone();
             let toggle_id = step_id.clone();
             let detail = acp_tool_step_detail(&kind, &content, &locations);
             let body = acp_tool_step_body(&content, &locations);
@@ -9827,17 +9805,20 @@ fn render_steps_group(
             let meta = (!done).then(|| status.clone());
             view! {
                 <div class="step acp-tool" data-testid="acp-tool" data-status=status.clone()
-                    class:open=move || sopen.get() class=("no-body", !has_body)>
-                    <div class="step-head" on:click=move |_| {
+                    class:open=move || disclosure_open(disclosure_state, &class_id, automatic)
+                    class=("no-body", !has_body)>
+                    <button type="button" class="step-head" disabled=!has_body
+                        aria-expanded=move || (has_body && disclosure_open(disclosure_state, &aria_id, automatic)).to_string()
+                        on:click=move |_| {
                         if has_body {
-                            toggle_disclosure(sopen, disclosure_state, &toggle_id)
+                            toggle_disclosure(disclosure_state, &toggle_id, automatic)
                         }
                     }>
                         {icon}
                         <span class="step-name">{title.clone()}</span>
                         {(!detail.is_empty()).then(|| view! { <span class="step-detail">{detail.clone()}</span> })}
                         {meta.map(|text| view! { <span class="step-meta">{text}</span> })}
-                    </div>
+                    </button>
                     {has_body.then(|| view! {
                         <div class="step-body">
                             <pre class="tool-output">{body.clone()}</pre>
@@ -9848,17 +9829,22 @@ fn render_steps_group(
         }
         _ => view! {}.into_view(),
     }).collect_view();
+    let class_group_id = group_id.clone();
+    let aria_group_id = group_id.clone();
     let toggle_group_id = group_id.clone();
     view! {
-        <div class="steps" class:open=move || open.get()>
-            <div class="steps-head" on:click=move |_| {
-                toggle_disclosure(open, disclosure_state, &toggle_group_id)
+        <div class="steps"
+            class:open=move || disclosure_open(disclosure_state, &class_group_id, live)>
+            <button type="button" class="steps-head"
+                aria-expanded=move || disclosure_open(disclosure_state, &aria_group_id, live).to_string()
+                on:click=move |_| {
+                toggle_disclosure(disclosure_state, &toggle_group_id, live)
             }>
                 <span class="steps-chevron"></span>
                 <span class="steps-title">{title}</span>
                 {now_line.map(|text| view! { <span class="steps-now">{text}</span> })}
                 {total_label.map(|label| view! { <span class="steps-meta">{label}</span> })}
-            </div>
+            </button>
             <div class="steps-body">{rows}</div>
         </div>
     }
@@ -9866,7 +9852,7 @@ fn render_steps_group(
 
 /// Latest step of a live run as "name · detail", shown in the collapsed
 /// steps header so folding the panel hides detail, not progress.
-fn steps_now_line(items: &[ChatItem], thinking_label: &str) -> Option<String> {
+fn steps_now_line(items: &[ChatItem]) -> Option<String> {
     let first_line = |s: &str| -> String {
         s.lines()
             .find(|l| !l.trim().is_empty())
@@ -9899,11 +9885,6 @@ fn steps_now_line(items: &[ChatItem], thinking_label: &str) -> Option<String> {
                 format!("{title} · {detail}")
             })
         }
-        ChatItem::Assistant { text, .. } => {
-            let line = first_line(text);
-            (!line.is_empty()).then_some(line)
-        }
-        ChatItem::Reasoning(_) => Some(thinking_label.to_string()),
         _ => None,
     })
 }
@@ -9931,14 +9912,11 @@ mod steps_now_line_tests {
             tool("python", "\nfrom pypdf import PdfReader\nmore"),
         ];
         assert_eq!(
-            steps_now_line(&items, "thinking"),
+            steps_now_line(&items),
             Some("python · from pypdf import PdfReader".into())
         );
-        assert_eq!(
-            steps_now_line(&[ChatItem::Reasoning("hmm".into())], "thinking"),
-            Some("thinking".into())
-        );
-        assert_eq!(steps_now_line(&[], "thinking"), None);
+        assert_eq!(steps_now_line(&[ChatItem::Reasoning("hmm".into())]), None);
+        assert_eq!(steps_now_line(&[]), None);
     }
 }
 
@@ -10112,7 +10090,7 @@ fn render_item(
     on_file: Callback<ModalArtifact>,
     runs: RwSignal<Vec<RunRecord>>,
     busy: ReadSignal<bool>,
-    is_last: bool,
+    compact_assistant: bool,
     can_modify: bool,
     on_edit: impl Fn(usize) + Clone + 'static,
     on_branch: impl Fn(usize) + Clone + 'static,
@@ -10165,6 +10143,11 @@ fn render_item(
                 </div>
             }.into_view()
         }
+        ChatItem::Assistant { text, .. } if compact_assistant => view! {
+            <div class="assistant-wrap">
+                <div class="body md" inner_html=md_to_html(text)></div>
+            </div>
+        }.into_view(),
         ChatItem::Assistant { text, model, resources } => view! {
             <AssistantMessage
                 text=text.clone()
@@ -10187,13 +10170,8 @@ fn render_item(
             />
         }.into_view(),
         ChatItem::Reasoning(s) => {
-            // Auto-expand the block while it is the live, streaming item. The thread
-            // is a non-keyed re-render, so every reasoning delta rebuilds this
-            // <details> from scratch; a DOM-only open state would snap shut on the
-            // next chunk and the user could never watch the live thinking (#31).
-            let live = is_last && busy.get();
             view! {
-                <details class="rz" open=live>
+                <details class="rz">
                     <summary>{move || t(locale.get(), "chat.thinking")}</summary>
                     <div class="body">{s.clone()}</div>
                 </details>

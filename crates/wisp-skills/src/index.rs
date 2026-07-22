@@ -308,11 +308,12 @@ mod tests {
     }
 
     #[test]
-    fn bundled_catalog_loads_agent_infini() {
+    fn bundled_catalog_loads_expected_skills() {
         let Some(dir) = bundled_dir() else {
             return;
         };
         let idx = SkillIndex::load(&[dir]);
         assert!(idx.get("agent-infini").is_some());
+        assert!(idx.get("journal-club-ppt").is_some());
     }
 }

@@ -50,7 +50,7 @@ wisp-science/
 ├─ ui/              Leptos CSR frontend (built by Trunk, loaded in WebView2)
 ├─ python/          kernel_worker.py + mock MCP server (uv-managed)
 ├─ r/               optional system-R kernel worker (requires jsonlite)
-├─ skills/          Bundled SKILL.md catalog (29 science workflows)
+├─ skills/          Bundled SKILL.md catalog for reusable scientific workflows
 ├─ mcp-servers/     Bundled MCP servers (bio-tools: ~80 DB clients)
 └─ seed/            Bundled demo session recordings (CRISPR / enzyme / extremophile / immunotherapy)
 ```
@@ -306,9 +306,10 @@ transcript only. Project files and runs remain in their source project;
 conversation-linked artifact records are not transferred, and the underlying
 workspace files are never deleted.
 
-During an agent turn, assistant progress notes, reasoning, and ordinary tool
-calls are grouped into one collapsible steps panel. The final answer remains a
-normal message, and reopening the conversation preserves the same separation.
+During an agent turn, assistant progress notes stay visible as compact
+commentary, model reasoning stays in its own collapsed disclosure, and only
+consecutive tool calls are grouped into a steps panel. The final answer remains
+a normal message, and reopening the conversation preserves the same order.
 
 On macOS, the native app menu mirrors the global desktop command surface,
 including project navigation, new-session commands, edit shortcuts, and
