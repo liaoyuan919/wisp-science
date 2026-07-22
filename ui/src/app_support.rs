@@ -3624,66 +3624,6 @@ pub(super) fn trailing_queue_start(items: &[ChatItem]) -> usize {
         .unwrap_or(0)
 }
 
-/// Insert ACP tool rows above the turn's assistant answer (and above the empty
-/// streaming placeholder), so they coalesce into the same "Ran N steps" panel
-/// as native Wisp tools instead of dangling under the finished reply.
-pub(super) fn acp_tool_insert_index(items: &[ChatItem]) -> usize {
-    let Some(user_idx) = items
-        .iter()
-        .rposition(|item| matches!(item, ChatItem::User(_)))
-    else {
-        return items.len();
-    };
-    for (offset, item) in items[user_idx + 1..].iter().enumerate() {
-        match item {
-            ChatItem::Reasoning(_) | ChatItem::AcpTool { .. } => {}
-            ChatItem::Tool { name, .. } if name != "attempt_completion" => {}
-            _ => return user_idx + 1 + offset,
-        }
-    }
-    items.len()
-}
-
-#[cfg(test)]
-mod acp_tool_insert_tests {
-    use super::acp_tool_insert_index;
-    use crate::dto::ChatItem;
-
-    #[test]
-    fn inserts_before_streaming_assistant_placeholder() {
-        let items = vec![
-            ChatItem::User("hi".into()),
-            ChatItem::Assistant {
-                text: String::new(),
-                model: None,
-                resources: Vec::new(),
-            },
-        ];
-        assert_eq!(acp_tool_insert_index(&items), 1);
-    }
-
-    #[test]
-    fn stacks_with_existing_acp_tools() {
-        let items = vec![
-            ChatItem::User("hi".into()),
-            ChatItem::AcpTool {
-                call_id: "1".into(),
-                title: "ls".into(),
-                kind: "execute".into(),
-                status: "completed".into(),
-                content: String::new(),
-                locations: String::new(),
-            },
-            ChatItem::Assistant {
-                text: "done".into(),
-                model: Some("Codex".into()),
-                resources: Vec::new(),
-            },
-        ];
-        assert_eq!(acp_tool_insert_index(&items), 2);
-    }
-}
-
 pub(super) fn start_user_turn(items: &mut Vec<ChatItem>, text: String, model: Option<String>) {
     let incoming_body = composer_text_from_user_message(&text);
     // ponytail: text-keyed promotion; upgrade to a backend intent_id if
@@ -3743,7 +3683,7 @@ pub(super) fn start_user_turn(items: &mut Vec<ChatItem>, text: String, model: Op
 mod start_user_turn_tests {
     use super::{
         append_assistant_delta, append_reasoning_delta, composer_text_from_user_message,
-        is_process_item_at, message_with_attachments, message_with_composer_context,
+        is_commentary_at, message_with_attachments, message_with_composer_context,
         message_with_quotes, process_item_insert_index, runtime_object_quote, start_user_turn,
         trailing_queue_start, ComposerQuote, ComposerReferenceChip,
     };
@@ -3903,11 +3843,7 @@ mod start_user_turn_tests {
     }
 
     #[test]
-    fn acp_thinking_joins_tool_steps_above_a_started_reply() {
-        // Codex-style order: a short reply streams first, then thinking, then
-        // ACP tools (which are hoisted above the reply). Thinking must land in
-        // the same process region so it folds into the steps panel instead of
-        // dangling under the reply (issue: ACP run/thinking rendered apart).
+    fn acp_activity_preserves_stream_order_after_a_started_reply() {
         let mut items = vec![
             ChatItem::User("查下文献".into()),
             ChatItem::Assistant {
@@ -3918,8 +3854,7 @@ mod start_user_turn_tests {
         ];
 
         append_reasoning_delta(&mut items, "Searching for literature.".into());
-        // A subsequent ACP tool inserts at the same process-region anchor.
-        let idx = super::acp_tool_insert_index(&items);
+        let idx = process_item_insert_index(&items);
         items.insert(
             idx,
             ChatItem::AcpTool {
@@ -3932,17 +3867,17 @@ mod start_user_turn_tests {
             },
         );
 
-        // Reasoning + tool sit consecutively before the reply → one panel.
         assert!(matches!(&items[0], ChatItem::User(_)));
-        assert!(matches!(&items[1], ChatItem::Reasoning(t) if t == "Searching for literature."));
-        assert!(matches!(&items[2], ChatItem::AcpTool { .. }));
-        assert!(matches!(&items[3], ChatItem::Assistant { text, .. } if text == "我先查近年文献"));
+        assert!(matches!(&items[1], ChatItem::Assistant { text, .. } if text == "我先查近年文献"));
+        assert!(matches!(&items[2], ChatItem::Reasoning(t) if t == "Searching for literature."));
+        assert!(matches!(&items[3], ChatItem::AcpTool { .. }));
+        assert!(is_commentary_at(&items, 1));
     }
 
     #[test]
     fn native_thinking_precedes_reply_and_stays_at_the_tail() {
-        // Native reasoning models emit thinking before any reply, so the hoist
-        // must not fire: thinking appends at the tail next to the placeholder.
+        // Native reasoning models can emit thinking before any visible reply;
+        // keep it after the streaming placeholder in arrival order.
         let mut items = vec![
             ChatItem::User("hi".into()),
             ChatItem::Assistant {
@@ -4006,7 +3941,7 @@ mod start_user_turn_tests {
     }
 
     #[test]
-    fn intermediate_assistant_rows_fold_with_their_tools() {
+    fn intermediate_assistant_rows_are_commentary_not_final_answers() {
         let assistant = |text: &str| ChatItem::Assistant {
             text: text.into(),
             model: None,
@@ -4030,9 +3965,9 @@ mod start_user_turn_tests {
             assistant("final answer"),
         ];
 
-        assert!(is_process_item_at(&items, 1));
-        assert!(is_process_item_at(&items, 3));
-        assert!(!is_process_item_at(&items, 6));
+        assert!(is_commentary_at(&items, 1));
+        assert!(is_commentary_at(&items, 3));
+        assert!(!is_commentary_at(&items, 6));
     }
 
     #[test]
@@ -4210,69 +4145,36 @@ pub(super) fn is_run_monitor_tool(name: &str) -> bool {
     matches!(name, "monitor_run" | "wisp_monitor_run")
 }
 
-pub(super) fn is_process_item(item: &ChatItem) -> bool {
+pub(super) fn is_tool_activity(item: &ChatItem) -> bool {
     match item {
-        ChatItem::Reasoning(_) => true,
         ChatItem::Tool { name, .. } => name != "attempt_completion" && !is_run_monitor_tool(name),
         ChatItem::AcpTool { .. } => true,
         _ => false,
     }
 }
 
-/// Assistant text is process narration when the same model round proceeds to
-/// a foldable tool call. Final answers have no following tool and stay visible.
-pub(super) fn is_process_item_at(items: &[ChatItem], index: usize) -> bool {
-    if is_process_item(&items[index]) {
-        return true;
-    }
+/// Assistant text that introduces a tool is visible commentary, while the last
+/// assistant row in a turn keeps the full answer treatment.
+pub(super) fn is_commentary_at(items: &[ChatItem], index: usize) -> bool {
     if !matches!(&items[index], ChatItem::Assistant { text, .. } if !text.trim().is_empty()) {
         return false;
     }
     items[index + 1..]
         .iter()
         .find(|item| !matches!(item, ChatItem::Reasoning(_) | ChatItem::Usage { .. }))
-        .is_some_and(is_process_item)
+        .is_some_and(is_tool_activity)
 }
 
 pub(super) fn append_reasoning_delta(items: &mut Vec<ChatItem>, delta: String) {
     let queue_start = trailing_queue_start(items);
-    if let Some(idx) = items[..queue_start]
-        .iter()
-        .rposition(|item| matches!(item, ChatItem::Reasoning(_)))
+    if let Some(ChatItem::Reasoning(text)) = queue_start
+        .checked_sub(1)
+        .and_then(|idx| items.get_mut(idx))
     {
-        if let ChatItem::Reasoning(text) = &mut items[idx] {
-            text.push_str(&delta);
-            return;
-        }
+        text.push_str(&delta);
+        return;
     }
-    // ACP agents (e.g. Codex) stream a short reply first, THEN thinking, THEN
-    // tools. Tool rows are hoisted above that reply (acp_tool_insert_index) so
-    // they fold into one "Ran N steps" panel; thinking must join them there
-    // instead of dangling under the reply. A non-empty reply already present in
-    // the turn is that signature — native reasoning always precedes the reply,
-    // so this never fires for native turns.
-    // ponytail: only covers reply-before-thinking; an ACP agent that emits
-    // thinking as its very first event still lands at the tail until a tool
-    // arrives — revisit if such an agent shows up.
-    let insert_at = if turn_has_started_reply(&items[..queue_start]) {
-        acp_tool_insert_index(items)
-    } else {
-        queue_start
-    };
-    items.insert(insert_at, ChatItem::Reasoning(delta));
-}
-
-/// True when the active turn (after the last user message) already carries a
-/// non-empty assistant reply — i.e. the agent spoke before it started thinking.
-fn turn_has_started_reply(turn: &[ChatItem]) -> bool {
-    let start = turn
-        .iter()
-        .rposition(|item| matches!(item, ChatItem::User(_)))
-        .map(|u| u + 1)
-        .unwrap_or(0);
-    turn[start..]
-        .iter()
-        .any(|item| matches!(item, ChatItem::Assistant { text, .. } if !text.trim().is_empty()))
+    items.insert(queue_start, ChatItem::Reasoning(delta));
 }
 
 pub(super) fn append_stdout_chunk(items: &mut Vec<ChatItem>, chunk: String) {

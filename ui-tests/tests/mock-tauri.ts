@@ -1874,9 +1874,9 @@ export function tauriMock(fixtures?: { xlsxBase64?: string; pptxBase64?: string 
             sessionModels[fid] ??= activeHttpModelId();
             const acpAgentId = args?.acpAgentId ?? acpBindings[fid];
             if (acpAgentId && String(msg).includes("ACPTHINK")) {
-              // Codex-style ordering: a short reply streams first, THEN thinking,
-              // THEN tool calls. Thinking must fold into the steps panel with the
-              // tools, not dangle under the reply.
+              // Codex-style ordering: visible commentary streams first, then
+              // reasoning, then tool activity. The UI must preserve those as
+              // separate transcript layers.
               acpBindings[fid] = acpAgentId;
               setTimeout(() => {
                 emit("agent", { kind: "User", frame_id: fid, text: msg });
@@ -2100,26 +2100,28 @@ export function tauriMock(fixtures?: { xlsxBase64?: string; pptxBase64?: string 
               }, 30);
               return fid;
             }
-            // Multi-tool path (#82): a thinking + tool-call run that must fold
-            // into one collapsible "steps" panel instead of a wall of cards.
+            // Interleaved commentary, reasoning, and tool calls exercise the
+            // transcript's three-layer activity flow.
             if (String(arg("message") ?? "").includes("STEPSDEMO")) {
-              setTimeout(() => {
-                emit("agent", { kind: "User", frame_id: fid, text: msg });
-                emit("agent", { kind: "Text", frame_id: fid, delta: "I’ll inspect the count matrix header first." });
-                emit("agent", { kind: "Reasoning", frame_id: fid, delta: "Let me inspect the count matrix header first." });
-                emit("agent", { kind: "ToolCall", frame_id: fid, name: "shell", preview: "zcat counts.txt.gz | head" });
-                emit("agent", { kind: "ToolResult", frame_id: fid, name: "shell", ok: true, content: Array.from({ length: 8 }, (_, i) => `gene_${i}\t12\t8\t15`).join("\n") });
-                emit("agent", { kind: "Text", frame_id: fid, delta: "I’ll load the full matrix and summarize it." });
-                emit("agent", { kind: "Reasoning", frame_id: fid, delta: "Now load the full matrix and summarize." });
-                emit("agent", { kind: "ToolCall", frame_id: fid, name: "python", preview: "import pandas as pd\ndf = pd.read_csv('counts.txt.gz', sep='\\t')" });
-                emit("agent", { kind: "ToolResult", frame_id: fid, name: "python", ok: true, content: Array.from({ length: 18 }, (_, i) => `col_${i}: ok`).join("\n") });
-                emit("agent", { kind: "Text", frame_id: fid, delta: "I’ll save the reusable analysis script." });
-                emit("agent", { kind: "ToolCall", frame_id: fid, name: "write", preview: "/mock/root/deseq2.R" });
-                emit("agent", { kind: "ToolResult", frame_id: fid, name: "write", ok: true, content: "" });
-                emit("agent", { kind: "Text", frame_id: fid, delta: "The data is clean: 60,675 genes × 15 samples in a 2×2 factorial design." });
-                emit("agent", { kind: "Done", frame_id: fid });
-              }, 30);
-              return fid;
+              return await new Promise<string>((resolve) => {
+                setTimeout(() => {
+                  emit("agent", { kind: "User", frame_id: fid, text: msg });
+                  emit("agent", { kind: "Text", frame_id: fid, delta: "I’ll inspect the count matrix header first." });
+                  emit("agent", { kind: "Reasoning", frame_id: fid, delta: "Let me inspect the count matrix header first." });
+                  emit("agent", { kind: "ToolCall", frame_id: fid, name: "shell", preview: "zcat counts.txt.gz | head" });
+                  emit("agent", { kind: "ToolResult", frame_id: fid, name: "shell", ok: true, content: Array.from({ length: 8 }, (_, i) => `gene_${i}\t12\t8\t15`).join("\n") });
+                  emit("agent", { kind: "Text", frame_id: fid, delta: "I’ll load the full matrix and summarize it." });
+                  emit("agent", { kind: "Reasoning", frame_id: fid, delta: "Now load the full matrix and summarize." });
+                  emit("agent", { kind: "ToolCall", frame_id: fid, name: "python", preview: "import pandas as pd\ndf = pd.read_csv('counts.txt.gz', sep='\\t')" });
+                  emit("agent", { kind: "ToolResult", frame_id: fid, name: "python", ok: true, content: Array.from({ length: 18 }, (_, i) => `col_${i}: ok`).join("\n") });
+                  emit("agent", { kind: "Text", frame_id: fid, delta: "I’ll save the reusable analysis script." });
+                  emit("agent", { kind: "ToolCall", frame_id: fid, name: "write", preview: "/mock/root/deseq2.R" });
+                  emit("agent", { kind: "ToolResult", frame_id: fid, name: "write", ok: true, content: "" });
+                  emit("agent", { kind: "Text", frame_id: fid, delta: "The data is clean: 60,675 genes × 15 samples in a 2×2 factorial design." });
+                  emit("agent", { kind: "Done", frame_id: fid });
+                  resolve(fid);
+                }, 30);
+              });
             }
             if (String(arg("message") ?? "").includes("MDLIST")) {
               const md = [
