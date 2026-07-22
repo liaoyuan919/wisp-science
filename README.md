@@ -311,8 +311,10 @@ workspace files are never deleted.
 
 During an agent turn, assistant progress notes stay visible as compact
 commentary, model reasoning stays in its own collapsed disclosure, and only
-consecutive tool calls are grouped into a steps panel. The final answer remains
-a normal message, and reopening the conversation preserves the same order.
+consecutive tool calls are grouped into a steps panel. When the turn finishes,
+those process layers collapse into one **Processed** disclosure while the final
+answer remains open. Reopening the conversation preserves the same compact
+completed state.
 
 On macOS, the native app menu mirrors the global desktop command surface,
 including project navigation, new-session commands, edit shortcuts, and

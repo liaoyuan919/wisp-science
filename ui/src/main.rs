@@ -6621,9 +6621,9 @@ fn App() -> impl IntoView {
                             // Queued user turns live after the active turn and
                             // must not make its process group look historical.
                             let last = trailing_queue_start(list).saturating_sub(1);
-                            // Visible commentary stays in the transcript. Only
-                            // consecutive tool calls fold into a steps panel;
-                            // reasoning remains a separate, collapsed row.
+                            // Keep process layers separate while the turn runs;
+                            // once complete, fold commentary + reasoning + tools
+                            // into one activity summary before the final answer.
                             let mut rows: Vec<(usize, u64, ThreadRow)> = Vec::new();
                             let (window, _, _) = transcript_render_window(
                                 list,
@@ -6633,7 +6633,21 @@ fn App() -> impl IntoView {
                             let mut i = window.start;
                             while i < window.end {
                                 if renders_nothing(&list[i]) { i += 1; continue; }
-                                if is_tool_activity(&list[i]) {
+                                if let Some(end) = completed_activity_end(list, i, busy_now) {
+                                    let start = i;
+                                    let mut run: Vec<(usize, ChatItem)> = Vec::new();
+                                    for j in i..end {
+                                        if is_turn_activity_at(list, j) {
+                                            run.push((j, list[j].clone()));
+                                        }
+                                    }
+                                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                                    for (idx, it) in &run { (idx, it.fingerprint()).hash(&mut h); }
+                                    true.hash(&mut h);
+                                    let items_only = run.into_iter().map(|(_, item)| item).collect();
+                                    rows.push((start, h.finish(), ThreadRow::Activity { items: items_only }));
+                                    i = end;
+                                } else if is_tool_activity(&list[i]) {
                                     let start = i;
                                     let mut run: Vec<(usize, ChatItem)> = Vec::new();
                                     let mut j = i;
@@ -6717,6 +6731,22 @@ fn App() -> impl IntoView {
                                             render_steps_group(
                                                 items,
                                                 live,
+                                                false,
+                                                group_id,
+                                                step_disclosure_state,
+                                            )
+                                        }</div>
+                                    }.into_view()
+                                },
+                                ThreadRow::Activity { items } => {
+                                    let sid = active_session.get().unwrap_or_default();
+                                    let group_id = format!("{sid}:activity:{start}");
+                                    view! {
+                                        <div class="steps-wrap">{
+                                            render_steps_group(
+                                                items,
+                                                false,
+                                                true,
                                                 group_id,
                                                 step_disclosure_state,
                                             )
@@ -9812,6 +9842,9 @@ enum ThreadRow {
         items: Vec<ChatItem>,
         live: bool,
     },
+    Activity {
+        items: Vec<ChatItem>,
+    },
 }
 
 /// Compact, foldable summary of consecutive tool calls. Collapsed by default;
@@ -9835,6 +9868,7 @@ fn toggle_disclosure(states: RwSignal<HashMap<String, bool>>, id: &str, automati
 fn render_steps_group(
     items: Vec<ChatItem>,
     live: bool,
+    completed_turn: bool,
     group_id: String,
     disclosure_state: RwSignal<HashMap<String, bool>>,
 ) -> impl IntoView {
@@ -9861,7 +9895,9 @@ fn render_steps_group(
         })
         .sum();
     let title = move || {
-        if live {
+        if completed_turn {
+            t(locale.get(), "chat.activity_done").to_string()
+        } else if live {
             t(locale.get(), "chat.steps_running").to_string()
         } else if n_tools == 1 {
             t(locale.get(), "chat.steps_1").to_string()
@@ -9875,6 +9911,52 @@ fn render_steps_group(
     // so this static line tracks the in-flight step while collapsed.
     let now_line = live.then(|| steps_now_line(&items)).flatten();
     let rows = items.into_iter().enumerate().map(|(position, it)| match it {
+        ChatItem::Assistant { text, .. } => {
+            let step_id = format!("{group_id}:progress:{position}");
+            let class_id = step_id.clone();
+            let aria_id = step_id.clone();
+            let toggle_id = step_id.clone();
+            let detail: String = text
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(100)
+                .collect();
+            let html = md_to_html(&text);
+            view! {
+                <div class="step step-progress"
+                    class:open=move || disclosure_open(disclosure_state, &class_id, false)>
+                    <button type="button" class="step-head"
+                        aria-expanded=move || disclosure_open(disclosure_state, &aria_id, false).to_string()
+                        on:click=move |_| toggle_disclosure(disclosure_state, &toggle_id, false)>
+                        <span class="step-icon progress"></span>
+                        <span class="step-name">{move || t(locale.get(), "chat.progress")}</span>
+                        <span class="step-detail">{detail}</span>
+                    </button>
+                    <div class="step-progress-body body md" inner_html=html></div>
+                </div>
+            }.into_view()
+        }
+        ChatItem::Reasoning(text) => {
+            let step_id = format!("{group_id}:reasoning:{position}");
+            let class_id = step_id.clone();
+            let aria_id = step_id.clone();
+            let toggle_id = step_id.clone();
+            view! {
+                <div class="step step-think"
+                    class:open=move || disclosure_open(disclosure_state, &class_id, false)>
+                    <button type="button" class="step-head"
+                        aria-expanded=move || disclosure_open(disclosure_state, &aria_id, false).to_string()
+                        on:click=move |_| toggle_disclosure(disclosure_state, &toggle_id, false)>
+                        <span class="step-icon think"></span>
+                        <span class="step-name">{move || t(locale.get(), "chat.thinking")}</span>
+                    </button>
+                    <div class="step-think-body">{text}</div>
+                </div>
+            }.into_view()
+        }
         ChatItem::Tool { name, ok, input, output, started_at_ms, duration_ms, .. } => {
             let step_id = format!("{group_id}:tool:{position}");
             let automatic = ok.is_none() && live;
@@ -9974,6 +10056,7 @@ fn render_steps_group(
     let toggle_group_id = group_id.clone();
     view! {
         <div class="steps"
+            class=("activity-summary", completed_turn)
             class:open=move || disclosure_open(disclosure_state, &class_group_id, live)>
             <button type="button" class="steps-head"
                 aria-expanded=move || disclosure_open(disclosure_state, &aria_group_id, live).to_string()

@@ -4523,7 +4523,7 @@ test("assistant markdown uses normal whitespace (no phantom blank lines)", async
   expect(whiteSpace).toBe("normal");
 });
 
-test("commentary, reasoning, and tool activity render as separate layers", async ({ page }) => {
+test("completed commentary, reasoning, and tools fold into one activity summary", async ({ page }) => {
   const browserErrors: string[] = [];
   page.on("pageerror", (error) => browserErrors.push(error.message));
   page.on("console", (message) => {
@@ -4533,31 +4533,27 @@ test("commentary, reasoning, and tool activity render as separate layers", async
   await composer(page).fill("STEPSDEMO");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText(/60,675 genes/)).toBeVisible({ timeout: 10_000 });
-  await expect(page.locator(".msg.assistant")).toHaveCount(4);
-  await expect(page.locator(".msg.assistant.commentary")).toHaveCount(3);
+  await expect(page.locator(".msg.assistant")).toHaveCount(1);
+  await expect(page.locator(".msg.assistant.commentary")).toHaveCount(0);
 
-  // Each visible progress note remains in the transcript and bounds its own
-  // tool batch, instead of being folded into one giant activity panel.
-  const steps = page.locator(".steps");
-  await expect(steps).toHaveCount(3);
+  const activity = page.locator(".steps.activity-summary");
+  await expect(activity).toHaveCount(1);
   expect(browserErrors).toEqual([]);
-  await expect(steps.first()).not.toHaveClass(/open/);
+  await expect(activity).not.toHaveClass(/open/);
   await expect(page.locator(".step-body:visible")).toHaveCount(0);
-  const firstStepsHead = steps.first().getByRole("button", { name: /Ran 1 step/ });
-  await expect(firstStepsHead).toHaveAttribute("aria-expanded", "false");
-  await firstStepsHead.focus();
+  const activityHead = activity.getByRole("button", { name: /Processed/ });
+  await expect(activityHead).toHaveAttribute("aria-expanded", "false");
+  await activityHead.focus();
   await page.keyboard.press("Enter");
-  await expect(firstStepsHead).toHaveAttribute("aria-expanded", "true");
+  await expect(activityHead).toHaveAttribute("aria-expanded", "true");
+  await expect(activity.locator(".step-progress")).toHaveCount(3);
+  await expect(activity.locator(".step-think")).toHaveCount(2);
+  await expect(activity.locator(".step-name")).toContainText([
+    "progress", "thinking", "shell", "progress", "thinking", "python", "progress", "write",
+  ]);
   await page.keyboard.press("Space");
-  await expect(firstStepsHead).toHaveAttribute("aria-expanded", "false");
-  await expect(page.locator(".steps .step-name")).toContainText(["shell", "python", "write"]);
-  await expect(page.locator(".steps .step-think, .steps .step-progress")).toHaveCount(0);
-
-  // Raw model reasoning is still inspectable, but it is separate and never
-  // auto-expanded into the live conversation.
-  const reasoning = page.locator("details.rz");
-  await expect(reasoning).toHaveCount(2);
-  await expect(reasoning.first()).not.toHaveAttribute("open", "");
+  await expect(activityHead).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator("details.rz")).toHaveCount(0);
   expect(browserErrors).toEqual([]);
 });
 
@@ -4588,11 +4584,13 @@ test("live step disclosure choices survive tool updates and completion (#172)", 
   await expect(shell).toHaveClass(/open/);
 
   await expect(page.getByText("Live steps finished.")).toBeVisible({ timeout: 4_000 });
-  await expect(steps).toHaveClass(/open/);
-  await expect(shell).toHaveClass(/open/);
+  // Completion replaces the live disclosure with a fresh, collapsed summary.
+  await expect(steps).toHaveClass(/activity-summary/);
+  await expect(steps).not.toHaveClass(/open/);
+  await expect(shell).not.toHaveClass(/open/);
 });
 
-test("ACP commentary stays above separate reasoning and tool activity", async ({ page }) => {
+test("completed ACP commentary, reasoning, and tools share one summary", async ({ page }) => {
   await enterApp(page);
   await newSessionButton(page).click();
   await page.locator(".model-picker-btn").click();
@@ -4600,26 +4598,20 @@ test("ACP commentary stays above separate reasoning and tool activity", async ({
   await composer(page).fill("ACPTHINK");
   await page.getByRole("button", { name: "Send" }).click();
 
-  await expect(page.getByText("Let me search the literature first.")).toBeVisible({ timeout: 4_000 });
+  const activity = page.locator(".steps.activity-summary");
+  await expect(activity).toHaveCount(1, { timeout: 4_000 });
+  await expect(activity).not.toHaveClass(/open/);
+  await activity.locator(".steps-head").click();
+  await expect(activity.getByText("web_search")).toBeVisible();
+  await expect(activity.locator(".step-progress")).toHaveCount(1);
+  await expect(activity.locator(".step-think")).toHaveCount(1);
 
-  const steps = page.locator(".steps");
-  await expect(steps).toHaveCount(1);
-  await steps.locator(".steps-head").click();
-  await expect(steps.getByText("web_search")).toBeVisible();
-  await expect(steps.locator(".step-think")).toHaveCount(0);
-
-  const reasoning = page.locator(".msg.reasoning details.rz");
-  await expect(reasoning).toHaveCount(1);
-  await expect(reasoning).not.toHaveAttribute("open", "");
-
-  // Preserve the event order: visible commentary, reasoning disclosure, tool.
-  const replyY = await page
-    .getByText("Let me search the literature first.")
-    .evaluate((el) => el.getBoundingClientRect().top);
-  const reasoningY = await reasoning.evaluate((el) => el.getBoundingClientRect().top);
-  const stepsY = await steps.evaluate((el) => el.getBoundingClientRect().top);
-  expect(replyY).toBeLessThan(reasoningY);
-  expect(reasoningY).toBeLessThan(stepsY);
+  // Preserve the wire order inside the completed activity disclosure.
+  const progressY = await activity.locator(".step-progress").evaluate((el) => el.getBoundingClientRect().top);
+  const reasoningY = await activity.locator(".step-think").evaluate((el) => el.getBoundingClientRect().top);
+  const toolY = await activity.locator(".acp-tool").evaluate((el) => el.getBoundingClientRect().top);
+  expect(progressY).toBeLessThan(reasoningY);
+  expect(reasoningY).toBeLessThan(toolY);
 });
 
 test("Delegation toggle gates the dynamic temporary-Agent editor", async ({ page }) => {

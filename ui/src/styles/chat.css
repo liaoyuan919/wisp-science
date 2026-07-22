@@ -1071,6 +1071,9 @@ button.stop:disabled { opacity: .6; cursor: default; }
    disclosure marker can't be portably removed from <summary>. */
 .steps-wrap { align-self: stretch; }
 .steps { background: var(--bg-sunken); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+.steps.activity-summary { background: transparent; border-width: 0 0 1px; border-radius: 0; }
+.steps.activity-summary > .steps-head { padding: 8px 0 11px; }
+.steps.activity-summary > .steps-body { padding: 3px 0 8px 14px; }
 .steps-head { display: flex; width: 100%; align-items: center; gap: 8px; padding: 9px 13px; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; user-select: none; }
 .steps-head:hover { background: rgba(60, 55, 45, 0.03); }
 .steps-head:focus-visible, .step-head:focus-visible { outline: 2px solid color-mix(in srgb, var(--clay) 45%, transparent); outline-offset: -2px; }
@@ -1093,6 +1096,8 @@ button.stop:disabled { opacity: .6; cursor: default; }
 .step-icon { flex: 0 0 auto; width: 14px; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; line-height: 1; }
 .step-icon.ok { color: var(--ok); }
 .step-icon.fail { color: var(--err); }
+.step-icon.think::before { content: ""; width: 5px; height: 5px; border-radius: 50%; border: 1.5px solid var(--text-faint); }
+.step-icon.progress::before { content: ""; width: 7px; height: 1.5px; border-radius: 1px; background: var(--text-faint); }
 .step-icon .run-dot { width: 7px; height: 7px; }
 .step-name { flex: 0 0 auto; font-size: 12.5px; font-weight: 600; color: var(--clay); }
 .step-detail { flex: 1 1 auto; min-width: 0; font-size: 12px; color: var(--text-faint); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1154,9 +1159,14 @@ button.stop:disabled { opacity: .6; cursor: default; }
 .run-progress progress::-moz-progress-bar { background:var(--clay-strong); border-radius:999px; }
 .run-progress-meta { margin-top:5px; flex-wrap:wrap; color:var(--text-faint); font:10.5px var(--font-mono); }
 .run-progress-meta span + span::before { content:"·"; margin-right:8px; color:var(--border-strong); }
-.step-body { display: none; }
+.step-think .step-name, .step-progress .step-name { color: var(--text-faint); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: .05em; }
+.step-body, .step-think-body, .step-progress-body { display: none; }
 .step.open > .step-body { display: flex; flex-direction: column; gap: 6px; padding: 2px 8px 8px 30px; }
+.step.open > .step-think-body, .step.open > .step-progress-body { display: block; }
 .step-body .tool-input, .step-body .tool-output { margin: 0; max-height: 220px; }
+.step-think-body, .step-progress-body { padding: 2px 8px 8px 30px; color: var(--text-faint); font-size: 13px; line-height: 1.55; }
+.step-think-body { font-style: italic; white-space: pre-wrap; }
+.step-progress-body.body.md { white-space: normal; }
 
 @media (max-width: 640px) {
   .topbar { padding-left: 10px; padding-right: 10px; }

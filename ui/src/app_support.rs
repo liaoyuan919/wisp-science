@@ -3186,6 +3186,7 @@ mod skill_filter_tests {
             tags: tags.iter().map(|tag| (*tag).into()).collect(),
             enabled,
             builtin: true,
+            managed: false,
             dir: String::new(),
         }
     }
@@ -3683,9 +3684,10 @@ pub(super) fn start_user_turn(items: &mut Vec<ChatItem>, text: String, model: Op
 mod start_user_turn_tests {
     use super::{
         append_assistant_delta, append_reasoning_delta, composer_text_from_user_message,
-        is_commentary_at, message_with_attachments, message_with_composer_context,
-        message_with_quotes, process_item_insert_index, runtime_object_quote, start_user_turn,
-        trailing_queue_start, ComposerQuote, ComposerReferenceChip,
+        completed_activity_end, is_commentary_at, message_with_attachments,
+        message_with_composer_context, message_with_quotes, process_item_insert_index,
+        runtime_object_quote, start_user_turn, trailing_queue_start, ComposerQuote,
+        ComposerReferenceChip,
     };
     use crate::dto::ChatItem;
 
@@ -3971,6 +3973,51 @@ mod start_user_turn_tests {
     }
 
     #[test]
+    fn completed_activity_folds_until_the_final_answer() {
+        let assistant = |text: &str| ChatItem::Assistant {
+            text: text.into(),
+            model: None,
+            resources: Vec::new(),
+        };
+        let items = vec![
+            ChatItem::User("question".into()),
+            assistant("checking"),
+            ChatItem::Reasoning("thinking".into()),
+            ChatItem::Tool {
+                name: "read".into(),
+                ok: Some(true),
+                input: String::new(),
+                output: String::new(),
+                started_at_ms: None,
+                duration_ms: Some(4),
+            },
+            assistant("final answer"),
+        ];
+
+        assert_eq!(completed_activity_end(&items, 1, false), Some(4));
+        assert_eq!(completed_activity_end(&items, 1, true), None);
+    }
+
+    #[test]
+    fn historical_activity_can_fold_while_the_latest_turn_is_busy() {
+        let assistant = |text: &str| ChatItem::Assistant {
+            text: text.into(),
+            model: None,
+            resources: Vec::new(),
+        };
+        let items = vec![
+            ChatItem::User("old".into()),
+            ChatItem::Reasoning("old thought".into()),
+            assistant("old answer"),
+            ChatItem::User("current".into()),
+            ChatItem::Reasoning("current thought".into()),
+        ];
+
+        assert_eq!(completed_activity_end(&items, 1, true), Some(2));
+        assert_eq!(completed_activity_end(&items, 4, true), None);
+    }
+
+    #[test]
     fn tool_rows_stay_before_the_usage_tail() {
         let items = vec![
             ChatItem::User("question".into()),
@@ -4163,6 +4210,47 @@ pub(super) fn is_commentary_at(items: &[ChatItem], index: usize) -> bool {
         .iter()
         .find(|item| !matches!(item, ChatItem::Reasoning(_) | ChatItem::Usage { .. }))
         .is_some_and(is_tool_activity)
+}
+
+pub(super) fn is_turn_activity_at(items: &[ChatItem], index: usize) -> bool {
+    matches!(items.get(index), Some(ChatItem::Reasoning(_)))
+        || items.get(index).is_some_and(is_tool_activity)
+        || (index < items.len() && is_commentary_at(items, index))
+}
+
+/// End (exclusive) of the contiguous process activity that can collapse once
+/// its turn is complete. The active tail stays expanded while `busy` is true;
+/// turns followed by another user message are historical and may still fold.
+pub(super) fn completed_activity_end(
+    items: &[ChatItem],
+    start: usize,
+    busy: bool,
+) -> Option<usize> {
+    if !is_turn_activity_at(items, start) {
+        return None;
+    }
+
+    let boundary = items[start + 1..]
+        .iter()
+        .position(|item| matches!(item, ChatItem::User(_) | ChatItem::QueuedUser(_)))
+        .map(|offset| start + 1 + offset);
+    let historical = boundary.is_some_and(|index| matches!(items[index], ChatItem::User(_)));
+    if busy && !historical {
+        return None;
+    }
+
+    let turn_end = boundary.unwrap_or(items.len());
+    let mut end = start;
+    while end < turn_end {
+        if is_turn_activity_at(items, end)
+            || matches!(&items[end], ChatItem::Assistant { text, .. } if text.trim().is_empty())
+        {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    Some(end)
 }
 
 pub(super) fn append_reasoning_delta(items: &mut Vec<ChatItem>, delta: String) {
