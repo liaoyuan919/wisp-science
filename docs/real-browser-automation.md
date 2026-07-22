@@ -53,12 +53,15 @@ For unattended browser downloads, make this one-time browser-profile change:
 
 For unattended batches that download more than one file from the same site:
 
-1. Open `chrome://settings/content/automaticDownloads` in Chrome, or
+1. Before triggering the batch, Wisp explains the following browser settings
+   and waits for the user to confirm that configuration is complete. Until the
+   user confirms, Wisp downloads at most one file.
+2. Open `chrome://settings/content/automaticDownloads` in Chrome, or
    `edge://settings/content/automaticDownloads` in Edge.
-2. Add only the trusted target site to **Allowed to automatically download
+3. Add only the trusted target site to **Allowed to automatically download
    multiple files**. If the browser asks on that site's first batch, choose
    **Allow**.
-3. Do not grant this permission to untrusted sites; it allows that site to
+4. Do not grant this permission to untrusted sites; it allows that site to
    trigger multiple successive downloads without a user gesture for each file.
 
 These settings must be changed manually because internal settings pages such as

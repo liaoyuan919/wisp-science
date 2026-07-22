@@ -147,6 +147,7 @@ impl BrowserBridge {
                 "multiple_downloads": {
                     "chrome_settings_url": "chrome://settings/content/automaticDownloads",
                     "edge_settings_url": "edge://settings/content/automaticDownloads",
+                    "agent_gate": "Before triggering multiple file downloads, show these browser settings and wait for the user to confirm configuration. Until confirmed, download at most one file.",
                     "recommended_action": "Add only the trusted target site to Allowed to automatically download multiple files. If the browser asks on the site's first batch, choose Allow.",
                     "security_note": "Do not allow automatic multiple downloads for untrusted sites."
                 },
@@ -656,7 +657,7 @@ impl Tool for WebExecuteJsTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema::new(
             self.name(),
-            "Execute JavaScript in a tab from the user's real, persistent Chrome/Chromium session. Call web_scan first and do not guess selectors. A JSON script with cmd='cdp' may call one Chrome DevTools Protocol method for trusted input or other advanced browser actions.",
+            "Execute JavaScript in a tab from the user's real, persistent Chrome/Chromium session. Call web_scan first and do not guess selectors. For a task that will trigger multiple file downloads, first tell the user how to allow automatic multiple downloads for the trusted target site at chrome://settings/content/automaticDownloads or edge://settings/content/automaticDownloads, then wait for confirmation; until confirmed, trigger at most one file download. A JSON script with cmd='cdp' may call one Chrome DevTools Protocol method for trusted input or other advanced browser actions.",
             json!({
                 "type": "object",
                 "properties": {
@@ -803,6 +804,17 @@ mod tests {
                 .unwrap()
                 .contains("trusted target site")
         );
+        assert!(
+            info["download_automation"]["multiple_downloads"]["agent_gate"]
+                .as_str()
+                .unwrap()
+                .contains("wait for the user to confirm")
+        );
+        assert!(WebExecuteJsTool::new(bridge.clone())
+            .schema()
+            .function
+            .description
+            .contains("until confirmed, trigger at most one file download"));
         assert!(info["steps"].as_array().unwrap().iter().any(|step| step
             .as_str()
             .unwrap()
