@@ -25,13 +25,47 @@ exact extension directory on that installation, and the following steps.
    directory. In a source checkout this is the repository's
    `browser-extension/` directory. An installed build reports its exact bundled
    path through `browser_setup`. Select the directory itself, not an individual
-   file or archive inside it.
+   file or archive inside it. The reported path comes from the running Wisp
+   binary's native Tauri resource directory and must be copied verbatim; Wisp
+   never translates it between Windows, WSL, macOS, or Linux path formats.
 5. Open the extension popup and confirm that it says **Connected to Wisp**.
 
 The unpacked extension remains installed in that browser profile across Wisp
 and browser restarts. It reconnects to `ws://127.0.0.1:18765` when Wisp is
 running. Only loopback connections whose WebSocket origin is a Chrome extension
 with Wisp's bundled, stable extension ID are accepted.
+
+## Downloads and native dialogs
+
+GA Web controls web-page tabs. It cannot operate Chrome/Edge toolbar download
+bubbles or native operating-system **Open**, **Save**, and **Save As** dialogs.
+Page JavaScript and the Wisp extension cannot access those browser or operating
+system surfaces.
+
+For unattended browser downloads, make this one-time browser-profile change:
+
+1. Open `chrome://settings/downloads` in Chrome, or
+   `edge://settings/downloads` in Edge.
+2. Turn off **Ask where to save each file before downloading**.
+3. Downloads will then use the browser's configured default download directory
+   without opening a native location prompt. An authorized Wisp filesystem tool
+   can process or move the saved file afterward.
+
+For unattended batches that download more than one file from the same site:
+
+1. Before triggering the batch, Wisp explains the following browser settings
+   and waits for the user to confirm that configuration is complete. Until the
+   user confirms, Wisp downloads at most one file.
+2. Open `chrome://settings/content/automaticDownloads` in Chrome, or
+   `edge://settings/content/automaticDownloads` in Edge.
+3. Add only the trusted target site to **Allowed to automatically download
+   multiple files**. If the browser asks on that site's first batch, choose
+   **Allow**.
+4. Do not grant this permission to untrusted sites; it allows that site to
+   trigger multiple successive downloads without a user gesture for each file.
+
+These settings must be changed manually because internal settings pages such as
+`chrome://settings` and `edge://settings` are not scriptable by the bridge.
 
 ## Agent tools
 
