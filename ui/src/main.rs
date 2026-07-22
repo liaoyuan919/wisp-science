@@ -717,6 +717,7 @@ fn App() -> impl IntoView {
         });
     });
     let send_mode_menu_open = create_rw_signal(false);
+    let send_guide_open = create_rw_signal(false);
     let side_chat_input = create_rw_signal(String::new());
     let side_chat_items = create_rw_signal::<Vec<ChatItem>>(vec![]);
     let side_chat_busy = create_rw_signal(false);
@@ -2276,6 +2277,12 @@ fn App() -> impl IntoView {
         let active = active_session.get();
         let branch = action == ComposerSendAction::BranchNew;
         let queued = !branch && active.as_ref().is_some_and(|id| running.get().contains(id));
+        // Guide (#410): a plain send into a busy session asks whether to queue
+        // behind the running task or interrupt it, instead of silently queueing.
+        if queued && action == ComposerSendAction::Normal {
+            send_guide_open.set(true);
+            return;
+        }
         let agent_id = active_acp_agent_id.get();
         let turn_model = if let Some(id) = agent_id.as_ref() {
             acp_agents
@@ -2349,6 +2356,14 @@ fn App() -> impl IntoView {
                 }
             });
             force_chat_bottom();
+            // Await the stop before send_message so the running turn is already
+            // flagged for cancellation; send_message then blocks on the session's
+            // workflow lock and starts as soon as the old turn aborts. Firing the
+            // stop concurrently could cancel the new turn instead.
+            if action == ComposerSendAction::InterruptReplace {
+                let arg = to_value(&tauri_args::stop_agent(&Some(id.clone()))).unwrap();
+                let _ = invoke("stop_agent", arg).await;
+            }
             // Persist/emit the same display text the optimistic bubble uses
             // (including "Uploaded files: …"). Sending the bare composer body
             // makes AgentEvent::User mismatch the optimistic row and append a
@@ -2360,6 +2375,8 @@ fn App() -> impl IntoView {
                 references: reference_args,
                 resume: false,
                 acp_agent_id: agent_id.clone(),
+                guide: (action == ComposerSendAction::GuideAppend).then_some(true),
+                replace: (action == ComposerSendAction::InterruptReplace).then_some(true),
             })
             .unwrap();
             match invoke_checked("send_message", args).await {
@@ -2661,6 +2678,8 @@ fn App() -> impl IntoView {
                     references: vec![],
                     resume: true,
                     acp_agent_id: None,
+                    guide: None,
+                    replace: None,
                 })
                 .unwrap();
                 match invoke_checked("send_message", arg).await {
@@ -3517,6 +3536,8 @@ fn App() -> impl IntoView {
                     references: vec![],
                     resume: false,
                     acp_agent_id: None,
+                    guide: None,
+                    replace: None,
                 })
                 .unwrap();
                 match invoke_checked("send_message", arg).await {
@@ -3909,6 +3930,8 @@ fn App() -> impl IntoView {
                 references: vec![],
                 resume: false,
                 acp_agent_id: None,
+                guide: None,
+                replace: None,
             })
             .unwrap();
             begin_pending_turn(pending_turns, running, &id);
@@ -7889,7 +7912,7 @@ fn App() -> impl IntoView {
                             })}
                             <div class="send-split">
                                 <button class="send" disabled=composer_blocked on:click=move |_| send.call(ComposerSendAction::Normal)>
-                                    {move || t(locale.get(), if busy.get() { "composer.queue" } else { "composer.send" })}
+                                    {move || t(locale.get(), if busy.get() { "composer.guide_button" } else { "composer.send" })}
                                 </button>
                                 <button type="button" class="send-menu-toggle"
                                     disabled=composer_blocked
@@ -9509,6 +9532,35 @@ fn App() -> impl IntoView {
                 </div>
             }.into_view()
         })}
+
+        {move || send_guide_open.get().then(|| {
+            // ACP agents cannot take mid-turn guidance or roll back context,
+            // so the dialog promises only what that session can deliver.
+            let acp = active_acp_agent_id.get().is_some();
+            let key = move |native: &'static str, acp_key: &'static str| {
+                if acp { acp_key } else { native }
+            };
+            view! {
+            <div class="overlay" data-testid="send-guide-overlay">
+                <div class="modal confirm-modal" data-testid="send-guide-modal">
+                    <h2>{move || t(locale.get(), "composer.guide_title")}</h2>
+                    <div class="hint">{move || t(locale.get(), key("composer.guide_hint", "composer.guide_hint_acp"))}</div>
+                    <div class="row">
+                        <button on:click=move |_| send_guide_open.set(false)>
+                            {move || t(locale.get(), "settings.cancel")}
+                        </button>
+                        <button on:click=move |_| {
+                            send_guide_open.set(false);
+                            send.call(ComposerSendAction::InterruptReplace);
+                        }>{move || t(locale.get(), key("composer.guide_replace", "composer.guide_replace_acp"))}</button>
+                        <button class="primary" on:click=move |_| {
+                            send_guide_open.set(false);
+                            send.call(ComposerSendAction::GuideAppend);
+                        }>{move || t(locale.get(), key("composer.guide_queue", "composer.guide_queue_acp"))}</button>
+                    </div>
+                </div>
+            </div>
+        }})}
 
         {move || show_proj_settings.get().then(|| view! {
             <div class="overlay">

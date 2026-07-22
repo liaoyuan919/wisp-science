@@ -1457,6 +1457,13 @@ struct SessionRuntime {
     cancel: Arc<AtomicBool>,
     deleted: AtomicBool,
     last_seq: StdMutex<i64>,
+    /// Guide (#410): mid-turn messages the running loop drains into user
+    /// messages at its next iteration; ids let queued senders detect that.
+    pending_guidance: wisp_core::GuidanceQueue,
+    guidance_seq: std::sync::atomic::AtomicU64,
+    /// Where the last cancelled turn started, so an InterruptReplace send can
+    /// roll the model context back to before the abandoned task.
+    interrupted_turn_start: StdMutex<Option<usize>>,
 }
 
 impl SessionRuntime {
@@ -1467,6 +1474,9 @@ impl SessionRuntime {
             cancel: Arc::new(AtomicBool::new(false)),
             deleted: AtomicBool::new(false),
             last_seq: StdMutex::new(0),
+            pending_guidance: wisp_core::GuidanceQueue::default(),
+            guidance_seq: std::sync::atomic::AtomicU64::new(0),
+            interrupted_turn_start: StdMutex::new(None),
         }
     }
     fn last_seq(&self) -> i64 {
@@ -3573,6 +3583,8 @@ async fn send_message(
     resume: Option<bool>,
     acp_agent_id: Option<String>,
     progress_observer_id: Option<u64>,
+    guide: Option<bool>,
+    replace: Option<bool>,
 ) -> Result<String, String> {
     send_message_inner(
         state.inner(),
@@ -3585,6 +3597,8 @@ async fn send_message(
         resume,
         acp_agent_id,
         progress_observer_id,
+        guide,
+        replace,
         None,
     )
     .await
@@ -3602,6 +3616,12 @@ async fn send_message_inner(
     resume: Option<bool>,
     acp_agent_id: Option<String>,
     progress_observer_id: Option<u64>,
+    // Guide (#410): while a turn runs, park the message for the loop to inject
+    // at its next iteration instead of only queueing a whole new turn.
+    guide: Option<bool>,
+    // Guide (#410): roll the model context back to where the interrupted turn
+    // started before running this message ("replace the current task").
+    replace: Option<bool>,
     mut workflow_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<String, String> {
     let resume = resume.unwrap_or(false);
@@ -3638,6 +3658,10 @@ async fn send_message_inner(
         .is_some_and(|id| !id.trim().is_empty())
         || saved_binding.is_some()
     {
+        // ACP agents own their conversation context, so neither mid-turn
+        // guidance injection nor context rollback is possible over the
+        // protocol; `guide`/`replace` degrade to the plain queued turn here.
+        let _ = (guide, replace);
         let frame_id = match session_id.as_deref().filter(|id| !id.is_empty()) {
             Some(id) => {
                 let owner = state
@@ -3857,11 +3881,40 @@ async fn send_message_inner(
             .or_insert_with(|| Arc::new(SessionRuntime::new()))
             .clone()
     };
+    // Guide (#410): park the message for the running loop BEFORE waiting for
+    // the workflow lock. Exactly one side takes each entry: either the loop
+    // drains it into the running turn, or this call reclaims it below after
+    // the lock is acquired and runs a normal turn with it.
+    let guidance_id = if guide.unwrap_or(false) && !resume {
+        let running = state.running_turns.lock().await.contains(&frame_id);
+        running.then(|| {
+            let id = rt
+                .guidance_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            rt.pending_guidance
+                .lock()
+                .unwrap()
+                .push((id, message.clone()));
+            id
+        })
+    } else {
+        None
+    };
     let _workflow = match workflow_guard.take() {
         Some(guard) => guard,
         None => rt.workflow.clone().lock_owned().await,
     };
     rt.cancel.store(false, Ordering::SeqCst);
+    if let Some(id) = guidance_id {
+        let mut pending = rt.pending_guidance.lock().unwrap();
+        let before = pending.len();
+        pending.retain(|(gid, _)| *gid != id);
+        if pending.len() == before {
+            // The loop already injected this message into the previous turn
+            // (persisted + User event emitted there); nothing left to run.
+            return Ok(frame_id);
+        }
+    }
     let mut guard = rt.agent.lock().await;
     let _progress_subscription =
         progress_observer_id.and_then(|id| channels::activate_progress_observer(id, &frame_id));
@@ -4021,6 +4074,28 @@ async fn send_message_inner(
         *guard = Some(agent);
     }
     let agent = guard.as_mut().unwrap();
+    // InterruptReplace (#410): the user stopped the previous turn because it
+    // went the wrong way — drop that turn (its user message included) from the
+    // model context before running the replacement. Mirrors /compact: only the
+    // persisted message rows are rewritten; the visual transcript keeps the
+    // interrupted rows as history. The index is only trusted when it still
+    // fits the context (an agent rebuild could have changed the row count).
+    if replace.unwrap_or(false) && !resume {
+        // Bind before the await below: the temporary guard in an if-let
+        // scrutinee lives for the whole block and is not Send.
+        let interrupted = rt.interrupted_turn_start.lock().unwrap().take();
+        if let Some(start) = interrupted {
+            if start < agent.ctx.messages.len() {
+                agent.ctx.messages.truncate(start);
+                state
+                    .store
+                    .replace_messages(&frame_id, &agent.ctx.messages)
+                    .await
+                    .map_err(|e| format!("replace: rolling back the context failed: {e}"))?;
+                rt.set_last_seq(agent.ctx.messages.len() as i64);
+            }
+        }
+    }
     // User-triggered /compact — never part of a model turn. Archive + fold the
     // in-memory context, rewrite only the persisted message rows (the visual
     // transcript in session_ui_events keeps the full history), and report via
@@ -4253,7 +4328,9 @@ async fn send_message_inner(
     let turn_start = agent.ctx.messages.len();
     state.running_turns.lock().await.insert(frame_id.clone());
     let result = if resume {
-        agent.run_resume(&output, Some(&rt.cancel)).await
+        agent
+            .run_resume(&output, Some(&rt.cancel), Some(&rt.pending_guidance))
+            .await
     } else {
         agent
             .run_with_images(
@@ -4262,9 +4339,14 @@ async fn send_message_inner(
                 primary_supports_vision,
                 &output,
                 Some(&rt.cancel),
+                Some(&rt.pending_guidance),
             )
             .await
     };
+    // Remember where a cancelled turn began so an InterruptReplace follow-up
+    // can roll the context back to it; any other outcome clears the marker.
+    *rt.interrupted_turn_start.lock().unwrap() =
+        (result.is_err() && rt.cancel.load(Ordering::SeqCst)).then_some(turn_start);
     if result.is_ok() {
         agent.ctx.clear_runtime_injections();
         if !completion_delivery_ids.is_empty() {
@@ -4594,7 +4676,7 @@ async fn automatic_review(
                     frame_id: frame_id.to_string(),
                     model: model_label.to_string(),
                 });
-                let correction = agent.run_resume(output, Some(cancel)).await;
+                let correction = agent.run_resume(output, Some(cancel), None).await;
                 agent.ctx.clear_runtime_injections();
                 if let Err(error) = correction {
                     tracing::warn!("automatic correction failed for {frame_id}: {error}");

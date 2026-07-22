@@ -13,7 +13,7 @@ pub mod provenance;
 pub mod subagent;
 pub mod system_prompt;
 
-pub use agent::{agent_loop, agent_loop_continue};
+pub use agent::{agent_loop, agent_loop_continue, GuidanceQueue};
 pub use context::ContextManager;
 pub use delegation::{
     AgentArtifact, AgentAuthorizationSnapshot, AgentBackend, AgentBudget, AgentDelegationLineage,
@@ -150,6 +150,7 @@ impl Agent {
         provider_supports_vision: bool,
         output: &dyn Output,
         cancel: Option<&std::sync::atomic::AtomicBool>,
+        guidance: Option<&GuidanceQueue>,
     ) -> anyhow::Result<()> {
         agent::agent_loop_with_images(
             &mut self.ctx,
@@ -163,6 +164,7 @@ impl Agent {
             provider_supports_vision,
             self.max_iter,
             cancel,
+            guidance,
         )
         .await
     }
@@ -172,6 +174,7 @@ impl Agent {
         &mut self,
         output: &dyn Output,
         cancel: Option<&std::sync::atomic::AtomicBool>,
+        guidance: Option<&GuidanceQueue>,
     ) -> anyhow::Result<()> {
         agent_loop_continue(
             &mut self.ctx,
@@ -182,6 +185,7 @@ impl Agent {
             output,
             self.max_iter,
             cancel,
+            guidance,
         )
         .await
     }

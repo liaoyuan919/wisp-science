@@ -444,6 +444,8 @@ async fn dispatch_frame(app: AppHandle, frame_id: String) {
         Some(true),
         None,
         None,
+        None,
+        None,
         Some(workflow_guard),
     )
     .await;

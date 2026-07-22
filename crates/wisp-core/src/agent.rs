@@ -62,6 +62,12 @@ fn budget_stream_result(tool_name: &str, content: Content) -> Content {
     Content::text(ContextManager::truncate_middle(text, half, half, &marker))
 }
 
+/// Mid-turn guidance queue: `(id, text)` pairs pushed by the host while a turn
+/// is running and drained into real user messages at the loop's next
+/// iteration. The id lets the queued sender detect whether the loop consumed
+/// its message or it still has to run a normal turn (see `send_message_inner`).
+pub type GuidanceQueue = std::sync::Mutex<Vec<(u64, String)>>;
+
 pub async fn agent_loop(
     ctx: &mut ContextManager,
     provider: &dyn Provider,
@@ -85,6 +91,7 @@ pub async fn agent_loop(
         false,
         max_iter,
         cancel,
+        None,
     )
     .await
 }
@@ -102,6 +109,7 @@ pub async fn agent_loop_with_images(
     provider_supports_vision: bool,
     max_iter: usize,
     cancel: Option<&AtomicBool>,
+    guidance: Option<&GuidanceQueue>,
 ) -> Result<()> {
     let observations = if images.is_empty() || provider_supports_vision {
         None
@@ -132,6 +140,7 @@ pub async fn agent_loop_with_images(
         output,
         max_iter,
         cancel,
+        guidance,
     )
     .await
 }
@@ -183,6 +192,7 @@ pub async fn agent_loop_continue(
     output: &dyn Output,
     max_iter: usize,
     cancel: Option<&AtomicBool>,
+    guidance: Option<&GuidanceQueue>,
 ) -> Result<()> {
     agent_loop_inner(
         ctx,
@@ -193,6 +203,7 @@ pub async fn agent_loop_continue(
         output,
         max_iter,
         cancel,
+        guidance,
     )
     .await
 }
@@ -206,6 +217,7 @@ async fn agent_loop_inner(
     output: &dyn Output,
     max_iter: usize,
     cancel: Option<&AtomicBool>,
+    guidance: Option<&GuidanceQueue>,
 ) -> Result<()> {
     let env = match cancel {
         Some(c) => ToolEnvAdapter::with_cancel(root.to_path_buf(), output, c),
@@ -216,6 +228,18 @@ async fn agent_loop_inner(
     loop {
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             anyhow::bail!("stopped by user");
+        }
+        // Guide (#410): fold mid-turn user guidance into the context at the
+        // iteration boundary, so this request already sees it. on_message
+        // persists the row and emits the User event the UI promotes on.
+        if let Some(queue) = guidance {
+            let drained: Vec<(u64, String)> = std::mem::take(&mut *queue.lock().unwrap());
+            for (_, text) in drained {
+                ctx.append_user(&text);
+                if let Some(m) = ctx.messages.last() {
+                    output.on_message(m);
+                }
+            }
         }
         iteration += 1;
         let messages = ctx.prepare_for_api(output);
@@ -586,6 +610,7 @@ mod tests {
             true,
             1,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -619,6 +644,7 @@ mod tests {
             &[test_image()],
             false,
             1,
+            None,
             None,
         )
         .await
@@ -654,6 +680,7 @@ mod tests {
             &[test_image()],
             false,
             1,
+            None,
             None,
         )
         .await
