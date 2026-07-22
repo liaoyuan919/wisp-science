@@ -672,6 +672,23 @@ test("Ctrl+K opens the unified command palette and Shift+Enter attaches", async 
   await expect(page.locator(".composer-reference-chips")).toContainText(/counts\.csv|Cross-project counts/);
 });
 
+test("the needs-you inbox opens cross-project sessions in their own window", async ({ page }) => {
+  await enterApp(page);
+  const bell = page.locator(".inbox-wrap .icon-btn");
+  await expect(bell.locator(".inbox-badge")).toHaveText("1");
+  await bell.click();
+  const item = page.locator(".inbox-item");
+  await expect(item).toContainText("Other project");
+  await expect(item).toContainText("Cross-project counts");
+  await item.click();
+  // Cross-project targets go to the project's own window (#423), not this one.
+  await expect.poll(() => lastInvokeArgs(page, "open_project_window")).toMatchObject({
+    id: "other",
+    session: "s-other",
+  });
+  await expect(page.locator(".inbox-drop")).not.toBeVisible();
+});
+
 test("Cmd+K opens search and the composer shows the macOS shortcut", async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(navigator, "userAgent", {
@@ -4441,10 +4458,10 @@ test("desktop pet remains independent and reflects global agent state", async ({
 test("pet navigation opens the project and session that need the user", async ({ page }) => {
   await page.goto("/");
   await expect.poll(() => page.evaluate(() =>
-    (window as any).__tauriListenerReady("pet-open-session"),
+    (window as any).__tauriListenerReady("open-session"),
   )).toBe(true);
   await page.evaluate(() => {
-    (window as any).__tauriEmit("pet-open-session", {
+    (window as any).__tauriEmit("open-session", {
       projectId: "other",
       sessionId: "pet-frame",
     });

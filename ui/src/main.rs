@@ -4563,6 +4563,45 @@ fn App() -> impl IntoView {
         });
         refresh.forget();
     }
+    // Cross-project "needs you" inbox (#423): sessions across every project
+    // that are waiting on the user, surfaced from any window's topbar.
+    let inbox_open = create_rw_signal(false);
+    let inbox_sessions = create_rw_signal::<Vec<SessionSearchInfo>>(vec![]);
+    let refresh_inbox = move || {
+        spawn_local(async move {
+            let arg = to_value(&serde_json::json!({ "query": "", "limit": 50 })).unwrap();
+            let v = invoke("search_sessions", arg).await;
+            if let Ok(rows) = serde_wasm_bindgen::from_value::<Vec<SessionSearchInfo>>(v) {
+                inbox_sessions.set(
+                    rows.into_iter()
+                        .filter(|s| s.status == "needs_you")
+                        .collect(),
+                );
+            }
+        });
+    };
+    refresh_inbox();
+    // Close on any click that bubbles to the window; the bell and the dropdown
+    // stop propagation (same pattern as the titlebar menus — a fixed backdrop
+    // would be clipped to the topbar, whose backdrop-filter contains it).
+    window_event_listener(ev::click, move |_| {
+        if inbox_open.get_untracked() {
+            inbox_open.set(false);
+        }
+    });
+    {
+        // ponytail: 20s poll; switch to pushed session events if latency matters.
+        let refresh = Closure::wrap(Box::new(refresh_inbox) as Box<dyn FnMut()>);
+        let _ = web_sys::window().and_then(|window| {
+            window
+                .set_interval_with_callback_and_timeout_and_arguments_0(
+                    refresh.as_ref().unchecked_ref(),
+                    20_000,
+                )
+                .ok()
+        });
+        refresh.forget();
+    }
     create_effect(move |_| {
         if rename_session_target.get().is_some() {
             focus_and_select_soon("rename-session-input");
@@ -5354,8 +5393,10 @@ fn App() -> impl IntoView {
             });
         })
     };
-    let pet_open_project = open_project_transition;
-    let pet_open_cb = Closure::wrap(Box::new(move |payload: JsValue| {
+    // Sent by the pet (to "main") and by `open_project_window` targeting a
+    // session in an already-open project window (#423).
+    let event_open_project = open_project_transition;
+    let open_session_cb = Closure::wrap(Box::new(move |payload: JsValue| {
         let Ok(target) = serde_wasm_bindgen::from_value::<serde_json::Value>(payload) else {
             return;
         };
@@ -5365,27 +5406,42 @@ fn App() -> impl IntoView {
         let Some(session_id) = target.get("sessionId").and_then(serde_json::Value::as_str) else {
             return;
         };
-        pet_open_project.call((project_id.to_string(), Some(session_id.to_string())));
+        event_open_project.call((project_id.to_string(), Some(session_id.to_string())));
     }) as Box<dyn FnMut(JsValue)>);
-    let pet_open_js = pet_open_cb
+    let open_session_js = open_session_cb
         .as_ref()
         .unchecked_ref::<js_sys::Function>()
         .clone();
-    pet_open_cb.forget();
+    open_session_cb.forget();
     spawn_local(async move {
-        let _ = listen("pet-open-session", &pet_open_js).await;
+        let _ = listen("open-session", &open_session_js).await;
     });
+    // Cross-project opens from inside a workspace go to the target project's
+    // own window (#423). The landing (and a window with no project yet) keeps
+    // repointing the current window — it's the "enter a project here" surface.
+    let opens_in_project_window = move |project_id: &str| -> bool {
+        !show_projects.get_untracked()
+            && matches!(project_info.get_untracked(), Some(p) if p.id != project_id)
+    };
     // Switch the active project inline (same guarded flow as the Projects screen).
     let switch_project = {
         let open_project_transition = open_project_transition;
         Callback::new(move |id: String| {
+            if opens_in_project_window(&id) {
+                spawn_local(async move {
+                    let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
+                    let _ = invoke("open_project_window", arg).await;
+                });
+                return;
+            }
             open_project_transition.call((id, None));
         })
     };
     // Dedicated project window (#52): enter through the same serialized,
     // target-validated transition instead of maintaining a second startup path.
+    // `&session=` (#423) drops the window straight into the requested session.
     if let Some(project_id) = dedicated_project_id {
-        switch_project.call(project_id);
+        open_project_transition.call((project_id, url_session_param()));
     }
     let toggle_proj_menu = move |_| {
         let opening = !show_proj_menu.get();
@@ -5627,6 +5683,15 @@ fn App() -> impl IntoView {
     let palette_open_session = {
         let open_project_transition = open_project_transition;
         Callback::new(move |(project_id, session_id): (String, String)| {
+            if opens_in_project_window(&project_id) {
+                spawn_local(async move {
+                    let arg =
+                        to_value(&serde_json::json!({ "id": project_id, "session": session_id }))
+                            .unwrap();
+                    let _ = invoke("open_project_window", arg).await;
+                });
+                return;
+            }
             open_project_transition.call((project_id, Some(session_id)));
         })
     };
@@ -6389,6 +6454,53 @@ fn App() -> impl IntoView {
                     view! { <span class="hint">{move || status.get()}</span> }.into_view()
                 }}
                 <div class="spacer"></div>
+                <div class="inbox-wrap">
+                    <button class="icon-btn"
+                        class:active=move || inbox_open.get()
+                        title=move || {
+                            let n = inbox_sessions.get().len().to_string();
+                            tf(locale.get(), "sess_status.needs_you_n", &[("n", &n)])
+                        }
+                        on:click=move |ev| {
+                            ev.stop_propagation();
+                            let opening = !inbox_open.get_untracked();
+                            if opening { refresh_inbox(); }
+                            inbox_open.set(opening);
+                        }>
+                        {compose_icon("bell")}
+                        {move || {
+                            let n = inbox_sessions.get().len();
+                            (n > 0).then(|| view! { <span class="inbox-badge">{n}</span> })
+                        }}
+                    </button>
+                    {move || inbox_open.get().then(|| view! {
+                        <div class="inbox-drop" on:click=|ev| ev.stop_propagation()>
+                            <div class="inbox-title">{move || t(locale.get(), "sess_status.needs_you")}</div>
+                            {move || {
+                                let rows = inbox_sessions.get();
+                                if rows.is_empty() {
+                                    view! { <div class="inbox-empty">{move || t(locale.get(), "inbox.empty")}</div> }.into_view()
+                                } else {
+                                    rows.into_iter().map(|s| {
+                                        let project_id = s.project_id.clone();
+                                        let session_id = s.id.clone();
+                                        let title = user_message_presentation(&s.title).body;
+                                        view! {
+                                            <button type="button" class="inbox-item"
+                                                on:click=move |_| {
+                                                    inbox_open.set(false);
+                                                    palette_open_session.call((project_id.clone(), session_id.clone()));
+                                                }>
+                                                <span class="inbox-item-project">{s.project_name.clone()}</span>
+                                                <span class="inbox-item-title">{title}</span>
+                                            </button>
+                                        }
+                                    }).collect_view()
+                                }
+                            }}
+                        </div>
+                    })}
+                </div>
                 <button class="icon-btn" title=move || t(locale.get(), "contexts.open_terminal")
                     class:active=move || terminal_panel_open.get()
                     on:click=move |_| {
