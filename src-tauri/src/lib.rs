@@ -5960,23 +5960,41 @@ fn project_window_label(id: &str) -> String {
     format!("proj-{id}") // project ids are UUIDs or "default" — label-safe
 }
 
+/// URL for a dedicated project window. Ids are UUIDs or "default" — no
+/// percent-encoding needed (matches `url_project_param` in the frontend).
+fn project_window_url(id: &str, session: Option<&str>) -> String {
+    match session {
+        Some(sid) => format!("index.html?project={id}&session={sid}"),
+        None => format!("index.html?project={id}"),
+    }
+}
+
 /// Open a project in its own window (or focus the existing one), wiring up
 /// cleanup on close. Shared by the `open_project_window` command and the
-/// startup restore (#52).
+/// startup restore (#52). With `session`, the window opens straight into that
+/// session — an existing window is told via the `open-session` event (#423).
 async fn spawn_project_window(
     app: &AppHandle,
     state: &AppState,
     id: &str,
+    session: Option<&str>,
 ) -> Result<String, String> {
     let label = project_window_label(id);
     if let Some(w) = app.get_webview_window(&label) {
         let _ = w.set_focus();
+        if let Some(sid) = session {
+            let _ = app.emit_to(
+                label.as_str(),
+                "open-session",
+                serde_json::json!({ "projectId": id, "sessionId": sid }),
+            );
+        }
         return Ok(label);
     }
     // Pre-set this window's active project so its first commands resolve correctly
     // even before the window's frontend calls open_project.
     set_active_project(state, &label, id).await?;
-    let url = tauri::WebviewUrl::App(format!("index.html?project={id}").into());
+    let url = tauri::WebviewUrl::App(project_window_url(id, session).into());
     let builder = tauri::WebviewWindowBuilder::new(app, &label, url)
         .title("wisp-science")
         .inner_size(1100.0, 760.0)
@@ -6015,8 +6033,9 @@ async fn open_project_window(
     app: AppHandle,
     state: State<'_, AppState>,
     id: String,
+    session: Option<String>,
 ) -> Result<String, String> {
-    spawn_project_window(&app, state.inner(), &id).await
+    spawn_project_window(&app, state.inner(), &id, session.as_deref()).await
 }
 
 #[tauri::command]
@@ -7273,7 +7292,7 @@ pub fn run() {
                     let handle = app.handle().clone();
                     tauri::async_runtime::block_on(async {
                         let st = handle.state::<AppState>();
-                        let _ = spawn_project_window(&handle, st.inner(), &id).await;
+                        let _ = spawn_project_window(&handle, st.inner(), &id, None).await;
                     });
                 }
             }

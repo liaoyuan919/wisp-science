@@ -308,7 +308,7 @@ pub(super) async fn open_pet_session(
     desktop_lifecycle::activate_workspace(&app);
     app.emit_to(
         "main",
-        "pet-open-session",
+        "open-session",
         serde_json::json!({ "projectId": project_id, "sessionId": session_id }),
     )
     .map_err(|error| error.to_string())

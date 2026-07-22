@@ -1073,6 +1073,18 @@ fn windows_close_to_tray_applies_only_to_the_main_window() {
 }
 
 #[test]
+fn project_window_url_carries_the_target_session() {
+    assert_eq!(
+        super::project_window_url("abc", None),
+        "index.html?project=abc"
+    );
+    assert_eq!(
+        super::project_window_url("abc", Some("s1")),
+        "index.html?project=abc&session=s1"
+    );
+}
+
+#[test]
 fn app_activation_restores_workspace_windows_but_not_the_pet() {
     assert!(should_activate_workspace_window("main"));
     assert!(should_activate_workspace_window("proj-default"));

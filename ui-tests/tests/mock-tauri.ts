@@ -1651,7 +1651,7 @@ export function tauriMock(fixtures?: { xlsxBase64?: string; pptxBase64?: string 
             const rows = [
               { id: "s-current", project_id: "default", project_name: "wisp-science", title: "Current analysis", ts: 1, activity_at: 3, status: "complete" },
               { id: "s-old", project_id: "default", project_name: "wisp-science", title: "Older structure run", ts: 1, activity_at: 2, status: "complete" },
-              { id: "s-other", project_id: "other", project_name: "Other project", title: "Cross-project counts", ts: 1, activity_at: 1, status: "complete" },
+              { id: "s-other", project_id: "other", project_name: "Other project", title: "Cross-project counts", ts: 1, activity_at: 1, status: "needs_you" },
               { id: "s-complete", project_id: "default", project_name: "wisp-science", title: "Enumerate MCP bio-tools databases", ts: 1, activity_at: 1, status: "complete" },
             ];
             return q ? rows.filter((s) => s.title.toLowerCase().includes(q)) : rows;

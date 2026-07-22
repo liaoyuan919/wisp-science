@@ -7749,6 +7749,7 @@ pub(super) fn compose_icon(kind: &str) -> impl IntoView {
         "sync" => view! { <path d="M20 7h-9"/><path d="m16 3 4 4-4 4"/><path d="M4 17h9"/><path d="m8 21-4-4 4-4"/> }.into_view(),
         "pin" => view! { <path d="M12 17v5"/><path d="M5 17h14"/><path d="m6 3 1 7-3 4h16l-3-4 1-7Z"/> }.into_view(),
         "link" => view! { <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/> }.into_view(),
+        "bell" => view! { <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/> }.into_view(),
         "close" => view! { <path d="M18 6 6 18"/><path d="m6 6 12 12"/> }.into_view(),
         "more" => view! { <circle cx="12" cy="5" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1" fill="currentColor" stroke="none"/> }.into_view(),
         "plus" => view! { <path d="M12 5v14"/><path d="M5 12h14"/> }.into_view(),
@@ -9063,7 +9064,7 @@ pub(super) fn ProjectsScreen(
                                                 let arg = to_value(&serde_json::json!({ "id": id })).unwrap();
                                                 let _ = invoke("open_project_window", arg).await;
                                             });
-                                        }>{compose_icon("copy")}</button>
+                                        }>{compose_icon("expand")}</button>
                                     <button class="pc-del" title=t(loc, "projects.delete")
                                         on:click=move |e| {
                                             e.stop_propagation();
@@ -9170,10 +9171,21 @@ pub(super) fn route_items(
 /// that id so the window opens straight into the project and skips the landing.
 /// Project ids are UUIDs or "default" — no percent-decoding needed.
 pub(super) fn url_project_param() -> Option<String> {
+    url_query_param("project")
+}
+
+/// Optional `&session=<id>` companion to `?project=` (#423): the window opens
+/// straight into that session. Session ids are UUIDs — no percent-decoding.
+pub(super) fn url_session_param() -> Option<String> {
+    url_query_param("session")
+}
+
+fn url_query_param(key: &str) -> Option<String> {
     let search = web_sys::window()?.location().search().ok()?;
     let q = search.strip_prefix('?').unwrap_or(&search);
+    let prefix = format!("{key}=");
     q.split('&')
-        .find_map(|p| p.strip_prefix("project="))
+        .find_map(|p| p.strip_prefix(prefix.as_str()))
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(str::to_string)
@@ -9261,12 +9273,18 @@ pub(super) fn CommandPalette(
         });
         out.extend(ars.into_iter().map(CommandPaletteItem::Artifact));
         let mut ss = sessions.get();
-        ss.sort_by_key(|s| {
-            (
-                current.as_deref() != Some(s.project_id.as_str()),
-                std::cmp::Reverse(s.activity_at),
-            )
-        });
+        if q.is_empty() {
+            // Empty query is the "switch away" gesture (#423): most recent
+            // activity first across all projects, no current-project bias.
+            ss.sort_by_key(|s| std::cmp::Reverse(s.activity_at));
+        } else {
+            ss.sort_by_key(|s| {
+                (
+                    current.as_deref() != Some(s.project_id.as_str()),
+                    std::cmp::Reverse(s.activity_at),
+                )
+            });
+        }
         out.extend(ss.into_iter().map(CommandPaletteItem::Session));
         out.push(CommandPaletteItem::Command("new"));
         out.push(CommandPaletteItem::Command("check-updates"));

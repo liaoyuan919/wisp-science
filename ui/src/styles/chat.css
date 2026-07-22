@@ -187,6 +187,34 @@
 .icon-btn.active { color: var(--clay); background: var(--clay-soft); }
 .icon-btn .gi { width: 16px; height: 16px; }
 
+/* Cross-project "needs you" inbox (#423). */
+.inbox-wrap { position: relative; display: inline-flex; }
+.inbox-wrap .icon-btn { position: relative; }
+.inbox-badge {
+  position: absolute; top: -3px; right: -3px; min-width: 14px; height: 14px;
+  padding: 0 3px; border-radius: 999px; box-sizing: border-box;
+  background: var(--info); color: #fff; font-size: 10px; font-weight: 600;
+  line-height: 14px; text-align: center; pointer-events: none;
+}
+.inbox-drop {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 91;
+  width: 300px; max-height: 380px; overflow-y: auto;
+  padding: 6px; background: var(--bg-elev); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm); box-shadow: 0 8px 28px rgba(0,0,0,.14);
+  transform-origin: top right;
+  animation: motion-surface-in-soft var(--motion-duration-fast) var(--motion-ease-decelerate) both;
+}
+.inbox-title { padding: 6px 10px 4px; font-size: 11px; font-weight: 600; color: var(--text-faint); text-transform: uppercase; letter-spacing: .04em; }
+.inbox-empty { padding: 10px; font-size: 13px; color: var(--text-faint); }
+.inbox-item {
+  width: 100%; display: flex; flex-direction: column; gap: 2px;
+  background: transparent; border: 0; border-radius: 6px; padding: 6px 10px;
+  font: inherit; color: var(--text); cursor: pointer; text-align: left;
+}
+.inbox-item:hover { background: var(--bg-sunken); }
+.inbox-item-project { font-size: 11px; color: var(--text-faint); }
+.inbox-item-title { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* No scroll-behavior:smooth here: streaming row rebuilds clamp scrollTop
    instantly while the follow snap-back would animate, so the view visibly
    bounces up and down on every thinking delta. Snaps must be instant. */
