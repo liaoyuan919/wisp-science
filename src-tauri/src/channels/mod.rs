@@ -850,6 +850,8 @@ pub(crate) async fn handle_inbound_observed(
         None,
         None,
         progress.as_ref().map(PendingProgress::id),
+        None,
+        None,
     )
     .await;
     match result {

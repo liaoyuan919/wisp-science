@@ -705,6 +705,12 @@ pub(crate) struct SendMessageArgs {
     pub(crate) resume: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) acp_agent_id: Option<String>,
+    /// Guide (#410): inject into the running turn's next loop iteration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) guide: Option<bool>,
+    /// Guide (#410): roll back the interrupted turn before sending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) replace: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -198,6 +198,12 @@ pub(super) fn apply_font_sizes(ui_size: u16, code_size: u16) {
 pub(super) enum ComposerSendAction {
     Normal,
     BranchNew,
+    /// Guide choice: hand the message to the running task, which folds it in
+    /// at its next loop iteration (ACP sessions fall back to plain queueing).
+    GuideAppend,
+    /// Guide choice: stop the running task, roll its unfinished work out of
+    /// the model context, and send this message as the replacement.
+    InterruptReplace,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3045,6 +3051,8 @@ mod tauri_args_tests {
             references: vec![],
             resume: false,
             acp_agent_id: None,
+            guide: None,
+            replace: None,
         })
         .unwrap();
         assert_eq!(v["sessionId"], "frame-1");
