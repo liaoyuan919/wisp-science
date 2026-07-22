@@ -9,6 +9,10 @@ use tokio::{io::AsyncWriteExt, sync::Mutex};
 
 const GIT_AUTHOR_NAME: &str = "Wisp Science Agent";
 const GIT_AUTHOR_EMAIL: &str = "wisp-agent@localhost";
+// Git for Windows can fail during DLL initialization when several project
+// windows probe it at once. One app-wide lock keeps capability probes from
+// launching overlapping git.exe processes.
+static GIT_PROBE_LOCK: Mutex<()> = Mutex::const_new(());
 
 #[derive(Debug, Clone)]
 pub(crate) struct GitCommandOutput {
@@ -201,6 +205,7 @@ impl GitWorktreeIsolation {
         if !project_root.is_dir() {
             anyhow::bail!("the project directory does not exist");
         }
+        let _probe = GIT_PROBE_LOCK.lock().await;
         let version = self
             .runner
             .run(project_root, os_args(["--version"]), None)
@@ -621,7 +626,15 @@ fn nul_paths(value: &[u8]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::VecDeque, fs, process::Command, sync::Mutex as StdMutex};
+    use std::{
+        collections::VecDeque,
+        fs,
+        process::Command,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Mutex as StdMutex,
+        },
+    };
 
     fn git(cwd: &Path, args: &[&str]) -> std::process::Output {
         Command::new("git")
@@ -880,6 +893,51 @@ mod tests {
                 .pop_front()
                 .unwrap_or_else(|| anyhow::bail!("unexpected fake Git command"))
         }
+    }
+
+    #[derive(Default)]
+    struct ConcurrentProbeRunner {
+        active: AtomicUsize,
+        max_active: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl GitCommandRunner for ConcurrentProbeRunner {
+        async fn run(
+            &self,
+            _cwd: &Path,
+            _args: Vec<OsString>,
+            _stdin: Option<Vec<u8>>,
+        ) -> anyhow::Result<GitCommandOutput> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            anyhow::bail!("git executable was not found")
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_capability_probes_do_not_overlap_git_processes() {
+        let root = std::env::temp_dir().join(format!(
+            "wisp-concurrent-git-probes-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let first_root = root.join("first");
+        let second_root = root.join("second");
+        fs::create_dir_all(&first_root).unwrap();
+        fs::create_dir_all(&second_root).unwrap();
+        let runner = Arc::new(ConcurrentProbeRunner::default());
+        let first = GitWorktreeIsolation::with_runner(runner.clone(), root.join("worktrees-1"));
+        let second = GitWorktreeIsolation::with_runner(runner.clone(), root.join("worktrees-2"));
+
+        let (first_available, second_available) =
+            tokio::join!(first.available(&first_root), second.available(&second_root));
+
+        assert!(!first_available);
+        assert!(!second_available);
+        assert_eq!(runner.max_active.load(Ordering::SeqCst), 1);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
