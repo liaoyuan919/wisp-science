@@ -1717,8 +1717,8 @@ fn App() -> impl IntoView {
                         loc,
                         "status.usage",
                         &[
-                            ("in", &format!("{:.1}", input as f64 / 1000.0)),
-                            ("out", &format!("{:.1}", output as f64 / 1000.0)),
+                            ("in", &fmt_tokens(input)),
+                            ("out", &fmt_tokens(output)),
                             ("pct", &pct.to_string()),
                         ],
                     ));
@@ -9826,6 +9826,17 @@ fn fmt_tokens(n: u64) -> String {
         n.to_string()
     } else {
         format!("{:.1}k", n as f64 / 1000.0)
+    }
+}
+
+#[cfg(test)]
+mod token_format_tests {
+    use super::fmt_tokens;
+
+    #[test]
+    fn small_counts_are_not_rounded_to_zero() {
+        assert_eq!(fmt_tokens(81), "81");
+        assert_eq!(fmt_tokens(136_286), "136.3k");
     }
 }
 
