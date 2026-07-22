@@ -220,7 +220,17 @@ fn parse_completion(val: &Value) -> Completion {
             "end_turn" | "stop_sequence" => "stop".to_string(),
             other => other.to_string(),
         });
-    let u = val.get("usage");
+    let usage = parse_usage(val.get("usage"));
+    Completion {
+        content,
+        reasoning: None,
+        tool_calls,
+        finish_reason,
+        usage,
+    }
+}
+
+fn parse_usage(u: Option<&Value>) -> Usage {
     let field = |k: &str| {
         u.and_then(|u| u.get(k))
             .and_then(|v| v.as_u64())
@@ -229,20 +239,24 @@ fn parse_completion(val: &Value) -> Completion {
     // Anthropic's `input_tokens` excludes cache read/creation; add them so the
     // figure means the same cache-inclusive total as the OpenAI providers.
     let cache_read = field("cache_read_input_tokens");
-    let usage = Usage {
-        input_tokens: field("input_tokens") + cache_read + field("cache_creation_input_tokens"),
+    Usage {
+        input_tokens: field("input_tokens")
+            .saturating_add(cache_read)
+            .saturating_add(field("cache_creation_input_tokens")),
         output_tokens: field("output_tokens"),
         // Anthropic counts thinking inside output_tokens; no separate figure.
         reasoning_tokens: 0,
         cached_input_tokens: cache_read,
-    };
-    Completion {
-        content,
-        reasoning: None,
-        tool_calls,
-        finish_reason,
-        usage,
     }
+}
+
+fn merge_usage(current: &mut Usage, update: Usage) {
+    // Streaming-compatible providers do not agree on which event carries the
+    // final counters. Keep the greatest cumulative value seen for each field.
+    current.input_tokens = current.input_tokens.max(update.input_tokens);
+    current.output_tokens = current.output_tokens.max(update.output_tokens);
+    current.reasoning_tokens = current.reasoning_tokens.max(update.reasoning_tokens);
+    current.cached_input_tokens = current.cached_input_tokens.max(update.cached_input_tokens);
 }
 
 #[async_trait]
@@ -309,14 +323,9 @@ impl Provider for AnthropicProvider {
                 };
                 match etype.as_str() {
                     "message_start" => {
-                        if let Some(u) = val.pointer("/message/usage") {
-                            let get = |k: &str| u.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-                            let cache_read = get("cache_read_input_tokens");
-                            usage.input_tokens = get("input_tokens")
-                                + cache_read
-                                + get("cache_creation_input_tokens");
-                            usage.cached_input_tokens = cache_read;
-                            usage.output_tokens = get("output_tokens");
+                        if let Some(u) = val.pointer("/message/usage").or_else(|| val.get("usage"))
+                        {
+                            merge_usage(&mut usage, parse_usage(Some(u)));
                         }
                     }
                     "content_block_start" => {
@@ -389,9 +398,7 @@ impl Provider for AnthropicProvider {
                             });
                         }
                         if let Some(u) = val.get("usage") {
-                            if let Some(o) = u.get("output_tokens").and_then(|v| v.as_u64()) {
-                                usage.output_tokens = o;
-                            }
+                            merge_usage(&mut usage, parse_usage(Some(u)));
                         }
                     }
                     _ => {}
@@ -473,5 +480,36 @@ mod tests {
         assert_eq!(comp.usage.input_tokens, 5500);
         assert_eq!(comp.usage.cached_input_tokens, 5000);
         assert_eq!(comp.usage.output_tokens, 42);
+    }
+
+    #[test]
+    fn stream_usage_accepts_input_tokens_from_final_delta() {
+        let mut usage = Usage::default();
+        merge_usage(
+            &mut usage,
+            parse_usage(Some(&json!({"input_tokens": 0, "output_tokens": 0}))),
+        );
+        merge_usage(
+            &mut usage,
+            parse_usage(Some(&json!({"input_tokens": 136_286, "output_tokens": 81}))),
+        );
+
+        assert_eq!(usage.input_tokens, 136_286);
+        assert_eq!(usage.output_tokens, 81);
+    }
+
+    #[test]
+    fn sparse_final_delta_keeps_start_usage() {
+        let mut usage = parse_usage(Some(&json!({
+            "input_tokens": 200,
+            "cache_read_input_tokens": 5000,
+            "cache_creation_input_tokens": 300,
+            "output_tokens": 1
+        })));
+        merge_usage(&mut usage, parse_usage(Some(&json!({"output_tokens": 42}))));
+
+        assert_eq!(usage.input_tokens, 5500);
+        assert_eq!(usage.cached_input_tokens, 5000);
+        assert_eq!(usage.output_tokens, 42);
     }
 }
