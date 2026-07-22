@@ -138,6 +138,14 @@ impl BrowserBridge {
                 "The running Wisp build has no verified bundled extension path. Do not invent a path or claim the extension exists."
             },
             "steps": steps,
+            "download_automation": {
+                "limitation": "GA Web controls web-page tabs. It cannot operate Chrome/Edge toolbar download bubbles or native operating-system Open, Save, and Save As dialogs.",
+                "manual_setup_required": true,
+                "chrome_settings_url": "chrome://settings/downloads",
+                "edge_settings_url": "edge://settings/downloads",
+                "setting_to_disable": "Ask where to save each file before downloading",
+                "effect": "Downloads save to the browser's configured default download directory without opening a native location prompt. Authorized filesystem tools may process the saved file afterward."
+            },
             "error": state.startup_error
         })
     }
@@ -515,7 +523,7 @@ impl Tool for BrowserSetupTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema::new(
             self.name(),
-            "Call when the user asks to configure, install, set up, or connect the real browser. The result is derived from the running Wisp binary's native Tauri resource directory. Copy extension_path character-for-character and never convert it between Windows, WSL, macOS, or Linux. If extension_path_verified is false, report the missing bundled extension and never invent a path.",
+            "Call when the user asks to configure, install, set up, or connect the real browser. The result is derived from the running Wisp binary's native Tauri resource directory and includes the manual setting required for unattended downloads. Copy extension_path character-for-character and never convert it between Windows, WSL, macOS, or Linux. If extension_path_verified is false, report the missing bundled extension and never invent a path.",
             json!({
                 "type": "object",
                 "properties": {},
@@ -771,6 +779,14 @@ mod tests {
         assert_eq!(info["extension_path"], expected_path.display().to_string());
         assert_eq!(info["extension_path_verified"], true);
         assert_eq!(info["install_scope"], "once_per_browser_profile");
+        assert_eq!(
+            info["download_automation"]["chrome_settings_url"],
+            "chrome://settings/downloads"
+        );
+        assert_eq!(
+            info["download_automation"]["setting_to_disable"],
+            "Ask where to save each file before downloading"
+        );
         assert!(info["steps"].as_array().unwrap().iter().any(|step| step
             .as_str()
             .unwrap()

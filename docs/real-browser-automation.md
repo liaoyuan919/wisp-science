@@ -35,6 +35,25 @@ and browser restarts. It reconnects to `ws://127.0.0.1:18765` when Wisp is
 running. Only loopback connections whose WebSocket origin is a Chrome extension
 with Wisp's bundled, stable extension ID are accepted.
 
+## Downloads and native dialogs
+
+GA Web controls web-page tabs. It cannot operate Chrome/Edge toolbar download
+bubbles or native operating-system **Open**, **Save**, and **Save As** dialogs.
+Page JavaScript and the Wisp extension cannot access those browser or operating
+system surfaces.
+
+For unattended browser downloads, make this one-time browser-profile change:
+
+1. Open `chrome://settings/downloads` in Chrome, or
+   `edge://settings/downloads` in Edge.
+2. Turn off **Ask where to save each file before downloading**.
+3. Downloads will then use the browser's configured default download directory
+   without opening a native location prompt. An authorized Wisp filesystem tool
+   can process or move the saved file afterward.
+
+This setting must be changed manually because internal settings pages such as
+`chrome://settings` and `edge://settings` are not scriptable by the bridge.
+
 ## Agent tools
 
 - `browser_setup`: report bridge status, the exact bundled extension directory,
