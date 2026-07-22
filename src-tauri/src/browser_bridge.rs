@@ -99,35 +99,45 @@ impl BrowserBridge {
 
     async fn setup_info(&self) -> Value {
         let state = self.state.lock().await;
-        let extension_dir = std::fs::canonicalize(&self.extension_dir)
-            .unwrap_or_else(|_| self.extension_dir.clone());
-        let extension_path_exists = extension_dir.is_dir();
+        let extension_path = self.verified_extension_path();
+        let extension_ready = extension_path.is_some();
         let status = if state.startup_error.is_some() {
             "error"
-        } else if !extension_path_exists {
+        } else if !extension_ready {
             "extension_missing"
         } else if state.client.is_some() {
             "connected"
         } else {
             "disconnected"
         };
-        let extension_path = extension_dir.display().to_string();
+        let steps = extension_path.as_ref().map_or_else(Vec::new, |path| {
+            vec![
+                "Start Wisp Science and keep it running.".to_string(),
+                "Open chrome://extensions in the Chrome/Chromium profile Wisp should control."
+                    .to_string(),
+                "Enable Developer mode.".to_string(),
+                format!("Click Load unpacked and select this exact folder: {path}"),
+                "Open the Wisp Real Browser Bridge extension popup and confirm Connected to Wisp."
+                    .to_string(),
+            ]
+        });
 
         json!({
             "status": status,
             "connected_tabs": state.tabs.len(),
+            "runtime_os": std::env::consts::OS,
+            "path_source": "wisp_tauri_resource_dir",
             "extension_path": extension_path,
-            "extension_path_exists": extension_path_exists,
+            "extension_path_verified": extension_ready,
             "extension_id": EXTENSION_ORIGIN.trim_start_matches("chrome-extension://"),
             "bridge_endpoint": format!("ws://{BRIDGE_ADDR}"),
             "install_scope": "once_per_browser_profile",
-            "steps": [
-                "Start Wisp Science and keep it running.",
-                "Open chrome://extensions in the Chrome/Chromium profile Wisp should control.",
-                "Enable Developer mode.",
-                format!("Click Load unpacked and select this folder: {extension_path}"),
-                "Open the Wisp Real Browser Bridge extension popup and confirm Connected to Wisp."
-            ],
+            "assistant_instruction": if extension_ready {
+                "Copy extension_path character-for-character. Never translate, infer, normalize, or replace any path segment."
+            } else {
+                "The running Wisp build has no verified bundled extension path. Do not invent a path or claim the extension exists."
+            },
+            "steps": steps,
             "error": state.startup_error
         })
     }
@@ -309,10 +319,22 @@ impl BrowserBridge {
     }
 
     fn unavailable_message(&self, reason: &str) -> String {
-        format!(
-            "real-browser bridge unavailable: {reason}. In Chrome/Chromium open chrome://extensions, enable Developer mode, and Load unpacked from '{}'. Keep Wisp running; the extension connects only to {BRIDGE_ADDR}.",
-            self.extension_dir.display()
-        )
+        match self.verified_extension_path() {
+            Some(path) => format!(
+                "real-browser bridge unavailable: {reason}. In Chrome/Chromium open chrome://extensions, enable Developer mode, and Load unpacked from this exact native {} path: '{path}'. Keep Wisp running; the extension connects only to {BRIDGE_ADDR}.",
+                std::env::consts::OS
+            ),
+            None => format!(
+                "real-browser bridge unavailable: {reason}. This Wisp build has no verified bundled browser extension; do not infer an installation path."
+            ),
+        }
+    }
+
+    fn verified_extension_path(&self) -> Option<String> {
+        let dir = dunce::canonicalize(&self.extension_dir).ok()?;
+        dir.join("manifest.json")
+            .is_file()
+            .then(|| dir.display().to_string())
     }
 }
 
@@ -493,7 +515,7 @@ impl Tool for BrowserSetupTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema::new(
             self.name(),
-            "Call when the user asks to configure, install, set up, or connect the real browser. Returns the current bridge status, the exact local browser-extension folder to choose with Chrome's Load unpacked button, and complete installation steps. The extension is installed once per browser profile.",
+            "Call when the user asks to configure, install, set up, or connect the real browser. The result is derived from the running Wisp binary's native Tauri resource directory. Copy extension_path character-for-character and never convert it between Windows, WSL, macOS, or Linux. If extension_path_verified is false, report the missing bundled extension and never invent a path.",
             json!({
                 "type": "object",
                 "properties": {},
@@ -741,21 +763,43 @@ mod tests {
         let extension_dir = wisp_paths::browser_extension_dir().unwrap();
         let bridge = Arc::new(BrowserBridge::new(extension_dir.clone()));
         let info = bridge.setup_info().await;
-        let expected_path = std::fs::canonicalize(extension_dir).unwrap();
+        let expected_path = dunce::canonicalize(extension_dir).unwrap();
 
         assert_eq!(info["status"], "disconnected");
+        assert_eq!(info["runtime_os"], std::env::consts::OS);
+        assert_eq!(info["path_source"], "wisp_tauri_resource_dir");
         assert_eq!(info["extension_path"], expected_path.display().to_string());
-        assert_eq!(info["extension_path_exists"], true);
+        assert_eq!(info["extension_path_verified"], true);
         assert_eq!(info["install_scope"], "once_per_browser_profile");
-        assert!(info["steps"]
-            .as_array()
+        assert!(info["steps"].as_array().unwrap().iter().any(|step| step
+            .as_str()
             .unwrap()
-            .iter()
-            .any(|step| step.as_str().unwrap().contains("Load unpacked")));
+            .contains(info["extension_path"].as_str().unwrap())));
+        assert!(bridge
+            .unavailable_message("not connected")
+            .contains(info["extension_path"].as_str().unwrap()));
         assert_eq!(
             BrowserSetupTool::new(bridge).minimum_approval(),
             Approval::Allow
         );
+    }
+
+    #[tokio::test]
+    async fn setup_never_offers_an_unverified_extension_path() {
+        let missing = std::env::temp_dir().join(format!(
+            "wisp-browser-extension-missing-{}",
+            std::process::id()
+        ));
+        let bridge = BrowserBridge::new(missing.clone());
+        let info = bridge.setup_info().await;
+
+        assert_eq!(info["status"], "extension_missing");
+        assert_eq!(info["extension_path_verified"], false);
+        assert!(info["extension_path"].is_null());
+        assert!(info["steps"].as_array().unwrap().is_empty());
+        assert!(!bridge
+            .unavailable_message("not connected")
+            .contains(&missing.display().to_string()));
     }
 
     #[test]
