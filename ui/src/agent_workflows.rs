@@ -406,7 +406,21 @@ fn group_workflows(
                 .then_with(|| left.workflow.id.cmp(&right.workflow.id))
         });
     }
-    groups.retain(|group| Some(group.frame_id.as_str()) == session_id);
+    // A taken-over child frame still belongs to the group that spawned it (#442).
+    groups.retain(|group| {
+        let Some(session_id) = session_id else {
+            return false;
+        };
+        group.frame_id == session_id
+            || group.snapshots.iter().any(|snapshot| {
+                snapshot.dynamic.tasks.iter().any(|task| {
+                    task.result
+                        .as_ref()
+                        .and_then(|result| result.child_frame_id.as_deref())
+                        == Some(session_id)
+                })
+            })
+    });
     groups
 }
 
@@ -1380,6 +1394,81 @@ mod tests {
             .tasks
             .iter()
             .all(|task| task.specialist_id.is_none()));
+    }
+
+    #[test]
+    fn taken_over_child_frame_keeps_its_root_group() {
+        let snapshot: AgentWorkflowSnapshot = serde_json::from_value(serde_json::json!({
+            "workflow": {
+                "id": "wf-1",
+                "frame_id": "parent-frame",
+                "root_workflow_id": "",
+                "depth": 0,
+                "name": "Workflow",
+                "goal": "g",
+                "mode": "manual",
+                "status": "running",
+                "max_parallel": 1,
+                "requires_confirmation": true,
+                "version": 1,
+                "updated_at": 0
+            },
+            "delegation_enabled": true,
+            "dynamic": {
+                "schema_version": 1,
+                "approval_policy": "review_all",
+                "editable_proposal": {
+                    "goal": "g",
+                    "context": "",
+                    "approval_policy": "review_all",
+                    "tasks": []
+                },
+                "approval_reasons": [],
+                "tasks": [{
+                    "id": "task_1",
+                    "stored_step_id": "step-1",
+                    "instruction": "do",
+                    "depends_on": [],
+                    "capabilities": [],
+                    "specialist_id": null,
+                    "specialist_name": null,
+                    "executor": {"kind": "native", "profile_id": null, "model_id": null},
+                    "workspace_policy": "shared",
+                    "merge_policy": "manual",
+                    "tools": [],
+                    "can_write": false,
+                    "can_execute": false,
+                    "can_access_network": false,
+                    "budget": {
+                        "max_tokens": null,
+                        "max_tool_calls": null,
+                        "max_cost_microunits": null
+                    },
+                    "timeout_secs": null,
+                    "approval_reasons": [],
+                    "output_schema": null,
+                    "result": {
+                        "status": "running",
+                        "summary": null,
+                        "error": null,
+                        "child_frame_id": "agent-child",
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "tool_calls": 0,
+                        "cost_microunits": 0,
+                        "duration_secs": null,
+                        "full_result_available": false
+                    }
+                }]
+            }
+        }))
+        .expect("snapshot fixture deserializes");
+
+        let parent = group_workflows(vec![snapshot.clone()], &[], Some("parent-frame"));
+        assert_eq!(parent.len(), 1);
+        let taken_over = group_workflows(vec![snapshot.clone()], &[], Some("agent-child"));
+        assert_eq!(taken_over.len(), 1);
+        assert!(group_workflows(vec![snapshot], &[], Some("unrelated")).is_empty());
     }
 
     #[test]

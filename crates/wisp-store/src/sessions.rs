@@ -307,6 +307,16 @@ impl Store {
         Ok(())
     }
 
+    pub async fn root_frame_id(&self, frame_id: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar::<_, Option<String>>(
+            "SELECT COALESCE(root_frame_id, id) FROM frames WHERE id=?",
+        )
+        .bind(frame_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten())
+    }
+
     pub async fn frame_model(&self, frame_id: &str) -> Result<Option<String>> {
         Ok(
             sqlx::query_scalar::<_, Option<String>>("SELECT model FROM frames WHERE id=?")
