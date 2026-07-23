@@ -630,9 +630,7 @@ fn is_usable_truncation(error: &anyhow::Error, output: &CollectedOutput) -> bool
     }
     let message = format!("{error:#}").to_lowercase();
     message.contains("max_tokens")
-        && (message.contains("truncat")
-            || message.contains("length")
-            || message.contains("截断"))
+        && (message.contains("truncat") || message.contains("length") || message.contains("截断"))
 }
 
 fn request_context(
