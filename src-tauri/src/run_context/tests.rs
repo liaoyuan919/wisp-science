@@ -147,6 +147,47 @@ async fn run_in_context_can_suspend_until_terminal_without_get_run_calls() {
 }
 
 #[tokio::test]
+async fn run_in_context_wait_reports_a_failed_run_as_a_failed_tool_call() {
+    use wisp_tools::Tool;
+    let tmp = std::env::temp_dir().join(format!("wisp_run_wait_fail_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let store = wisp_store::Store::open(&tmp.join("wisp.sqlite"))
+        .await
+        .unwrap();
+    store
+        .create_project("p", "project", &tmp.to_string_lossy())
+        .await
+        .unwrap();
+    let manager = RunManager::with_runner(Arc::new(FakeRunRunner {
+        output: Ok(RunCommandOutput {
+            exit_code: 127,
+            stdout: String::new(),
+            stderr: "python: command not found".into(),
+        }),
+    }));
+    let tool = RunInContextTool::new(store, manager, "p".into(), None);
+    let result = tool
+        .run(
+            &serde_json::json!({
+                "context_id": "local",
+                "command": "python -c pass",
+                "wait_for_completion": true
+            }),
+            &RunToolTestEnv(tmp.clone()),
+        )
+        .await;
+
+    assert!(
+        !result.success,
+        "failed Run must not render as a green tool call"
+    );
+    let run: wisp_store::RunRecord = serde_json::from_str(&result.content).unwrap();
+    assert_eq!(run.status, wisp_store::RunStatus::Failed);
+    assert_eq!(run.exit_code, Some(127));
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
+#[tokio::test]
 async fn run_in_context_rejects_nested_ssh_transfer_commands() {
     use wisp_tools::Tool;
     let tmp = std::env::temp_dir().join(format!("wisp_run_ssh_guard_{}", uuid::Uuid::new_v4()));
@@ -1198,7 +1239,7 @@ fn permanent_remote_start_errors_require_user_intervention() {
         "SSH launch failed: connection timed out"
     ));
     assert!(permanent_remote_start_error(
-        "SSH connectivity gate blocked for `ssh:gpu` after a previous failure"
+        "SSH authentication gate blocked for `ssh:gpu` after a previous failure"
     ));
 }
 

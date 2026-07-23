@@ -3,11 +3,12 @@
 //! Answers two transparency questions users can't otherwise see: how large the
 //! built-in system prompt is, and whether an uploaded file's contents were
 //! inlined into the request (vs. read by a tool). It serializes the exact
-//! provider-agnostic request — system prompt + full message history + runtime
-//! injections + tool schemas — with a per-section token/char breakdown.
+//! provider-agnostic request — the persisted prefix and runtime injections used
+//! by the latest model call, plus tool schemas — with a per-section token/char
+//! breakdown. The subsequent assistant response is intentionally excluded.
 //!
 //! Preferred source is the live `Agent` cached in `SessionRuntime` (highest
-//! fidelity: tools + provider/model + post-compaction context). When no agent
+//! fidelity: tools + provider/model + latest prepared request). When no agent
 //! is resident (never run this launch) or a turn holds the lock, it falls back
 //! to the persisted messages, which still carry the system prompt (message[0])
 //! and any inlined file content.
@@ -166,15 +167,18 @@ pub(super) async fn export_debug_request(
 
     let captured_at = chrono::Utc::now().to_rfc3339();
 
-    // Prefer the live agent (tools + provider + post-compaction context). Use a
+    // Prefer the live agent (tools + provider + latest prepared request). Use a
     // non-blocking try_lock so an in-flight turn falls back to persisted
     // messages instead of stalling the export behind a long turn.
     let rt = { state.sessions.lock().await.get(&session_id).cloned() };
     let live = rt.as_ref().and_then(|rt| {
         rt.agent.try_lock().ok().and_then(|guard| {
             guard.as_ref().map(|agent| {
-                let mut msgs: Vec<Message> = agent.ctx.messages.clone();
-                msgs.extend(agent.ctx.runtime_injections.iter().cloned());
+                let msgs = agent.ctx.last_request().unwrap_or_else(|| {
+                    let mut messages: Vec<Message> = agent.ctx.messages.clone();
+                    messages.extend(agent.ctx.runtime_injections.iter().cloned());
+                    messages
+                });
                 build_snapshot(
                     &session_id,
                     captured_at.clone(),

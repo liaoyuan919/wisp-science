@@ -658,7 +658,7 @@ fn list_remote_dir_with_runner(
     let output = match runner.run(&command) {
         Ok(output) => output,
         Err(error) => {
-            if crate::ssh_guard::is_connectivity_failure(&error) {
+            if crate::ssh_guard::is_authentication_failure(&error) {
                 crate::ssh_guard::record_failure(&context.id, &error);
             }
             return Err(error);
@@ -674,7 +674,7 @@ fn list_remote_dir_with_runner(
             "Remote directory request failed (exit {}): {detail}",
             output.status
         );
-        if crate::ssh_guard::is_connectivity_failure(&error) {
+        if crate::ssh_guard::is_authentication_failure(&error) {
             crate::ssh_guard::record_failure(&context.id, &error);
         }
         return Err(error);
@@ -736,7 +736,7 @@ fn read_remote_file_bytes_with_runner(
     let output = match runner.run(&command) {
         Ok(output) => output,
         Err(error) => {
-            if crate::ssh_guard::is_connectivity_failure(&error) {
+            if crate::ssh_guard::is_authentication_failure(&error) {
                 crate::ssh_guard::record_failure(&context.id, &error);
             }
             return Err(error);
@@ -752,7 +752,7 @@ fn read_remote_file_bytes_with_runner(
             "Remote file request failed (exit {}): {detail}",
             output.status
         );
-        if crate::ssh_guard::is_connectivity_failure(&error) {
+        if crate::ssh_guard::is_authentication_failure(&error) {
             crate::ssh_guard::record_failure(&context.id, &error);
         }
         return Err(error);

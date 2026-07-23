@@ -168,12 +168,12 @@ fn record_ssh_runner_outcome(context_id: &str, result: &Result<RunCommandOutput,
             } else {
                 output.stderr.trim()
             };
-            if crate::ssh_guard::is_connectivity_failure(detail) {
+            if crate::ssh_guard::is_authentication_failure(detail) {
                 crate::ssh_guard::record_failure(context_id, detail);
             }
         }
         Err(error) => {
-            if crate::ssh_guard::is_connectivity_failure(error) {
+            if crate::ssh_guard::is_authentication_failure(error) {
                 crate::ssh_guard::record_failure(context_id, error);
             }
         }
