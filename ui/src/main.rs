@@ -5071,6 +5071,15 @@ fn App() -> impl IntoView {
                             }
                         });
                     }
+                    context_menu::SessionAction::SetPinned { id, pinned } => {
+                        spawn_local(async move {
+                            let arg =
+                                to_value(&serde_json::json!({ "id": id, "pinned": pinned })).unwrap();
+                            if invoke_checked("set_session_pinned", arg).await.is_ok() {
+                                refresh_session_history();
+                            }
+                        });
+                    }
                     context_menu::SessionAction::Delete(id) => {
                         ui_confirm.set(Some(UiConfirm::DeleteSession(id)));
                     }
@@ -6548,12 +6557,13 @@ fn App() -> impl IntoView {
                 session_history_loading,
             ))
             move_session_to=move_session_to
-            open_session_actions=Callback::new(move |(ev, id, title): (web_sys::MouseEvent, String, String)| {
+            open_session_actions=Callback::new(move |(ev, id, title, pinned): (web_sys::MouseEvent, String, String, bool)| {
                 ctx_menu.set(Some(context_menu::session_menu(
                     ev.client_x() as f64,
                     ev.client_y() as f64,
                     &id,
                     &title,
+                    pinned,
                     locale.get(),
                 )));
             })

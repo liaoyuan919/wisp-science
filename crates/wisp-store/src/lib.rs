@@ -585,6 +585,11 @@ impl Store {
                 .execute(pool)
                 .await?;
         }
+        if !Self::has_column(pool, "frames", "pinned").await? {
+            sqlx::query("ALTER TABLE frames ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+                .execute(pool)
+                .await?;
+        }
         sqlx::query("CREATE INDEX IF NOT EXISTS ix_frames_folder ON frames(folder_id)")
             .execute(pool)
             .await?;

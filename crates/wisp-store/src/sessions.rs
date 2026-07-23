@@ -770,6 +770,60 @@ impl Store {
         Ok(out)
     }
 
+    /// Pinned root frames for a project, newest first. Returned as
+    /// `(frame_id, title, created_at, folder_id)` like `list_sessions_page`, but
+    /// unpaginated so the sidebar's "Pinned" section is complete regardless of
+    /// how far the keyset history has been scrolled.
+    pub async fn list_pinned_sessions(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<(String, String, i64, Option<String>)>> {
+        let rows = sqlx::query(
+            "SELECT f.id AS id, f.created_at AS created_at, f.title AS custom_title, f.folder_id AS folder_id, \
+                (SELECT content FROM messages m WHERE m.frame_id = f.id AND m.role = 'user' ORDER BY m.seq ASC LIMIT 1) AS first_user \
+             FROM frames f \
+             WHERE f.project_id = ? AND f.parent_frame_id = f.id AND COALESCE(f.pinned, 0) = 1 \
+               AND EXISTS (SELECT 1 FROM messages mm WHERE mm.frame_id = f.id AND mm.role = 'user') \
+             ORDER BY f.created_at DESC, f.id DESC",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = vec![];
+        for row in rows {
+            let id: String = row.try_get("id")?;
+            let created: i64 = row.try_get("created_at")?;
+            let folder_id: Option<String> = row.try_get("folder_id")?;
+            let custom_title: Option<String> = row.try_get("custom_title")?;
+            let first_user: Option<String> = row.try_get("first_user")?;
+            out.push((id, session_display_title(custom_title, first_user), created, folder_id));
+        }
+        Ok(out)
+    }
+
+    /// Pin or unpin a saved conversation so it floats to the top of the sidebar.
+    pub async fn set_session_pinned(
+        &self,
+        frame_id: &str,
+        project_id: &str,
+        pinned: bool,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        let n = sqlx::query(
+            "UPDATE frames SET pinned=?, updated_at=? WHERE id=? AND project_id=? AND parent_frame_id=id",
+        )
+        .bind(pinned as i64)
+        .bind(now)
+        .bind(frame_id)
+        .bind(project_id)
+        .execute(&self.pool)
+        .await?;
+        if n.rows_affected() == 0 {
+            anyhow::bail!("Session not found");
+        }
+        Ok(())
+    }
+
     /// Delete a saved conversation (root frame) and all of its messages/artifacts.
     pub async fn delete_session(&self, frame_id: &str, project_id: &str) -> Result<()> {
         let exists: Option<(String,)> = sqlx::query_as(

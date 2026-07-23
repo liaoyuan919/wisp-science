@@ -10,7 +10,7 @@
   const sessions = [
     { id: "s1", title: "查找文献, FX-cell", ts: 1719900000, folder_id: "d1" },
     { id: "s2", title: "我确认下你你有什么skill", ts: 1719890000 },
-    { id: "s3", title: "你能做啥", ts: 1719880000 },
+    { id: "s3", title: "你能做啥", ts: 1719880000, pinned: true },
   ];
   const folders = [{ id: "d1", name: "Research" }];
   let libraryItems = [];
@@ -172,6 +172,11 @@
           case "move_session": {
             const s = sessions.find((x) => x.id === args?.id);
             if (s) s.folder_id = args?.folderId ?? args?.folder_id ?? null;
+            return null;
+          }
+          case "set_session_pinned": {
+            const s = sessions.find((x) => x.id === args?.id);
+            if (s) s.pinned = !!args?.pinned;
             return null;
           }
           case "list_projects":

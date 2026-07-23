@@ -138,6 +138,10 @@ pub enum SessionAction {
         id: String,
         folder_id: Option<String>,
     },
+    SetPinned {
+        id: String,
+        pinned: bool,
+    },
     Transfer {
         id: String,
         mode: SessionTransferMode,
@@ -192,7 +196,14 @@ fn session_move_items(session_id: &str, locale: Locale) -> Vec<CtxItem> {
     items
 }
 
-pub fn session_menu(x: f64, y: f64, session_id: &str, title: &str, locale: Locale) -> CtxMenu {
+pub fn session_menu(
+    x: f64,
+    y: f64,
+    session_id: &str,
+    title: &str,
+    pinned: bool,
+    locale: Locale,
+) -> CtxMenu {
     let mut items = vec![item(
         "copyTitle",
         i18n::t(locale, "ctx.copy_title"),
@@ -202,6 +213,11 @@ pub fn session_menu(x: f64, y: f64, session_id: &str, title: &str, locale: Local
         items.push(item(
             "openSession",
             i18n::t(locale, "ctx.open_session"),
+            session_id.to_string(),
+        ));
+        items.push(item(
+            if pinned { "unpinSession" } else { "pinSession" },
+            i18n::t(locale, if pinned { "ctx.unpin_session" } else { "ctx.pin_session" }),
             session_id.to_string(),
         ));
         items.push(item(
@@ -357,7 +373,8 @@ pub fn build(
     if let Some(ses) = closest(&target, ".side-item.ses") {
         let title = ses.get_attribute("data-session-title").unwrap_or_default();
         let id = ses.get_attribute("data-session-id").unwrap_or_default();
-        return Some(session_menu(x, y, &id, &title, locale));
+        let pinned = ses.get_attribute("data-session-pinned").as_deref() == Some("true");
+        return Some(session_menu(x, y, &id, &title, pinned, locale));
     }
 
     if let Some(folder) = closest(&target, ".side-folder") {
@@ -589,6 +606,14 @@ pub fn session_action(action: &str, payload: &str) -> Option<SessionAction> {
                 folder_id: (!folder_id.is_empty()).then(|| folder_id.to_string()),
             })
         }
+        "pinSession" if !payload.is_empty() => Some(SessionAction::SetPinned {
+            id: payload.to_string(),
+            pinned: true,
+        }),
+        "unpinSession" if !payload.is_empty() => Some(SessionAction::SetPinned {
+            id: payload.to_string(),
+            pinned: false,
+        }),
         "copySessionToProject" if !payload.is_empty() => Some(SessionAction::Transfer {
             id: payload.to_string(),
             mode: SessionTransferMode::Copy,
