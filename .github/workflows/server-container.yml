@@ -11,6 +11,10 @@ permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: wisp-server-container-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -59,5 +63,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=wisp-server-runtime
+          cache-from: |
+            type=gha,scope=wisp-server-test
+            type=gha,scope=wisp-server-runtime
           cache-to: type=gha,mode=max,scope=wisp-server-runtime

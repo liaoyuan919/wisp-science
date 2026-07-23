@@ -15,8 +15,8 @@ RUN cargo fmt --all -- --check
 RUN cargo test -p wisp-server
 RUN cargo test -p wisp-server bundled_mcp_catalog_is_read_only_and_license_gated -- --ignored
 
-FROM source AS builder
-RUN cargo build --locked --release -p wisp-server
+FROM test AS builder
+RUN cargo build --locked --offline --release -p wisp-server
 
 FROM python:3.12-slim-bookworm AS runtime
 RUN pip install --no-cache-dir -r /dev/stdin <<'EOF'
