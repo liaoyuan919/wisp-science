@@ -173,8 +173,7 @@ fn optional_env(name: &str) -> Option<String> {
 }
 
 fn required_env(name: &str) -> Result<String> {
-    optional_env(name)
-        .ok_or_else(|| anyhow!("{name} is required"))
+    optional_env(name).ok_or_else(|| anyhow!("{name} is required"))
 }
 
 fn mcp_contact_environment(
@@ -347,10 +346,9 @@ async fn launch_public_mcp(config: &ServerConfig) -> Result<McpClient> {
         .env("TMPDIR", "/tmp")
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .env("PYTHONUNBUFFERED", "1");
-    for (name, value) in mcp_contact_environment(
-        config.ncbi_email.as_deref(),
-        config.ncbi_api_key.as_deref(),
-    ) {
+    for (name, value) in
+        mcp_contact_environment(config.ncbi_email.as_deref(), config.ncbi_api_key.as_deref())
+    {
         command.env(name, value);
     }
     McpClient::launch_with_command(command)
