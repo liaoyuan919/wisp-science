@@ -110,6 +110,8 @@ pub struct ServerConfig {
     pub resource_root: PathBuf,
     pub work_dir: PathBuf,
     pub python: PathBuf,
+    pub ncbi_email: Option<String>,
+    pub ncbi_api_key: Option<String>,
 }
 
 impl ServerConfig {
@@ -158,15 +160,35 @@ impl ServerConfig {
             resource_root: PathBuf::from(env_value("WISP_RESOURCE_ROOT", "/app")),
             work_dir: PathBuf::from(env_value("WISP_WORK_DIR", "/tmp/wisp-server")),
             python: PathBuf::from(env_value("WISP_PYTHON", "python3")),
+            ncbi_email: optional_env("WISP_NCBI_EMAIL"),
+            ncbi_api_key: optional_env("WISP_NCBI_API_KEY"),
         })
     }
 }
 
-fn required_env(name: &str) -> Result<String> {
+fn optional_env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())
+}
+
+fn required_env(name: &str) -> Result<String> {
+    optional_env(name)
         .ok_or_else(|| anyhow!("{name} is required"))
+}
+
+fn mcp_contact_environment(
+    ncbi_email: Option<&str>,
+    ncbi_api_key: Option<&str>,
+) -> Vec<(&'static str, String)> {
+    let mut environment = Vec::new();
+    if let Some(email) = ncbi_email {
+        environment.push(("NCBI_EMAIL", email.to_owned()));
+    }
+    if let Some(api_key) = ncbi_api_key {
+        environment.push(("NCBI_API_KEY", api_key.to_owned()));
+    }
+    environment
 }
 
 fn env_value(name: &str, default: &str) -> String {
@@ -325,6 +347,12 @@ async fn launch_public_mcp(config: &ServerConfig) -> Result<McpClient> {
         .env("TMPDIR", "/tmp")
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .env("PYTHONUNBUFFERED", "1");
+    for (name, value) in mcp_contact_environment(
+        config.ncbi_email.as_deref(),
+        config.ncbi_api_key.as_deref(),
+    ) {
+        command.env(name, value);
+    }
     McpClient::launch_with_command(command)
         .await
         .context("launch isolated bundled mcp_bio server")
@@ -1374,6 +1402,18 @@ mod tests {
         assert!(is_read_only(&safe));
         assert!(!is_read_only(&unsafe_tool));
         assert!(!is_read_only(&missing));
+    }
+
+    #[test]
+    fn isolated_mcp_receives_only_explicit_ncbi_contact_settings() {
+        assert!(mcp_contact_environment(None, None).is_empty());
+        assert_eq!(
+            mcp_contact_environment(Some("operator@example.com"), Some("ncbi-secret")),
+            vec![
+                ("NCBI_EMAIL", "operator@example.com".to_owned()),
+                ("NCBI_API_KEY", "ncbi-secret".to_owned()),
+            ]
+        );
     }
 
     #[tokio::test]

@@ -34,6 +34,7 @@ RUN addgroup --system --gid 10001 wisp \
 WORKDIR /app
 COPY --from=builder /src/target/release/wisp-server /usr/local/bin/wisp-server
 COPY mcp-servers/bio-tools /app/mcp-servers/bio-tools
+COPY python/mcp_domain_smoke.py /app/python/mcp_domain_smoke.py
 
 ENV WISP_BIND=0.0.0.0:8080 \
     WISP_RESOURCE_ROOT=/app \

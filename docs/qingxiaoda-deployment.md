@@ -25,7 +25,9 @@ commands, and MCP App artifact writes are not registered.
 ## Container deployment
 
 1. Copy `deploy/.env.example` to `deploy/.env`.
-2. Set the GHCR image, service token, model provider settings, and ACME email.
+2. Set the GHCR image, service token, model provider settings, NCBI contact
+   email, and ACME email. `WISP_NCBI_EMAIL` is passed only to the isolated
+   read-only MCP process; model and service credentials are still excluded.
 3. From `deploy/`, run:
 
    ```sh
@@ -66,6 +68,17 @@ For resource observation:
 docker stats --no-stream
 docker compose logs --tail=100 wisp-server
 ```
+
+Run one real, bounded read-only lookup in every public research domain:
+
+```sh
+docker compose run --rm --entrypoint python3 \
+  wisp-server /app/python/mcp_domain_smoke.py
+```
+
+This manual check contacts third-party scientific databases and is deliberately
+not part of offline CI. A non-zero exit identifies the failed domains without
+printing API keys or full upstream payloads.
 
 Keep the current 768 MiB container limit for the initial 1 GiB host. If catalog
 startup or a representative single request approaches the limit, first split
