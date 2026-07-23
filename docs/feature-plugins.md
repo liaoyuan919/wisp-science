@@ -83,8 +83,10 @@ npm run build:motif
 
 Use the SHA-256 from
 `dist-motif/motif-for-claude-science.checksums.json` when installing
-`dist-motif/motif-for-claude-science.zip`. Enable it for a test project and
-start a new session. The acceptance checks are:
+`dist-motif/motif-for-claude-science.zip`. Enable it for a test project and use
+**Use in new session**. That action attaches the plugin-managed Skill to the
+first turn so the agent follows the plugin's startup instructions instead of
+guessing MCP tools from its display name. The acceptance checks are:
 
 1. The `motif-for-claude-science` Skill appears as plugin-managed.
 2. The MCP server exposes `motif_open_workbench` and

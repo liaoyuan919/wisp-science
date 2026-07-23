@@ -313,7 +313,7 @@ pub(super) fn SettingsView(
     install_plugin_from: Callback<(String, Option<String>)>,
     install_plugin_url: Callback<(String, String)>,
     set_plugin_enabled: Callback<(String, String, bool)>,
-    use_plugin: Callback<(String, String, String, bool)>,
+    use_plugin: Callback<(String, String, String, Vec<String>, bool)>,
     remove_plugin: Callback<(String, String)>,
     remove_specialist: Callback<String>,
     open_add_host: Callback<()>,
@@ -2177,6 +2177,7 @@ pub(super) fn SettingsView(
                                     let use_id = plugin.id.clone();
                                     let use_version = plugin.version.clone();
                                     let use_name = plugin.display_name.clone();
+                                    let use_skills = plugin.skill_names.clone();
                                     let remove_id = plugin.id.clone();
                                     let remove_version = plugin.version.clone();
                                     let remove_name = plugin.display_name.clone();
@@ -2242,6 +2243,7 @@ pub(super) fn SettingsView(
                                                         use_id.clone(),
                                                         use_version.clone(),
                                                         use_name.clone(),
+                                                        use_skills.clone(),
                                                         enabled,
                                                     ))>
                                                     {move || t(locale.get(), if enabled { "plugins.use_new_session" } else { "plugins.enable_and_use" })}

@@ -3630,12 +3630,20 @@ fn App() -> impl IntoView {
     };
 
     let use_plugin = Callback::new(
-        move |(plugin_id, version, display_name, enabled): (String, String, String, bool)| {
+        move |(plugin_id, version, display_name, skill_names, enabled): (String, String, String, Vec<String>, bool)| {
             let prompt = tf(
                 locale.get(),
-                "plugins.start_prompt",
+                if skill_names.is_empty() {
+                    "plugins.start_prompt"
+                } else {
+                    "plugins.start_prompt_guided"
+                },
                 &[("name", &display_name)],
             );
+            let skill_references = skill_names
+                .into_iter()
+                .map(|name| ComposerReferenceArg::Skill { name })
+                .collect();
             let turn_model = active_model_label(&models.get());
             if let Some(old) = active_session.get() {
                 transcripts.update(|cache| {
@@ -3691,7 +3699,7 @@ fn App() -> impl IntoView {
                     session_id: Some(session_id.clone()),
                     message: prompt,
                     attachments: vec![],
-                    references: vec![],
+                    references: skill_references,
                     resume: false,
                     acp_agent_id: None,
                     guide: None,
