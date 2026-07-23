@@ -51,7 +51,7 @@ pub(super) fn Sidebar(
     load_session: Callback<String>,
     load_older_sessions: Callback<()>,
     move_session_to: Callback<(String, Option<String>)>,
-    open_session_actions: Callback<(web_sys::MouseEvent, String, String)>,
+    open_session_actions: Callback<(web_sys::MouseEvent, String, String, bool)>,
     open_folder_actions: Callback<(web_sys::MouseEvent, String, String)>,
     open_capabilities: Callback<web_sys::MouseEvent>,
     open_settings: Callback<web_sys::MouseEvent>,
@@ -229,6 +229,14 @@ pub(super) fn Sidebar(
                         list.sort_by(|a, b| a.title.trim().to_lowercase().cmp(&b.title.trim().to_lowercase()));
                     }
                     // "newest" keeps the backend's created_at DESC order.
+                    // Pinned sessions are pulled out of whatever grouping is active
+                    // and shown in one block at the very top. The backend guarantees
+                    // they arrive on the first page even when older than the window.
+                    let pinned: Vec<SessionInfo> =
+                        list.iter().filter(|s| s.pinned).cloned().collect();
+                    if !pinned.is_empty() {
+                        list.retain(|s| !s.pinned);
+                    }
                     let group = group_by.get();
                     // Whether any folder exists — used to keep the "ungrouped" drop
                     // zone available (so a session can be dragged out of a folder) without
@@ -253,9 +261,11 @@ pub(super) fn Sidebar(
                         let id_actions = id.clone();
                         let title_actions = title.clone();
                         let show_actions = open_session_actions.clone();
+                        let pinned = s.pinned;
                         view! {
                             <div class="side-item-wrap">
                                 <button type="button" class="side-item ses"
+                                    class:pinned=pinned
                                     title=title_tooltip
                                     class:active=move || active_session.get().as_deref() == Some(id_active.as_str())
                                     class:running=move || running.get().contains(&id_running)
@@ -264,6 +274,7 @@ pub(super) fn Sidebar(
                                     attr:draggable="true"
                                     data-session-id=id_attr
                                     data-session-title=title_attr
+                                    data-session-pinned=if pinned { "true" } else { "false" }
                                     on:click=move |_| {
                                         open.call(id_key.clone());
                                     }
@@ -296,20 +307,25 @@ pub(super) fn Sidebar(
                                     on:click=move |ev: web_sys::MouseEvent| {
                                         ev.prevent_default();
                                         ev.stop_propagation();
-                                        show_actions.call((ev, id_actions.clone(), title_actions.clone()));
+                                        show_actions.call((ev, id_actions.clone(), title_actions.clone(), pinned));
                                     }>"⋯"</button>
                             </div>
                         }.into_view()
                     };
+                    let pinned_view = (!pinned.is_empty()).then(|| view! {
+                        <div class="side-group-title">{t(loc, "sidebar.pinned")}</div>
+                        {pinned.iter().map(&make).collect_view()}
+                    });
                     // "None": one flat, sorted list, no folder blocks or date headers.
                     if group == "none" {
-                        return list.iter().map(&make).collect_view();
+                        return view! { {pinned_view}{list.iter().map(&make).collect_view()} }.into_view();
                     }
                     // "Date": folders hidden, every session bucketed by date. Folder
                     // membership stays in the DB — switch to "Folders" to drag/reassign.
                     if group == "date" {
                         let (today, earlier) = bucket_sessions_by_date(&list);
                         return view! {
+                            {pinned_view}
                             {(!today.is_empty()).then(|| view! {
                                 <div class="side-group-title">{t(loc, "sidebar.today")}</div>
                                 {today.iter().map(&make).collect_view()}
@@ -415,6 +431,7 @@ pub(super) fn Sidebar(
                         }
                     }).collect_view();
                     view! {
+                        {pinned_view}
                         {folder_views}
                         {( !ungrouped.is_empty() || has_folders ).then(|| view! {
                             <div class="side-ungrouped"

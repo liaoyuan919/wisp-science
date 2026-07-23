@@ -699,6 +699,8 @@ struct SessionInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     folder_id: Option<String>,
     running: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pinned: bool,
 }
 
 const SESSION_HISTORY_PAGE_SIZE: usize = 100;
@@ -5321,11 +5323,18 @@ async fn list_sessions(
         .list_sessions(&ap.id)
         .await
         .map_err(|e| format!("{e}"))?;
+    let pinned_ids = state
+        .store
+        .list_pinned_sessions(&ap.id)
+        .await
+        .map(|rows| rows.into_iter().map(|row| row.0).collect::<HashSet<_>>())
+        .unwrap_or_default();
     let running = state.running_turns.lock().await.clone();
     Ok(rows
         .into_iter()
         .map(|(id, title, ts, folder_id)| SessionInfo {
             running: running.contains(&id),
+            pinned: pinned_ids.contains(&id),
             id,
             title,
             ts,
@@ -5361,17 +5370,40 @@ async fn list_sessions_page(
             id: row.0.clone(),
         }
     });
+    // Pinned sessions float to the top and must show even when they fall outside
+    // the newest keyset page, so fetch them once (first page only) and prepend any
+    // that aren't already in this page. The keyset cursor is left untouched.
+    let pinned_rows = match cursor {
+        None => state
+            .store
+            .list_pinned_sessions(&ap.id)
+            .await
+            .map_err(|e| format!("{e}"))?,
+        Some(_) => Vec::new(),
+    };
+    let pinned_ids: HashSet<String> = pinned_rows.iter().map(|row| row.0.clone()).collect();
+    let page_ids: HashSet<String> = rows.iter().map(|row| row.0.clone()).collect();
     let running = state.running_turns.lock().await.clone();
-    let items = rows
+    let mut items: Vec<SessionInfo> = pinned_rows
         .into_iter()
+        .filter(|(id, ..)| !page_ids.contains(id))
         .map(|(id, title, ts, folder_id)| SessionInfo {
             running: running.contains(&id),
+            pinned: true,
             id,
             title,
             ts,
             folder_id,
         })
         .collect();
+    items.extend(rows.into_iter().map(|(id, title, ts, folder_id)| SessionInfo {
+        running: running.contains(&id),
+        pinned: pinned_ids.contains(&id),
+        id,
+        title,
+        ts,
+        folder_id,
+    }));
     Ok(SessionPage {
         items,
         next_cursor,
@@ -5832,6 +5864,23 @@ async fn rename_session(
     state
         .store
         .rename_session(&id, &ap.id, &title)
+        .await
+        .map_err(|e| format!("{e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_session_pinned(
+    state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
+    id: String,
+    pinned: bool,
+) -> Result<(), String> {
+    let ap = state.active(window.label());
+    let _project_activity = state.begin_project_activity(&ap.id)?;
+    state
+        .store
+        .set_session_pinned(&id, &ap.id, pinned)
         .await
         .map_err(|e| format!("{e}"))?;
     Ok(())
@@ -7650,6 +7699,7 @@ pub fn run() {
             get_research_graph,
             delete_session,
             rename_session,
+            set_session_pinned,
             transfer_session_to_project,
             list_folders,
             create_folder,

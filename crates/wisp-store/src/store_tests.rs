@@ -965,6 +965,35 @@ async fn session_pages_are_stable_when_timestamps_match() {
 }
 
 #[tokio::test]
+async fn pinned_sessions_are_listed_separately_and_toggle() {
+    let tmp = std::env::temp_dir().join(format!("wisp_pinned_{}.sqlite", uuid::Uuid::new_v4()));
+    let store = Store::open(&tmp).await.unwrap();
+    store.create_project("p", "proj", "").await.unwrap();
+    for id in ["a", "b", "c"] {
+        store.create_frame(id, "p", "OPERON", "m").await.unwrap();
+        store
+            .append_message(id, 1, &Message::user(id))
+            .await
+            .unwrap();
+    }
+
+    assert!(store.list_pinned_sessions("p").await.unwrap().is_empty());
+
+    store.set_session_pinned("a", "p", true).await.unwrap();
+    let pinned = store.list_pinned_sessions("p").await.unwrap();
+    assert_eq!(pinned.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["a"]);
+    // The full listing still contains every session, pinned or not.
+    assert_eq!(store.list_sessions("p").await.unwrap().len(), 3);
+
+    store.set_session_pinned("a", "p", false).await.unwrap();
+    assert!(store.list_pinned_sessions("p").await.unwrap().is_empty());
+
+    // Pinning a missing session is an error, not a silent no-op.
+    assert!(store.set_session_pinned("missing", "p", true).await.is_err());
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[tokio::test]
 async fn multi_turn_append() {
     // Mirrors the Tauri wiring: a frame is created once, then messages are
     // appended across turns with incrementing seq; load_messages returns
