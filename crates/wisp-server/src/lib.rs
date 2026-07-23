@@ -488,23 +488,12 @@ async fn non_streaming_response(
     match result {
         Ok(Ok(())) => {
             state.inner.quota.record(snapshot.usage);
-            Json(json!({
-                "id": completion_id("chatcmpl"),
-                "object": "chat.completion",
-                "created": unix_seconds(),
-                "model": state.inner.public_model,
-                "choices": [{
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": snapshot.text,
-                        "reasoning": optional_string(snapshot.reasoning),
-                    },
-                    "finish_reason": "stop"
-                }],
-                "usage": usage_json(snapshot.usage)
-            }))
-            .into_response()
+            completion_response(&state.inner.public_model, snapshot, "stop")
+        }
+        Ok(Err(error)) if is_usable_truncation(&error, &snapshot) => {
+            tracing::info!("returning partial model output after max_tokens truncation");
+            state.inner.quota.record(snapshot.usage);
+            completion_response(&state.inner.public_model, snapshot, "length")
         }
         Ok(Err(error)) => {
             tracing::warn!("agent request failed: {error:#}");
@@ -547,7 +536,12 @@ async fn streaming_response(
         match result {
             Ok(Ok(())) => {
                 task_state.inner.quota.record(snapshot.usage);
-                let _ = tx.send(StreamEvent::Stop(snapshot.usage));
+                let _ = tx.send(StreamEvent::Stop(snapshot.usage, "stop"));
+            }
+            Ok(Err(error)) if is_usable_truncation(&error, &snapshot) => {
+                tracing::info!("returning partial streamed output after max_tokens truncation");
+                task_state.inner.quota.record(snapshot.usage);
+                let _ = tx.send(StreamEvent::Stop(snapshot.usage, "length"));
             }
             Ok(Err(error)) => {
                 tracing::warn!("streaming agent request failed: {error:#}");
@@ -604,6 +598,41 @@ async fn run_request(
         None,
     )
     .await
+}
+
+fn completion_response(
+    public_model: &str,
+    snapshot: CollectedOutput,
+    finish_reason: &str,
+) -> Response {
+    Json(json!({
+        "id": completion_id("chatcmpl"),
+        "object": "chat.completion",
+        "created": unix_seconds(),
+        "model": public_model,
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": snapshot.text,
+                "reasoning": optional_string(snapshot.reasoning),
+            },
+            "finish_reason": finish_reason
+        }],
+        "usage": usage_json(snapshot.usage)
+    }))
+    .into_response()
+}
+
+fn is_usable_truncation(error: &anyhow::Error, output: &CollectedOutput) -> bool {
+    if output.text.is_empty() && output.reasoning.is_empty() {
+        return false;
+    }
+    let message = format!("{error:#}").to_lowercase();
+    message.contains("max_tokens")
+        && (message.contains("truncat")
+            || message.contains("length")
+            || message.contains("截断"))
 }
 
 fn request_context(
@@ -771,7 +800,7 @@ enum StreamEvent {
     Role,
     Text(String),
     Reasoning(String),
-    Stop(TokenUsage),
+    Stop(TokenUsage, &'static str),
     Error(String),
     Done,
 }
@@ -798,7 +827,9 @@ fn sse_event(item: StreamEvent, id: &str, model: &str) -> Event {
         StreamEvent::Reasoning(delta) => {
             chunk_event(id, model, json!({"reasoning": delta}), Value::Null, None)
         }
-        StreamEvent::Stop(usage) => chunk_event(id, model, json!({}), json!("stop"), Some(usage)),
+        StreamEvent::Stop(usage, finish_reason) => {
+            chunk_event(id, model, json!({}), json!(finish_reason), Some(usage))
+        }
     }
 }
 
@@ -1054,11 +1085,15 @@ mod tests {
     impl ProviderFactory for FakeFactory {
         fn build(&self, max_tokens: u64) -> Box<dyn Provider> {
             self.max_tokens.store(max_tokens, Ordering::Relaxed);
-            Box::new(FakeProvider)
+            Box::new(FakeProvider {
+                truncated: max_tokens == 1,
+            })
         }
     }
 
-    struct FakeProvider;
+    struct FakeProvider {
+        truncated: bool,
+    }
 
     #[async_trait]
     impl Provider for FakeProvider {
@@ -1075,7 +1110,7 @@ mod tests {
             _messages: &[Message],
             _tools: &[ToolSchema],
         ) -> wisp_llm::Result<Completion> {
-            Ok(fake_completion())
+            Ok(fake_completion(self.truncated))
         }
 
         async fn stream(
@@ -1087,18 +1122,18 @@ mod tests {
             sink.on_reasoning("检索");
             sink.on_text("你好，");
             sink.on_text("世界");
-            let completion = fake_completion();
+            let completion = fake_completion(self.truncated);
             sink.on_usage(completion.usage.clone());
             Ok(completion)
         }
     }
 
-    fn fake_completion() -> Completion {
+    fn fake_completion(truncated: bool) -> Completion {
         Completion {
             content: "你好，世界".into(),
             reasoning: Some("检索".into()),
             tool_calls: vec![],
-            finish_reason: Some("stop".into()),
+            finish_reason: Some(if truncated { "length" } else { "stop" }.into()),
             usage: Usage {
                 input_tokens: 7,
                 output_tokens: 3,
@@ -1198,8 +1233,43 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["object"], "chat.completion");
         assert_eq!(body["choices"][0]["message"]["content"], "你好，世界");
-        assert_eq!(body["choices"][0]["finish_reason"], "stop");
+        assert_eq!(body["choices"][0]["finish_reason"], "length");
         assert_eq!(body["usage"]["total_tokens"], 10);
+        assert_eq!(max_tokens.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn streaming_max_tokens_one_returns_length_usage_and_done() {
+        let max_tokens = Arc::new(AtomicU64::new(0));
+        let router = app(test_state(max_tokens.clone()), 4096);
+        let response = router
+            .oneshot(request(
+                "POST",
+                "/v1/chat/completions",
+                Some("server-secret"),
+                Some(json!({
+                    "messages": [{"role": "user", "content": "probe"}],
+                    "stream": true,
+                    "max_tokens": 1
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let text = String::from_utf8(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(text.contains("\"finish_reason\":\"length\""));
+        assert!(text.contains("\"total_tokens\":10"));
+        assert!(!text.contains("\"error\""));
+        assert!(text.contains("[DONE]"));
         assert_eq!(max_tokens.load(Ordering::Relaxed), 1);
     }
 
