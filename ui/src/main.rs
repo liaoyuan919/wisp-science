@@ -502,13 +502,13 @@ fn acp_select_options(option: &serde_json::Value) -> Vec<(String, String)> {
 }
 
 fn remove_optimistic_send_rows(rows: &mut Vec<ChatItem>, display_message: &str) {
-    let Some(index) = rows
-        .iter()
-        .rposition(|item| matches!(item, ChatItem::User(value) | ChatItem::QueuedUser(value) if value == display_message))
-    else {
+    let Some(index) = rows.iter().rposition(|item| {
+        matches!(item, ChatItem::User(value) if value == display_message)
+            || matches!(item, ChatItem::QueuedUser { text, .. } if text == display_message)
+    }) else {
         return;
     };
-    if matches!(rows.get(index), Some(ChatItem::QueuedUser(_))) {
+    if matches!(rows.get(index), Some(ChatItem::QueuedUser { .. })) {
         rows.remove(index);
         return;
     }
@@ -518,13 +518,13 @@ fn remove_optimistic_send_rows(rows: &mut Vec<ChatItem>, display_message: &str) 
 }
 
 fn mark_optimistic_send_failed(rows: &mut Vec<ChatItem>, display_message: &str, error: &str) {
-    let Some(index) = rows
-        .iter()
-        .rposition(|item| matches!(item, ChatItem::User(value) | ChatItem::QueuedUser(value) if value == display_message))
-    else {
+    let Some(index) = rows.iter().rposition(|item| {
+        matches!(item, ChatItem::User(value) if value == display_message)
+            || matches!(item, ChatItem::QueuedUser { text, .. } if text == display_message)
+    }) else {
         return;
     };
-    if matches!(rows.get(index), Some(ChatItem::QueuedUser(_))) {
+    if matches!(rows.get(index), Some(ChatItem::QueuedUser { .. })) {
         rows[index] = ChatItem::User(display_message.to_string());
         rows.insert(
             index + 1,
@@ -765,7 +765,9 @@ fn App() -> impl IntoView {
         });
     });
     let send_mode_menu_open = create_rw_signal(false);
-    let send_guide_open = create_rw_signal(false);
+    // Queue (#433): monotonic key for optimistic queued bubbles, shared with the
+    // backend queue item so edit/cancel/cut-in target the same row.
+    let queue_seq = create_rw_signal(0u64);
     let side_chat_input = create_rw_signal(String::new());
     let side_chat_items = create_rw_signal::<Vec<ChatItem>>(vec![]);
     let side_chat_busy = create_rw_signal(false);
@@ -2367,10 +2369,42 @@ fn App() -> impl IntoView {
         let active = active_session.get();
         let branch = action == ComposerSendAction::BranchNew;
         let queued = !branch && active.as_ref().is_some_and(|id| running.get().contains(id));
-        // Guide (#410): a plain send into a busy session asks whether to queue
-        // behind the running task or interrupt it, instead of silently queueing.
+        // Queue (#433): a plain send into a busy session parks behind the
+        // running turn — editable/cancellable until the driver runs it — instead
+        // of a dialog. Cut-in / interrupt-replace are explicit dropdown choices.
         if queued && action == ComposerSendAction::Normal {
-            send_guide_open.set(true);
+            let Some(session) = active.clone() else { return };
+            let qid = queue_seq.get() + 1;
+            queue_seq.set(qid);
+            input.set(String::new());
+            attachments.set(vec![]);
+            composer_references.set(vec![]);
+            composer_quotes.set(vec![]);
+            picker_mode.set(None);
+            route_items(active_session, items, transcripts, &session, |rows| {
+                rows.push(ChatItem::QueuedUser {
+                    id: qid,
+                    text: display_message.clone(),
+                });
+            });
+            force_chat_bottom();
+            let enqueue_msg = display_message.clone();
+            spawn_local(async move {
+                let args = to_value(&EnqueueTurnArgs {
+                    session_id: session.clone(),
+                    id: qid,
+                    message: enqueue_msg.clone(),
+                    attachments: paths,
+                    references: reference_args,
+                })
+                .unwrap();
+                if invoke_checked("enqueue_turn", args).await.is_err() {
+                    route_items(active_session, items, transcripts, &session, |rows| {
+                        remove_optimistic_send_rows(rows, &enqueue_msg);
+                    });
+                    status.set(t(locale.get(), "status.send_failed").into());
+                }
+            });
             return;
         }
         let agent_id = active_acp_agent_id.get();
@@ -2435,7 +2469,13 @@ fn App() -> impl IntoView {
             });
             route_items(active_session, items, transcripts, &id, |rows| {
                 if queued {
-                    rows.push(ChatItem::QueuedUser(display_message.clone()));
+                    // Cut-in (#433): a direct guide-append from the dropdown folds
+                    // into the running turn immediately, so it carries no queue id
+                    // (id 0 = transient, no edit/cancel controls).
+                    rows.push(ChatItem::QueuedUser {
+                        id: 0,
+                        text: display_message.clone(),
+                    });
                 } else {
                     rows.push(ChatItem::User(display_message.clone()));
                     rows.push(ChatItem::Assistant {
@@ -2729,6 +2769,73 @@ fn App() -> impl IntoView {
             });
         }
     };
+
+    // Queue (#433): edit / cancel / cut-in a parked follow-up from its bubble.
+    let on_queue = Callback::new(move |op: QueueOp| {
+        let sid = active_session.get_untracked().unwrap_or_default();
+        if sid.is_empty() {
+            return;
+        }
+        let (id, action, message): (u64, &'static str, Option<String>) = match op {
+            QueueOp::Cancel(id) => {
+                route_items(active_session, items, transcripts, &sid, |rows| {
+                    rows.retain(
+                        |it| !matches!(it, ChatItem::QueuedUser { id: qid, .. } if *qid == id),
+                    );
+                });
+                (id, "cancel", None)
+            }
+            // The bubble stays; it promotes to a User row when the running turn
+            // folds it in and emits the matching User event.
+            QueueOp::CutIn(id) => (id, "cutin", None),
+            QueueOp::Save(id, text) => {
+                route_items(active_session, items, transcripts, &sid, |rows| {
+                    if let Some(ChatItem::QueuedUser { text: slot, .. }) = rows
+                        .iter_mut()
+                        .find(|it| matches!(it, ChatItem::QueuedUser { id: qid, .. } if *qid == id))
+                    {
+                        *slot = text.clone();
+                    }
+                });
+                (id, "edit", Some(text))
+            }
+            // Reorder (#433): swap with the neighbouring queued row locally, then
+            // mirror it server-side. Queued rows sit contiguously at the tail, so
+            // a neighbour that is not a QueuedUser means we are at an end → no-op.
+            QueueOp::MoveUp(id) | QueueOp::MoveDown(id) => {
+                let up = matches!(op, QueueOp::MoveUp(_));
+                route_items(active_session, items, transcripts, &sid, |rows| {
+                    let Some(i) = rows
+                        .iter()
+                        .position(|it| matches!(it, ChatItem::QueuedUser { id: qid, .. } if *qid == id))
+                    else {
+                        return;
+                    };
+                    let target = if up {
+                        i.checked_sub(1)
+                    } else {
+                        (i + 1 < rows.len()).then_some(i + 1)
+                    };
+                    if let Some(j) = target {
+                        if matches!(rows.get(j), Some(ChatItem::QueuedUser { .. })) {
+                            rows.swap(i, j);
+                        }
+                    }
+                });
+                (id, if up { "move_up" } else { "move_down" }, None)
+            }
+        };
+        spawn_local(async move {
+            let args = to_value(&QueuedTurnActionArgs {
+                session_id: sid,
+                id,
+                action,
+                message,
+            })
+            .unwrap();
+            let _ = invoke("queued_turn_action", args).await;
+        });
+    });
 
     let resume_turn = {
         let locale = locale;
@@ -7152,7 +7259,7 @@ fn App() -> impl IntoView {
                                             {render_item(
                                                 i, &item, &arts, on_artifact_select, on_file_link,
                                                 run_records, busy.read_only(), compact_assistant, active_acp_agent_id.get().is_none(), edit_message, branch_message, sid,
-                                                respond_confirm, on_resume,
+                                                respond_confirm, on_resume, on_queue,
                                             )}
                                         </div>
                                     }.into_view()
@@ -8325,7 +8432,7 @@ fn App() -> impl IntoView {
                             })}
                             <div class="send-split">
                                 <button class="send" disabled=composer_blocked on:click=move |_| send.call(ComposerSendAction::Normal)>
-                                    {move || t(locale.get(), if busy.get() { "composer.guide_button" } else { "composer.send" })}
+                                    {move || t(locale.get(), if busy.get() { "composer.queue_button" } else { "composer.send" })}
                                 </button>
                                 <button type="button" class="send-menu-toggle"
                                     disabled=composer_blocked
@@ -8337,6 +8444,28 @@ fn App() -> impl IntoView {
                                 {move || send_mode_menu_open.get().then(|| view! {
                                     <div class="send-menu-backdrop" on:click=move |_| send_mode_menu_open.set(false)></div>
                                     <div class="send-mode-menu">
+                                        {move || (busy.get() && active_acp_agent_id.get().is_none()).then(|| view! {
+                                            <button type="button" class="send-mode-item"
+                                                disabled=composer_blocked
+                                                on:click=move |_| {
+                                                    send_mode_menu_open.set(false);
+                                                    send.call(ComposerSendAction::GuideAppend);
+                                                }>
+                                                <span class="compose-item-icon">{compose_icon("up")}</span>
+                                                <span>{move || t(locale.get(), "composer.cut_in_now")}</span>
+                                            </button>
+                                        })}
+                                        {move || busy.get().then(|| view! {
+                                            <button type="button" class="send-mode-item"
+                                                disabled=composer_blocked
+                                                on:click=move |_| {
+                                                    send_mode_menu_open.set(false);
+                                                    send.call(ComposerSendAction::InterruptReplace);
+                                                }>
+                                                <span class="compose-item-icon">{compose_icon("sync")}</span>
+                                                <span>{move || t(locale.get(), "composer.interrupt_replace")}</span>
+                                            </button>
+                                        })}
                                         <button type="button" class="send-mode-item"
                                             disabled=move || side_chat_busy.get()
                                             on:click=move |_| {
@@ -9946,35 +10075,6 @@ fn App() -> impl IntoView {
             }.into_view()
         })}
 
-        {move || send_guide_open.get().then(|| {
-            // ACP agents cannot take mid-turn guidance or roll back context,
-            // so the dialog promises only what that session can deliver.
-            let acp = active_acp_agent_id.get().is_some();
-            let key = move |native: &'static str, acp_key: &'static str| {
-                if acp { acp_key } else { native }
-            };
-            view! {
-            <div class="overlay" data-testid="send-guide-overlay">
-                <div class="modal confirm-modal" data-testid="send-guide-modal">
-                    <h2>{move || t(locale.get(), "composer.guide_title")}</h2>
-                    <div class="hint">{move || t(locale.get(), key("composer.guide_hint", "composer.guide_hint_acp"))}</div>
-                    <div class="row">
-                        <button on:click=move |_| send_guide_open.set(false)>
-                            {move || t(locale.get(), "settings.cancel")}
-                        </button>
-                        <button on:click=move |_| {
-                            send_guide_open.set(false);
-                            send.call(ComposerSendAction::InterruptReplace);
-                        }>{move || t(locale.get(), key("composer.guide_replace", "composer.guide_replace_acp"))}</button>
-                        <button class="primary" on:click=move |_| {
-                            send_guide_open.set(false);
-                            send.call(ComposerSendAction::GuideAppend);
-                        }>{move || t(locale.get(), key("composer.guide_queue", "composer.guide_queue_acp"))}</button>
-                    </div>
-                </div>
-            </div>
-        }})}
-
         {move || show_proj_settings.get().then(|| view! {
             <div class="overlay">
                 <div class="modal proj-settings-modal">
@@ -10270,7 +10370,7 @@ fn renders_nothing(item: &ChatItem) -> bool {
 fn class_for(item: &ChatItem) -> &'static str {
     match item {
         ChatItem::User(_) => "msg user",
-        ChatItem::QueuedUser(_) => "msg user queued",
+        ChatItem::QueuedUser { .. } => "msg user queued",
         ChatItem::Assistant { text, .. } if text.starts_with("Error: ") => "tool-wrap",
         ChatItem::Assistant { .. } => "msg assistant",
         ChatItem::Reasoning(_) => "msg reasoning",
@@ -10797,6 +10897,7 @@ fn render_item(
     session_id: String,
     on_approval: Callback<(String, bool, Option<String>, String)>,
     on_resume: Callback<usize>,
+    on_queue: Callback<QueueOp>,
 ) -> impl IntoView {
     let locale = use_locale();
     match item {
@@ -10812,11 +10913,13 @@ fn render_item(
                 on_file=on_file
             />
         }.into_view(),
-        ChatItem::QueuedUser(s) => view! {
-            <div class="role">{move || t(locale.get(), "composer.queued")}</div>
-            <div class="user-bubble queued-bubble">
-                <div class="body">{s.clone()}</div>
-            </div>
+        ChatItem::QueuedUser { id, text } => view! {
+            <QueuedMessage
+                id=*id
+                text=text.clone()
+                can_cut_in=can_modify
+                on_queue=on_queue
+            />
         }.into_view(),
         ChatItem::Assistant { text, .. } if text.trim().is_empty() => view! {}.into_view(),
         ChatItem::Assistant { text, .. } if text.starts_with("Error: ") => {

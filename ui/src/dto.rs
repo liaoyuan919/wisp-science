@@ -195,9 +195,11 @@ fn default_evidence_coverage() -> u8 {
 #[derive(Clone)]
 pub(crate) enum ChatItem {
     User(String),
-    /// A user turn accepted while the same session is still running.  It stays
-    /// outside the active turn until the backend emits the matching User event.
-    QueuedUser(String),
+    /// A user turn queued (#433) while the same session is still running. It
+    /// waits, editable/cancellable, until the backend drains it into a fresh
+    /// turn (or a cut-in folds it into the running one) and emits the matching
+    /// User event. `id` is the frontend-assigned key the queue commands target.
+    QueuedUser { id: u64, text: String },
     Assistant {
         text: String,
         model: Option<String>,
@@ -266,7 +268,7 @@ impl ChatItem {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         match self {
             Self::User(s) => (0u8, s).hash(&mut h),
-            Self::QueuedUser(s) => (1u8, s).hash(&mut h),
+            Self::QueuedUser { id, text } => (1u8, id, text).hash(&mut h),
             Self::Assistant {
                 text,
                 model,
@@ -713,6 +715,30 @@ pub(crate) struct SendMessageArgs {
     /// Guide (#410): roll back the interrupted turn before sending.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) replace: Option<bool>,
+}
+
+/// Queue (#433): park a follow-up turn behind the running one.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnqueueTurnArgs {
+    pub(crate) session_id: String,
+    pub(crate) id: u64,
+    pub(crate) message: String,
+    #[serde(default)]
+    pub(crate) attachments: Vec<String>,
+    #[serde(default)]
+    pub(crate) references: Vec<ComposerReferenceArg>,
+}
+
+/// Queue (#433): edit / cancel / cut-in a parked follow-up by id.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct QueuedTurnActionArgs {
+    pub(crate) session_id: String,
+    pub(crate) id: u64,
+    pub(crate) action: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) message: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
