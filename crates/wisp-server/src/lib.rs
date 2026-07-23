@@ -806,16 +806,10 @@ fn sse_event(item: StreamEvent, id: &str, model: &str) -> Event {
         StreamEvent::Text(delta) => {
             chunk_event(id, model, json!({"content": delta}), Value::Null, None)
         }
-        StreamEvent::Reasoning(delta) => chunk_event(
-            id,
-            model,
-            json!({"reasoning": delta}),
-            Value::Null,
-            None,
-        ),
-        StreamEvent::Stop(usage) => {
-            chunk_event(id, model, json!({}), json!("stop"), Some(usage))
+        StreamEvent::Reasoning(delta) => {
+            chunk_event(id, model, json!({"reasoning": delta}), Value::Null, None)
         }
+        StreamEvent::Stop(usage) => chunk_event(id, model, json!({}), json!("stop"), Some(usage)),
     }
 }
 
@@ -995,7 +989,8 @@ impl Tool for PublicMcpTool {
     }
 
     async fn run(&self, args: &Value, _env: &dyn ToolEnv) -> ToolResult {
-        match tokio::time::timeout(self.timeout, self.client.tool_call_rich(&self.name, args)).await {
+        match tokio::time::timeout(self.timeout, self.client.tool_call_rich(&self.name, args)).await
+        {
             Ok(Ok(result)) => bounded_mcp_result(result, self.max_result_chars),
             Ok(Err(error)) => ToolResult::fail(format!("mcp {} error: {error}", self.name)),
             Err(_) => ToolResult::fail(format!(
@@ -1184,12 +1179,7 @@ mod tests {
         );
 
         let allowed = router
-            .oneshot(request(
-                "GET",
-                "/v1/models",
-                Some("server-secret"),
-                None,
-            ))
+            .oneshot(request("GET", "/v1/models", Some("server-secret"), None))
             .await
             .unwrap();
         assert_eq!(allowed.status(), StatusCode::OK);
@@ -1335,7 +1325,11 @@ mod tests {
             .await
             .unwrap();
         let tools = client.tools_list().await.unwrap();
-        assert!(tools.len() > 200, "unexpected catalog size: {}", tools.len());
+        assert!(
+            tools.len() > 200,
+            "unexpected catalog size: {}",
+            tools.len()
+        );
         assert!(tools.iter().all(is_read_only));
         let names = tools
             .iter()
@@ -1350,13 +1344,8 @@ mod tests {
             assert!(!names.contains(gated), "license-gated tool leaked: {gated}");
         }
         let expected = tools.len();
-        let (registry, approved) = public_registry(
-            Arc::new(client),
-            tools,
-            Duration::from_secs(1),
-            1024,
-        )
-        .unwrap();
+        let (registry, approved) =
+            public_registry(Arc::new(client), tools, Duration::from_secs(1), 1024).unwrap();
         assert_eq!(approved, expected);
         assert_eq!(
             registry
