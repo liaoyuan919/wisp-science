@@ -633,16 +633,20 @@ paths. To watch a submitted Run or wait for its result, call `monitor_run` \
 exactly once instead of repeatedly calling `get_run`. For persistent interactive analysis, call `python` or `r` with the \
 matching `context_id`; omitting it selects `local`. Interpreter paths come from \
 the execution context's saved settings or probe result, not shell environment \
-changes. Use `set_runtime_interpreter` when the user provides a different \
-Python or R executable.\n\
-**SSH connectivity policy:** remote work is only allowed after a successful Probe \
+changes. For one-off `run_in_context` scripts, use the exact probed interpreter \
+path shown in capabilities; do not guess `python` when the probe found `python3`. \
+Use `set_runtime_interpreter` when the user provides a different Python or R executable.\n\
+**SSH authentication policy:** remote work is only allowed after a successful Probe \
 on the registered environment. Always use `run_in_context`, `python`, `r`, \
 `configure_ssh_trust`, or `transfer_between_contexts` with \
 the matching `context_id` so Wisp uses the configured alias/user/port/identity \
-exactly. Free-form shell `ssh`/`scp` is disabled. If connectivity is unknown or \
-failed: STOP, tell the user to check the SSH server and Probe again — do not invent \
-`ssh -i`, ports, or `StrictHostKeyChecking` options. After one failure, do not \
-retry; repeated attempts look like SSH brute force and can ban the user's IP.\n\n",
+exactly. Free-form shell `ssh`/`scp` is disabled. If SSH authentication or host-key \
+verification fails: STOP, report it once, and ask the user to fix the saved credentials \
+or trust and Probe again — do not invent `ssh -i`, ports, or `StrictHostKeyChecking` \
+options. Do not retry a rejected login because repeated authentication attempts can ban \
+the user's IP. A successful SSH connection followed by any remote command/application \
+failure—including exit 127—is normal exploration: inspect stderr, correct the command \
+using the probed capabilities, and continue.\n\n",
     );
     for ctx in contexts {
         let cfg: serde_json::Value = serde_json::from_str(&ctx.config_json).unwrap_or_default();
@@ -714,7 +718,7 @@ retry; repeated attempts look like SSH brute force and can ban the user's IP.\n\
             .find(|(id, _)| id == &ctx.id)
         {
             s.push_str(&format!(
-                " — CONNECTIVITY GATE OPEN: blocked after prior failure ({reason}). Do not attempt any SSH to this host"
+                " — AUTHENTICATION GATE OPEN: blocked after a rejected login or host trust failure ({reason}). Do not attempt another SSH login to this host"
             ));
         }
         s.push('\n');
@@ -766,12 +770,22 @@ fn capability_summary(capabilities_json: &str) -> Option<String> {
     {
         parts.push(format!("scheduler: {scheduler}"));
     }
-    if let Some(python) = caps
-        .get("python")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.trim().is_empty())
-    {
-        parts.push(python.into());
+    let python_executable = caps
+        .get("python_executable")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty());
+    let python_version = caps
+        .get("python_version")
+        .or_else(|| caps.get("python"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty());
+    match (python_executable, python_version) {
+        (Some(executable), Some(version)) => {
+            parts.push(format!("python: {executable} ({version})"));
+        }
+        (Some(executable), None) => parts.push(format!("python: {executable}")),
+        (None, Some(version)) => parts.push(version.into()),
+        (None, None) => {}
     }
     if parts.is_empty() {
         None
@@ -1436,8 +1450,8 @@ Host -unsafe bad/name !negated
             "remote path warning missing:\n{s}"
         );
         assert!(
-            s.contains("SSH connectivity policy"),
-            "connectivity policy missing:\n{s}"
+            s.contains("SSH authentication policy"),
+            "authentication policy missing:\n{s}"
         );
         assert!(
             s.contains("Free-form shell `ssh`/`scp` is disabled"),
@@ -1450,6 +1464,10 @@ Host -unsafe bad/name !negated
         assert!(
             s.contains("successful Probe"),
             "probe-first guidance missing:\n{s}"
+        );
+        assert!(
+            s.contains("including exit 127") && s.contains("correct the command"),
+            "ordinary command failure recovery guidance missing:\n{s}"
         );
         assert!(s.contains("slurm; sbatch"), "notes missing:\n{s}");
     }
@@ -1692,7 +1710,9 @@ Host -unsafe bad/name !negated
             "arch": "x86_64",
             "gpu_summary": "GPU 0: NVIDIA A100",
             "scheduler": "slurm",
-            "python": "Python 3.11.8"
+            "python": "Python 3.11.8",
+            "python_executable": "/usr/bin/python3",
+            "python_version": "Python 3.11.8"
         })
         .to_string();
 
@@ -1700,6 +1720,9 @@ Host -unsafe bad/name !negated
         assert!(s.contains("Linux/x86_64"), "os/arch missing:\n{s}");
         assert!(s.contains("GPU 0: NVIDIA A100"), "gpu missing:\n{s}");
         assert!(s.contains("scheduler: slurm"), "scheduler missing:\n{s}");
-        assert!(s.contains("Python 3.11.8"), "python missing:\n{s}");
+        assert!(
+            s.contains("python: /usr/bin/python3 (Python 3.11.8)"),
+            "python executable missing:\n{s}"
+        );
     }
 }

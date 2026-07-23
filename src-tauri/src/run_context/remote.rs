@@ -868,6 +868,7 @@ pub(super) fn permanent_remote_start_error(error: &str) -> bool {
         "no route to host",
         "network is unreachable",
         "kex_exchange_identification",
+        "ssh authentication gate blocked",
         "ssh connectivity gate blocked",
     ]
     .iter()

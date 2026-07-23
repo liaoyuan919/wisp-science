@@ -275,11 +275,17 @@ async fn wait_for_terminal(
 }
 
 fn run_wait_result(run: wisp_store::RunRecord, detached: bool) -> ToolResult {
+    let succeeded = run.status == wisp_store::RunStatus::Succeeded;
     let mut value = serde_json::to_value(run).unwrap_or_default();
     if detached {
         value["wait_detached"] = serde_json::Value::Bool(true);
     }
-    ToolResult::ok(value.to_string())
+    let content = value.to_string();
+    if detached || succeeded {
+        ToolResult::ok(content)
+    } else {
+        ToolResult::fail(content)
+    }
 }
 
 pub struct CancelRunTool {

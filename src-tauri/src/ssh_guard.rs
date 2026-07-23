@@ -1,19 +1,19 @@
-//! Process-wide SSH connectivity gate.
+//! Process-wide SSH authentication gate.
 //!
-//! After a hard connectivity/auth failure, further managed SSH attempts for the
-//! same context fail immediately without contacting the server. This protects
-//! remote hosts (and the caller's IP) from AI tool loops that look like SSH
-//! brute-force probes. A successful connection or a user-driven probe clears
-//! the block.
+//! After an authentication/trust failure, further managed SSH attempts for the
+//! same context fail immediately without contacting the server. Remote command
+//! and transport failures do not open the gate: correcting failed commands is
+//! normal exploration, while only repeated login attempts resemble brute force.
+//! A successful connection or a user-driven probe clears the block.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// How long a host stays blocked after a connectivity failure.
+/// How long a host stays blocked after an authentication failure.
 const COOLDOWN: Duration = Duration::from_secs(15 * 60);
 
-const BLOCKED_MARKER: &str = "SSH connectivity gate blocked";
+const BLOCKED_MARKER: &str = "SSH authentication gate blocked";
 
 #[derive(Debug, Clone)]
 struct Block {
@@ -38,35 +38,20 @@ fn normalize_key(context_id: &str) -> String {
     }
 }
 
-/// True when the error indicates SSH transport/auth failure rather than a
-/// remote command that simply returned non-zero after a successful login.
-pub fn is_connectivity_failure(error: &str) -> bool {
+/// True only when another connection would repeat rejected credentials or an
+/// untrusted host key. Remote command and ordinary transport failures are not
+/// authentication failures.
+pub fn is_authentication_failure(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     [
-        "connection timed out",
-        "connect timed out",
-        "operation timed out",
-        "connection refused",
-        "connection reset",
-        "connection closed by remote host",
-        "no route to host",
-        "network is unreachable",
-        "could not resolve hostname",
-        "could not resolve host",
-        "name or service not known",
         "permission denied (publickey",
         "permission denied (keyboard-interactive",
         "permission denied (password",
         "too many authentication failures",
+        "ssh key authentication failed",
+        "ssh password authentication failed",
         "host key verification failed",
-        "no such identity",
-        "identity file",
-        "not accessible: no such file or directory",
-        "kex_exchange_identification",
-        "banner exchange",
-        "ssh: connect to host",
-        "ssh_dispatch_run_fatal",
-        "ssh connectivity gate blocked",
+        "ssh authentication gate blocked",
     ]
     .iter()
     .any(|needle| error.contains(needle))
@@ -78,8 +63,8 @@ pub fn blocked_message(context_id: &str, reason: &str) -> String {
          from repeated login attempts (which remote hosts treat as SSH brute force). \
          Do NOT retry with shell `ssh`, alternate `-i` keys, StrictHostKeyChecking changes, \
          `python`/`r` on this context_id, or additional `run_in_context` calls. \
-         Report the failure once and ask the user to fix connectivity (unlock IP, fix key, \
-         re-probe the environment) then retry manually. Previous error: {reason}"
+         Report the failure once and ask the user to fix the saved credentials, user/key, \
+         or host trust, then re-probe before retrying. Previous error: {reason}"
     )
 }
 
@@ -103,7 +88,7 @@ pub fn assert_allowed(context_id: &str) -> Result<(), String> {
 
 pub fn record_failure(context_id: &str, error: &str) {
     let key = normalize_key(context_id);
-    if key.is_empty() || !is_connectivity_failure(error) {
+    if key.is_empty() || !is_authentication_failure(error) {
         return;
     }
     // Avoid nesting the gate message as the "previous" reason.
@@ -267,7 +252,7 @@ pub fn preflight_shell(cmd: &str) -> Result<(), String> {
 
 /// After a shell command finishes, open the gate for targets it failed to reach.
 pub fn note_shell_outcome(cmd: &str, success: bool, detail: &str) {
-    if success || !shell_looks_like_ssh(cmd) || !is_connectivity_failure(detail) {
+    if success || !shell_looks_like_ssh(cmd) || !is_authentication_failure(detail) {
         return;
     }
     let targets = shell_ssh_targets(cmd);
@@ -290,13 +275,10 @@ mod tests {
     }
 
     #[test]
-    fn gate_blocks_after_connectivity_failure_and_clears_on_success() {
+    fn gate_blocks_after_authentication_failure_and_clears_on_success() {
         let id = unique_id("block");
         assert!(assert_allowed(&id).is_ok());
-        record_failure(
-            &id,
-            "ssh: connect to host example port 22: Connection timed out",
-        );
+        record_failure(&id, "Permission denied (publickey,password).");
         let err = assert_allowed(&id).unwrap_err();
         assert!(err.contains(BLOCKED_MARKER), "{err}");
         assert!(err.contains("Do NOT retry"), "{err}");
@@ -305,13 +287,16 @@ mod tests {
     }
 
     #[test]
-    fn non_connectivity_errors_do_not_open_the_gate() {
+    fn command_and_transport_errors_do_not_open_the_authentication_gate() {
         let id = unique_id("cmdfail");
-        record_failure(
-            &id,
+        for error in [
             "ls: cannot access '/missing': No such file or directory",
-        );
-        assert!(assert_allowed(&id).is_ok());
+            "ssh: connect to host example port 22: Connection timed out",
+            "Connection refused",
+        ] {
+            record_failure(&id, error);
+            assert!(assert_allowed(&id).is_ok(), "{error}");
+        }
     }
 
     #[test]
@@ -335,14 +320,10 @@ mod tests {
     }
 
     #[test]
-    fn note_shell_outcome_opens_gate_for_parsed_target() {
+    fn note_shell_authentication_failure_opens_gate_for_parsed_target() {
         let alias = format!("host-{}", uuid::Uuid::new_v4());
         let cmd = format!("ssh -o ConnectTimeout=10 {alias} true");
-        note_shell_outcome(
-            &cmd,
-            false,
-            &format!("ssh: connect to host {alias} port 22: Connection timed out"),
-        );
+        note_shell_outcome(&cmd, false, "Permission denied (publickey).");
         let err = assert_allowed(&alias).unwrap_err();
         assert!(err.contains(BLOCKED_MARKER), "{err}");
         clear(&alias);

@@ -1,8 +1,9 @@
-# Transfers between SSH contexts
+# Transfers from SSH contexts
 
-Wisp transfers one exact file or directory between two registered, probed SSH
-execution contexts. Agent-generated free-form `ssh`, `scp`, and
-`rsync -e ssh` commands remain disabled.
+Wisp transfers one exact file or directory from a registered, probed SSH
+execution context either to another SSH context or to the local machine.
+Agent-generated free-form `ssh`, `scp`, and `rsync -e ssh` commands remain
+disabled.
 
 ## Routes
 
@@ -15,8 +16,22 @@ execution contexts. Agent-generated free-form `ssh`, `scp`, and
   then uploads with B's separately configured credentials. The temporary
   directory is removed after success, failure, or cancellation.
 
-The source and destination paths must be exact absolute or `~/` paths. Globs
-and filesystem/home roots are rejected. Neither route adds `--delete`.
+For SSH-to-SSH transfers, the source and destination paths must be exact
+absolute or `~/` paths. Globs and filesystem/home roots are rejected. Neither
+route adds `--delete`.
+
+## Download to the local machine
+
+Set `destination_context_id` to `local` and provide the exact new absolute
+local file or directory path. If the user has not chosen that path, ask before
+calling the tool. Local downloads accept `route=auto|relay` and
+`transport=auto|scp`.
+
+Wisp authenticates through the selected source context once and downloads with
+scp into a private staging directory beside the destination. After a complete
+download, it renames the staged item to the requested path. Existing
+destinations are rejected and partial downloads are removed after failure,
+cancellation, or timeout.
 
 ## User-approved trust
 
@@ -40,6 +55,7 @@ themselves; it does not generate or copy a key.
 ## Current limitations
 
 - Direct rsync is resumable at rsync's file-transfer level; scp relay is not.
+- SSH-to-local downloads use scp and are not resumable yet.
 - Relay temporarily needs local free space approximately equal to the source.
 - scp recursive copies follow symlinks according to the installed OpenSSH
   implementation.

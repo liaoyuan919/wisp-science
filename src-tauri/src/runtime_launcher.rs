@@ -208,7 +208,7 @@ impl RuntimeLauncher for TauriRuntimeLauncher {
                     .await
                     .map_err(|error| {
                         if context.kind == wisp_store::ExecutionContextKind::Ssh
-                            && crate::ssh_guard::is_connectivity_failure(&error)
+                            && crate::ssh_guard::is_authentication_failure(&error)
                         {
                             crate::ssh_guard::record_failure(&context.id, &error);
                         }
@@ -271,7 +271,7 @@ impl RuntimeLauncher for TauriRuntimeLauncher {
                 crate::ssh_hosts::cleanup_password_auth_env(&ssh_auth_envs);
                 if context.kind == wisp_store::ExecutionContextKind::Ssh {
                     let detail = error.to_string();
-                    if crate::ssh_guard::is_connectivity_failure(&detail) {
+                    if crate::ssh_guard::is_authentication_failure(&detail) {
                         crate::ssh_guard::record_failure(&context.id, &detail);
                     }
                 }

@@ -131,7 +131,8 @@ impl Tool for UpdatePlanTool {
              every call — it replaces the previous plan, it is not a delta. Reach for it only when the \
              work is genuinely multi-stage (several analyses to sequence, long compute, a pipeline worth \
              showing the user); skip it for lookups, a single computation, or reading one file. Keep at \
-             most one step 'in_progress' at a time.",
+             most one step 'in_progress' at a time. A failed or cancelled tool call does not complete its \
+             related step; keep that step in_progress/pending or revise the plan.",
             json!({
                 "type": "object",
                 "properties": {

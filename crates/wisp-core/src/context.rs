@@ -56,6 +56,11 @@ pub struct ContextManager {
     /// Set once the warning fired; reset when back under the threshold.
     warned: bool,
     pub runtime_injections: Vec<Message>,
+    /// Persisted prefix and ephemeral messages used by the latest model call.
+    /// Keeping only the prefix length avoids cloning the full conversation on
+    /// every agent-loop iteration.
+    last_request_message_count: Option<usize>,
+    last_request_runtime_injections: Vec<Message>,
 }
 
 impl ContextManager {
@@ -66,6 +71,8 @@ impl ContextManager {
             warn_threshold: (max_context as f64 * 0.8) as usize,
             warned: false,
             runtime_injections: vec![],
+            last_request_message_count: None,
+            last_request_runtime_injections: vec![],
         }
     }
 
@@ -77,6 +84,7 @@ impl ContextManager {
     }
     pub fn clear(&mut self) {
         self.messages.clear();
+        self.invalidate_last_request();
     }
 
     pub fn append_system(&mut self, content: impl Into<String>) {
@@ -95,6 +103,24 @@ impl ContextManager {
     }
     pub fn clear_runtime_injections(&mut self) {
         self.runtime_injections.clear();
+    }
+
+    fn invalidate_last_request(&mut self) {
+        self.last_request_message_count = None;
+        self.last_request_runtime_injections.clear();
+    }
+
+    /// Reconstruct the provider-agnostic messages prepared for the latest
+    /// model call, even after runtime injections were cleared and the model
+    /// response was appended to persisted history.
+    pub fn last_request(&self) -> Option<Vec<Message>> {
+        let count = self.last_request_message_count?;
+        if count > self.messages.len() {
+            return None;
+        }
+        let mut messages = self.messages[..count].to_vec();
+        messages.extend(self.last_request_runtime_injections.iter().cloned());
+        Some(messages)
     }
 
     pub fn append_assistant(
@@ -129,6 +155,7 @@ impl ContextManager {
     }
 
     pub fn load(&mut self, path: &Path) {
+        self.invalidate_last_request();
         match std::fs::read_to_string(path) {
             Ok(s) => match serde_json::from_str::<Vec<Message>>(&s) {
                 Ok(v) => self.messages = v,
@@ -462,6 +489,7 @@ work in progress. Use this structure:
         provider: &dyn Provider,
         archive_path: &Path,
     ) -> Result<(usize, usize), String> {
+        self.invalidate_last_request();
         let before = self.total_tokens();
         self.save(archive_path);
         if !archive_path.is_file() {
@@ -512,6 +540,9 @@ work in progress. Use this structure:
             self.warned = true;
             output.context_warning(total, self.max_context);
         }
+        self.last_request_message_count = Some(self.messages.len());
+        self.last_request_runtime_injections
+            .clone_from(&self.runtime_injections);
         if self.runtime_injections.is_empty() {
             std::borrow::Cow::Borrowed(&self.messages)
         } else {
@@ -762,6 +793,30 @@ mod tests {
         ctx.append_user("y".repeat(4_000));
         ctx.prepare_for_api(&counter);
         assert_eq!(counter.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn last_request_preserves_cleared_injections_and_excludes_the_response() {
+        let counter = WarnCounter(std::sync::atomic::AtomicUsize::new(0));
+        let mut ctx = ContextManager::new(100_000);
+        ctx.append_system("system");
+        ctx.append_user("question");
+        ctx.inject_user("runtime compute context");
+
+        let prepared = ctx.prepare_for_api(&counter).into_owned();
+        ctx.append_assistant("answer".into(), vec![], None);
+        ctx.clear_runtime_injections();
+
+        let captured = ctx.last_request().expect("last request");
+        assert_eq!(
+            serde_json::to_string(&captured).unwrap(),
+            serde_json::to_string(&prepared).unwrap()
+        );
+        assert_eq!(captured.len(), 3);
+        assert_eq!(captured[2].content.as_text(), "runtime compute context");
+        assert!(!captured
+            .iter()
+            .any(|message| message.content.as_text() == "answer"));
     }
 
     #[test]

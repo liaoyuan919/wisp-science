@@ -806,7 +806,12 @@ impl Store {
             let folder_id: Option<String> = row.try_get("folder_id")?;
             let custom_title: Option<String> = row.try_get("custom_title")?;
             let first_user: Option<String> = row.try_get("first_user")?;
-            out.push((id, session_display_title(custom_title, first_user), created, folder_id));
+            out.push((
+                id,
+                session_display_title(custom_title, first_user),
+                created,
+                folder_id,
+            ));
         }
         Ok(out)
     }

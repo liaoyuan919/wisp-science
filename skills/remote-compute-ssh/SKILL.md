@@ -16,7 +16,8 @@ or Wisp restarts.
 
 1. Use short `run_in_context` calls for read-only discovery such as
    `nvidia-smi -L`, `which python3`, or `module avail`. Free-form shell SSH is
-   disabled.
+   disabled. Use the interpreter path reported by the context probe; do not
+   assume a `python` alias exists when the probe found `python3`.
 2. Put the real command in one `run_in_context` call. Include environment
    activation in the command so the Run is reproducible.
 3. To watch the Run or wait for later work, call `monitor_run` exactly once with
@@ -59,6 +60,11 @@ script by basename. Upload progress, throughput, and ETA appear in the Run card.
 the server, reference its absolute remote path in `command`; do not copy it
 back to the laptop just to send it out again.
 
+A remote command or application exiting non-zero is normal exploration after a
+successful login. Read stderr, correct the command from the probed
+capabilities, and continue. Stop only when SSH rejects authentication or host
+trust; do not repeat a rejected login with guessed credentials or SSH options.
+
 The control directory is `~/.wisp-science/runs/<run-id>` and the command starts
 in its `inputs/` subdirectory. stdout and stderr are
 tailed into the Run record. The SSH supervisor requires `setsid`, GNU-compatible
@@ -89,10 +95,17 @@ For a small result that must become local, wait until the Run is terminal,
 then transfer it as a separate quick operation and register the local file.
 Large outputs should remain remote references.
 
-## Transfers between SSH contexts
+## Transfers from SSH contexts
 
-Use `transfer_between_contexts` for one exact remote file or directory. Never
-compose nested `ssh`, `scp`, or `rsync -e ssh` inside `run_in_context`.
+Use `transfer_between_contexts` for one exact remote file or directory. The
+destination may be another selected SSH context or `local`. Never compose
+nested `ssh`, `scp`, or `rsync -e ssh` inside `run_in_context`.
+
+For a local download, set `destination_context_id` to `local` and provide the
+exact new absolute local path. Ask the user when that path is unspecified.
+Wisp stages the item beside the destination, never overwrites an existing
+path, and removes partial staging data after failure or cancellation. Call
+`monitor_run` once with the returned Run id.
 
 When the user approves persistent A→B trust, call `configure_ssh_trust` first.
 It creates a dedicated key on A, carries only the public key through Wisp,
