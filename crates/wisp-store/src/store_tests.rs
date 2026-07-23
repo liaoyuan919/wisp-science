@@ -981,7 +981,10 @@ async fn pinned_sessions_are_listed_separately_and_toggle() {
 
     store.set_session_pinned("a", "p", true).await.unwrap();
     let pinned = store.list_pinned_sessions("p").await.unwrap();
-    assert_eq!(pinned.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["a"]);
+    assert_eq!(
+        pinned.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+        ["a"]
+    );
     // The full listing still contains every session, pinned or not.
     assert_eq!(store.list_sessions("p").await.unwrap().len(), 3);
 
@@ -989,7 +992,10 @@ async fn pinned_sessions_are_listed_separately_and_toggle() {
     assert!(store.list_pinned_sessions("p").await.unwrap().is_empty());
 
     // Pinning a missing session is an error, not a silent no-op.
-    assert!(store.set_session_pinned("missing", "p", true).await.is_err());
+    assert!(store
+        .set_session_pinned("missing", "p", true)
+        .await
+        .is_err());
     let _ = std::fs::remove_file(&tmp);
 }
 

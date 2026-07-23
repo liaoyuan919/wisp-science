@@ -5610,14 +5610,17 @@ async fn list_sessions_page(
             folder_id,
         })
         .collect();
-    items.extend(rows.into_iter().map(|(id, title, ts, folder_id)| SessionInfo {
-        running: running.contains(&id),
-        pinned: pinned_ids.contains(&id),
-        id,
-        title,
-        ts,
-        folder_id,
-    }));
+    items.extend(
+        rows.into_iter()
+            .map(|(id, title, ts, folder_id)| SessionInfo {
+                running: running.contains(&id),
+                pinned: pinned_ids.contains(&id),
+                id,
+                title,
+                ts,
+                folder_id,
+            }),
+    );
     Ok(SessionPage {
         items,
         next_cursor,
