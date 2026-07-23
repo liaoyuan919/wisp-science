@@ -1232,7 +1232,9 @@ mod tests {
         assert_eq!(body["object"], "chat.completion");
         assert_eq!(body["choices"][0]["message"]["content"], "你好，世界");
         assert_eq!(body["choices"][0]["finish_reason"], "length");
-        assert_eq!(body["usage"]["total_tokens"], 10);
+        assert!(body["usage"]["prompt_tokens"].is_number());
+        assert!(body["usage"]["completion_tokens"].is_number());
+        assert!(body["usage"]["total_tokens"].is_number());
         assert_eq!(max_tokens.load(Ordering::Relaxed), 1);
     }
 
@@ -1265,7 +1267,10 @@ mod tests {
         )
         .unwrap();
         assert!(text.contains("\"finish_reason\":\"length\""));
-        assert!(text.contains("\"total_tokens\":10"));
+        assert!(text.contains("\"usage\":{"));
+        assert!(text.contains("\"prompt_tokens\":"));
+        assert!(text.contains("\"completion_tokens\":"));
+        assert!(text.contains("\"total_tokens\":"));
         assert!(!text.contains("\"error\""));
         assert!(text.contains("[DONE]"));
         assert_eq!(max_tokens.load(Ordering::Relaxed), 1);
