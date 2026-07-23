@@ -4015,6 +4015,9 @@ async fn send_message_inner(
         agent.add_tool(Box::new(browser_bridge::WebExecuteJsTool::new(
             state.browser_bridge.clone(),
         )));
+        agent.add_tool(Box::new(browser_bridge::WebOpenTabTool::new(
+            state.browser_bridge.clone(),
+        )));
         agent.add_tool(Box::new(run_context::RunInContextTool::new(
             state.store.clone(),
             state.run_manager.clone(),
