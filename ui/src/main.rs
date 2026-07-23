@@ -1566,8 +1566,12 @@ fn App() -> impl IntoView {
         } else {
             format!("{session} · {detail}")
         };
+        let session_id = frame_id.to_string();
         spawn_local(async move {
-            let arg = to_value(&serde_json::json!({ "title": title, "body": body })).unwrap();
+            let arg = to_value(
+                &serde_json::json!({ "title": title, "body": body, "sessionId": session_id }),
+            )
+            .unwrap();
             let _ = invoke("notify_user", arg).await;
         });
     };

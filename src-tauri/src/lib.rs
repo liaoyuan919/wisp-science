@@ -2966,20 +2966,59 @@ fn app_has_focus() -> bool {
     !focused_windows().lock().unwrap().is_empty()
 }
 
+/// The `open-session` payload a window's most recent desktop notification was
+/// about, held until that window next gains focus — the user returning, usually
+/// by clicking the notification. Consumed once, then the window navigates to the
+/// session (#434). The desktop notification plugin has no click callback, so the
+/// focus that a click triggers is the signal we hang the navigation off of.
+fn pending_notify_targets() -> &'static StdMutex<HashMap<String, serde_json::Value>> {
+    static PENDING: std::sync::OnceLock<StdMutex<HashMap<String, serde_json::Value>>> =
+        std::sync::OnceLock::new();
+    PENDING.get_or_init(Default::default)
+}
+
+/// Remove and return a window's queued notification target, if any. Consuming it
+/// disarms the navigation so a later, unrelated focus does not re-trigger it.
+fn take_pending_notify_target(label: &str) -> Option<serde_json::Value> {
+    pending_notify_targets().lock().unwrap().remove(label)
+}
+
+/// If the focused window has a session queued from an earlier notification,
+/// navigate to it (once). Called on every `Focused(true)`.
+fn drain_pending_notify_target(window: &tauri::Window) {
+    if let Some(target) = take_pending_notify_target(window.label()) {
+        let _ = window.emit_to(window.label(), "open-session", target);
+    }
+}
+
 /// Desktop notification for task status (#327). No-op while any app window is
 /// focused (the in-app UI already shows the state) or when disabled in settings.
+/// Clicking the notification navigates to the session it was about (#434) —
+/// see `pending_notify_targets`.
 #[tauri::command]
 async fn notify_user(
-    app: tauri::AppHandle,
+    window: tauri::Window,
     state: State<'_, AppState>,
     title: String,
     body: String,
+    session_id: String,
 ) -> Result<(), String> {
     if app_has_focus() || !load_notifications_enabled(&state.store).await {
         return Ok(());
     }
+    // Arm click-to-open before showing: on this window's next focus it jumps to
+    // the session. Skipped if the session's project can't be resolved (the
+    // notification still shows, just without navigation).
+    if let Ok(Some(project_id)) = state.store.frame_project_id(&session_id).await {
+        pending_notify_targets().lock().unwrap().insert(
+            window.label().to_string(),
+            serde_json::json!({ "projectId": project_id, "sessionId": session_id }),
+        );
+    }
     use tauri_plugin_notification::NotificationExt;
-    app.notification()
+    window
+        .app_handle()
+        .notification()
         .builder()
         .title(title)
         .body(body)
@@ -7526,6 +7565,9 @@ pub fn run() {
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::Focused(focused) => {
                 record_window_focus(window.label(), *focused);
+                if *focused {
+                    drain_pending_notify_target(window);
+                }
             }
             tauri::WindowEvent::Destroyed => record_window_focus(window.label(), false),
             _ => {}
