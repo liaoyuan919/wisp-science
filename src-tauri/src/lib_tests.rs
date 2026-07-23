@@ -7,8 +7,8 @@ use super::{
     resolve_reader_references, resolve_review_backend, resolve_workspace, session_runtime_status,
     should_hide_app_on_macos_close, should_persist_ui_event, side_chat_prompt,
     transcript_page_items, update_check_from_release, user_message_start, AgentEvent,
-    ComposerReferenceArg, GithubRelease, McpConnection, McpHttpAuth, McpTransport,
-    MAX_PENDING_UI_EVENT_BYTES,
+    ComposerReferenceArg, GithubRelease, McpConnection, McpHttpAuth, McpTransport, QueuedItem,
+    SessionRuntime, MAX_PENDING_UI_EVENT_BYTES,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -1199,4 +1199,84 @@ fn window_focus_tracking_survives_unordered_focus_handoff() {
     // Destroyed window must not pin the app as focused forever.
     super::record_window_focus("proj-a", false);
     assert_reset();
+}
+
+// Queue (#433): the enqueue/driver protocol must (a) claim exactly one driver,
+// (b) drain FIFO, and (c) let a later enqueue re-claim after the queue empties —
+// otherwise an item enqueued just as the driver exits would strand with no runner.
+#[test]
+fn queue_driver_claim_is_single_and_reclaimable() {
+    use std::sync::atomic::Ordering;
+    let item = |id: u64| QueuedItem {
+        id,
+        message: format!("m{id}"),
+        attachments: vec![],
+        references: vec![],
+    };
+    let rt = SessionRuntime::new();
+
+    // First enqueue claims the driver slot; a concurrent second must not.
+    rt.queued.lock().unwrap().push(item(1));
+    assert!(
+        !rt.draining.swap(true, Ordering::SeqCst),
+        "first enqueue claims the driver"
+    );
+    rt.queued.lock().unwrap().push(item(2));
+    assert!(
+        rt.draining.swap(true, Ordering::SeqCst),
+        "second enqueue sees a driver already running"
+    );
+
+    // The driver drains FIFO from the front.
+    assert_eq!(rt.queued.lock().unwrap().remove(0).id, 1);
+    assert_eq!(rt.queued.lock().unwrap().remove(0).id, 2);
+
+    // Empty → the driver clears the flag under the queued lock and exits.
+    {
+        let q = rt.queued.lock().unwrap();
+        assert!(q.is_empty());
+        rt.draining.store(false, Ordering::SeqCst);
+    }
+
+    // A later enqueue re-claims the slot rather than stranding.
+    rt.queued.lock().unwrap().push(item(3));
+    assert!(
+        !rt.draining.swap(true, Ordering::SeqCst),
+        "post-drain enqueue re-claims the driver"
+    );
+}
+
+// Reorder (#433): move swaps with the neighbour and clamps at both ends, so the
+// driver (which drains front-first) runs items in the user's chosen order.
+#[test]
+fn queue_reorder_swaps_and_clamps() {
+    let item = |id: u64| QueuedItem {
+        id,
+        message: format!("m{id}"),
+        attachments: vec![],
+        references: vec![],
+    };
+    let swap_toward = |q: &mut Vec<QueuedItem>, id: u64, up: bool| {
+        if let Some(i) = q.iter().position(|it| it.id == id) {
+            let target = if up {
+                i.checked_sub(1)
+            } else {
+                (i + 1 < q.len()).then_some(i + 1)
+            };
+            if let Some(j) = target {
+                q.swap(i, j);
+            }
+        }
+    };
+    let ids = |q: &[QueuedItem]| q.iter().map(|it| it.id).collect::<Vec<_>>();
+
+    let mut q = vec![item(1), item(2), item(3)]; // A, B, C
+    swap_toward(&mut q, 3, true); // C up → A, C, B
+    assert_eq!(ids(&q), [1, 3, 2]);
+    swap_toward(&mut q, 1, false); // A down → C, A, B
+    assert_eq!(ids(&q), [3, 1, 2]);
+    swap_toward(&mut q, 3, true); // C already first → no-op
+    assert_eq!(ids(&q), [3, 1, 2]);
+    swap_toward(&mut q, 2, false); // B already last → no-op
+    assert_eq!(ids(&q), [3, 1, 2]);
 }

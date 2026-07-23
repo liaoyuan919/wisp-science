@@ -2502,6 +2502,25 @@ export function parallelMock(): void {
             await current;
             return fid;
           }
+          case "enqueue_turn": {
+            // Queue (#433): chain the parked turn onto the same per-session
+            // promise chain send_message uses, so it drains FIFO after the
+            // running turn finishes — mirroring the backend driver. Returns
+            // immediately (the real command is fast and non-blocking).
+            const fid = (args && (args.sessionId ?? args.session_id)) || "t1";
+            const msg = (args && args.message) || "";
+            const run = async () => {
+              emit("agent", { kind: "User", frame_id: fid, text: msg });
+              emit("agent", { kind: "Text", frame_id: fid, delta: `echo:${msg}` });
+              await new Promise((resolve) => setTimeout(resolve, 50));
+              emit("agent", { kind: "Done", frame_id: fid });
+            };
+            const previous = queues[fid] ?? Promise.resolve();
+            const current = previous.then(run, run);
+            queues[fid] = current.catch(() => undefined);
+            return null;
+          }
+          case "queued_turn_action": return null;
           case "open_external_url":
             if (arg("url")) window.open(String(arg("url")), "_blank", "noopener,noreferrer");
             return null;

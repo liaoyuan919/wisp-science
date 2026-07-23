@@ -1499,6 +1499,25 @@ struct SessionRuntime {
     /// Latest state published by each live MCP App. Apps overwrite their own
     /// entry through the standard `ui/update-model-context` request.
     mcp_app_contexts: StdMutex<HashMap<String, McpAppContext>>,
+    /// Queue (#433): turns waiting for the running one to finish. Each item is
+    /// editable/cancellable while it waits; a single driver task drains them
+    /// FIFO into fresh turns. ponytail: in-memory only — lost on app restart,
+    /// same as the optimistic bubbles, which are never persisted either.
+    queued: StdMutex<Vec<QueuedItem>>,
+    /// True while a driver task owns draining `queued`. Flipped only under the
+    /// `queued` lock so an enqueue can never strand behind a driver that is
+    /// about to exit on an empty queue.
+    draining: AtomicBool,
+}
+
+/// One parked follow-up turn (#433). `id` is assigned by the frontend so the
+/// optimistic bubble and every edit/cancel/cut-in command target the same row.
+#[derive(Clone)]
+struct QueuedItem {
+    id: u64,
+    message: String,
+    attachments: Vec<String>,
+    references: Vec<ComposerReferenceArg>,
 }
 
 impl SessionRuntime {
@@ -1513,6 +1532,8 @@ impl SessionRuntime {
             guidance_seq: std::sync::atomic::AtomicU64::new(0),
             interrupted_turn_start: StdMutex::new(None),
             mcp_app_contexts: StdMutex::new(HashMap::new()),
+            queued: StdMutex::new(Vec::new()),
+            draining: AtomicBool::new(false),
         }
     }
     fn last_seq(&self) -> i64 {
@@ -4624,6 +4645,166 @@ async fn send_message_inner(
     }
 }
 
+/// Queue (#433): drain a session's parked follow-ups FIFO. Each acquires the
+/// workflow lock (fair → runs in enqueue order) and runs as a fresh turn with
+/// the item's *current* text, so edits made while it waited take effect. The
+/// `draining` flag is cleared under the `queued` lock so a concurrent enqueue
+/// can never leave an item stranded with no driver.
+fn spawn_queue_driver(
+    app: AppHandle,
+    rt: Arc<SessionRuntime>,
+    session_id: String,
+    window_label: String,
+) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let guard = rt.workflow.clone().lock_owned().await;
+            let item = {
+                let mut q = rt.queued.lock().unwrap();
+                match q.is_empty() {
+                    true => {
+                        rt.draining.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                    false => q.remove(0),
+                }
+            };
+            let state = app.state::<AppState>();
+            if let Err(error) = send_message_inner(
+                state.inner(),
+                app.clone(),
+                &window_label,
+                Some(session_id.clone()),
+                item.message,
+                Some(item.attachments),
+                Some(item.references),
+                Some(false),
+                None,
+                None,
+                None,
+                None,
+                Some(guard),
+            )
+            .await
+            {
+                tracing::warn!("queued turn failed: {error}");
+            }
+        }
+    });
+}
+
+/// Queue (#433): park a follow-up behind the running turn instead of sending
+/// now. Fast, non-blocking — the driver runs it once the session frees up.
+#[tauri::command]
+async fn enqueue_turn(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    session_id: String,
+    id: u64,
+    message: String,
+    attachments: Option<Vec<String>>,
+    references: Option<Vec<ComposerReferenceArg>>,
+) -> Result<(), String> {
+    if session_id.is_empty() {
+        return Err("queue requires a session id".into());
+    }
+    let rt = {
+        let mut sessions = state.sessions.lock().await;
+        sessions
+            .entry(session_id.clone())
+            .or_insert_with(|| Arc::new(SessionRuntime::new()))
+            .clone()
+    };
+    let spawn = {
+        let mut q = rt.queued.lock().unwrap();
+        q.push(QueuedItem {
+            id,
+            message,
+            attachments: attachments.unwrap_or_default(),
+            references: references.unwrap_or_default(),
+        });
+        // Claim the driver slot atomically with the push: the driver only clears
+        // `draining` while holding this same lock on an empty queue.
+        !rt.draining.swap(true, Ordering::SeqCst)
+    };
+    if spawn {
+        spawn_queue_driver(app, rt, session_id, window.label().to_string());
+    }
+    Ok(())
+}
+
+/// Queue (#433): edit / cancel / cut-in a parked follow-up by id.
+/// - `edit`   → replace the item's text (runs with the latest when it drains).
+/// - `cancel` → drop it from the queue.
+/// - `cutin`  → pull it out and fold it into the *running* turn via the guide
+///   path (#410); if nothing is running it stays queued and runs normally.
+#[tauri::command]
+async fn queued_turn_action(
+    state: State<'_, AppState>,
+    session_id: String,
+    id: u64,
+    action: String,
+    message: Option<String>,
+) -> Result<(), String> {
+    let rt = {
+        let sessions = state.sessions.lock().await;
+        match sessions.get(&session_id) {
+            Some(rt) => rt.clone(),
+            None => return Ok(()),
+        }
+    };
+    match action.as_str() {
+        "edit" => {
+            if let Some(text) = message {
+                let mut q = rt.queued.lock().unwrap();
+                if let Some(item) = q.iter_mut().find(|it| it.id == id) {
+                    item.message = text;
+                }
+            }
+        }
+        "cancel" => {
+            rt.queued.lock().unwrap().retain(|it| it.id != id);
+        }
+        "cutin" => {
+            let running = state.running_turns.lock().await.contains(&session_id);
+            if running {
+                let text = {
+                    let mut q = rt.queued.lock().unwrap();
+                    q.iter()
+                        .position(|it| it.id == id)
+                        .map(|i| q.remove(i).message)
+                };
+                // ponytail: cut-in folds only text into the turn, matching the
+                // guide path; attachments on a cut-in item are dropped.
+                if let Some(text) = text {
+                    let gid = rt
+                        .guidance_seq
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    rt.pending_guidance.lock().unwrap().push((gid, text));
+                }
+            }
+        }
+        // Reorder within the queue (#433): swap with the neighbour, clamped at
+        // the ends. FIFO order is the Vec order, which the driver drains front-first.
+        "move_up" | "move_down" => {
+            let mut q = rt.queued.lock().unwrap();
+            if let Some(i) = q.iter().position(|it| it.id == id) {
+                let target = if action == "move_up" {
+                    i.checked_sub(1)
+                } else {
+                    (i + 1 < q.len()).then_some(i + 1)
+                };
+                if let Some(j) = target {
+                    q.swap(i, j);
+                }
+            }
+        }
+        other => return Err(format!("unknown queued action: {other}")),
+    }
+    Ok(())
+}
+
 fn message_uses_resource_bindings(message: &Message) -> bool {
     message.role == wisp_llm::Role::Assistant
         || (message.role == wisp_llm::Role::Tool
@@ -7561,6 +7742,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             send_message,
             update_mcp_app_context,
+            enqueue_turn,
+            queued_turn_action,
             stop_agent,
             channels::channels_status,
             channels::set_feishu_channel,

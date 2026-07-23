@@ -3195,6 +3195,7 @@ mod skill_filter_tests {
             enabled,
             builtin: true,
             managed: false,
+            managed_by: None,
             dir: String::new(),
         }
     }
@@ -3628,7 +3629,7 @@ pub(super) fn last_tool_input(items: &[ChatItem], tool: &str) -> String {
 pub(super) fn trailing_queue_start(items: &[ChatItem]) -> usize {
     items
         .iter()
-        .rposition(|item| !matches!(item, ChatItem::QueuedUser(_)))
+        .rposition(|item| !matches!(item, ChatItem::QueuedUser { .. }))
         .map(|i| i + 1)
         .unwrap_or(0)
 }
@@ -3638,7 +3639,7 @@ pub(super) fn start_user_turn(items: &mut Vec<ChatItem>, text: String, model: Op
     // ponytail: text-keyed promotion; upgrade to a backend intent_id if
     // display/echo texts ever diverge beyond the attachment suffix.
     if let Some((idx, queued)) = items.iter().enumerate().find_map(|(i, item)| match item {
-        ChatItem::QueuedUser(queued)
+        ChatItem::QueuedUser { text: queued, .. }
             if queued == &text || composer_text_from_user_message(queued) == incoming_body =>
         {
             Some((i, queued.clone()))
@@ -3912,7 +3913,7 @@ mod start_user_turn_tests {
                 model: None,
                 resources: Vec::new(),
             },
-            ChatItem::QueuedUser("queued".into()),
+            ChatItem::QueuedUser { id: 1, text: "queued".into() },
         ];
 
         assert_eq!(trailing_queue_start(&items), 2);
@@ -3922,7 +3923,7 @@ mod start_user_turn_tests {
             &items[1],
             ChatItem::Assistant { text, .. } if text == "echo:alpha:tail"
         ));
-        assert!(matches!(&items[2], ChatItem::QueuedUser(text) if text == "queued"));
+        assert!(matches!(&items[2], ChatItem::QueuedUser { text, .. } if text == "queued"));
     }
 
     #[test]
@@ -4040,7 +4041,7 @@ mod start_user_turn_tests {
                 reasoning: 0,
                 cached: 0,
             },
-            ChatItem::QueuedUser("next".into()),
+            ChatItem::QueuedUser { id: 1, text: "next".into() },
         ];
 
         assert_eq!(process_item_insert_index(&items), 2);
@@ -4056,7 +4057,7 @@ mod start_user_turn_tests {
                 model: None,
                 resources: Vec::new(),
             },
-            ChatItem::QueuedUser(display.clone()),
+            ChatItem::QueuedUser { id: 1, text: display.clone() },
         ];
 
         start_user_turn(&mut items, "图片里有啥文字?".into(), None);
@@ -4078,8 +4079,8 @@ mod start_user_turn_tests {
                 model: None,
                 resources: Vec::new(),
             },
-            ChatItem::QueuedUser("queued".into()),
-            ChatItem::QueuedUser("later".into()),
+            ChatItem::QueuedUser { id: 1, text: "queued".into() },
+            ChatItem::QueuedUser { id: 2, text: "later".into() },
         ];
 
         start_user_turn(&mut items, "queued".into(), Some("model".into()));
@@ -4089,7 +4090,7 @@ mod start_user_turn_tests {
             &items[3],
             ChatItem::Assistant { text, model, .. } if text.is_empty() && model.as_deref() == Some("model")
         ));
-        assert!(matches!(&items[4], ChatItem::QueuedUser(text) if text == "later"));
+        assert!(matches!(&items[4], ChatItem::QueuedUser { text, .. } if text == "later"));
     }
 }
 
@@ -4240,7 +4241,7 @@ pub(super) fn completed_activity_end(
 
     let boundary = items[start + 1..]
         .iter()
-        .position(|item| matches!(item, ChatItem::User(_) | ChatItem::QueuedUser(_)))
+        .position(|item| matches!(item, ChatItem::User(_) | ChatItem::QueuedUser { .. }))
         .map(|offset| start + 1 + offset);
     let historical = boundary.is_some_and(|index| matches!(items[index], ChatItem::User(_)));
     if busy && !historical {
@@ -7622,7 +7623,7 @@ pub(super) fn transcript_render_window(
         .iter()
         .enumerate()
         .filter_map(|(index, item)| {
-            matches!(item, ChatItem::User(_) | ChatItem::QueuedUser(_)).then_some(index)
+            matches!(item, ChatItem::User(_) | ChatItem::QueuedUser { .. }).then_some(index)
         })
         .collect::<Vec<_>>();
     let total = user_rows.len();
@@ -7828,6 +7829,102 @@ pub(super) fn AttachmentThumbnail(path: String, alt: String) -> impl IntoView {
                 |src| view! { <img src=src alt=alt.clone() /> }.into_view(),
             )}
         </span>
+    }
+}
+
+/// Queue (#433): an operation on a parked follow-up, raised from its bubble and
+/// handled by the parent (which owns the transcript signals + invoke).
+#[derive(Clone)]
+pub(super) enum QueueOp {
+    /// Drop it from the queue.
+    Cancel(u64),
+    /// Fold it into the running turn now (native sessions only).
+    CutIn(u64),
+    /// Replace its text (runs with the latest when it drains).
+    Save(u64, String),
+    /// Swap one place earlier / later in the FIFO order (clamped at the ends).
+    MoveUp(u64),
+    MoveDown(u64),
+}
+
+/// Queue (#433): a queued user turn bubble with inline edit + cancel + cut-in.
+/// `id == 0` marks a transient cut-in bubble (no controls). `can_cut_in` is
+/// false for ACP sessions, which cannot fold a message into a running turn.
+#[component]
+pub(super) fn QueuedMessage(
+    id: u64,
+    text: String,
+    can_cut_in: bool,
+    on_queue: Callback<QueueOp>,
+) -> impl IntoView {
+    let locale = use_locale();
+    let editing = create_rw_signal(false);
+    let draft = create_rw_signal(text.clone());
+    let show_controls = id != 0;
+    let body = text.clone();
+    view! {
+        <div class="role">{move || t(locale.get(), "composer.queued")}</div>
+        <div class="user-bubble queued-bubble">
+            {move || if editing.get() {
+                view! {
+                    <textarea class="queue-edit" prop:value=move || draft.get()
+                        on:input=move |ev| draft.set(event_target_value(&ev))></textarea>
+                    <div class="queue-actions">
+                        <button type="button" class="tool-btn"
+                            on:click=move |_| editing.set(false)>
+                            {move || t(locale.get(), "settings.cancel")}
+                        </button>
+                        <button type="button" class="tool-btn"
+                            on:click=move |_| {
+                                let v = draft.get();
+                                if !v.trim().is_empty() {
+                                    editing.set(false);
+                                    on_queue.call(QueueOp::Save(id, v));
+                                }
+                            }>
+                            {move || t(locale.get(), "settings.save")}
+                        </button>
+                    </div>
+                }.into_view()
+            } else {
+                let body = body.clone();
+                let edit_from = body.clone();
+                view! {
+                    <div class="body">{body}</div>
+                    {show_controls.then(|| view! {
+                        <div class="queue-actions">
+                            <button type="button" class="tool-btn queue-move"
+                                title=move || t(locale.get(), "queue.move_up")
+                                on:click=move |_| on_queue.call(QueueOp::MoveUp(id))>
+                                {compose_icon("up")}
+                            </button>
+                            <button type="button" class="tool-btn queue-move"
+                                title=move || t(locale.get(), "queue.move_down")
+                                on:click=move |_| on_queue.call(QueueOp::MoveDown(id))>
+                                {compose_icon("chevron-down")}
+                            </button>
+                            {can_cut_in.then(|| view! {
+                                <button type="button" class="tool-btn"
+                                    on:click=move |_| on_queue.call(QueueOp::CutIn(id))>
+                                    {move || t(locale.get(), "queue.cut_in")}
+                                </button>
+                            })}
+                            <button type="button" class="tool-btn"
+                                on:click={
+                                    let edit_from = edit_from.clone();
+                                    move |_| { draft.set(edit_from.clone()); editing.set(true); }
+                                }>
+                                {move || t(locale.get(), "msg.edit")}
+                            </button>
+                            <button type="button" class="tool-btn"
+                                on:click=move |_| on_queue.call(QueueOp::Cancel(id))>
+                                {move || t(locale.get(), "settings.cancel")}
+                            </button>
+                        </div>
+                    })}
+                }.into_view()
+            }}
+        </div>
     }
 }
 

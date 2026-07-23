@@ -4599,28 +4599,75 @@ test("a running conversation accepts another message for queueing", async ({ pag
   await expect(page.getByText("echo:alpha")).toBeVisible({ timeout: 10_000 });
 
   await composer(page).fill("queued");
-  const send = page.getByRole("button", { name: "Guide…" });
+  // Queue (#433): sending into a busy session queues directly — no dialog. The
+  // busy send button reads "Queue…" and the message parks as an editable bubble.
+  const send = page.getByRole("button", { name: "Queue…" });
   await expect(send).toBeEnabled({ timeout: 500 });
   await send.click();
-  // Guide dialog (#410): sending into a busy session asks how to deliver the
-  // message instead of queueing silently. Choose the guide/queue action.
-  const guideModal = page.getByTestId("send-guide-modal");
-  await expect(guideModal).toBeVisible({ timeout: 500 });
-  await guideModal.getByRole("button", { name: "Guide the running task" }).click();
   const queued = page.locator(".msg.user.queued .body", { hasText: /^queued$/ });
   await expect(queued).toBeVisible({ timeout: 500 });
 
+  // The parked turn goes through enqueue_turn, not send_message.
+  await expect.poll(async () => page.evaluate(() =>
+    ((window as any).__sendInvokeLog ?? [])
+      .filter((c: any) => c.cmd === "enqueue_turn")
+      .map((c: any) => c.args?.message),
+  )).toEqual(["queued"]);
+
   // The first turn keeps streaming after the second is queued. Its tail must
   // stay attached to the first assistant row instead of leaking into a hidden
-  // placeholder after the queued user message (#143).
+  // placeholder after the queued user message (#143). "queued" must NOT run yet.
   await expect(page.getByText("echo:alpha:tail", { exact: true })).toBeVisible({ timeout: 3_000 });
   await expect(queued).toBeVisible();
   await expect(page.getByText("echo:queued")).toHaveCount(0);
 
-  await expect.poll(async () => page.evaluate(() => {
-    const calls = ((window as any).__sendInvokeLog ?? []).filter((c: any) => c.cmd === "send_message");
-    return calls.map((c: any) => c.args?.message);
-  })).toEqual(["alpha", "queued"]);
+  // Only "alpha" ran as a live turn; the queue waits behind it.
+  await expect.poll(async () => page.evaluate(() =>
+    ((window as any).__sendInvokeLog ?? [])
+      .filter((c: any) => c.cmd === "send_message")
+      .map((c: any) => c.args?.message),
+  )).toEqual(["alpha"]);
+
+  // Once alpha finishes, the driver drains the queue: "queued" now runs and its
+  // optimistic bubble promotes to a live turn (#433).
+  await expect(page.getByText("echo:queued")).toBeVisible({ timeout: 10_000 });
+});
+
+test("queued follow-ups can be reordered up and down (#433)", async ({ page }) => {
+  await page.addInitScript(parallelMock);
+  await page.goto("/");
+  await page.locator(".proj-card-main").first().click();
+  await expect(newSessionButton(page)).toBeVisible();
+
+  // alpha stays running ~5s, keeping the session busy while we queue two more.
+  await composer(page).fill("alpha");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText("echo:alpha")).toBeVisible({ timeout: 10_000 });
+
+  for (const msg of ["bravo", "charlie"]) {
+    await composer(page).fill(msg);
+    await page.getByRole("button", { name: "Queue…" }).click();
+    await expect(
+      page.locator(".msg.user.queued .body", { hasText: new RegExp(`^${msg}$`) }),
+    ).toBeVisible({ timeout: 1_000 });
+  }
+
+  const queuedTexts = () => page.locator(".msg.user.queued .body").allInnerTexts();
+  expect(await queuedTexts()).toEqual(["bravo", "charlie"]);
+
+  // Move charlie up → [charlie, bravo]; then back down → [bravo, charlie].
+  const charlieRow = page.locator(".msg.user.queued", { hasText: "charlie" });
+  await charlieRow.getByTitle("Move up").click();
+  await expect.poll(queuedTexts).toEqual(["charlie", "bravo"]);
+  await charlieRow.getByTitle("Move down").click();
+  await expect.poll(queuedTexts).toEqual(["bravo", "charlie"]);
+
+  // Both reorders were mirrored to the backend queue.
+  await expect.poll(async () => page.evaluate(() =>
+    ((window as any).__sendInvokeLog ?? [])
+      .filter((c: any) => c.cmd === "queued_turn_action")
+      .map((c: any) => c.args?.action),
+  )).toEqual(["move_up", "move_down"]);
 });
 
 test("deleting a project uses an in-app confirm modal, not native confirm (#96)", async ({ page }) => {
