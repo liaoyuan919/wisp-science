@@ -1,0 +1,32 @@
+[package]
+name = "wisp-server"
+description = "OpenAI-compatible, read-only Wisp Science agent service."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wisp-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+futures-util = { workspace = true }
+ring = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+wisp-core = { workspace = true }
+wisp-llm = { workspace = true }
+wisp-mcp = { workspace = true }
+wisp-paths = { workspace = true }
+wisp-tools = { workspace = true }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

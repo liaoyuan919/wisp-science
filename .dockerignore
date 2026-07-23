@@ -1,0 +1,10 @@
+.git
+.github
+.wisp
+target
+ui/target
+ui-tests/node_modules
+node_modules
+dist
+deploy/.env
+*.log

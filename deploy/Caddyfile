@@ -1,0 +1,19 @@
+{
+	email {$ACME_EMAIL}
+}
+
+api.wispto.top {
+	encode zstd gzip
+	reverse_proxy wisp-server:8080 {
+		flush_interval -1
+		transport http {
+			response_header_timeout 115s
+		}
+	}
+
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+	}
+}

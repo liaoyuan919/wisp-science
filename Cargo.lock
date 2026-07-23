@@ -6365,6 +6365,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "wisp-server"
+version = "0.21.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "futures-util",
+ "http-body-util",
+ "ring",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wisp-core",
+ "wisp-llm",
+ "wisp-mcp",
+ "wisp-paths",
+ "wisp-tools",
+]
+
+[[package]]
 name = "wisp-skills"
 version = "0.21.0"
 dependencies = [
