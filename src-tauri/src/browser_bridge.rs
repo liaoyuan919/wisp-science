@@ -322,6 +322,49 @@ impl BrowserBridge {
         }
     }
 
+    /// Send a control command that does not target an existing tab (e.g. open a
+    /// new tab). Unlike `execute`, this never requires an HTTP(S) tab to exist,
+    /// so it can bootstrap browsing from an empty profile.
+    async fn send_command(&self, code: String, timeout: Duration) -> Result<Value, String> {
+        let id = Uuid::new_v4().to_string();
+        let (response_tx, response_rx) = oneshot::channel();
+        {
+            let mut state = self.state.lock().await;
+            if let Some(error) = &state.startup_error {
+                return Err(self.unavailable_message(error));
+            }
+            let Some(client) = state.client.clone() else {
+                return Err(self.unavailable_message("browser extension is not connected"));
+            };
+            state.pending.insert(id.clone(), response_tx);
+            let payload = json!({ "id": id, "code": code }).to_string();
+            if client.tx.send(Message::Text(payload.into())).is_err() {
+                state.pending.remove(&id);
+                return Err("browser extension disconnected before the request was sent".into());
+            }
+        }
+
+        match tokio::time::timeout(timeout, response_rx).await {
+            Ok(Ok(Ok(value))) => Ok(value),
+            Ok(Ok(Err(error))) => Err(error),
+            Ok(Err(_)) => Err("browser extension disconnected before returning a result".into()),
+            Err(_) => {
+                self.state.lock().await.pending.remove(&id);
+                Err(format!(
+                    "browser command timed out after {} ms",
+                    timeout.as_millis()
+                ))
+            }
+        }
+    }
+
+    async fn open_tab(&self, url: &str, active: bool) -> Result<Value, String> {
+        let code =
+            json!({ "cmd": "tabs", "method": "create", "url": url, "active": active }).to_string();
+        self.send_command(code, Duration::from_millis(DEFAULT_TIMEOUT_MS))
+            .await
+    }
+
     async fn tabs(&self) -> Result<Vec<BrowserTab>, String> {
         let state = self.state.lock().await;
         if let Some(error) = &state.startup_error {
@@ -742,6 +785,66 @@ impl Tool for WebExecuteJsTool {
     }
 }
 
+pub struct WebOpenTabTool {
+    bridge: Arc<BrowserBridge>,
+}
+
+impl WebOpenTabTool {
+    pub fn new(bridge: Arc<BrowserBridge>) -> Self {
+        Self { bridge }
+    }
+}
+
+#[async_trait]
+impl Tool for WebOpenTabTool {
+    fn name(&self) -> &str {
+        "web_open_tab"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            self.name(),
+            "Open a new tab at an http(s) URL in the user's real, persistent Chrome/Chromium session. Works even when no tab is open yet, so use this to start browsing. The result includes the new tab id; pass it as switch_tab_id to web_scan or web_execute_js to act on the new tab.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "Absolute http:// or https:// URL to open" },
+                    "active": { "type": "boolean", "description": "Focus the new tab (default false)" }
+                },
+                "required": ["url"]
+            }),
+        )
+    }
+
+    fn minimum_approval(&self) -> Approval {
+        Approval::Ask
+    }
+
+    fn preview(&self, args: &Value) -> String {
+        let url = args.get("url").and_then(Value::as_str).unwrap_or("");
+        format!("open real-browser tab at {url}")
+    }
+
+    async fn run(&self, args: &Value, _env: &dyn ToolEnv) -> ToolResult {
+        let Some(url) = args
+            .get("url")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+        else {
+            return ToolResult::fail("missing required argument 'url'");
+        };
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return ToolResult::fail("url must be an absolute http:// or https:// address");
+        }
+        let active = args.get("active").and_then(Value::as_bool).unwrap_or(false);
+        match self.bridge.open_tab(url, active).await {
+            Ok(tab) => ToolResult::ok(render_json(&json!({ "tab": tab }))),
+            Err(error) => ToolResult::fail(error),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -934,6 +1037,39 @@ mod tests {
         let result = running.await.unwrap().unwrap();
         assert_eq!(result.tab_id, 42);
         assert_eq!(result.value, "Example");
+    }
+
+    #[tokio::test]
+    async fn open_tab_creates_a_tab_without_any_existing_tab() {
+        let bridge = Arc::new(BrowserBridge::new(PathBuf::from("extension")));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        bridge.install_client(1, tx).await;
+        // No tabs_update sent: state.tabs is empty, yet open_tab must still work.
+
+        let running = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move { bridge.open_tab("https://example.com", true).await })
+        };
+        let outbound = rx.recv().await.unwrap().into_text().unwrap();
+        let outbound: Value = serde_json::from_str(&outbound).unwrap();
+        assert!(outbound.get("tabId").is_none());
+        let command: Value = serde_json::from_str(outbound["code"].as_str().unwrap()).unwrap();
+        assert_eq!(command["cmd"], "tabs");
+        assert_eq!(command["method"], "create");
+        assert_eq!(command["url"], "https://example.com");
+        assert_eq!(command["active"], true);
+
+        let id = outbound["id"].as_str().unwrap();
+        bridge
+            .handle_text(
+                1,
+                &json!({ "type": "result", "id": id, "result": { "id": 99, "url": "https://example.com" } })
+                    .to_string(),
+            )
+            .await;
+
+        let tab = running.await.unwrap().unwrap();
+        assert_eq!(tab["id"], 99);
     }
 
     #[test]
