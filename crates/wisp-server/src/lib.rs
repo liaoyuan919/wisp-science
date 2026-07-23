@@ -490,7 +490,7 @@ async fn non_streaming_response(
             state.inner.quota.record(snapshot.usage);
             completion_response(&state.inner.public_model, snapshot, "stop")
         }
-        Ok(Err(error)) if is_usable_truncation(&error, &snapshot) => {
+        Ok(Err(error)) if is_token_truncation(&error) => {
             tracing::info!("returning partial model output after max_tokens truncation");
             state.inner.quota.record(snapshot.usage);
             completion_response(&state.inner.public_model, snapshot, "length")
@@ -538,7 +538,7 @@ async fn streaming_response(
                 task_state.inner.quota.record(snapshot.usage);
                 let _ = tx.send(StreamEvent::Stop(snapshot.usage, "stop"));
             }
-            Ok(Err(error)) if is_usable_truncation(&error, &snapshot) => {
+            Ok(Err(error)) if is_token_truncation(&error) => {
                 tracing::info!("returning partial streamed output after max_tokens truncation");
                 task_state.inner.quota.record(snapshot.usage);
                 let _ = tx.send(StreamEvent::Stop(snapshot.usage, "length"));
@@ -624,10 +624,7 @@ fn completion_response(
     .into_response()
 }
 
-fn is_usable_truncation(error: &anyhow::Error, output: &CollectedOutput) -> bool {
-    if output.text.is_empty() && output.reasoning.is_empty() {
-        return false;
-    }
+fn is_token_truncation(error: &anyhow::Error) -> bool {
     let message = format!("{error:#}").to_lowercase();
     message.contains("max_tokens")
         && (message.contains("truncat") || message.contains("length") || message.contains("截断"))
@@ -1117,9 +1114,11 @@ mod tests {
             _tools: &[ToolSchema],
             sink: &mut dyn StreamSink,
         ) -> wisp_llm::Result<Completion> {
-            sink.on_reasoning("检索");
-            sink.on_text("你好，");
-            sink.on_text("世界");
+            if !self.truncated {
+                sink.on_reasoning("检索");
+                sink.on_text("你好，");
+                sink.on_text("世界");
+            }
             let completion = fake_completion(self.truncated);
             sink.on_usage(completion.usage.clone());
             Ok(completion)
@@ -1230,7 +1229,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["object"], "chat.completion");
-        assert_eq!(body["choices"][0]["message"]["content"], "你好，世界");
+        assert_eq!(body["choices"][0]["message"]["content"], "");
         assert_eq!(body["choices"][0]["finish_reason"], "length");
         assert!(body["usage"]["prompt_tokens"].is_number());
         assert!(body["usage"]["completion_tokens"].is_number());
