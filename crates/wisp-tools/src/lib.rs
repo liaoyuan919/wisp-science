@@ -30,6 +30,10 @@ const USE_MCP_TOOL: &str = "use_mcp_tool";
 const DEFAULT_MCP_SEARCH_LIMIT: usize = 5;
 const MAX_MCP_SEARCH_LIMIT: usize = 10;
 const MAX_MCP_DESCRIPTION_CHARS: usize = 2_048;
+const MAX_MCP_SCHEMA_DESCRIPTION_CHARS: usize = 512;
+const MAX_MCP_BATCH_QUERIES: usize = 5;
+const DEFAULT_MCP_BATCH_SEARCH_LIMIT: usize = 3;
+const MAX_MCP_BATCH_SEARCH_LIMIT: usize = 5;
 
 /// The built-in tool set plus any extras (repl, MCP) registered later.
 pub struct Registry {
@@ -152,84 +156,138 @@ impl Registry {
     }
 
     fn search_mcp_tools(&self, args: &Value) -> ToolResult {
-        let Some(query) = args
-            .get("query")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|query| !query.is_empty())
-        else {
-            return ToolResult::fail("missing required argument 'query'");
+        let batch_requested = args.get("queries").is_some();
+        let mut queries = if let Some(values) = args.get("queries").and_then(Value::as_array) {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|query| !query.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        } else {
+            args.get("query")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|query| !query.is_empty())
+                .map(|query| vec![query.to_owned()])
+                .unwrap_or_default()
+        };
+        queries.dedup();
+        if queries.is_empty() {
+            return ToolResult::fail("provide a non-empty 'query' or 'queries' array");
+        }
+        if queries.len() > MAX_MCP_BATCH_QUERIES {
+            return ToolResult::fail(format!(
+                "'queries' accepts at most {MAX_MCP_BATCH_QUERIES} items"
+            ));
+        }
+        let default_limit = if batch_requested {
+            DEFAULT_MCP_BATCH_SEARCH_LIMIT
+        } else {
+            DEFAULT_MCP_SEARCH_LIMIT
+        };
+        let max_limit = if batch_requested {
+            MAX_MCP_BATCH_SEARCH_LIMIT
+        } else {
+            MAX_MCP_SEARCH_LIMIT
         };
         let limit = args
             .get("limit")
             .and_then(Value::as_u64)
             .map(|limit| limit as usize)
-            .unwrap_or(DEFAULT_MCP_SEARCH_LIMIT)
-            .clamp(1, MAX_MCP_SEARCH_LIMIT);
-        let query = query.to_lowercase();
-        let browse = query == "*";
-        let terms: Vec<_> = query.split_whitespace().collect();
+            .unwrap_or(default_limit)
+            .clamp(1, max_limit);
         let total_hidden_tools = self.tools.iter().filter(|tool| tool.defer_schema()).count();
-        let mut matches = vec![];
-        for tool in self.tools.iter().filter(|tool| tool.defer_schema()) {
-            let schema = tool.schema();
-            let name = schema.function.name.to_lowercase();
-            let description = schema.function.description.to_lowercase();
-            let parameters = schema.function.parameters.to_string().to_lowercase();
-            let mut score = usize::from(browse);
-            if name == query {
-                score += 1_000;
-            } else if name.contains(&query) {
-                score += 100;
-            }
-            if description.contains(&query) {
-                score += 50;
-            }
-            for term in &terms {
-                if name.contains(term) {
-                    score += 20;
+        let search_results: Vec<_> = queries
+            .iter()
+            .map(|original_query| {
+                let query = original_query.to_lowercase();
+                let browse = query == "*";
+                let terms: Vec<_> = query.split_whitespace().collect();
+                let mut matches = vec![];
+                for tool in self.tools.iter().filter(|tool| tool.defer_schema()) {
+                    let schema = tool.schema();
+                    let name = schema.function.name.to_lowercase();
+                    let description = schema.function.description.to_lowercase();
+                    let parameters = schema.function.parameters.to_string().to_lowercase();
+                    let mut score = usize::from(browse);
+                    if name == query {
+                        score += 1_000;
+                    } else if name.contains(&query) {
+                        score += 100;
+                    }
+                    if description.contains(&query) {
+                        score += 50;
+                    }
+                    for term in &terms {
+                        if name.contains(term) {
+                            score += 20;
+                        }
+                        if description.contains(term) {
+                            score += 5;
+                        }
+                        if parameters.contains(term) {
+                            score += 1;
+                        }
+                    }
+                    if score > 0 {
+                        matches.push((score, schema));
+                    }
                 }
-                if description.contains(term) {
-                    score += 5;
-                }
-                if parameters.contains(term) {
-                    score += 1;
-                }
-            }
-            if score > 0 {
-                matches.push((score, schema));
-            }
-        }
-        matches.sort_by(|(left_score, left), (right_score, right)| {
-            right_score
-                .cmp(left_score)
-                .then_with(|| left.function.name.cmp(&right.function.name))
-        });
-        let matched_tools = matches.len();
-        let results: Vec<_> = matches
-            .into_iter()
-            .take(limit)
-            .map(|(_, schema)| {
+                matches.sort_by(|(left_score, left), (right_score, right)| {
+                    right_score
+                        .cmp(left_score)
+                        .then_with(|| left.function.name.cmp(&right.function.name))
+                });
+                let matched_tools = matches.len();
+                let results: Vec<_> = matches
+                    .into_iter()
+                    .take(limit)
+                    .map(|(_, schema)| {
+                        serde_json::json!({
+                            "tool_name": schema.function.name,
+                            "description": truncate_chars(
+                                &schema.function.description,
+                                MAX_MCP_DESCRIPTION_CHARS,
+                            ),
+                            "input_schema": compact_schema_descriptions(
+                                &schema.function.parameters,
+                            ),
+                        })
+                    })
+                    .collect();
                 serde_json::json!({
-                    "tool_name": schema.function.name,
-                    "description": truncate_chars(
-                        &schema.function.description,
-                        MAX_MCP_DESCRIPTION_CHARS,
-                    ),
-                    "input_schema": schema.function.parameters,
+                    "query": original_query,
+                    "results": results,
+                    "matched_tools": matched_tools,
                 })
             })
             .collect();
-        ToolResult::ok(
-            serde_json::to_string_pretty(&serde_json::json!({
-                "results": results,
-                "matched_tools": matched_tools,
+        let response = if batch_requested {
+            serde_json::json!({
+                "queries": search_results,
+                "total_hidden_tools": total_hidden_tools,
+                "next": format!(
+                    "Call '{USE_MCP_TOOL}' for selected tools. Multiple independent calls may be emitted together."
+                ),
+            })
+        } else {
+            let result = search_results
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| serde_json::json!({}));
+            serde_json::json!({
+                "results": result["results"],
+                "matched_tools": result["matched_tools"],
                 "total_hidden_tools": total_hidden_tools,
                 "next": format!(
                     "Call '{USE_MCP_TOOL}' with a returned tool_name and matching tool_input. Use query '*' to browse."
                 ),
-            }))
-            .unwrap_or_default(),
+            })
+        };
+        ToolResult::ok(
+            serde_json::to_string_pretty(&response).unwrap_or_default(),
         )
     }
 }
@@ -271,17 +329,57 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     truncated
 }
 
+fn compact_schema_descriptions(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| {
+                    let compacted = if key == "description" {
+                        value
+                            .as_str()
+                            .map(|text| {
+                                Value::String(truncate_chars(
+                                    text,
+                                    MAX_MCP_SCHEMA_DESCRIPTION_CHARS,
+                                ))
+                            })
+                            .unwrap_or_else(|| compact_schema_descriptions(value))
+                    } else {
+                        compact_schema_descriptions(value)
+                    };
+                    (key.clone(), compacted)
+                })
+                .collect(),
+        ),
+        Value::Array(values) => {
+            Value::Array(values.iter().map(compact_schema_descriptions).collect())
+        }
+        _ => value.clone(),
+    }
+}
+
 fn search_mcp_tools_schema() -> ToolSchema {
     ToolSchema::new(
         SEARCH_MCP_TOOLS,
-        "Search deferred MCP tools by name, description, and input fields. Returns only matching schemas so the full MCP catalog does not consume every request.",
+        "Search deferred MCP tools by name, description, and input fields. For multi-part tasks, send up to five queries together, then call independent selected tools together. Returns only matching schemas so the full MCP catalog does not consume every request.",
         serde_json::json!({
             "type": "object",
             "properties": {
                 "query": { "type": "string", "description": "Capability, server, action, known tool name, or '*' to browse" },
-                "limit": { "type": "integer", "description": "Maximum matches to return (default 5, maximum 10)" }
+                "queries": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 1,
+                    "maxItems": 5,
+                    "description": "Batch of capabilities for a multi-part task; prefer this over repeated searches"
+                },
+                "limit": { "type": "integer", "description": "Maximum matches per query (single default 5/max 10; batch default 3/max 5)" }
             },
-            "required": ["query"]
+            "anyOf": [
+                { "required": ["query"] },
+                { "required": ["queries"] }
+            ]
         }),
     )
 }
@@ -584,6 +682,63 @@ mod approval_tests {
             event,
             ToolEvent::Call { name, .. } if name == "pubmed_search_articles"
         )));
+    }
+
+    #[tokio::test]
+    async fn deferred_tools_support_batched_capability_search() {
+        let mut reg = Registry { tools: vec![] };
+        reg.add(Box::new(DeferredTool));
+        let env = EventEnv {
+            root: PathBuf::from("."),
+            events: Mutex::new(vec![]),
+        };
+
+        let found = reg
+            .run(
+                SEARCH_MCP_TOOLS,
+                &serde_json::json!({
+                    "queries": ["biomedical", "articles"],
+                    "limit": 1
+                }),
+                &env,
+            )
+            .await;
+        assert!(found.success, "batch search failed: {}", found.content);
+        let catalog: Value = serde_json::from_str(&found.content).unwrap();
+        assert_eq!(catalog["queries"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            catalog["queries"][0]["results"][0]["tool_name"],
+            "pubmed_search_articles"
+        );
+        assert_eq!(
+            catalog["queries"][1]["results"][0]["tool_name"],
+            "pubmed_search_articles"
+        );
+    }
+
+    #[test]
+    fn deferred_schema_descriptions_are_compacted_without_losing_shape() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "x".repeat(MAX_MCP_SCHEMA_DESCRIPTION_CHARS + 50)
+                }
+            },
+            "required": ["query"]
+        });
+        let compacted = compact_schema_descriptions(&schema);
+        assert_eq!(compacted["properties"]["query"]["type"], "string");
+        assert_eq!(compacted["required"][0], "query");
+        assert!(
+            compacted["properties"]["query"]["description"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count()
+                < MAX_MCP_SCHEMA_DESCRIPTION_CHARS + 50
+        );
     }
 
     #[test]
