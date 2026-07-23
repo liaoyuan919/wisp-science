@@ -3247,10 +3247,11 @@ fn App() -> impl IntoView {
         spawn_local(async move {
             let v = invoke("get_settings", JsValue::UNDEFINED).await;
             if let Ok(cfg) = serde_wasm_bindgen::from_value::<Settings>(v) {
-                let cfg = normalized_settings(cfg);
-                let l = Locale::from_code(&cfg.locale);
-                loc.set(l);
-                set_document_lang(l);
+                let mut cfg = normalized_settings(cfg);
+                // Keep the live locale authoritative: reloading the settings form
+                // must not clobber an unsaved language change (#431). Sync the form
+                // field to the live signal instead of the other way around.
+                cfg.locale = loc.get_untracked().code().into();
                 s.set(cfg);
             } else {
                 msg.set(Some((
