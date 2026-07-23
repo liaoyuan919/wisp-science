@@ -125,8 +125,7 @@ impl ServerConfig {
             model_api_key,
             env_value("WISP_MODEL", "deepseek-chat"),
         );
-        let max_output_tokens =
-            env_parse("WISP_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS)?;
+        let max_output_tokens = env_parse("WISP_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS)?;
         provider.max_tokens = max_output_tokens;
         provider.reasoning_effort = std::env::var("WISP_REASONING_EFFORT")
             .ok()
@@ -155,10 +154,7 @@ impl ServerConfig {
                 "WISP_TOOL_TIMEOUT_SECS",
                 DEFAULT_TOOL_TIMEOUT_SECS,
             )?),
-            daily_token_limit: env_parse(
-                "WISP_DAILY_TOKEN_LIMIT",
-                DEFAULT_DAILY_TOKEN_LIMIT,
-            )?,
+            daily_token_limit: env_parse("WISP_DAILY_TOKEN_LIMIT", DEFAULT_DAILY_TOKEN_LIMIT)?,
             resource_root: PathBuf::from(env_value("WISP_RESOURCE_ROOT", "/app")),
             work_dir: PathBuf::from(env_value("WISP_WORK_DIR", "/tmp/wisp-server")),
             python: PathBuf::from(env_value("WISP_PYTHON", "python3")),
@@ -183,9 +179,7 @@ where
     T::Err: std::fmt::Display,
 {
     match std::env::var(name) {
-        Ok(value) => value
-            .parse()
-            .map_err(|error| anyhow!("{name}: {error}")),
+        Ok(value) => value.parse().map_err(|error| anyhow!("{name}: {error}")),
         Err(_) => Ok(default),
     }
 }
@@ -574,10 +568,12 @@ async fn streaming_response(
         let id = id.clone();
         let model = model.clone();
         async move {
-            receiver
-                .recv()
-                .await
-                .map(|item| (Ok::<Event, Infallible>(sse_event(item, &id, &model)), receiver))
+            receiver.recv().await.map(|item| {
+                (
+                    Ok::<Event, Infallible>(sse_event(item, &id, &model)),
+                    receiver,
+                )
+            })
         }
     });
     Sse::new(stream)
@@ -692,10 +688,7 @@ struct RequestOutput {
 }
 
 impl RequestOutput {
-    fn new(
-        stream: Option<mpsc::UnboundedSender<StreamEvent>>,
-        max_tool_calls: usize,
-    ) -> Self {
+    fn new(stream: Option<mpsc::UnboundedSender<StreamEvent>>, max_tool_calls: usize) -> Self {
         Self {
             collected: Mutex::new(CollectedOutput::default()),
             stream,
@@ -796,13 +789,9 @@ fn sse_event(item: StreamEvent, id: &str, model: &str) -> Event {
             })
             .to_string(),
         ),
-        StreamEvent::Role => chunk_event(
-            id,
-            model,
-            json!({"role": "assistant"}),
-            Value::Null,
-            None,
-        ),
+        StreamEvent::Role => {
+            chunk_event(id, model, json!({"role": "assistant"}), Value::Null, None)
+        }
         StreamEvent::Text(delta) => {
             chunk_event(id, model, json!({"content": delta}), Value::Null, None)
         }
