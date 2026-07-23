@@ -198,6 +198,15 @@ async fn load_agent_workflow_snapshots(
         .await
         .map_err(|error| error.to_string())?;
     if let Some(session_id) = session_id {
+        // A taken-over delegation child frame must keep showing the workflows
+        // of the conversation that spawned it, which stay bound to the root
+        // frame (#442).
+        let session_id = store
+            .root_frame_id(session_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .unwrap_or_else(|| session_id.to_string());
+        let session_id = session_id.as_str();
         let root_ids = workflows
             .iter()
             .filter(|workflow| workflow.depth == 0)
@@ -6352,6 +6361,43 @@ mod tests {
             .await
             .unwrap());
         (plan, registry, host)
+    }
+
+    #[tokio::test]
+    async fn snapshots_for_a_taken_over_child_frame_resolve_to_the_root_conversation() {
+        let (store, _root) = dynamic_fixture().await;
+        let (registry, host) = test_dynamic_policy();
+        let plan = dynamic_workflow::resolve_proposal(
+            &store,
+            "takeover-workflow".into(),
+            dynamic_proposal(vec![dynamic_task("interpret", &[])]),
+            &registry,
+            &host,
+            None,
+        )
+        .await
+        .unwrap();
+        let (workflow, steps) = workflow_records(
+            &plan,
+            "p",
+            std::path::Path::new("workspace"),
+            Some("f".into()),
+        )
+        .unwrap();
+        store
+            .create_agent_workflow_plan(&workflow, &steps)
+            .await
+            .unwrap();
+        store
+            .create_child_frame("agent-child", "f", "p", "Task agent", "local")
+            .await
+            .unwrap();
+
+        let from_child = load_agent_workflow_snapshots(&store, "p", Some("agent-child"))
+            .await
+            .unwrap();
+        assert_eq!(from_child.len(), 1);
+        assert_eq!(from_child[0].workflow.id, plan.id);
     }
 
     #[tokio::test]
