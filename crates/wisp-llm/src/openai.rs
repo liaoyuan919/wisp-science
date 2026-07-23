@@ -7,7 +7,10 @@
 //! - MiniMax: `reasoning_details` (array of `{text}`)
 
 use crate::message::{Content, Message, Part, Role, ToolCall, ToolSchema};
-use crate::provider::{LlmError, Provider, Result, StreamSink, Utf8Stream};
+use crate::provider::{
+    openai_internal_tool_name, openai_wire_tool_name, LlmError, Provider, Result, StreamSink,
+    Utf8Stream,
+};
 use crate::{Completion, FunctionCall, Usage};
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -101,10 +104,15 @@ impl OpenAiProvider {
                     Some(json!({ "role": "user", "content": sanitize_user_content(&m.content) }))
                 }
                 Role::Assistant => {
-                    let kept: Vec<&ToolCall> = m
+                    let kept: Vec<ToolCall> = m
                         .tool_calls
                         .iter()
                         .filter(|tc| answered.contains(&tc.id))
+                        .cloned()
+                        .map(|mut tc| {
+                            tc.function.name = openai_wire_tool_name(&tc.function.name).into();
+                            tc
+                        })
                         .collect();
                     let mut o = json!({ "role": "assistant", "content": m.content.as_text() });
                     if !kept.is_empty() {
@@ -130,7 +138,11 @@ impl OpenAiProvider {
     fn build_body(&self, messages: &[Message], tools: &[ToolSchema], stream: bool) -> Value {
         let tools_json: Vec<Value> = tools
             .iter()
-            .map(|t| serde_json::to_value(t).unwrap_or(Value::Null))
+            .map(|t| {
+                let mut t = t.clone();
+                t.function.name = openai_wire_tool_name(&t.function.name).into();
+                serde_json::to_value(t).unwrap_or(Value::Null)
+            })
             .collect();
         let mut body = json!({
             "model": self.cfg.model,
@@ -223,6 +235,7 @@ fn normalize_tool_calls(msg: &Value) -> Vec<ToolCall> {
         let name = func
             .get("name")
             .and_then(|v| v.as_str())
+            .map(openai_internal_tool_name)
             .unwrap_or("")
             .to_string();
         let args = func
@@ -261,7 +274,7 @@ fn merge_stream_tool_call_delta(entry: &mut (String, String, String), tc: &Value
                 .filter(|s| !s.is_empty())
         });
     if let Some(name) = name {
-        entry.1 = name.to_string();
+        entry.1 = openai_internal_tool_name(name).to_string();
     }
     let arguments = function
         .and_then(|f| f.get("arguments"))
@@ -571,6 +584,40 @@ mod tests {
         assert_eq!(out[1]["tool_call_id"], "a");
     }
 
+    #[test]
+    fn aliases_reserved_python_name_on_openai_wire() {
+        let provider = OpenAiProvider::new(crate::ProviderConfig::openai(
+            "https://example.test/v1",
+            "",
+            "codex",
+        ));
+        let tools = vec![ToolSchema::new(
+            "python",
+            "Run Python",
+            json!({"type": "object"}),
+        )];
+        let body = provider.build_body(&[Message::user("analyze")], &tools, false);
+        assert_eq!(body["tools"][0]["function"]["name"], "wisp_python");
+
+        let mut asst = Message::assistant("");
+        let mut python_call = call("py");
+        python_call.function.name = "python".into();
+        asst.tool_calls = vec![python_call];
+        let history = OpenAiProvider::sanitize(&[asst, Message::tool("py", "python", "ok")]);
+        assert_eq!(
+            history[0]["tool_calls"][0]["function"]["name"],
+            "wisp_python"
+        );
+
+        let calls = normalize_tool_calls(&json!({
+            "tool_calls": [{
+                "id": "py",
+                "function": {"name": "wisp_python", "arguments": "{}"}
+            }]
+        }));
+        assert_eq!(calls[0].function.name, "python");
+    }
+
     // reasoning_content is never replayed — not even for the most recent turn.
     // Bulk-replaying past CoT bloats context and reinforces repeat loops; keeping
     // it off *every* assistant message keeps each one byte-stable across turns so
@@ -624,12 +671,12 @@ mod tests {
             &json!({
                 "index": 0,
                 "id": "call_1",
-                "name": "read",
+                "name": "wisp_python",
                 "arguments": "{\"file_path\":\"C:/test.txt\"}"
             }),
         );
         assert_eq!(entry.0, "call_1");
-        assert_eq!(entry.1, "read");
+        assert_eq!(entry.1, "python");
         assert_eq!(entry.2, "{\"file_path\":\"C:/test.txt\"}");
     }
 

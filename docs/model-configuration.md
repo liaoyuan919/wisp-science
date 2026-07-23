@@ -25,6 +25,11 @@ For image workflows, mark an API profile as **Supports image input** and optiona
 | OpenAI (Responses API) | OpenAI reasoning/tool-call models through `/v1/responses` | API URL, Model ID, API key |
 | Anthropic | Claude API through `/v1/messages` | API URL, Model ID, API key |
 
+For OpenAI-compatible and Responses API profiles, Wisp sends its internal
+`python` REPL tool as `wisp_python` and maps returned calls back to `python`.
+This avoids the reserved `python` function-name collision on Codex models,
+including when the request is translated by gateways such as CLIProxyAPI.
+
 API keys are stored in the OS keyring. They are not stored in SQLite.
 
 The desktop app stores model profile metadata in `.wisp/wisp.sqlite`. Existing single-model installs are migrated into a `default` model profile the first time settings are loaded.

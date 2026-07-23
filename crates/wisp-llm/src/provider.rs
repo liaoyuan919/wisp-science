@@ -3,6 +3,24 @@
 use crate::{Completion, Message, ToolSchema};
 use async_trait::async_trait;
 
+const OPENAI_PYTHON_TOOL_ALIAS: &str = "wisp_python";
+
+/// Codex models reserve `python` for their hosted runtime. Keep Wisp's stable
+/// internal tool name, but avoid the collision on OpenAI-compatible wires.
+pub(crate) fn openai_wire_tool_name(name: &str) -> &str {
+    match name {
+        "python" => OPENAI_PYTHON_TOOL_ALIAS,
+        _ => name,
+    }
+}
+
+pub(crate) fn openai_internal_tool_name(name: &str) -> &str {
+    match name {
+        OPENAI_PYTHON_TOOL_ALIAS => "python",
+        _ => name,
+    }
+}
+
 /// reqwest's Display hides the useful part ("connection refused", "proxy
 /// unreachable", dns errors) in `source()`; walk the chain so users see it (#77).
 fn error_chain(e: &reqwest::Error) -> String {

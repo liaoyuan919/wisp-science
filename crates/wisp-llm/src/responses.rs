@@ -1,7 +1,9 @@
 //! OpenAI first-party Responses API (`/v1/responses`).
 
 use crate::message::{Content, Message, Part, Role, ToolCall, ToolSchema};
-use crate::provider::{LlmError, Provider, Result, StreamSink};
+use crate::provider::{
+    openai_internal_tool_name, openai_wire_tool_name, LlmError, Provider, Result, StreamSink,
+};
 use crate::{Completion, FunctionCall, Usage};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -100,7 +102,7 @@ fn message_to_input(m: &Message) -> Vec<Value> {
                 items.push(json!({
                     "type": "function_call",
                     "call_id": tc.id,
-                    "name": tc.function.name,
+                    "name": openai_wire_tool_name(&tc.function.name),
                     "arguments": tc.function.arguments,
                 }));
             }
@@ -133,7 +135,7 @@ fn part_to_responses(p: &Part) -> Value {
 fn tool_to_responses(t: &ToolSchema) -> Value {
     json!({
         "type": "function",
-        "name": t.function.name.clone(),
+        "name": openai_wire_tool_name(&t.function.name),
         "description": t.function.description.clone(),
         "parameters": t.function.parameters.clone(),
     })
@@ -165,6 +167,7 @@ fn parse_completion(val: &Value) -> Completion {
                     let name = item
                         .get("name")
                         .and_then(|v| v.as_str())
+                        .map(openai_internal_tool_name)
                         .unwrap_or("")
                         .to_string();
                     let arguments = item
@@ -341,5 +344,24 @@ mod tests {
         assert_eq!(comp.tool_calls[0].function.name, "openalex");
         assert_eq!(comp.usage.input_tokens, 3);
         assert_eq!(comp.usage.output_tokens, 5);
+    }
+
+    #[test]
+    fn reserved_python_name_round_trips_through_responses_wire() {
+        let schema = ToolSchema::new("python", "Run Python", json!({"type": "object"}));
+        assert_eq!(tool_to_responses(&schema)["name"], "wisp_python");
+
+        let input = message_to_input(&assistant_with_call("", "py", "python", "{}"));
+        assert_eq!(input[0]["name"], "wisp_python");
+
+        let comp = parse_completion(&json!({
+            "output": [{
+                "type": "function_call",
+                "call_id": "py",
+                "name": "wisp_python",
+                "arguments": "{}"
+            }]
+        }));
+        assert_eq!(comp.tool_calls[0].function.name, "python");
     }
 }
