@@ -22,6 +22,11 @@ from the bundled `mcp_bio` aggregate whose MCP annotation contains
 `use_mcp_tool`. Local files, shell, Python/R, memory, skills, custom MCP
 commands, and MCP App artifact writes are not registered.
 
+For multi-domain questions, the agent emits independent discovery calls
+together, then emits the selected independent tool calls together. This uses
+the existing tool protocol and reduces repeated model rounds without adding a
+second search interface or removing any research domains.
+
 ## Container deployment
 
 1. Copy `deploy/.env.example` to `deploy/.env`.

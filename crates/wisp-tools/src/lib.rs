@@ -274,7 +274,7 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 fn search_mcp_tools_schema() -> ToolSchema {
     ToolSchema::new(
         SEARCH_MCP_TOOLS,
-        "Search deferred MCP tools by name, description, and input fields. Returns only matching schemas so the full MCP catalog does not consume every request.",
+        "Search deferred MCP tools by name, description, and input fields. For multi-part tasks, issue independent searches together in one turn. Returns only matching schemas so the full MCP catalog does not consume every request.",
         serde_json::json!({
             "type": "object",
             "properties": {
