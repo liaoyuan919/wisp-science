@@ -286,7 +286,9 @@ impl Registry {
                 ),
             })
         };
-        ToolResult::ok(serde_json::to_string_pretty(&response).unwrap_or_default())
+        ToolResult::ok(
+            serde_json::to_string_pretty(&response).unwrap_or_default(),
+        )
     }
 }
 
