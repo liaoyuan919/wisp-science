@@ -22,11 +22,6 @@ from the bundled `mcp_bio` aggregate whose MCP annotation contains
 `use_mcp_tool`. Local files, shell, Python/R, memory, skills, custom MCP
 commands, and MCP App artifact writes are not registered.
 
-For multi-domain questions, `search_mcp_tools` accepts up to five capability
-queries in one call. The agent can then issue independent `use_mcp_tool` calls
-together, reducing repeated model rounds and cumulative input-token cost
-without removing any research domains.
-
 ## Container deployment
 
 1. Copy `deploy/.env.example` to `deploy/.env`.
